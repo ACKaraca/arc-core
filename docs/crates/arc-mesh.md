@@ -127,7 +127,8 @@ validates every part against an `arc_base::Limits` profile, and `into_builder` r
   afterwards. Under a mirror the handedness of every tangent is negated and every triangle's
   second and third index are swapped, so the winding keeps agreeing with the normals. A transform
   with a non-finite entry, or whose linear part divided by its largest entry has a zero
-  determinant, is singular.
+  determinant, is singular; a matrix whose bottom row is not `[0, 0, 0, 1]` is not affine and
+  is rejected.
 - **GPU positions** (`gpu_positions`) are the positions minus an `f64` origin, narrowed to `f32`
   after the subtraction ([camera-relative precision](../architecture/rendering.md#camera-relative-precision)).
   Channels are already `f32`.
@@ -137,8 +138,10 @@ validates every part against an `arc_base::Limits` profile, and `into_builder` r
 ### Normals and tangents
 
 `with_normals(weighting, crease_angle, tolerance, limits)` and `with_tangents(uv_set, tolerance)`
-implement CORE-MESH-003. Lengths and angles are computed from coordinates scaled by their largest
-magnitude, so coordinates from 1e-300 to 1e300 work.
+implement CORE-MESH-003. Lengths and angles are computed from the edge vectors of each triangle
+(differences of its vertices, which are exact for nearby vertices) scaled by their largest
+magnitude, so a small triangle far from the origin keeps its precision and coordinates from
+1e-300 to 1e300 work.
 
 - **Faces.** Degenerate triangles (as above, at `tolerance.linear`) contribute nothing. A face
   normal points to the side from which the winding is counterclockwise.
@@ -147,7 +150,10 @@ magnitude, so coordinates from 1e-300 to 1e300 work.
   (CORE-MESH-018).
 - **Crease angle.** Around a corner of triangle `t`, a face `f` at the same position counts when
   the angle between the normals of `f` and `t` is not greater than the crease angle, in radians
-  within [0, π]; `t` always counts. π smooths everything.
+  within [0, π]; `t` always counts. π smooths everything. The faces around a position are kept
+  in a tree over their normals, so the cost grows with the faces near the crease boundary, not
+  with all faces at the position; the search takes at most 256 steps per element of
+  `limits.array_length` and fails with `mesh.limit.exceeded` beyond that.
 - **Weighting.** `Flat` gives each corner its own face normal and ignores the crease angle; `Area`
   sums the counted face normals weighted by face area; `Angle` weights them by the face's interior
   angle at that position. The sum is normalized.
@@ -169,7 +175,9 @@ magnitude, so coordinates from 1e-300 to 1e300 work.
 
 Reference accuracy, checked by the tests: a cube creased below 90° has 24 vertices with exact face
 normals, and at exactly 90° stays smooth; a UV sphere with `n` rings and `2n` segments has normals
-within 1.6 / n² radians of radial with angle weighting and within 0.65 / n with area weighting.
+within 1.6 / n² radians of radial with angle weighting and within 0.65 / n with area weighting; a
+small triangle far from the origin has the normals, tangents and degeneracy of the same triangle
+at the origin; and a cone apex of valence 100,000 is creased in near-linear time.
 
 ### Mesh encoding
 
@@ -182,11 +190,12 @@ within 1.6 / n² radians of radial with angle weighting and within 0.65 / n with
 - `position_error` (a distance) quantizes positions to a grid over the bounding box and
   `normal_angle` (radians) quantizes normals by octahedral mapping. The encoder takes the smallest
   bit width (at most 32 for positions, 24 for normals) at which every decoded value is within the
-  bound, and stores the bound. Decoded normals have unit length. When no bit width meets a bound
+  bound, trying every width from the smallest, and stores the bound. Decoded normals have unit length. When no bit width meets a bound
   the section is stored exactly, so encoding does not fail for a tight bound; a bound that is not
   finite and positive is `mesh.quantization.invalid`.
 - Decoding checks the input length, every count and every name against the limits and the
-  remaining input before allocating, and validates the result as `TriMeshBuilder::build` does:
+  remaining input before allocating, counts the memory it reserves against `memory_bytes`, and
+  reports a reservation the platform cannot make instead of panicking; and validates the result as `TriMeshBuilder::build` does:
   every index against the vertex count and every group against the triangle count. Every failure
   is `mesh.decode.invalid` with the details `offset` and `reason`, and `cause` when validation
   rejected the mesh.
@@ -212,3 +221,4 @@ The codes `arc-mesh` owns. A code is never reused for a different meaning; messa
 | `mesh.crease.invalid` | `invalid_input` | A crease angle is not a finite number in [0, π] |
 | `mesh.quantization.invalid` | `invalid_input` | A quantization error bound is not a finite positive number |
 | `mesh.decode.invalid` | `corrupt_data` | Encoded mesh data is malformed, truncated or oversized |
+| `mesh.transform.not_affine` | `invalid_input` | A transform's matrix does not have the bottom row `[0, 0, 0, 1]` of an affine transform |

@@ -18,9 +18,10 @@
 //! - **Deterministic.** The same mesh and bounds always give the same bytes.
 //! - **Bounded.** Decoding takes [`Limits`]: the input length is checked against `input_bytes`,
 //!   every count against `array_length` and against the input that remains before anything is
-//!   allocated, and names against `string_bytes`. The decoded parts go through
-//!   [`TriMeshBuilder::build`], which validates every index against the vertex count and every
-//!   group against the triangle count.
+//!   allocated, names against `string_bytes`, and the memory reserved for decoded values against
+//!   `memory_bytes`. A reservation the platform cannot make fails instead of panicking. The
+//!   decoded parts go through [`TriMeshBuilder::build`], which validates every index against
+//!   the vertex count and every group against the triangle count.
 //!
 //! Every decoding failure is `mesh.decode.invalid` with the details `offset` and `reason`; a
 //! mesh that validation rejects also carries the validation code as `cause`.
@@ -129,43 +130,38 @@ fn grid_point(q: &[u32; 3], min: &Point3, max: &Point3, steps: f64) -> Point3 {
     )
 }
 
-/// The coarsest grid whose decoded positions are all within `bound`, if any.
+/// The coarsest grid whose decoded positions are all within `bound`, if any. Every width from
+/// 1 bit up is tried; a width stops at the first position outside the bound, so widths that
+/// fail cost little and only the chosen width converts every position.
 fn quantize_positions(positions: &[Point3], bound: f64) -> Option<Grid> {
     let bbox = arc_geom::Aabb3::from_points(positions);
     if bbox.is_empty() {
         return None;
     }
     let (min, max) = (bbox.min(), bbox.max());
-    let diagonal = length(&(max - min));
-    if !diagonal.is_finite() {
+    if !length(&(max - min)).is_finite() {
         return None;
     }
-    (1..=MAX_POSITION_BITS)
-        // The grid's own error is half a cell diagonal; skip widths that cannot meet the bound.
-        .filter(|&bits| diagonal / steps(bits) / 2.0 <= bound)
-        .find_map(|bits| {
-            let steps = steps(bits);
-            let codes: Vec<[u32; 3]> = positions
-                .iter()
-                .map(|p| {
-                    [
-                        quantize(p.x, min.x, max.x, steps),
-                        quantize(p.y, min.y, max.y, steps),
-                        quantize(p.z, min.z, max.z, steps),
-                    ]
-                })
-                .collect();
-            let within = positions
-                .iter()
-                .zip(&codes)
-                .all(|(p, q)| length(&(grid_point(q, &min, &max, steps) - p)) <= bound);
-            within.then_some(Grid {
-                bits,
-                min,
-                max,
-                codes,
+    (1..=MAX_POSITION_BITS).find_map(|bits| {
+        let steps = steps(bits);
+        let codes = positions
+            .iter()
+            .map(|p| {
+                let q = [
+                    quantize(p.x, min.x, max.x, steps),
+                    quantize(p.y, min.y, max.y, steps),
+                    quantize(p.z, min.z, max.z, steps),
+                ];
+                (length(&(grid_point(&q, &min, &max, steps) - p)) <= bound).then_some(q)
             })
+            .collect::<Option<Vec<[u32; 3]>>>()?;
+        Some(Grid {
+            bits,
+            min,
+            max,
+            codes,
         })
+    })
 }
 
 fn sign(x: f64) -> f64 {
@@ -195,9 +191,17 @@ fn octahedral_direction(q: [u32; 2], steps: f64) -> [f32; 3] {
     } else {
         Vector3::new(u, v, z)
     };
-    // |u| + |v| + |z| is at least 1, so the vector is never zero.
-    let n = unit(&folded).unwrap_or_else(Vector3::z);
-    arc_base::math::vector3_to_gpu(&n).to_array()
+    // The documented sequence, written out so that it does not depend on a library's order of
+    // operations: divide by the largest magnitude (|u| + |v| + |z| is at least 1, so it is not
+    // zero), then by the square root of ((x·x + y·y) + z·z), then round to f32.
+    let largest = folded.x.abs().max(folded.y.abs()).max(folded.z.abs());
+    let [x, y, z] = [folded.x / largest, folded.y / largest, folded.z / largest];
+    let norm = ((x * x + y * y) + z * z).sqrt();
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "rounding to the nearest f32 is the documented last step"
+    )]
+    [(x / norm) as f32, (y / norm) as f32, (z / norm) as f32]
 }
 
 fn to_f64(v: &[f32; 3]) -> Vector3 {
@@ -365,6 +369,7 @@ impl TriMesh {
             bytes,
             pos: 0,
             limits,
+            allocated: 0,
         };
         if r.take::<4>()? != MeshEncoding::MAGIC {
             return Err(invalid(0, "not a mesh encoding"));
@@ -377,7 +382,7 @@ impl TriMesh {
         let vertices = positions.len();
 
         let count = r.count(12)?;
-        let mut triangles = Vec::with_capacity(count);
+        let mut triangles = r.reserve(count)?;
         for _ in 0..count {
             triangles.push([r.u32()?, r.u32()?, r.u32()?]);
         }
@@ -421,6 +426,8 @@ struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
     limits: &'a Limits,
+    /// The bytes reserved for decoded values so far.
+    allocated: u64,
 }
 
 impl Reader<'_> {
@@ -509,6 +516,29 @@ impl Reader<'_> {
         }
     }
 
+    /// An empty vector with room for `count` values. Its size counts against
+    /// `limits.memory_bytes`, and a reservation the platform cannot make (more than `isize::MAX`
+    /// bytes on a 32-bit target, or memory the allocator refuses) fails instead of panicking.
+    fn reserve<T>(&mut self, count: usize) -> Result<Vec<T>> {
+        let at = self.pos;
+        let size = count.saturating_mul(size_of::<T>());
+        self.allocated = self
+            .allocated
+            .saturating_add(u64::try_from(size).unwrap_or(u64::MAX));
+        if self
+            .limits
+            .memory_bytes
+            .is_some_and(|budget| self.allocated > budget)
+        {
+            return Err(invalid(at, "the decoded mesh exceeds the memory limit"));
+        }
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(count)
+            .map_err(|_| invalid(at, "the decoded mesh does not fit in memory"))?;
+        Ok(values)
+    }
+
     /// Fails unless `count` elements of `size` bytes fit in the remaining input.
     fn fits(&self, count: usize, size: usize) -> Result<()> {
         if count
@@ -534,19 +564,25 @@ impl Reader<'_> {
             }
             let steps = steps(bits);
             let count = self.count(3 * width(bits))?;
-            let mut positions = Vec::with_capacity(count);
+            let mut positions = self.reserve(count)?;
+            let flat = [min.x == max.x, min.y == max.y, min.z == max.z];
             for _ in 0..count {
+                let at = self.pos;
                 let q = [
                     self.quantized(bits, steps)?,
                     self.quantized(bits, steps)?,
                     self.quantized(bits, steps)?,
                 ];
+                // One accepted form: an axis without extent has only the code 0.
+                if q.iter().zip(flat).any(|(&q, flat)| flat && q != 0) {
+                    return Err(invalid(at, "nonzero code on an axis without extent"));
+                }
                 positions.push(grid_point(&q, &min, &max, steps));
             }
             positions
         } else {
             let count = self.count(24)?;
-            let mut positions = Vec::with_capacity(count);
+            let mut positions = self.reserve(count)?;
             for _ in 0..count {
                 positions.push(self.point()?);
             }
@@ -583,7 +619,7 @@ impl Reader<'_> {
                 self.bound()?;
                 self.fits(vertices, 2 * width(bits))?;
                 let steps = normal_steps(bits);
-                let mut normals = Vec::with_capacity(vertices);
+                let mut normals = self.reserve(vertices)?;
                 for _ in 0..vertices {
                     let q = [self.quantized(bits, steps)?, self.quantized(bits, steps)?];
                     normals.push(octahedral_direction(q, steps));
@@ -645,7 +681,7 @@ impl Reader<'_> {
     }
 
     fn values<const N: usize>(&mut self, count: usize) -> Result<Vec<[f32; N]>> {
-        let mut values = Vec::with_capacity(count);
+        let mut values = self.reserve(count)?;
         for _ in 0..count {
             values.push(self.array()?);
         }
@@ -987,12 +1023,111 @@ mod tests {
                 normal_angle: None,
             })
             .unwrap();
-        assert_eq!(&quantized[6..8], &[1, 2]);
+        // The cube's corners lie on the 1-bit grid, so 1 bit is exact and chosen.
+        assert_eq!(&quantized[6..8], &[1, 1]);
         let mut wrong = quantized.clone();
-        wrong[8 + 8 + 48 + 8] = 4;
+        wrong[8 + 8 + 48 + 8] = 2;
         assert_eq!(decode(&wrong), "quantized value exceeds its range");
         let mut wrong = quantized;
         wrong[7] = 33;
         assert_eq!(decode(&wrong), "bit width or component count out of range");
+        // On an axis without extent only the code 0 is accepted.
+        let flat = TriMesh::new(
+            vec![Point3::new(0.0, 0.0, 5.0), Point3::new(1.0, 2.0, 5.0)],
+            vec![],
+            &limits,
+        )
+        .unwrap();
+        let bytes = flat
+            .encode(&Quantization {
+                position_error: Some(0.1),
+                normal_angle: None,
+            })
+            .unwrap();
+        // 6 header, mode, bits, bound, box, count; then x, y, z codes of one byte each.
+        let z = 8 + 8 + 48 + 8 + 2;
+        assert_eq!(bytes[z], 0);
+        let mut wrong = bytes;
+        wrong[z] = 1;
+        assert_eq!(decode(&wrong), "nonzero code on an axis without extent");
+    }
+
+    #[test]
+    fn the_smallest_width_that_meets_the_bound_is_chosen() {
+        // Both vertices are corners of the box: 1 bit is exact, whatever the bound.
+        let segment = TriMesh::new(
+            vec![Point3::new(0.0, 0.0, 0.0), Point3::new(100.0, 0.0, 0.0)],
+            vec![],
+            &Limits::STRICT,
+        )
+        .unwrap();
+        let bytes = segment
+            .encode(&Quantization {
+                position_error: Some(1e-9),
+                normal_angle: None,
+            })
+            .unwrap();
+        assert_eq!(&bytes[6..8], &[1, 1]);
+        assert_eq!(TriMesh::decode(&bytes, &Limits::STRICT).unwrap(), segment);
+        // A third vertex at 0.3 needs a step of at most 0.2: 100 / 0.2 = 500 steps, 9 bits.
+        let three = TriMesh::new(
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(100.0, 0.0, 0.0),
+                Point3::new(0.3, 0.0, 0.0),
+            ],
+            vec![],
+            &Limits::STRICT,
+        )
+        .unwrap();
+        let bits = |bound: f64| {
+            three
+                .encode(&Quantization {
+                    position_error: Some(bound),
+                    normal_angle: None,
+                })
+                .unwrap()[7]
+        };
+        // 0.3 is within 0.3 of the code 0 at 1 bit.
+        assert_eq!(bits(0.3), 1);
+        let chosen = bits(0.01);
+        let error_at = |b: u8| {
+            let steps = f64::from(u32::MAX >> (32 - u32::from(b)));
+            let q = (0.3 / 100.0 * steps).round();
+            (q / steps * 100.0 - 0.3).abs()
+        };
+        assert!(error_at(chosen) <= 0.01);
+        assert!((1..chosen).all(|b| error_at(b) > 0.01));
+    }
+
+    #[test]
+    fn reservations_are_fallible_and_count_against_the_memory_limit() {
+        let limits = Limits {
+            memory_bytes: None,
+            ..Limits::STRICT
+        };
+        let mut reader = Reader {
+            bytes: &[],
+            pos: 0,
+            limits: &limits,
+            allocated: 0,
+        };
+        // More than isize::MAX bytes: a capacity overflow on every target, reported, not raised.
+        let error = reader.reserve::<Point3>(usize::MAX / 8).unwrap_err();
+        assert_eq!(reason(&error), "the decoded mesh does not fit in memory");
+        let tight = Limits {
+            memory_bytes: Some(100),
+            ..Limits::STRICT
+        };
+        let cube_bytes = exact(&cube());
+        assert_eq!(
+            reason(&TriMesh::decode(&cube_bytes, &tight).unwrap_err()),
+            "the decoded mesh exceeds the memory limit"
+        );
+        let enough = Limits {
+            memory_bytes: Some(8 * 24 + 12 * 12),
+            ..Limits::STRICT
+        };
+        assert_eq!(TriMesh::decode(&cube_bytes, &enough).unwrap(), cube());
     }
 }

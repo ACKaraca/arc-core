@@ -7,11 +7,14 @@
 //! swapping its second and third index, so face normals from the winding keep agreeing with the
 //! transformed vertex normals. Other channels and the face groups are unchanged.
 //!
+//! A matrix whose bottom row is not `[0, 0, 0, 1]` (possible only through an unchecked
+//! constructor) is rejected rather than having that row ignored.
+//!
 //! The linear part is singular when it has a non-finite entry, all entries zero, or, divided
 //! by its largest entry magnitude, an exactly zero determinant; scaling first keeps invertible
 //! transforms with very large or very small entries usable.
 
-use arc_base::math::{Matrix3, Transform3, Vector3};
+use arc_base::math::{Matrix3, Matrix4, Transform3, Vector3};
 use arc_base::{Error, Result};
 
 use crate::error::codes;
@@ -33,11 +36,16 @@ impl TriMesh {
     /// # Errors
     ///
     /// `mesh.transform.singular` when the transform is not finite or not invertible;
-    /// `mesh.precision.insufficient` when a transformed position overflows.
+    /// `mesh.transform.not_affine` when its matrix (built unchecked) does not end in the row
+    /// `[0, 0, 0, 1]`; `mesh.precision.insufficient` when a transformed position overflows.
     pub fn transformed(&self, transform: &Transform3) -> Result<TriMesh> {
         let matrix = transform.matrix();
         if !matrix.iter().all(|c| c.is_finite()) {
             return Err(Error::new(codes::TRANSFORM_SINGULAR));
+        }
+        // An affine transform ignores this row, so a projective one would be applied wrongly.
+        if matrix.row(3) != Matrix4::identity().row(3) {
+            return Err(Error::new(codes::TRANSFORM_NOT_AFFINE));
         }
         let linear: Matrix3 = matrix.fixed_view::<3, 3>(0, 0).into_owned();
         let largest = linear.amax();
@@ -103,7 +111,7 @@ impl TriMesh {
     reason = "test values are small and exact enough"
 )]
 mod tests {
-    use arc_base::math::{Matrix4, Point3};
+    use arc_base::math::Point3;
     use arc_base::{Limits, Tolerance};
     use proptest::prelude::*;
 
@@ -145,7 +153,9 @@ mod tests {
         flat[(2, 2)] = 0.0;
         let mut nan = Matrix4::identity();
         nan[(0, 3)] = f64::NAN;
-        for m in [flat, nan, Matrix4::zeros()] {
+        let mut zero = Matrix4::zeros();
+        zero[(3, 3)] = 1.0;
+        for m in [flat, nan, zero] {
             assert_eq!(
                 mesh.transformed(&affine(m)).unwrap_err().code(),
                 "mesh.transform.singular"
@@ -157,6 +167,18 @@ mod tests {
             far.transformed(&huge).unwrap_err().code(),
             "mesh.precision.insufficient"
         );
+        // A projective bottom row is not ignored but rejected.
+        let mut projective = Matrix4::identity();
+        projective[(3, 0)] = 1.0;
+        projective[(3, 3)] = 0.0;
+        let mut shifted = Matrix4::identity();
+        shifted[(3, 3)] = 2.0;
+        for m in [projective, shifted] {
+            assert_eq!(
+                mesh.transformed(&affine(m)).unwrap_err().code(),
+                "mesh.transform.not_affine"
+            );
+        }
         // Invertible with tiny entries.
         assert!(
             mesh.transformed(&affine(Matrix4::new_scaling(1e-200)))

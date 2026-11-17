@@ -54,6 +54,12 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "mesh-transform-singular",
     };
+    /// A transform's matrix does not have the bottom row `[0, 0, 0, 1]` of an affine transform.
+    pub const TRANSFORM_NOT_AFFINE: ErrorCode = ErrorCode {
+        code: "mesh.transform.not_affine",
+        category: Category::InvalidInput,
+        message_id: "mesh-transform-not-affine",
+    };
     /// A result is not representable: a transformed position overflows or a GPU coordinate exceeds `f32`.
     pub const PRECISION_INSUFFICIENT: ErrorCode = ErrorCode {
         code: "mesh.precision.insufficient",
@@ -107,6 +113,7 @@ pub mod codes {
         CREASE_INVALID,
         QUANTIZATION_INVALID,
         DECODE_INVALID,
+        TRANSFORM_NOT_AFFINE,
     ];
 }
 

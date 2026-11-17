@@ -31,7 +31,7 @@ hand-written layout with optional quantization is recorded in
 | | bound | `f64` | Only when quantized: the error bound the encoder was given, positive |
 | | min, max | 2 × `point3` | Only when quantized: the grid box, `min ≤ max` on every axis and `max − min` finite |
 | | vertices | `u64` | The vertex count `V` |
-| | data | | Exact: `V` × `point3`. Quantized: `V` × three `code(b)` (x, y, z), each at most 2^b − 1 |
+| | data | | Exact: `V` × `point3`. Quantized: `V` × three `code(b)` (x, y, z), each at most 2^b − 1, and 0 on an axis where `min` equals `max` |
 | Triangles | triangles | `u64` | The triangle count `T` |
 | | data | `T` × 3 × `u32` | Vertex indices, each below `V` |
 | Channels | channels | `u64` | The channel count, at most 64 |
@@ -65,11 +65,16 @@ values:
 | bound | `f64` | Only when quantized: the angular error bound in radians the encoder was given, positive |
 | data | `V` × two `code(b)` | Only when quantized: `qu`, `qv`, each at most 2^b − 2 |
 
-A quantized normal is decoded with `n = 2^b − 2`, `u = 2·qu/n − 1`, `v = 2·qv/n − 1` and
-`z = 1 − |u| − |v|`. When `z < 0`, `u` and `v` become `(1 − |v|)·sign(u)` and `(1 − |u|)·sign(v)`,
-computed from the values before the change, with `sign(0) = 1`. The normal is `(u, v, z)` scaled to
-unit length in binary64 and rounded to `f32`. The number of steps is even, so the six axis
-directions are stored without error.
+A quantized normal is decoded in binary64, each step rounded to nearest, in exactly this order:
+
+1. `n = 2^b − 2`, `u = (qu / n)·2 − 1`, `v = (qv / n)·2 − 1`, `z = (1 − |u|) − |v|`.
+2. When `z < 0`, `u` and `v` become `(1 − |v|)·sign(u)` and `(1 − |u|)·sign(v)`, both computed
+   from the values before the change, with `sign(0) = 1`; `z` stays.
+3. `m = max(|u|, |v|, |z|)` (at least 1/3, never zero); `x = u / m`, `y = v / m`, `w = z / m`.
+4. `s = sqrt((x·x + y·y) + w·w)`; the normal is `(x / s, y / s, w / s)`, each rounded to the
+   nearest `f32`, with −0.0 stored as +0.0.
+
+The number of steps is even, so the six axis directions are stored without error.
 
 ### Groups
 
@@ -88,8 +93,9 @@ exact.
 
 - **Positions.** The box is the bounding box of the positions. The encoder takes the smallest bit
   width from 1 to 32 at which the distance between every position and its decoded value, computed
-  from the decoded value as the decoder computes it, is at most the bound. A quantized coordinate
-  is `round((x − min) / (max − min) · (2^b − 1))`, or 0 on an axis without extent.
+  from the decoded value as the decoder computes it, is at most the bound; every width is tried
+  from 1 up. A quantized coordinate is `round((x − min) / (max − min) · (2^b − 1))`, or 0 on an
+  axis without extent.
 - **Normals.** The encoder takes the smallest bit width from 2 to 24 at which the angle between
   every normal and its decoded `f32` value is at most the bound. The octahedral coordinates of a
   unit normal are `(x, y) / (|x| + |y| + |z|)`, folded as in decoding when `z < 0`, and a code is
@@ -106,10 +112,12 @@ The stored bound is the caller's bound, not the smaller error actually reached.
 - The same mesh and bounds give the same bytes. The sign of zero is not part of a value: a mesh
   never holds −0.0, and the decoder rejects its bit pattern.
 - Every field has one width and one accepted form (flags are 0 or 1, channels are in key order,
-  codes do not exceed their range), so an exact encoding is unique: decoding it and encoding the
-  result without bounds gives the same bytes.
-- Decoding a quantized encoding and encoding the result with the same bounds can choose a
-  different bit width, because the bounds are then measured against the decoded values.
+  codes do not exceed their range, codes on an axis without extent are 0), so an exact encoding
+  is unique: decoding it and encoding the result without bounds gives the same bytes.
+- A quantized encoding is canonical for a mesh and its bounds: the encoder's box, bit widths and
+  codes follow from them, and no field has a second accepted form. Decoding a quantized encoding
+  and encoding the result with the same bounds can still choose a different bit width, because
+  the bounds are then measured against the decoded values.
 
 ## Limits and errors
 
@@ -122,6 +130,10 @@ The stored bound is the caller's bound, not the smaller error actually reached.
   input. A user name must not exceed `string_bytes`. All are checked before anything is
   allocated, so the decoder allocates at most a small multiple of the input length (eight times
   for positions quantized to one byte per coordinate).
+- The memory reserved for decoded positions, triangles and channel values counts against
+  `memory_bytes` when the profile sets it. A reservation the platform cannot make (more than
+  `isize::MAX` bytes on a 32-bit target, or memory the allocator refuses) is a decoding failure,
+  not a panic.
 - The decoded parts are validated as a mesh is on construction: every index against the vertex
   count, every group against the triangle count, the tangent handedness, and the counts against
   `array_length` and 32 bits.
@@ -170,6 +182,8 @@ One triangle with the vertices (0, 0, 0), (1, 0, 0) and (0, 2, 0), no channels a
 Property tests check that an exact encoding decodes to the mesh bit for bit and is unique, that a
 quantized encoding decodes within its bounds measured on the decoded mesh, that every single-byte
 change, truncation and extension of an encoding is rejected or decodes to a valid mesh, and that
-arbitrary bytes never panic. Golden vectors fix the bytes of one exact and one quantized mesh.
-The fuzz target `decode` in `crates/arc-mesh/fuzz` decodes arbitrary input with the strict
-profile and checks that a decoded mesh encodes and decodes to itself.
+arbitrary bytes never panic. Golden vectors fix the bytes of one exact and two quantized meshes;
+for the quantized mesh with off-grid positions and oblique normals they also fix the decoded bits,
+which follow from the formulas above. The fuzz target `decode` in `crates/arc-mesh/fuzz` decodes
+arbitrary input with the strict profile, checks that a decoded mesh encodes and decodes to
+itself, and that input without quantized sections encodes to exactly the input.

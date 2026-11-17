@@ -15,3 +15,4 @@ mesh-tolerance-invalid = A tolerance is negative or not a finite number.
 mesh-crease-invalid = The crease angle must be between zero and a half turn.
 mesh-quantization-invalid = The quantization error bound must be a positive number.
 mesh-decode-invalid = The stored mesh is damaged or too large.
+mesh-transform-not-affine = The transform is not affine: its last row must be 0, 0, 0, 1.

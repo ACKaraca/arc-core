@@ -55,6 +55,21 @@ smaller lossy form at a stated error bound is wanted for display data.
 - **Fixed 16-bit quantization.** Simpler, but the error would depend on the size of the mesh
   instead of the caller's stated bound.
 
+## Amendment before first release
+
+Review before any document stored a mesh changed version 1 in place; no stored data is affected,
+so the version stays 1 and the golden vectors were updated:
+
+- The encoder tries every position bit width from 1 up instead of skipping widths whose
+  worst-case grid error exceeds the bound, so it really takes the smallest width that meets the
+  bound on the decoded values (the quantized golden triangle now uses 1 bit instead of 2).
+- On an axis without extent the decoder accepts only the code 0, so a quantized encoding has one
+  accepted form per mesh and bounds.
+- The normal decoding sequence is stated step by step, and a golden vector with off-grid
+  positions and oblique normals fixes the decoded bits.
+- Reservations count against `Limits::memory_bytes` and fail instead of panicking where the
+  platform cannot make them.
+
 ## Reopen when
 
 Mesh assets remain the dominant part of package size after package compression, or a third-party

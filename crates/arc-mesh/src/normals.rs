@@ -3,8 +3,10 @@
 //! **Faces.** A triangle is degenerate when two of its indices are equal or its smallest height
 //! (twice its area over its longest edge) is at most `tolerance.linear`. Degenerate triangles
 //! contribute to no normal and no tangent. Face normals follow the winding: counterclockwise
-//! seen from the side the normal points to. Every length and angle is computed from coordinates
-//! scaled by their largest magnitude, so meshes with coordinates from 1e-300 to 1e300 work.
+//! seen from the side the normal points to. Every length and angle is computed from the edge
+//! vectors (vertex differences, exact for nearby vertices; from halved coordinates where a
+//! difference would overflow) scaled by their largest magnitude, so a small triangle far from
+//! the origin keeps its precision and coordinates from 1e-300 to 1e300 work.
 //!
 //! **Normals.** [`TriMesh::with_normals`] gives every triangle corner a normal and stores it in
 //! the [`AttributeKey::Normal`] channel:
@@ -15,6 +17,10 @@
 //! - Around a corner of triangle `t`, a face `f` counts when the angle between the normals of
 //!   `f` and `t` is not greater than the crease angle (`angle > crease` excludes it; `t` always
 //!   counts). A crease angle of π smooths everything; 0 smooths only exactly parallel faces.
+//!   The faces at a position are searched through a tree over their normals: whole nodes inside
+//!   or outside the crease angle are taken or skipped at once, and only faces near the boundary
+//!   are tested one by one. The search takes at most 256 steps per element of
+//!   `limits.array_length` and fails with `mesh.limit.exceeded` beyond that.
 //! - [`NormalWeighting::Flat`] gives every corner its own face's normal and ignores the crease
 //!   angle. [`NormalWeighting::Area`] sums the counted face normals weighted by face area;
 //!   [`NormalWeighting::Angle`] weighted by the face's interior angle at that position. The sum
@@ -70,7 +76,7 @@ pub(crate) struct Face {
     ln_area: f64,
     /// The interior angle at each corner.
     angles: [f64; 3],
-    /// The scaled edge vectors `b − a` and `c − a`, sharing one positive scale factor.
+    /// The edge vectors `b − a` and `c − a`, sharing one positive scale factor.
     edges: [Vector3; 2],
 }
 
@@ -82,24 +88,40 @@ pub(crate) fn face(positions: &[Point3], t: [u32; 3], linear: f64) -> Option<Fac
     }
     let point = |i: u32| positions.get(i as usize).map(|p| p.coords);
     let (a, b, c) = (point(i)?, point(j)?, point(k)?);
-    let scale = a.amax().max(b.amax()).max(c.amax());
-    if scale.is_nan() || scale <= 0.0 {
+    // Differences first, so a small triangle far from the origin keeps its precision (the
+    // difference of close numbers is exact). Where a difference overflows, the halved
+    // coordinates are subtracted instead: halving a number that large is exact.
+    let mut edges = (b - a, c - a, c - b);
+    let mut halved = false;
+    if !edges
+        .0
+        .iter()
+        .chain(&edges.1)
+        .chain(&edges.2)
+        .all(|c| c.is_finite())
+    {
+        let (a, b, c) = (a / 2.0, b / 2.0, c / 2.0);
+        edges = (b - a, c - a, c - b);
+        halved = true;
+    }
+    let scale = edges.0.amax().max(edges.1.amax()).max(edges.2.amax());
+    if !(scale > 0.0 && scale.is_finite()) {
         return None;
     }
-    let (a, b, c) = (a / scale, b / scale, c / scale);
-    let (ab, ac, bc) = (b - a, c - a, c - b);
+    let (ab, ac, bc) = (edges.0 / scale, edges.1 / scale, edges.2 / scale);
     let cross = ab.cross(&ac);
     let double_area = cross.norm();
     let longest = ab.norm().max(ac.norm()).max(bc.norm());
-    let height = double_area / longest * scale;
+    let height = double_area / longest * scale * if halved { 2.0 } else { 1.0 };
     // NaN is degenerate.
     if height.is_nan() || height <= linear {
         return None;
     }
+    let ln_scale = scale.ln() + if halved { std::f64::consts::LN_2 } else { 0.0 };
     Some(Face {
         // +0.0 turns −0.0 into +0.0, so equal normals have equal bits.
         normal: (cross / double_area).map(|c| c + 0.0),
-        ln_area: 2.0 * scale.ln() + (double_area / 2.0).ln(),
+        ln_area: 2.0 * ln_scale + (double_area / 2.0).ln(),
         angles: [
             angle_between(&ab, &ac),
             angle_between(&bc, &-ab),
@@ -119,6 +141,235 @@ fn to_f64(v: &[f32; 3]) -> Vector3 {
     Vector3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2]))
 }
 
+/// The crease search may take this many steps (tree nodes and face tests) per element of
+/// `Limits::array_length` before `with_normals` fails with `mesh.limit.exceeded`.
+const CREASE_WORK_PER_ELEMENT: u64 = 256;
+
+/// The faces of a fan at most this many per leaf of its tree.
+const LEAF_SIZE: usize = 8;
+
+/// Rounding allowance on chord lengths between unit normals: a tree node is taken whole or
+/// skipped whole only when every face in it is decided the same way by the exact angle test.
+const CHORD_MARGIN: f64 = 64.0 * f64::EPSILON;
+
+/// A weighted sum of normals, `vector · e^ln_scale`, kept in logarithmic scale so that weights
+/// of any magnitude combine without overflow.
+#[derive(Debug, Clone, Copy)]
+struct Sum {
+    ln_scale: f64,
+    vector: Vector3,
+}
+
+impl Sum {
+    const ZERO: Self = Self {
+        ln_scale: f64::NEG_INFINITY,
+        vector: Vector3::new(0.0, 0.0, 0.0),
+    };
+
+    fn add(self, other: Self) -> Self {
+        if other.ln_scale == f64::NEG_INFINITY {
+            return self;
+        }
+        if self.ln_scale == f64::NEG_INFINITY {
+            return other;
+        }
+        let ln_scale = self.ln_scale.max(other.ln_scale);
+        Self {
+            ln_scale,
+            vector: self.vector * (self.ln_scale - ln_scale).exp()
+                + other.vector * (other.ln_scale - ln_scale).exp(),
+        }
+    }
+}
+
+/// One face corner around a position: its face normal (for the crease test) and its weighted
+/// contribution `value · e^ln_weight`.
+struct Entry {
+    normal: Vector3,
+    value: Vector3,
+    ln_weight: f64,
+}
+
+impl Entry {
+    fn sum(&self) -> Sum {
+        Sum {
+            ln_scale: self.ln_weight,
+            vector: self.value,
+        }
+    }
+}
+
+/// A node of a fan's tree: the entries `start..end`, the box of their normals, their sum and
+/// the two children of an inner node (0 for a leaf; the root is never a child).
+struct Node {
+    start: usize,
+    end: usize,
+    min: Vector3,
+    max: Vector3,
+    sum: Sum,
+    children: [usize; 2],
+}
+
+/// The faces around one position in a tree over their normals (points on the unit sphere),
+/// so the faces within the crease angle of a normal are summed without visiting all of them.
+struct Fan {
+    entries: Vec<Entry>,
+    nodes: Vec<Node>,
+}
+
+impl Fan {
+    fn new(mut entries: Vec<Entry>) -> Self {
+        let mut nodes: Vec<Node> = Vec::new();
+        // (start, end, parent, side); built in preorder without recursion.
+        let mut pending = vec![(0, entries.len(), None::<(usize, usize)>)];
+        while let Some((start, end, parent)) = pending.pop() {
+            let index = nodes.len();
+            if let Some((parent, side)) = parent
+                && let Some(slot) = nodes.get_mut(parent).and_then(|p| p.children.get_mut(side))
+            {
+                *slot = index;
+            }
+            let slice = entries.get_mut(start..end).unwrap_or_default();
+            let mut min = Vector3::repeat(f64::INFINITY);
+            let mut max = Vector3::repeat(f64::NEG_INFINITY);
+            for e in slice.iter() {
+                min = min.inf(&e.normal);
+                max = max.sup(&e.normal);
+            }
+            nodes.push(Node {
+                start,
+                end,
+                min,
+                max,
+                sum: Sum::ZERO,
+                children: [0, 0],
+            });
+            if slice.len() > LEAF_SIZE {
+                let axis = (max - min).imax();
+                let middle = slice.len() / 2;
+                slice.select_nth_unstable_by(middle, |a, b| {
+                    a.normal[axis].total_cmp(&b.normal[axis])
+                });
+                pending.push((start + middle, end, Some((index, 1))));
+                pending.push((start, start + middle, Some((index, 0))));
+            }
+        }
+        // Children come after their parent, so a reverse pass sums bottom-up.
+        for index in (0..nodes.len()).rev() {
+            let Some(node) = nodes.get(index) else {
+                continue;
+            };
+            let sum = if node.children == [0, 0] {
+                entries
+                    .get(node.start..node.end)
+                    .unwrap_or_default()
+                    .iter()
+                    .fold(Sum::ZERO, |s, e| s.add(e.sum()))
+            } else {
+                node.children
+                    .iter()
+                    .filter_map(|&c| nodes.get(c))
+                    .fold(Sum::ZERO, |s, c| s.add(c.sum))
+            };
+            if let Some(node) = nodes.get_mut(index) {
+                node.sum = sum;
+            }
+        }
+        Self { entries, nodes }
+    }
+
+    /// The fan of the (face, corner) pairs `around` a position, weighted by `weighting`.
+    fn around(
+        around: &[(usize, usize)],
+        faces: &[Option<Face>],
+        weighting: NormalWeighting,
+    ) -> Self {
+        Self::new(
+            around
+                .iter()
+                .filter_map(|&(f, corner)| {
+                    let g = faces.get(f)?.as_ref()?;
+                    Some(match weighting {
+                        // Angle weights are applied exactly; area weights through their
+                        // logarithms, so areas of any magnitude combine.
+                        NormalWeighting::Angle => Entry {
+                            normal: g.normal,
+                            value: g.normal * g.angles.get(corner).copied().unwrap_or(0.0),
+                            ln_weight: 0.0,
+                        },
+                        NormalWeighting::Flat | NormalWeighting::Area => Entry {
+                            normal: g.normal,
+                            value: g.normal,
+                            ln_weight: g.ln_area,
+                        },
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn total(&self) -> Sum {
+        self.nodes.first().map_or(Sum::ZERO, |root| root.sum)
+    }
+}
+
+/// The crease test of one `with_normals` call, with its work budget.
+struct Search {
+    crease_angle: f64,
+    /// A node whose farthest normal is closer than this chord is inside the crease angle.
+    inside: f64,
+    /// A node whose nearest normal is farther than this chord is outside it.
+    outside: f64,
+    work: u64,
+    budget: u64,
+}
+
+impl Search {
+    fn step(&mut self) -> Result<()> {
+        self.work += 1;
+        if self.work > self.budget {
+            Err(Error::new(codes::LIMIT_EXCEEDED))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The sum over the faces of `fan` whose normal is within the crease angle of `n`.
+    fn sum(&mut self, fan: &Fan, n: &Vector3) -> Result<Sum> {
+        let mut total = Sum::ZERO;
+        let mut pending = vec![0_usize];
+        while let Some(index) = pending.pop() {
+            self.step()?;
+            let Some(node) = fan.nodes.get(index) else {
+                continue;
+            };
+            if node.start == node.end {
+                continue;
+            }
+            let nearest = n.sup(&node.min).inf(&node.max) - n;
+            let farthest = (n - node.min).abs().sup(&(node.max - n).abs());
+            if nearest.norm() > self.outside {
+                continue;
+            }
+            if farthest.norm() < self.inside {
+                total = total.add(node.sum);
+                continue;
+            }
+            if node.children == [0, 0] {
+                for e in fan.entries.get(node.start..node.end).unwrap_or_default() {
+                    self.step()?;
+                    if angle_between(&e.normal, n) <= self.crease_angle {
+                        total = total.add(e.sum());
+                    }
+                }
+            } else {
+                pending.extend(node.children);
+            }
+        }
+        Ok(total)
+    }
+}
+
 impl TriMesh {
     /// This mesh with normals computed by `weighting` and `crease_angle` (radians); see the
     /// module documentation for the exact rules and the vertex order of the result.
@@ -127,7 +378,8 @@ impl TriMesh {
     ///
     /// `mesh.tolerance.invalid` for a negative or non-finite `tolerance.linear`;
     /// `mesh.crease.invalid` for a crease angle outside [0, π]; `mesh.limit.exceeded` when the
-    /// split vertices exceed `limits`.
+    /// split vertices exceed `limits`, or when the crease search exceeds its work budget of
+    /// 256 steps per element of `limits.array_length`.
     pub fn with_normals(
         &self,
         weighting: NormalWeighting,
@@ -148,48 +400,43 @@ impl TriMesh {
         let (class, around) = self.faces_around(&faces);
 
         let all = crease_angle >= std::f64::consts::PI;
-        // shortcut: crease filtering costs (distinct face normals × faces) per position, quadratic
-        // at a high-valence cone apex; upgrade to an angular sweep when such meshes are measured.
+        let chord = 2.0 * (crease_angle / 2.0).sin();
+        let mut search = Search {
+            crease_angle,
+            inside: chord - CHORD_MARGIN,
+            outside: chord + CHORD_MARGIN,
+            work: 0,
+            budget: limits.array_length.saturating_mul(CREASE_WORK_PER_ELEMENT),
+        };
+        let mut fans: Vec<Option<Fan>> = Vec::new();
+        fans.resize_with(around.len(), || None);
         let mut memo: HashMap<(usize, Option<[u64; 3]>), [f32; 3]> = HashMap::new();
-        let mut corner_normal = |own: Option<&Face>, class: usize| -> [f32; 3] {
+        let mut corner_normal = |own: Option<&Face>, class: usize| -> Result<[f32; 3]> {
             if let (NormalWeighting::Flat, Some(own)) = (weighting, own) {
-                return to_f32(&own.normal);
+                return Ok(to_f32(&own.normal));
             }
             let filter = own.filter(|_| !all).map(|f| f.normal);
-            *memo
-                .entry((class, filter.map(|n| n.map(f64::to_bits).into())))
-                .or_insert_with(|| {
-                    let counted: Vec<(&Face, usize)> = around
-                        .get(class)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|&(f, corner)| {
-                            faces.get(f).and_then(Option::as_ref).map(|g| (g, corner))
-                        })
-                        .filter(|(g, _)| {
-                            filter.is_none_or(|n| angle_between(&g.normal, &n) <= crease_angle)
-                        })
-                        .collect();
-                    let max_ln_area = counted
-                        .iter()
-                        .map(|(g, _)| g.ln_area)
-                        .fold(f64::NEG_INFINITY, f64::max);
-                    let sum: Vector3 = counted
-                        .iter()
-                        .map(|(g, corner)| {
-                            let weight = match weighting {
-                                NormalWeighting::Angle => {
-                                    g.angles.get(*corner).copied().unwrap_or(0.0)
-                                }
-                                NormalWeighting::Flat | NormalWeighting::Area => {
-                                    (g.ln_area - max_ln_area).exp()
-                                }
-                            };
-                            g.normal * weight
-                        })
-                        .sum();
-                    unit(&sum).map_or(FALLBACK_NORMAL, |n| to_f32(&n))
-                })
+            let key = (class, filter.map(|n| n.map(f64::to_bits).into()));
+            if let Some(normal) = memo.get(&key) {
+                return Ok(*normal);
+            }
+            let Some(slot) = fans.get_mut(class) else {
+                return Ok(FALLBACK_NORMAL);
+            };
+            let fan = slot.get_or_insert_with(|| {
+                Fan::around(
+                    around.get(class).map_or(&[][..], Vec::as_slice),
+                    &faces,
+                    weighting,
+                )
+            });
+            let sum = match filter {
+                None => fan.total(),
+                Some(n) => search.sum(fan, &n)?,
+            };
+            let normal = unit(&sum.vector).map_or(FALLBACK_NORMAL, |n| to_f32(&n));
+            memo.insert(key, normal);
+            Ok(normal)
         };
 
         let mut normals: Vec<Option<[f32; 3]>> = vec![None; self.positions.len()];
@@ -202,7 +449,7 @@ impl TriMesh {
                 let Some(&c) = class.get(*v as usize) else {
                     continue;
                 };
-                let normal = corner_normal(geometry.as_ref(), c);
+                let normal = corner_normal(geometry.as_ref(), c)?;
                 let bits = normal.map(f32::to_bits);
                 match normals.get_mut(*v as usize) {
                     Some(slot @ None) => *slot = Some(normal),
@@ -569,8 +816,239 @@ mod tests {
         assert_eq!(tangents[2], [0.0, 1.0, 0.0, 1.0]);
     }
 
+    /// A cone of `k` faces around an apex at (0, 0, 1) over the unit circle.
+    fn cone(k: u32) -> TriMesh {
+        let mut positions = vec![Point3::new(0.0, 0.0, 1.0)];
+        positions.extend((0..k).map(|i| {
+            let (sin, cos) = (std::f64::consts::TAU * f64::from(i) / f64::from(k)).sin_cos();
+            Point3::new(cos, sin, 0.0)
+        }));
+        let triangles = (0..k).map(|i| [0, 1 + i, 1 + (i + 1) % k]).collect();
+        TriMesh::new(positions, triangles, &Limits::DEFAULT).unwrap()
+    }
+
+    /// The normal of corner `corner` of triangle `t` by the definition: the counted faces at its
+    /// position summed directly, one by one.
+    fn reference_normal(
+        mesh: &TriMesh,
+        weighting: NormalWeighting,
+        crease_angle: f64,
+        t: usize,
+        corner: usize,
+    ) -> Vector3 {
+        let positions = mesh.positions();
+        let triangles = mesh.triangles();
+        let own = face(positions, triangles[t], 0.0).unwrap();
+        let at = positions[triangles[t][corner] as usize];
+        let mut sum = Vector3::zeros();
+        for tri in triangles {
+            let Some(g) = face(positions, *tri, 0.0) else {
+                continue;
+            };
+            for (k, &v) in tri.iter().enumerate() {
+                if positions[v as usize] == at
+                    && angle_between(&g.normal, &own.normal) <= crease_angle
+                {
+                    let w = match weighting {
+                        NormalWeighting::Angle => g.angles[k],
+                        _ => (g.ln_area - own.ln_area).exp(),
+                    };
+                    sum += g.normal * w;
+                }
+            }
+        }
+        sum.normalize()
+    }
+
+    #[test]
+    #[ignore = "takes about 20 s in a debug build; run with --run-ignored only"]
+    fn a_cone_apex_of_valence_100000_is_creased_in_near_linear_time() {
+        let k = 100_000;
+        let mesh = cone(k);
+        let start = std::time::Instant::now();
+        let creased = mesh
+            .with_normals(
+                NormalWeighting::Angle,
+                0.5,
+                &Tolerance::DEFAULT,
+                &Limits::DEFAULT,
+            )
+            .unwrap();
+        // Quadratic filtering took over four minutes in an optimized build; the tree takes well
+        // under a second there. The bound leaves room for unoptimized builds and slow machines.
+        assert!(start.elapsed().as_secs() < 60, "{:?}", start.elapsed());
+        // By symmetry every apex corner normal makes the same angle with the axis and lies in
+        // the plane through the axis and its face normal.
+        let axis = Vector3::z();
+        let first = corner(&creased, 0, 0);
+        for t in (0..k as usize).step_by(997) {
+            let n = corner(&creased, t, 0);
+            let own = face(creased.positions(), creased.triangles()[t], 0.0)
+                .unwrap()
+                .normal;
+            assert!((angle_between(&n, &axis) - angle_between(&first, &axis)).abs() < 1e-6);
+            assert!(n.dot(&axis.cross(&own)).abs() < 1e-6);
+        }
+        // The apex is a copy per face; the base vertices are smooth around the circle.
+        assert_eq!(creased.vertex_count(), mesh.vertex_count() + k as usize - 1);
+    }
+
+    #[test]
+    #[ignore = "takes about 30 s in a debug build; run with --run-ignored only"]
+    fn a_fan_of_scattered_normals_fails_when_the_crease_search_exceeds_its_budget() {
+        // 20,000 faces around one apex with normals scattered over the sphere: the faces within
+        // the crease angle of a normal are bounded by a circle that crosses many tree nodes.
+        let k = 20_000_u32;
+        let mut positions = vec![Point3::origin()];
+        let mut triangles = Vec::new();
+        for i in 0..k {
+            let a = f64::from(i) * 2.399_963;
+            let b = f64::from(i) * 0.618_034 * std::f64::consts::TAU;
+            positions.push(Point3::new(a.cos(), a.sin(), (a * 0.37).sin()));
+            positions.push(Point3::new(b.sin(), (b * 1.3).cos(), b.cos()));
+            triangles.push([0, 1 + 2 * i, 2 + 2 * i]);
+        }
+        let mesh = TriMesh::new(positions, triangles, &Limits::DEFAULT).unwrap();
+        // Room for every split vertex (flat normals split the apex once per face), but a budget
+        // of 256 steps per element is below what this fan needs.
+        let tight = Limits {
+            array_length: u64::from(3 * k),
+            ..Limits::DEFAULT
+        };
+        let tolerance = Tolerance::DEFAULT;
+        assert!(
+            mesh.with_normals(NormalWeighting::Flat, 1.0, &tolerance, &tight)
+                .is_ok()
+        );
+        let result = mesh.with_normals(NormalWeighting::Area, 1.0, &tolerance, &tight);
+        assert_eq!(result.unwrap_err().code(), "mesh.limit.exceeded");
+    }
+
+    #[test]
+    fn the_crease_search_stops_at_its_budget() {
+        let entries = || {
+            (0..2_000_u32)
+                .map(|i| {
+                    let a = f64::from(i) * 2.399_963;
+                    let n = Vector3::new(a.cos(), a.sin(), (a * 0.37).sin()).normalize();
+                    Entry {
+                        normal: n,
+                        value: n,
+                        ln_weight: 0.0,
+                    }
+                })
+                .collect()
+        };
+        let fan = Fan::new(entries());
+        let search = |budget| Search {
+            crease_angle: 1.0,
+            inside: 2.0 * 0.5_f64.sin() - CHORD_MARGIN,
+            outside: 2.0 * 0.5_f64.sin() + CHORD_MARGIN,
+            work: 0,
+            budget,
+        };
+        let mut unlimited = search(u64::MAX);
+        let n = Vector3::new(0.6, 0.0, 0.8);
+        let sum = unlimited.sum(&fan, &n).unwrap();
+        // The tree visits far fewer than all 2,000 faces, and sums the same faces as a scan.
+        assert!(unlimited.work < 1_000, "{}", unlimited.work);
+        let direct: Vector3 = fan
+            .entries
+            .iter()
+            .filter(|e| angle_between(&e.normal, &n) <= 1.0)
+            .map(|e| e.value)
+            .sum();
+        assert!((sum.vector * sum.ln_scale.exp() - direct).norm() < 1e-9);
+        let mut tight = search(unlimited.work - 1);
+        assert_eq!(
+            tight.sum(&fan, &n).unwrap_err().code(),
+            "mesh.limit.exceeded"
+        );
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+
+        /// The tree search sums exactly the faces the crease rule counts: corner normals agree
+        /// with a direct sum over every face at the position, on fans large enough to need it.
+        #[test]
+        fn crease_search_matches_the_direct_sum(
+            directions in prop::collection::vec(
+                (prop::array::uniform3(-1.0..1.0_f64), prop::array::uniform3(-1.0..1.0_f64)),
+                20..200,
+            ),
+            crease_angle in 0.0..PI,
+            angle_weighted in any::<bool>(),
+        ) {
+            let mut positions = vec![Point3::origin()];
+            let mut triangles = Vec::new();
+            for (i, (a, b)) in (0_u32..).zip(&directions) {
+                positions.push(Point3::from(*a));
+                positions.push(Point3::from(*b));
+                triangles.push([0, 1 + 2 * i, 2 + 2 * i]);
+            }
+            let mesh = TriMesh::new(positions, triangles, &Limits::DEFAULT).unwrap();
+            let weighting = if angle_weighted { NormalWeighting::Angle } else { NormalWeighting::Area };
+            let exact = Tolerance { linear: 0.0, ..Tolerance::DEFAULT };
+            let smooth = mesh.with_normals(weighting, crease_angle, &exact, &Limits::DEFAULT).unwrap();
+            for t in 0..mesh.triangle_count() {
+                if face(mesh.positions(), mesh.triangles()[t], 0.0).is_none() {
+                    continue;
+                }
+                let expected = reference_normal(&mesh, weighting, crease_angle, t, 0);
+                prop_assert!(angle_between(&corner(&smooth, t, 0), &expected) < 1e-6);
+            }
+        }
+
+        /// A small triangle far from the origin gets the same normals, tangents and degeneracy
+        /// as the same triangle moved to the origin: its edges are exact differences.
+        #[test]
+        fn small_triangles_far_from_the_origin_keep_their_precision(
+            base in prop::array::uniform3(1e6..1e15_f64),
+            offsets in prop::array::uniform9(-1.0..1.0_f64),
+            size_exponent in -6.0..1.0_f64,
+            uvs in prop::array::uniform6(-1.0..1.0_f32),
+        ) {
+            let size = 10.0_f64.powf(size_exponent);
+            let base = Point3::from(base);
+            let far: Vec<Point3> = offsets
+                .chunks(3)
+                .map(|o| base + Vector3::new(o[0], o[1], o[2]) * size)
+                .collect();
+            // The differences of close numbers are exact, so `near` has the same edges.
+            let near: Vec<Point3> = far.iter().map(|p| Point3::from(p - far[0])).collect();
+            let build = |positions: Vec<Point3>| {
+                TriMeshBuilder::new(positions, vec![[0, 1, 2]])
+                    .channel(
+                        AttributeKey::Uv(0),
+                        Channel::Vec2(uvs.chunks(2).map(|c| [c[0], c[1]]).collect()),
+                    )
+                    .build(&Limits::STRICT)
+                    .unwrap()
+            };
+            let (far, near) = (build(far), build(near));
+            let tolerance = Tolerance { linear: size * 1e-3, ..Tolerance::DEFAULT };
+            prop_assert_eq!(
+                far.degenerate_triangles(&tolerance).unwrap(),
+                near.degenerate_triangles(&tolerance).unwrap()
+            );
+            let frame = |mesh: &TriMesh| {
+                mesh.with_normals(NormalWeighting::Angle, 1.0, &tolerance, &Limits::STRICT)
+                    .unwrap()
+                    .with_tangents(0, &tolerance)
+                    .unwrap()
+            };
+            let (far, near) = (frame(&far), frame(&near));
+            prop_assert_eq!(far.normals(), near.normals());
+            prop_assert_eq!(far.tangents(), near.tangents());
+            // And the normal is the exact one, up to the f32 rounding of the output.
+            let p = near.positions();
+            if let Some(exact) = unit(&(p[1] - p[0]).cross(&(p[2] - p[0])))
+                && face(p, [0, 1, 2], tolerance.linear).is_some()
+            {
+                prop_assert!(angle_between(&v(&far.normals().unwrap()[0]), &exact) < 1e-6);
+            }
+        }
 
         /// Normals of a UV sphere with `n` rings and `2n` segments are radial within 1.6 / n²
         /// radians with angle weighting (the error of the diagonally split bands is second
