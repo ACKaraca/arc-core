@@ -19,6 +19,7 @@ arc-base = { path = "crates/arc-base" }
 arc-geom = { path = "crates/arc-geom" }
 arc-doc = { path = "crates/arc-doc" }
 arc-mesh = { path = "crates/arc-mesh" }
+arc-solve = { path = "crates/arc-solve" }
 
 # Lock-free publication of document snapshots in `arc-doc`; the optional `serde` feature stays off.
 arc-swap = { version = "1.9.5", default-features = false }

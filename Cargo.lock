@@ -66,6 +66,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-solve"
+version = "0.1.0"
+dependencies = [
+ "arc-base",
+ "proptest",
+]
+
+[[package]]
 name = "arc-swap"
 version = "1.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
