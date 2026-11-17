@@ -1,6 +1,6 @@
 # arc-ui
 
-The widget kit on egui shared by every Arc desktop product: docking workspace, viewport widget,
+The widget kit on egui shared by every Arc product on the desktop, in the browser and on tablets and phones: docking workspace, viewport widget,
 command line and palette, tool option bar, property grid, tree and outliner, virtualized tables,
 numeric and unit input, node editor, notifications, theming and the shared interaction standards.
 The architecture is specified in [ui-kit.md](../architecture/ui-kit.md).
@@ -12,6 +12,8 @@ The architecture is specified in [ui-kit.md](../architecture/ui-kit.md).
   handling.
 - Theme tokens, shipped themes, density and UI scale, icon atlas.
 - Accessibility integration (names, roles, focus order) and its test helpers.
+- Pointer sources (mouse, touch, pen), gesture recognizers, size-class layouts and soft-keyboard
+  integration for the browser and tablet and phone targets.
 - Re-export of the pinned egui family crates for products.
 - UI test helpers on `egui_kittest`.
 
@@ -34,6 +36,8 @@ product needs them.
 | `NodeEditor` | Canvas for `arc-nodes` graphs |
 | `Theme` | Token set for colors, spacing, radii, fonts, icon sizes |
 | `Notification` | Severity, message, optional command, progress |
+| `PointerEvent` | Pointer kind (mouse, touch, pen), position, pressure, tilt, contact size and hover state |
+| `SizeClass` | Compact, medium or expanded, derived from the window width, selecting a layout |
 
 ## Dependencies
 
@@ -44,11 +48,12 @@ product needs them.
 
 ## Test strategy
 
-`egui_kittest` tests for every widget: AccessKit name and role checks, keyboard traversal, snapshot
+`egui_kittest` tests for every widget, driven by simulated mouse, touch and pen streams: AccessKit name and role checks, keyboard traversal, snapshot
 images at 100 % and 200 % scale, pseudo-locale and pseudo right-to-left locale; contrast tests for
 all themes; virtualization tests with one million rows asserting constant frame cost; property grid
 tests for mixed values and invalid input; interaction-standard tests for selection gestures and
-Escape and Enter sequences.
+Escape and Enter sequences; gesture recognizer tests over recorded event streams; snapshots of
+each panel in the compact, medium and expanded size classes.
 
 ## Capabilities
 
@@ -113,3 +118,19 @@ Escape and Enter sequences.
 | CORE-UI-030 | Snapping feedback | Shows a marker shaped by snap kind with a tooltip, and alignment tracking lines from acquired points. | T1 | 1 |
 | CORE-UI-031 | Escape and Enter | Escape steps back through prompt step, command and selection; Enter accepts defaults, completes input or repeats the last command when idle. | T1 | 0 |
 | CORE-UI-032 | Undo keys | Undo and redo work from the keyboard at all times, stepping back inside an active command first. | T1 | 0 |
+
+### Touch, pen and small screens
+
+The behavior is specified in [ui-kit.md](../architecture/ui-kit.md#browser-tablet-and-phone-targets).
+
+| ID | Capability | Behavior | Tier | Phase |
+|---|---|---|---|---|
+| CORE-UI-033 | Pointer sources | Delivers mouse, touch and pen events with kind, position, pressure, tilt and contact size, and applies every interaction standard identically to each kind. | T3 | 5 |
+| CORE-UI-034 | Touch navigation gestures | Maps tap, long press, one- and two-finger drags, pinch, twist, double tap and two- and three-finger taps to selection, navigation, context menus, undo and redo, each with a button or menu equivalent. | T3 | 5 |
+| CORE-UI-035 | Pen input | Treats the pen as the primary pointer while touch navigates, rejects palm contacts, exposes pressure and tilt to tools, maps barrel button and eraser end to configurable commands and shows pre-selection on hover where the hardware reports it. | T3 | 5 |
+| CORE-UI-036 | Touch precision | Shows a loupe while a point is placed by touch, offers offset-cursor and nudge input, scales pick and snap radii by pointer kind and keeps interactive targets at 44 logical pixels or more. | T3 | 5 |
+| CORE-UI-037 | Size-class layouts | Switches between compact, medium and expanded layouts live as the window changes, storing the dock layout per class and turning panels, menus and dialogs into sheets in the compact class. | T3 | 5 |
+| CORE-UI-038 | Safe areas and orientation | Keeps panels and overlays inside safe areas and preserves camera, selection and the active prompt across rotation, resizing and split-screen changes. | T3 | 5 |
+| CORE-UI-039 | Soft keyboard and text entry | Raises an on-screen keyboard with accessory rows and a numeric keypad for quantity fields, keeps the focused field visible and preserves input method composition. | T3 | 5 |
+| CORE-UI-040 | Hover-free alternatives | Provides a touch equivalent for every hover-only feature, including pre-selection on contact, tooltips on long press and snap names in a status strip. | T3 | 5 |
+| CORE-UI-041 | Touch accessibility | Exposes the accessibility tree to the platform screen readers on tablet and phone and through an accessible mirror in the browser, follows system text, contrast and motion settings and offers a single-pointer alternative for every gesture. | T3 | 5 |

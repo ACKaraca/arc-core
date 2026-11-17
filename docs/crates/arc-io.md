@@ -2,8 +2,10 @@
 
 One crate per interchange format family, each exposing a neutral model of its format: `arc-io-dxf`,
 `arc-io-dwg`, `arc-io-ifc`, `arc-io-step`, `arc-io-mesh`, `arc-io-usd`, `arc-io-pointcloud`,
-`arc-io-geo`, `arc-io-pdf` and `arc-io-bcf`. The architecture, library choices and limits are
-specified in [interchange.md](../architecture/interchange.md).
+`arc-io-geo`, `arc-io-pdf`, `arc-io-bcf`, `arc-io-exchange` (the Arc exchange package used by
+connectors), `arc-io-3dm`, `arc-io-fbx`, `arc-io-dgn` and `arc-io-bridge` (licensed bridges). The
+architecture, library choices and limits are specified in
+[interchange.md](../architecture/interchange.md).
 
 ## Owns
 
@@ -13,10 +15,15 @@ specified in [interchange.md](../architecture/interchange.md).
 - The loss-report schema and the shared bounded readers for ZIP and XML used by the family.
 - Fuzz targets, hostile-input tests and corpus runners for each format.
 - Shared core mappings: drafting plot streams to PDF and SVG (`arc-io-pdf`).
+- The Arc exchange package: container, schemas, validator, neutral model and fixtures
+  (`arc-io-exchange`).
+- The licensed-bridge host: descriptors, the `bridge.convert` worker job and output reading
+  (`arc-io-bridge`).
 
 ## Stays in products
 
-All mapping between neutral models and product domain models, the fidelity level per format and
+All mapping between neutral models (including the exchange package) and product domain models, the
+element mapping tables that turn host categories into product object types, the fidelity level per format and
 direction, product-specific export options and presets, and product-level loss items (what the
 product could not map).
 
@@ -45,13 +52,22 @@ product could not map).
 | `arc-io-geo` | `arc-base`, `arc-geom` | `proj`, `geo`, `geozero`, `shapefile`, `flatgeobuf`, `rusqlite`, `quick-xml` |
 | `arc-io-pdf` | `arc-base`, `arc-geom`, `arc-draft`, `arc-command` (worker jobs), `arc-pdfium` (in `arc-worker` only) | `krilla`, `lopdf` |
 | `arc-io-bcf` | `arc-base` | `quick-xml`, `zip`, `image` |
+| `arc-io-exchange` | `arc-base`, `arc-geom`, `arc-mesh` | `zip`, `serde_json`, `jsonschema`, `blake3` |
+| `arc-io-3dm` | `arc-base`, `arc-geom`, `arc-mesh`, `arc-command` (worker jobs), `arc-opennurbs` (in `arc-worker` only) | none beyond openNURBS |
+| `arc-io-fbx` | `arc-base`, `arc-geom`, `arc-mesh` | `fbxcel`, `fbxcel-dom` |
+| `arc-io-dgn` | `arc-base`, `arc-geom` | none |
+| `arc-io-bridge` | `arc-base`, `arc-command` (worker jobs) | none |
 
 ## Test strategy
 
 Per crate: unit tests for every record kind; round-trip tests (read, write, re-read, compare neutral
 models); a hostile-input test over malformed files asserting errors and no panics; a fuzz target per
 reader; oracle comparison in the corpus job; determinism tests for writers (identical bytes for
-identical input); limit tests that construct inputs exceeding each limit.
+identical input); limit tests that construct inputs exceeding each limit. Exchange package: fixtures for every released
+schema version, one failing fixture per validation level and error code, a round trip through a
+reference connector written in a second language, and a differential test of the Rust validator
+against the independent validator. Bridge host: a test adapter that crashes, hangs, exceeds its
+memory limit and emits an invalid package, each asserting that the document is untouched.
 
 ## Capabilities
 
@@ -129,3 +145,38 @@ identical input); limit tests that construct inputs exceeding each limit.
 | CORE-IO-038 | SVG output | Writes plot streams to SVG with exact arcs, lineweights, linetypes and text. | T1 | 1 |
 | CORE-IO-039 | PDF vector import | Reads vector content of PDF pages (paths, fills, text runs) into neutral 2D geometry with page transforms. | T2 | 2 |
 | CORE-IO-040 | PDF raster underlays | Rasterizes PDF pages in `arc-worker` at requested resolution and region for underlay display. | T2 | 2 |
+
+### Exchange package
+
+| ID | Capability | Behavior | Tier | Phase |
+|---|---|---|---|---|
+| CORE-IO-041 | Exchange package reading | Reads an Arc exchange package into a neutral model of manifest, elements, types, parameters, relationships, materials, classifications, views, sheets and geometry definitions, with source identifiers on every record. | T3 | 5 |
+| CORE-IO-042 | Exchange package writing | Writes deterministic packages from the neutral model with manifest hashes and counts; output passes all validation levels. | T3 | 5 |
+| CORE-IO-043 | Exchange validation | Validates structure, schema, integrity, references and semantics in five levels and reports each failure with a stable `io.exchange.*` code in a loss report. | T3 | 5 |
+| CORE-IO-044 | Exchange versioning | Reads every minor version of a supported major version, preserves unknown fields and optional extensions, and refuses unknown major versions and unimplemented required extensions without reading data. | T3 | 5 |
+| CORE-IO-045 | Exchange geometry | Reads and writes B-rep bodies with analytic and NURBS geometry, indexed meshes, curves and shared definitions with `f64` placements, checking shell closure, orientation and index ranges. | T3 | 5 |
+| CORE-IO-046 | Exchange drafting views | Reads and writes view definitions, sheets with viewports, schedules and 2D drafting geometry with styles and links to source elements. | T3 | 5 |
+| CORE-IO-047 | Exchange incremental update | Reads packages that amend a base revision and writes change-only packages carrying the Arc `ObjectId` of each object, so a host update matches existing elements. | T3 | 5 |
+| CORE-IO-048 | Producer report | Reads and writes the connector's producer report in the loss-report item shape and merges it into the import loss report. | T3 | 5 |
+
+### Open readers for proprietary formats
+
+| ID | Capability | Behavior | Tier | Phase |
+|---|---|---|---|---|
+| CORE-IO-049 | 3DM reading | Reads 3DM files through openNURBS in `arc-worker` into layers, objects with attributes, instance definitions, NURBS geometry, B-rep, meshes, materials and user strings, preserving unknown plug-in data. | T3 | 5 |
+| CORE-IO-050 | FBX reading | Reads binary FBX 7.x into a neutral scene model with hierarchy, meshes, materials, cameras, lights, skeletons, skins, blend shapes and animation curves; ASCII files fail with `io.unsupported_version`. | T3 | 5 |
+| CORE-IO-051 | DGN V7 reading | Reads DGN V7 files from the published specification into levels, 2D and 3D elements, cells, complex chains and shapes, text, color tables and reference attachments. | T3 | 5 |
+
+### Licensed bridges
+
+| ID | Capability | Behavior | Tier | Phase |
+|---|---|---|---|---|
+| CORE-IO-052 | Bridge descriptors | Loads user-installed bridge descriptors that name an adapter executable, accepted input formats and output format; every bridge is disabled until the user enables it, and none is searched for or downloaded. | T3 | 5 |
+| CORE-IO-053 | Bridge conversion job | Runs `bridge.convert` in `arc-worker`: starts the adapter as a separate process with an empty output directory, limits and cancellation, then reads the result under the caller's limits profile; failures leave the document unchanged. | T3 | 5 |
+| CORE-IO-054 | Bridge provenance | Records the bridge name and version in the loss report header and keeps the input file as the source of preserved records. | T3 | 5 |
+
+### Constrained platforms
+
+| ID | Capability | Behavior | Tier | Phase |
+|---|---|---|---|---|
+| CORE-IO-055 | Constrained limits profile | Provides the `constrained` limits profile for browser and tablet or phone builds, and reports `io.limit_exceeded` with a suggestion to submit the import to a worker. | T3 | 5 |

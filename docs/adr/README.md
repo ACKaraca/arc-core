@@ -2,7 +2,7 @@
 
 Decisions specific to `arc-core`. Suite-wide decisions (repository topology, UI toolkit, geometry
 tiers, document model, package, command model, regeneration, units, interoperability, rendering,
-collaboration, extensibility, licensing, assistance, robustness, localization) are recorded in
+collaboration, extensibility, licensing, assistance, robustness, localization, exchange connectors and licensed bridges, web and mobile targets) are recorded in
 [arc-suite](https://github.com/ACKaraca/arc-suite/tree/main/docs/adr) and are not restated here.
 
 ## Index
@@ -19,6 +19,8 @@ collaboration, extensibility, licensing, assistance, robustness, localization) a
 | [0008](0008-native-subdivision-surfaces.md) | Native Catmull–Clark subdivision following published rules | Accepted |
 | [0009](0009-text-stack-and-drafting-fonts.md) | Text stack and Arc-owned single-stroke drafting fonts | Accepted |
 | [0010](0010-automation-protocol-transport.md) | Automation protocol transport: newline-delimited JSON-RPC over stdio and user-scoped local sockets | Accepted |
+| [0011](0011-exchange-package-container.md) | Exchange package container: ZIP with JSON Lines and binary buffers | Accepted |
+| [0012](0012-opennurbs-ffi-crate.md) | Rhino 3DM reading through an openNURBS FFI crate in the worker | Accepted |
 
 ## Process
 
