@@ -1,0 +1,21 @@
+[package]
+name = "arc-geom"
+description = "Exact 2D curves, bounding boxes, transforms and robust predicates of the Arc suite."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+arc-base = { workspace = true }
+robust = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

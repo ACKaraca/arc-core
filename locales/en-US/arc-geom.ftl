@@ -1,0 +1,18 @@
+# Messages of the errors owned by arc-geom. Identifiers are registered in
+# crates/arc-geom/src/error.rs.
+
+geom-input-not-finite = A coordinate, length, angle, factor or transform entry is not a finite number.
+geom-segment-zero-length = The segment starts and ends at the same point.
+geom-direction-zero = The direction has no length.
+geom-radius-not-positive = The radius must be a positive number.
+geom-sweep-invalid = The arc must sweep more than zero and at most one full turn.
+geom-ellipse-invalid-axis = The ellipse needs a major axis with a positive length and a minor-to-major ratio above zero and at most one.
+geom-polyline-too-few-vertices = A polyline needs at least two vertices.
+geom-polyline-zero-length-segment = Two consecutive polyline vertices are at the same point.
+geom-polyline-negative-width = A polyline width cannot be negative.
+geom-bbox-invalid = The bounding box minimum lies above its maximum.
+geom-transform-singular = The transform cannot be inverted.
+geom-transform-not-similarity = A polyline with arcs or widths can only be moved, rotated, mirrored or scaled uniformly.
+geom-precision-insufficient = The result cannot be computed precisely enough.
+geom-decode-invalid = The stored geometry is damaged or too large.
+geom-tolerance-invalid = A linear or angular tolerance is negative or not a finite number.

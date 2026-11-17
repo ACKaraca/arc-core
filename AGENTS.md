@@ -10,8 +10,8 @@ Arc product depends on one tagged release of it; it contains no product function
 
 ## Status and where to start reading
 
-Foundation phase: the workspace, `xtask` and `arc-base` exist; every other crate is still a
-specification. Read, in order: [README.md](README.md),
+Foundation phase: the workspace, `xtask`, `arc-base` and the first part of `arc-geom` exist; every
+other crate is still a specification. Read, in order: [README.md](README.md),
 [docs/architecture/overview.md](docs/architecture/overview.md), the architecture document for your
 area, and the crate specification you are changing under [docs/crates](docs/crates/README.md).
 Capability identifiers (`CORE-<AREA>-NNN`) are defined in the crate specifications.

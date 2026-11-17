@@ -20,6 +20,7 @@ third_party = [
   "glam",
   "nalgebra",
   "proptest",
+  "robust",
   "serde",
   "serde_json",
   "thiserror",
@@ -28,7 +29,7 @@ third_party = [
 ]
 
 # Crates built for wasm32-unknown-unknown by `cargo xtask wasm`.
-wasm = ["arc-base"]
+wasm = ["arc-base", "arc-geom"]
 
 # Class of every workspace crate: layer(n), ffi(n), app, testkit or tool.
 [crates]

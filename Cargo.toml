@@ -14,10 +14,12 @@ publish = false
 # docs/architecture/technology-baseline.md and in xtask/layers.toml.
 [workspace.dependencies]
 arc-base = { path = "crates/arc-base" }
+arc-geom = { path = "crates/arc-geom" }
 
 glam = "0.34"
 nalgebra = { version = "0.35", default-features = false, features = ["std", "serde-serialize"] }
 proptest = { version = "1.12", default-features = false, features = ["std"] }
+robust = "1.2"
 serde = { version = "1", features = ["derive"] }
 # `float_roundtrip`: a number read back from JSON is the number that was written.
 serde_json = { version = "1", features = ["float_roundtrip"] }

@@ -108,3 +108,117 @@ index queries; WebAssembly build in CI.
 | CORE-GEOM-030 | View frame | Defines eye, target, up, perspective or orthographic projection and clip planes, with world-to-view and view-to-world mappings in `f64`. | T1 | 0 |
 | CORE-GEOM-031 | Robust predicates | Decides orientation and in-circle tests with adaptive exact arithmetic; results are consistent for permuted inputs. | T1 | 0 |
 | CORE-GEOM-032 | Geometry encoding | Encodes every geometry value in a documented, versioned canonical byte form; decoding rejects malformed or oversized input with `geom.decode.invalid` and never panics. | T1 | 0 |
+
+### Curve parameterization
+
+Every 2D curve kind has a parameter range and evaluates the point at a parameter; evaluation
+clamps the parameter to the range. Arcs store a start angle and a signed sweep: positive runs
+counterclockwise, negative clockwise, and a magnitude of 2π is a full turn. A bulge is the tangent
+of a quarter of the included angle of the segment that starts at the vertex: 0 is straight, a
+positive bulge bends counterclockwise.
+
+The start angle of an arc and the start parameter of an elliptical arc are normalized into
+[0, 2π) on construction and on deserialization. A value already in that interval is kept bit for
+bit, so stored values round-trip exactly; any other finite value is reduced through its sine and
+cosine, which use an exact argument reduction, so the normalized angle names the same direction
+as the given one however large it is. Reversal and transforms produce normalized values the same
+way, and every later computation (evaluation, sweep membership, bounding boxes) works on the
+normalized angle.
+
+A bulged polyline segment is evaluated relative to its chord, from the vertices, the bulge and
+sines and cosines of fractions of the included angle; no value is derived from the center. Its
+end points are the vertices exactly, and its points and bounding box are accurate to a few units
+in the last place of the larger of the chord length and the sagitta for every accepted bulge,
+however close to 0. The segment is also available in center-radius form as an arc; for a nearly
+straight segment that form is far from the chord, and its center, radius, start angle and sweep
+reproduce the vertices only to the rounding of the radius. A bulge whose center-radius form
+cannot be represented in `f64` (center or radius out of range for a bulge very close to 0, or a
+sweep that rounds to a full turn for a bulge of about 1e16 or more in magnitude) is rejected with
+`geom.precision.insufficient`. A closed polyline with exactly two vertices is valid, including
+with both bulges 0: it is a degenerate loop whose second segment retraces the first, as some file
+formats store it.
+
+| Kind | Range | Parameter |
+|---|---|---|
+| Segment | [0, 1] | Linear fraction from start to end |
+| Ray | [0, +∞) | Distance from the origin |
+| Line | (−∞, +∞) | Signed distance from the reference point |
+| Circle | [0, 2π] | Angle from the positive x axis, counterclockwise |
+| Arc | [0, \|sweep\|] | Angle traveled from the start, in the sweep direction |
+| Ellipse | [0, 2π] | Eccentric angle from the major axis, counterclockwise |
+| Elliptical arc | [0, \|sweep\|] | Eccentric angle traveled from the start, in the sweep direction |
+| Polyline | [0, n] for n segments | Segment index plus the fraction along it; arcs proportionally to angle |
+
+Reversing a curve maps parameter `t` to `a + b − t` for range [a, b] (`−t` for a line); a circle
+or ellipse reverses into a clockwise full arc, and a ray has no reverse. Rays and lines have no
+bounding box; every other kind has an exact tight one that includes the axis extrema inside an
+arc's sweep.
+
+Values are validated on construction and on deserialization. Degeneracy is exact (a zero length,
+radius, sweep or direction), so validity never depends on a document tolerance. Every finite
+nonzero direction and every finite positive length is accepted, however large or small, and
+lengths and unit directions are computed without squaring components, so every accepted value
+evaluates to finite points.
+
+### Transform rules
+
+Rigid, similarity and affine transforms are all affine maps; the result depends on the map's
+effect:
+
+- Segments, rays and lines map point by point.
+- A circle or circular arc stays one when its image's semi-axes differ by at most the linear
+  tolerance, and otherwise becomes an exact ellipse or elliptical arc. Ellipses and elliptical
+  arcs stay ellipses and elliptical arcs; the new axes are the principal axes of the transformed
+  conjugate semi-diameters. A mirror reverses the sweep.
+- Open arcs and elliptical arcs keep their parameter: the image of the point at `t` is the point at
+  `t` of the result. A full circle or ellipse maps to one in its own canonical parameterization.
+- A polyline maps vertex by vertex; bulges are negated under a mirror and widths scale by the mean
+  scale factor. When the polyline has a nonzero bulge or width, the two principal scale factors
+  must differ by at most the linear tolerance divided by its largest width or arc extent (half the
+  chord times one plus the absolute bulge); otherwise the transform fails with
+  `geom.transform.not_similarity`. A polyline without bulges or widths accepts any affine map.
+- A transform is singular when its linear 2×2 block, divided by its largest entry magnitude, is
+  zero or has an exactly zero determinant; it then fails with `geom.transform.singular`.
+  Invertible transforms with very large or very small entries are accepted.
+- A linear or angular tolerance that is NaN, infinite or negative fails with
+  `geom.tolerance.invalid` before anything is computed.
+- Lengths and principal axes are computed from values scaled by their largest component
+  magnitude. When the image of a valid curve cannot be represented in `f64` (it overflows, its
+  axes or segments underflow until they would degenerate, or an image ellipse would have a
+  subnormal minor-to-major ratio), the transform fails with `geom.precision.insufficient`.
+
+### Robust predicates
+
+`orient2d` and `incircle` return the exact sign of their determinant. Before the adaptive exact
+evaluation, all coordinates are multiplied by one common power of two chosen from the largest
+coordinate magnitude, which is exact and keeps every intermediate value of the exact arithmetic
+away from overflow and from subnormal values. With `E` the exponent of the largest coordinate
+magnitude (2^E ≤ |x| < 2^(E+1)) and `L` the exponent of the lowest set bit of any nonzero
+coordinate (−1074 for the smallest subnormal), the sign is exact when `E − L ≤ 957` for
+`orient2d` and `E − L ≤ 477` for `incircle`; for coordinates with full 53-bit significands these
+are magnitude ratios of up to about 1e272 and 1e128. A wider span fails with
+`geom.precision.insufficient`. Both exponents depend only on the set of coordinate values, so
+every argument order of the same points gives consistently permuted signs or fails alike.
+
+### Error codes
+
+The codes `arc-geom` owns. A code is never reused for a different meaning; messages are in
+`locales/en-US/arc-geom.ftl`.
+
+| Code | Category | Raised when |
+|---|---|---|
+| `geom.input.not_finite` | `invalid_input` | A coordinate, length, angle, factor or transform entry is NaN or infinite |
+| `geom.segment.zero_length` | `invalid_input` | A segment starts and ends at the same point |
+| `geom.direction.zero` | `invalid_input` | The direction of a ray or line is the zero vector |
+| `geom.radius.not_positive` | `invalid_input` | The radius of a circle or arc is zero or negative |
+| `geom.sweep.invalid` | `invalid_input` | An arc sweep is zero or larger than a full turn |
+| `geom.ellipse.invalid_axis` | `invalid_input` | An ellipse has a zero major axis or a minor-to-major ratio outside (0, 1] |
+| `geom.polyline.too_few_vertices` | `invalid_input` | A polyline has fewer than two vertices |
+| `geom.polyline.zero_length_segment` | `invalid_input` | Two consecutive polyline vertices are equal |
+| `geom.polyline.negative_width` | `invalid_input` | A polyline width is negative |
+| `geom.bbox.invalid` | `invalid_input` | A stored bounding box has a minimum above its maximum |
+| `geom.transform.singular` | `invalid_input` | A transform is not invertible |
+| `geom.transform.not_similarity` | `unsupported` | A polyline with arcs or widths is given a transform that is not a similarity within tolerance |
+| `geom.precision.insufficient` | `failed_operation` | A computation exceeds the range or precision of `f64`: a transform image that is not representable, a bulge whose arc is not representable, predicate coordinates that span too many binary exponents |
+| `geom.decode.invalid` | `corrupt_data` | Encoded geometry is malformed or oversized |
+| `geom.tolerance.invalid` | `invalid_input` | A linear or angular tolerance is NaN, infinite or negative |

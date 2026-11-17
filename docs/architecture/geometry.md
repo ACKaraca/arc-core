@@ -36,9 +36,11 @@ the kernel.
 - A document stores its model tolerance in metadata; operations take a tolerance context so results
   are reproducible.
 - Orientation, incidence and in-circle decisions use robust adaptive-precision predicates
-  (`robust`). Constructions (intersection points) use `f64` with explicit error bounds; a
-  construction whose error bound exceeds `linear` reports `geom.precision.insufficient` instead of
-  returning a wrong topology.
+  (`robust`) on exactly prescaled coordinates; inputs whose binary exponents span more than the
+  exact computation can hold report `geom.precision.insufficient` (see
+  [arc-geom](../crates/arc-geom.md#robust-predicates)). Constructions (intersection points) use
+  `f64` with explicit error bounds; a construction whose error bound exceeds `linear` reports
+  `geom.precision.insufficient` instead of returning a wrong topology.
 - Large coordinates (georeferenced projects) are handled by keeping a document local origin and
   working in local coordinates; algorithms never subtract large absolute coordinates directly.
 - Every algorithm states its degenerate-input behavior: zero-length segments, coincident points,
