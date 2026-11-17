@@ -171,7 +171,8 @@ pub struct ExternalRef {
 /// The dynamically typed value of a field.
 ///
 /// Every variant corresponds to the [`ValueType`] of the same name. Floating-point values are
-/// finite. Serializing a value with `serde` yields its canonical JSON form, used in field
+/// finite. Variants whose data is larger than 24 bytes are boxed, so that a `Value` takes 32 bytes
+/// and a decoded payload stays close to its encoded size. Serializing a value with `serde` yields its canonical JSON form, used in field
 /// descriptors: numbers, strings, arrays of coordinates, identifiers as hyphenated text, byte
 /// strings and hashes as lowercase hexadecimal; payloads use [`crate::payload`] instead.
 #[derive(Debug, Clone, PartialEq)]
@@ -194,16 +195,16 @@ pub enum Value {
     Point3(Point3),
     /// A vector in space.
     Vector3(Vector3),
-    /// An affine transform of space.
-    Transform(Transform3),
+    /// An invertible affine transform of space.
+    Transform(Box<Transform3>),
     /// A color.
-    Color(ColorValue),
+    Color(Box<ColorValue>),
     /// The identifier of the target object.
     Reference(ObjectId),
     /// A reference into a linked document.
-    ExternalReference(ExternalRef),
+    ExternalReference(Box<ExternalRef>),
     /// The hash of an asset.
-    Asset(AssetHash),
+    Asset(Box<AssetHash>),
     /// A geometry value in its owning crate's encoding.
     Geometry(GeometryBytes),
     /// The elements of a list.
@@ -527,6 +528,10 @@ pub type TypeValidator = fn(&[Option<Value>]) -> Vec<Finding>;
 /// A migration: a pure function from the field values of one major version (at the minor
 /// version of its [`Migration::source`]) to those of the next major version (at the minor
 /// version of the next schema in the chain).
+///
+/// A migration sees decoded values only. A payload written by a newer minor version of the source
+/// major version decodes with [`crate::payload::Decoded::trailing`] bytes the function cannot see;
+/// migrating it would drop them, so such an object is not migrated: the migration step refuses it.
 pub type MigrateFn = fn(Vec<Option<Value>>) -> Result<Vec<Option<Value>>>;
 
 /// The schema of an older major version and the function that lifts its values to the next
@@ -589,15 +594,21 @@ impl TypeDecl {
 }
 
 /// Checks the values of a field list: one entry per field, every required field present, every
-/// value of its field's type, finite and within its bound and enum codes. This is the field
-/// schema check of commit validation.
+/// value of its field's type, finite and within its bound and enum codes, and every transform
+/// invertible. This is the field schema check of commit validation.
 ///
 /// Fails with `doc.value.type_mismatch` (also for a wrong number of entries),
 /// `doc.value.missing`, `doc.value.out_of_range` or `doc.value.not_finite`; the `field` argument
 /// names the offending field as a dotted path through nested records.
 pub fn check_values(fields: &[FieldDecl], values: &[Option<Value>]) -> Result<()> {
     if fields.len() != values.len() {
+        // The `field` argument names the first field without a value, or the position of the
+        // first value without a field.
+        let field = fields
+            .get(values.len())
+            .map_or_else(|| fields.len().to_string(), |field| field.name.clone());
         return Err(Error::new(codes::VALUE_TYPE_MISMATCH)
+            .with_arg("field", field)
             .with_detail("expected_fields", count(fields.len()))
             .with_detail("actual_fields", count(values.len())));
     }
@@ -710,11 +721,10 @@ pub(crate) fn check_value(
         (ValueType::Transform, Value::Transform(t)) => {
             finite(&transform_entries(t))?;
             let bottom = t.matrix().row(3);
-            if bottom.iter().eq([0.0, 0.0, 0.0, 1.0].iter()) {
-                Ok(())
-            } else {
-                Err(Error::new(codes::VALUE_TYPE_MISMATCH))
+            if !bottom.iter().eq([0.0, 0.0, 0.0, 1.0].iter()) {
+                return Err(Error::new(codes::VALUE_TYPE_MISMATCH));
             }
+            within(is_invertible(t))
         }
         (ValueType::Color, Value::Color(c)) => {
             let rgba = [c.rgba.r, c.rgba.g, c.rgba.b, c.rgba.a];
@@ -749,6 +759,20 @@ pub(crate) fn check_value(
         (ValueType::Record(fields), Value::Record(values)) => check_values(fields, values),
         _ => Err(Error::new(codes::VALUE_TYPE_MISMATCH)),
     }
+}
+
+/// True when the linear part of `transform` is invertible: its entries are finite and its
+/// determinant, after dividing every entry by the largest magnitude among them, is not zero.
+pub(crate) fn is_invertible(transform: &Transform3) -> bool {
+    let linear = transform.matrix().fixed_view::<3, 3>(0, 0);
+    let scale = linear
+        .iter()
+        .fold(0.0_f64, |largest, entry| largest.max(entry.abs()));
+    if !(scale.is_finite() && scale > 0.0) {
+        return false;
+    }
+    let determinant = (linear / scale).determinant();
+    determinant.is_finite() && determinant != 0.0
 }
 
 fn check_real(value: f64, bound: Option<&Bound>) -> Result<()> {
@@ -801,5 +825,167 @@ impl Serialize for Value {
             Self::Map(entries) => entries.serialize(s),
             Self::Record(values) => values.serialize(s),
         }
+    }
+}
+
+/// One step of a [`FieldPath`] after its field.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PathSegment {
+    /// A field of a record, or the field of the object for the first segment.
+    Field(String),
+    /// An element of a list.
+    Index(u64),
+    /// An entry of a map.
+    Key(String),
+}
+
+/// The address of a value inside an object: a field of the object, then record field names, list
+/// indices and map keys. Journal records name changed values by field path (ADR-0003).
+///
+/// The canonical text form ([`fmt::Display`]) writes the field name, `.name` for a record field,
+/// `[n]` for a list index and `["key"]` for a map key, the key as a JSON string; for example
+/// `layer.index`, `tags[3]` and `costs["a"]`. It is unambiguous for every path that
+/// [resolves](FieldPath::resolve), since field names are [names](is_name).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FieldPath {
+    /// The segments; the first is always a [`PathSegment::Field`].
+    segments: Vec<PathSegment>,
+}
+
+impl FieldPath {
+    /// The path of the object field `field`.
+    #[must_use]
+    pub fn new(field: impl Into<String>) -> Self {
+        Self {
+            segments: vec![PathSegment::Field(field.into())],
+        }
+    }
+
+    /// Extends the path by the record field `name`.
+    #[must_use]
+    pub fn field(mut self, name: impl Into<String>) -> Self {
+        self.segments.push(PathSegment::Field(name.into()));
+        self
+    }
+
+    /// Extends the path by the list element at `index`.
+    #[must_use]
+    pub fn index(mut self, index: u64) -> Self {
+        self.segments.push(PathSegment::Index(index));
+        self
+    }
+
+    /// Extends the path by the map entry with `key`.
+    #[must_use]
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.segments.push(PathSegment::Key(key.into()));
+        self
+    }
+
+    /// The segments, starting with the object field.
+    #[must_use]
+    pub fn segments(&self) -> &[PathSegment] {
+        &self.segments
+    }
+
+    /// The value type the path addresses in objects of `schema`, or `None` when a field does
+    /// not exist or a segment does not fit the type it steps into (an index into a non-list, a
+    /// key into a non-map, a field of a non-record).
+    #[must_use]
+    pub fn resolve<'a>(&self, schema: &'a Schema) -> Option<&'a ValueType> {
+        let mut fields = schema.fields.as_slice();
+        let mut current: Option<&ValueType> = None;
+        for segment in &self.segments {
+            current = Some(match (current, segment) {
+                (None, PathSegment::Field(name))
+                | (Some(ValueType::Record(_)), PathSegment::Field(name)) => {
+                    if let Some(ValueType::Record(nested)) = current {
+                        fields = nested;
+                    }
+                    &fields.iter().find(|field| field.name == *name)?.value_type
+                }
+                (Some(ValueType::List(element)), PathSegment::Index(_))
+                | (Some(ValueType::Map(element)), PathSegment::Key(_)) => element,
+                _ => return None,
+            });
+        }
+        current
+    }
+}
+
+impl fmt::Display for FieldPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (position, segment) in self.segments.iter().enumerate() {
+            match segment {
+                PathSegment::Field(name) if position == 0 => f.write_str(name)?,
+                PathSegment::Field(name) => write!(f, ".{name}")?,
+                PathSegment::Index(index) => write!(f, "[{index}]")?,
+                PathSegment::Key(key) => {
+                    let quoted = serde_json::to_string(key).map_err(|_| fmt::Error)?;
+                    write!(f, "[{quoted}]")?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schema() -> Schema {
+        let layer = ValueType::Record(vec![
+            FieldDecl::new("index", ValueType::I64),
+            FieldDecl::new("tags", ValueType::List(Box::new(ValueType::String))),
+        ]);
+        Schema::new(
+            SchemaVersion::new(1, 0),
+            vec![
+                FieldDecl::new("layers", ValueType::List(Box::new(layer))),
+                FieldDecl::new("costs", ValueType::Map(Box::new(ValueType::F64))),
+                FieldDecl::new("flag", ValueType::Bool),
+            ],
+        )
+    }
+
+    #[test]
+    fn field_paths_resolve_and_print_canonically() {
+        let schema = schema();
+        let tag = FieldPath::new("layers").index(2).field("tags").index(0);
+        assert_eq!(tag.resolve(&schema), Some(&ValueType::String));
+        assert_eq!(tag.to_string(), "layers[2].tags[0]");
+        let cost = FieldPath::new("costs").key("a \"b\"");
+        assert_eq!(cost.resolve(&schema), Some(&ValueType::F64));
+        assert_eq!(cost.to_string(), r#"costs["a \"b\""]"#);
+        assert_eq!(FieldPath::new("flag").to_string(), "flag");
+        assert_eq!(
+            FieldPath::new("flag").resolve(&schema),
+            Some(&ValueType::Bool)
+        );
+        assert_eq!(cost.segments().len(), 2);
+        for unresolved in [
+            FieldPath::new("missing"),
+            FieldPath::new("flag").index(0),
+            FieldPath::new("layers").field("index"),
+            FieldPath::new("layers").index(0).field("missing"),
+            FieldPath::new("costs").index(0),
+            FieldPath::new("layers").key("a"),
+        ] {
+            assert!(unresolved.resolve(&schema).is_none(), "{unresolved}");
+        }
+    }
+
+    #[test]
+    fn transforms_must_be_invertible() {
+        let mut entries = [0.0; 12];
+        assert!(!is_invertible(&transform_from_entries(&entries)));
+        entries[0] = 1.0;
+        entries[4] = 1.0;
+        entries[8] = 1e-300;
+        assert!(is_invertible(&transform_from_entries(&entries)));
+        entries[8] = 0.0;
+        entries[9] = 5.0;
+        assert!(!is_invertible(&transform_from_entries(&entries)));
     }
 }

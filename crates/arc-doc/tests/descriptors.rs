@@ -74,14 +74,14 @@ fn sample() -> TypeDecl {
         FieldDecl::new("normal", ValueType::Vector3)
             .with_default(Value::Vector3(Vector3::new(0.0, 0.0, 1.0))),
         FieldDecl::new("placement", ValueType::Transform)
-            .with_default(Value::Transform(Transform3::identity()))
+            .with_default(Value::Transform(Box::new(Transform3::identity())))
             .in_aspect("geometry"),
         FieldDecl::new("tint", ValueType::Color)
             .optional()
-            .with_default(Value::Color(ColorValue {
+            .with_default(Value::Color(Box::new(ColorValue {
                 rgba: Color::new(1.0, 0.5, 0.25, 1.0),
                 source: Some(ColorSource::Indexed(7)),
-            })),
+            }))),
         FieldDecl::new("host", reference(Cardinality::One, OnDelete::Cascade)),
         FieldDecl::new("style", reference(Cardinality::Optional, OnDelete::Clear)).optional(),
         FieldDecl::new(
@@ -93,13 +93,13 @@ fn sample() -> TypeDecl {
         ),
         FieldDecl::new("linked", ValueType::ExternalReference)
             .optional()
-            .with_default(Value::ExternalReference(ExternalRef {
+            .with_default(Value::ExternalReference(Box::new(ExternalRef {
                 link: id(1),
                 target: id(0x0190_0000_0000_7000_8000_0000_0000_0002),
-            })),
+            }))),
         FieldDecl::new("texture", ValueType::Asset)
             .optional()
-            .with_default(Value::Asset(AssetHash([0xab; 32]))),
+            .with_default(Value::Asset(Box::new(AssetHash([0xab; 32])))),
         FieldDecl::new(
             "outline",
             ValueType::Geometry(GeometryEncoding {
@@ -156,6 +156,8 @@ fn descriptors_of_every_version_match_the_reviewed_snapshots() {
     assert_eq!(versions, ["1.0", "2.0", "2.1"]);
     for version in decl.versions() {
         let text = descriptor(decl, version).unwrap();
+        // insta trims surrounding whitespace, so the form is checked here.
+        assert!(!text.ends_with('\n') && !text.starts_with(char::is_whitespace));
         insta::assert_snapshot!(
             format!("test_sample_{}_{}", version.major, version.minor),
             text

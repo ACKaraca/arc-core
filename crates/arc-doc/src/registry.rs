@@ -11,8 +11,8 @@ use arc_base::{Error, Result};
 
 use crate::error::codes;
 use crate::schema::{
-    Bound, Cardinality, FieldDecl, OnCopy, OnDelete, RelationshipRule, Schema, TypeDecl, ValueType,
-    check_value, is_key, is_name, prefix_field,
+    Bound, Cardinality, FieldDecl, OnCopy, OnDelete, RelationshipRule, Schema, Strength, TypeDecl,
+    ValueType, check_value, is_key, is_name, prefix_field,
 };
 
 /// The deepest nesting of lists, maps and records inside one field type.
@@ -72,7 +72,8 @@ impl TypeRegistry {
     }
 }
 
-fn validate(decl: &TypeDecl) -> Result<()> {
+/// Checks a whole declaration; [`TypeRegistry::register`] adds the duplicate-key check.
+pub(crate) fn validate(decl: &TypeDecl) -> Result<()> {
     check_schema(&decl.schema)?;
     for migration in &decl.migrations {
         check_schema(&migration.source)?;
@@ -153,6 +154,20 @@ fn check_field(field: &FieldDecl, depth: u32) -> Result<()> {
         return Err(invalid(
             codes::TYPE_FIELD_INVALID,
             "fields of nested records cannot be appended",
+        ));
+    }
+    let unindexable = matches!(
+        field.value_type,
+        ValueType::Opaque
+            | ValueType::Record(_)
+            | ValueType::List(_)
+            | ValueType::Map(_)
+            | ValueType::Geometry(_)
+    );
+    if field.indexed && (depth > 0 || unindexable) {
+        return Err(invalid(
+            codes::TYPE_FIELD_INVALID,
+            "only scalar fields of the object can be indexed",
         ));
     }
     let place = Place::Field {
@@ -246,6 +261,9 @@ fn check_rule(rule: &RelationshipRule, place: Place) -> Result<()> {
     let clears = rule.on_delete == OnDelete::Clear || rule.on_copy == OnCopy::Clear;
     if clears && rule.cardinality == Cardinality::One {
         return inconsistent("clear needs cardinality optional or many");
+    }
+    if rule.strength == Strength::Owning && rule.on_copy == OnCopy::ShareTarget {
+        return inconsistent("an owned target cannot be shared by a copy");
     }
     Ok(())
 }
@@ -609,5 +627,53 @@ mod tests {
         assert_eq!(versions, ["1.0", "1.1", "1.2", "2.0", "2.1"]);
         assert_eq!(decl.schema(1).map(|s| s.version.minor), Some(2));
         assert!(decl.schema(3).is_none());
+    }
+
+    #[test]
+    fn only_scalar_object_fields_are_indexed() {
+        let list = ValueType::List(Box::new(ValueType::Bool));
+        let record = ValueType::Record(vec![FieldDecl::new("b", ValueType::Bool).indexed()]);
+        let geometry = ValueType::Geometry(GeometryEncoding {
+            name: "test.curve".to_owned(),
+            version: 1,
+        });
+        for value_type in [
+            ValueType::Opaque,
+            ValueType::Record(vec![FieldDecl::new("b", ValueType::Bool)]),
+            list.clone(),
+            ValueType::Map(Box::new(ValueType::Bool)),
+            geometry,
+        ] {
+            let field = FieldDecl::new("a", value_type).indexed();
+            assert_eq!(outcome(decl(vec![field])), "doc.type.field_invalid");
+        }
+        // Inside a nested record, even a scalar field.
+        assert_eq!(
+            outcome(decl(vec![FieldDecl::new("a", record)])),
+            "doc.type.field_invalid"
+        );
+        let scalar = FieldDecl::new("a", ValueType::String).indexed();
+        assert_eq!(outcome(decl(vec![scalar, FieldDecl::new("l", list)])), "ok");
+    }
+
+    #[test]
+    fn an_owned_target_cannot_be_shared() {
+        let mut owning = rule(Cardinality::One, OnDelete::Block);
+        owning.strength = Strength::Owning;
+        let field = |rule| {
+            FieldDecl::new(
+                "a",
+                ValueType::Reference(ReferenceSpec {
+                    targets: Vec::new(),
+                    rule,
+                }),
+            )
+        };
+        assert_eq!(
+            outcome(decl(vec![field(owning)])),
+            "doc.type.relationship_inconsistent"
+        );
+        owning.on_copy = OnCopy::CopyTarget;
+        assert_eq!(outcome(decl(vec![field(owning)])), "ok");
     }
 }

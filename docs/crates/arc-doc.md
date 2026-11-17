@@ -171,17 +171,22 @@ type-key order, independent of registration order.
   bytes. Field names are unique within their field list.
 - **Versions.** A schema version is `major.minor` with major at least 1. Each field records the
   minor version that appended it (`since_minor`); fields appear in nondecreasing `since_minor`
-  order, none later than the current minor, and an appended field is optional or has a default.
-  Fields of nested records are never appended (`since_minor` 0).
+  order, none later than the current minor, and follow the
+  [appending rule](../architecture/document-model.md#schema-migration). Fields of nested records
+  are never appended (`since_minor` 0).
 - **Migrations.** A type of major version N declares exactly one migration from each major
   version 1 to N − 1. A migration carries the schema of its source major version (at that major's
   last minor version), which decodes payloads of that version, and a pure function from those
-  values to the values of the next major version.
+  values to the values of the next major version. A migration sees decoded values only, so an
+  object whose payload has trailing bytes of a newer minor version is not migrated.
 - **Validators.** A type validator is a function from the field values of one object to a list
   of findings, each an error or a warning with a code and message.
 - **Value types.** A record has at least one field; lists, maps and records nest at most 16
   levels. Enum variants are non-empty with unique names and codes. A geometry field names its
   encoding in the type-key grammar and an encoding version.
+- **Indexing.** Only fields of the object itself can be indexed, and only when their type is not
+  `opaque`, `record`, `list`, `map` or `geometry`; anything else fails with
+  `doc.type.field_invalid`.
 - **Bounds.** An integer range applies to `i64`, a real range (finite ends, in SI base units) to
   `f64` and `quantity`, and a length bound to `string` (bytes), `list` and `map` (entries) and
   `opaque` (bytes). The minimum is not above the maximum.
@@ -189,7 +194,8 @@ type-key order, independent of registration order.
   an optional reference field, and `many` (with a bound of at least 1) to a field whose type is a
   list of references; a reference anywhere else is inconsistent. A field of a nested record is a
   field for this purpose. On-delete `clear` and on-copy `clear` need cardinality `optional` or
-  `many`. The target type keys need not be registered yet; an empty list allows any type.
+  `many`. Strength `owning` excludes on-copy `share_target`, since a target has one owner. The
+  target type keys need not be registered yet; an empty list allows any type.
 - **Defaults.** A default has the field's type and satisfies its bound and enum codes.
 
 Registration checks the whole declaration and leaves the registry unchanged on failure. A repeated
@@ -200,9 +206,20 @@ as a dotted path through nested records.
 ### Field values
 
 The values of one object are one optional `Value` per field in declared order; an optional field
-may be absent. Floating-point values are finite everywhere. The field schema check
-(`schema::check_values`) verifies the count, required presence, types, bounds, enum codes,
-finiteness and the `many` bound of reference lists.
+may be absent. Floating-point values are finite everywhere, and transforms are invertible: the
+linear part, divided by its largest entry magnitude, has a nonzero determinant. The field schema
+check (`schema::check_values`) verifies the count, required presence, types, bounds, enum codes,
+finiteness, invertibility and the `many` bound of reference lists. A wrong number of values fails
+with `doc.value.type_mismatch`, its `field` argument naming the first field without a value or
+the position of the first value without a field.
+
+A `Value` takes 32 bytes; the transform, color, external reference and asset variants are boxed.
+
+A `FieldPath` addresses a value inside an object: a field of the object, then record field names,
+list indices and map keys. `FieldPath::resolve` gives the value type it addresses in a schema.
+Its canonical text form writes the field name, `.name` for a record field, `[n]` for a list index
+and `["key"]` for a map key with the key as a JSON string, for example `layers[2].tags[0]` or
+`costs["a"]`.
 
 | Value type | Value | Payload form (`postcard`) | JSON form |
 |---|---|---|---|
@@ -213,7 +230,7 @@ finiteness and the `many` bound of reference lists.
 | `quantity` | `Quantity` of the declared dimension | the SI value as `f64` | number (SI) |
 | `enum` | variant code | varint `u32` | number (code) |
 | `point2`, `point3`, `vector3` | coordinates | 2 or 3 `f64` | array of numbers |
-| `transform` | affine transform | 12 `f64`: the top three rows of the 4×4 matrix, column by column | array of 12 numbers, same order |
+| `transform` | invertible affine transform | 12 `f64`: the top three rows of the 4×4 matrix, column by column | array of 12 numbers, same order |
 | `color` | linear RGBA and optional source | 4 `f32` little-endian, then an option of the source (varint variant 0 `indexed` with one byte, 1 `named` with a string) | `{"rgba": [...], "source": null \| {"indexed": n} \| {"named": "..."}}` |
 | `reference` | `ObjectId` | 16 bytes, UUID byte order | hyphenated UUID |
 | `external_reference` | link id and target id | 32 bytes | `{"link": ..., "target": ...}` |
@@ -230,8 +247,12 @@ package, and decoding geometry bytes to the crate that owns the encoding named b
 ### Field descriptors (CORE-DOC-004)
 
 `descriptor(decl, version)` returns the JSON descriptor of any version a declaration describes:
-each minor version of the current major version and of every migration source. A minor version's
-descriptor lists the fields present at that minor version. The output is pretty-printed with
+each minor version of the current major version and of every migration source, and `None` for a
+declaration that would not register. A minor version's descriptor lists the fields present at
+that minor version. The contents a descriptor carries are listed in
+[document-package.md](../architecture/document-package.md#payload-encoding); this section fixes
+their JSON grammar. Building a `Schema` from a descriptor (as preserved objects and package
+inspection need) is not provided yet. The output is pretty-printed with
 two-space indentation and no trailing newline; keys appear in the fixed order below, numbers in
 their shortest round-trip form, map defaults in key order. It depends only on the declaration, so
 it is byte-identical across runs, platforms and registration orders.
@@ -267,10 +288,20 @@ it is byte-identical across runs, platforms and registration orders.
 
 ### Payload codec
 
+The schemas passed to the codec are those of registered declarations. The codec refuses the
+declarations that would make it unsafe, empty records and types nested deeper than 16 levels,
+with `doc.type.field_invalid`.
+
 `payload::encode` checks the values and writes the fields in declared order as a `postcard`
 tuple: an optional field as an option (one byte 0 for absent, or 1 followed by the value), a
 required field as its value, each value in the payload form of the table above. Encoding is
-canonical: equal values give equal bytes.
+canonical: bit-identical values give identical bytes (`0.0` and `-0.0` differ). It takes the
+same `Limits` as decoding and fails with `doc.payload.limit_exceeded` for any value that decoding
+would reject under them, so that everything written can be read back.
+
+`payload::encode_value` and `payload::decode_value` encode and decode one value of a value type
+on its own, in its payload form, with the same checks and limits; this is the form of field-level
+before and after values (ADR-0003). The field's bound is checked by the caller.
 
 `payload::decode` takes the schema of the payload's major version, the minor version that wrote
 it, the stored encoding and the hostile-input `Limits`:
@@ -278,16 +309,23 @@ it, the stored encoding and the hostile-input `Limits`:
 - A payload of an older minor version holds the fields present at that version; appended fields
   get their default or stay absent.
 - A payload of a newer minor version holds the known fields followed by bytes this schema does not
-  know; decoding returns them unchanged beside the values. Any other bytes after the known fields
-  fail with `doc.payload.invalid`.
+  know; decoding returns them unchanged beside the values, without validating them, so canonical
+  form and hash identity cover the known fields only. The caller checks the written minor version
+  against the versions the package declares. Any other bytes after the known fields fail with
+  `doc.payload.invalid`.
 - Decoded values pass the field schema check, and re-encoding them reproduces the consumed bytes;
   overlong varints, unsorted or repeated map keys and other non-canonical forms fail with
   `doc.payload.invalid`.
 - `input_bytes` bounds the payload, `string_bytes` every string, map key and color name,
   `array_length` the entries of every list and map and the bytes of every geometry and opaque
   value, and `nesting_depth` the nesting of lists, maps and records; exceeding one fails with
-  `doc.payload.limit_exceeded` before memory is reserved for the excess. Every value encodes to at
-  least one byte, so a payload never decodes to more elements than it has bytes.
+  `doc.payload.limit_exceeded` before memory is reserved for the excess. When `memory_bytes` is
+  set, the decoded values of one payload are charged against it: 32 bytes per value or absent
+  field, the size of the boxed data of transforms, colors, external references and assets, and
+  the length of every string, map key, color name and byte string; at most 1,024 elements of a
+  list are reserved ahead of decoding them. Without `memory_bytes` only the per-collection limits
+  apply. Every value of a registered type encodes to at least one byte, so a payload never
+  decodes to more elements than it has bytes.
 - Encoding code 1 (`postcard` with `zstd`) is reserved: this version writes code 0 only and
   rejects code 1 with `doc.payload.encoding_unsupported`.
 

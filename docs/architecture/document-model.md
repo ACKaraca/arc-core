@@ -40,9 +40,10 @@ Each object type is registered in a **type registry** with its type key, current
 field descriptors, validators, migrations and the relationship rules of its reference fields. The
 registry is an explicit value, not global state: the application builds one at start, registers
 each type once, and hands it, shared and immutable, to every document it opens; tests and tools
-may hold several registries in one process. Type keys are prefixed by their owner: `core.` for types defined in `arc-core`,
-the repository name for product types (`solidbuilder.feature.extrude`). A type key never changes
-meaning; a type that is redesigned gets a new major schema version, not a new key.
+may hold several registries in one process. Type keys are prefixed by their owner: `core.` for
+types defined in `arc-core`, the repository name for product types
+(`solidbuilder.feature.extrude`). A type key never changes meaning; a type that is redesigned gets
+a new major schema version, not a new key.
 
 Objects of one type key live in a **typed store**. Objects are dynamically typed: an object is
 its header and one optional field value per field of its registered schema, and a store is the
@@ -96,7 +97,7 @@ The decision and its alternatives are recorded in
 | `bool`, `i64`, `f64`, `string` | Strings are UTF-8, length-bounded by the schema |
 | `quantity` | `f64` in SI base units with a declared physical dimension (length, angle, area, volume, mass, time, temperature, force, pressure and others from `arc-base`) |
 | `enum` | A closed set of named values with stable numeric codes |
-| `point2`, `point3`, `vector3`, `transform` | `f64` model coordinates |
+| `point2`, `point3`, `vector3`, `transform` | `f64` model coordinates; a transform is affine and invertible |
 | `color` | Linear RGBA plus an optional indexed or named source |
 | `reference` | `ObjectId` of a target type, with a relationship rule |
 | `external_reference` | `(link id, ObjectId)` into a linked document |
@@ -105,12 +106,13 @@ The decision and its alternatives are recorded in
 | `list<T>`, `map<string, T>`, `record` | Bounded collections and nested records |
 | `opaque` | Bytes preserved for a foreign or newer schema, never interpreted |
 
-Each field descriptor states: name, value type, unit dimension (for quantities), the variant
-names and codes (for enums), the encoding name and version (for geometry), the relationship rule
-(for references), default, valid range or length bound, whether it is optional, whether it is
-**indexed** (copied to the package property index for queries) and which **aspect** it belongs
-to. An aspect is a named group of fields
-(`geometry`, `appearance`, `identity`, `data`) used as the unit of dependency tracking.
+Each field declares a name, value type, default, valid range or length bound, whether it is
+optional, whether it is **indexed** (copied to the package property index for queries; only
+scalar fields of the object itself, not opaque, record, list, map or geometry fields or fields of
+nested records) and which **aspect** it belongs to. An aspect is a named group of fields
+(`geometry`, `appearance`, `identity`, `data`) used as the unit of dependency tracking. The
+package stores each declaration as a field descriptor, whose contents are listed in
+[document-package.md](document-package.md#payload-encoding).
 
 **Property sets** carry user-defined and standard data (IFC property sets, classification codes,
 cost data). A property set definition is itself an object: name, applicable types, and an ordered
@@ -127,8 +129,8 @@ rule** in its descriptor:
 | Rule part | Values | Effect |
 |---|---|---|
 | Strength | `owning`, `associative`, `informational` | Owning: the target's life ends with the source (cascade delete). Associative: the source depends on the target. Informational: navigation only |
-| On target delete | `cascade`, `clear`, `block` | Delete the source, set the field to empty (field must be optional), or refuse the deleting transaction |
-| On copy | `copy_target`, `share_target`, `clear` | Whether a copy of the source copies, shares or drops the target |
+| On target delete | `cascade`, `clear`, `block` | Delete the source, clear the reference (an optional field becomes empty, a list loses the element; cardinality `optional` or `many`), or refuse the deleting transaction |
+| On copy | `copy_target`, `share_target`, `clear` | Whether a copy of the source copies, shares or drops the target; an owned target is never shared |
 | Cardinality | `one`, `optional`, `many` (bounded list) | |
 
 Commit validation guarantees that no reference dangles: every committed reference resolves to a
@@ -387,9 +389,9 @@ dependency-graph node that produces diagnostics, not in a validator.
 
 ## Schema migration
 
-- Each type has a schema version `major.minor`. A **minor** increment may only append optional
-  fields with defaults at the end of the field list. A **major** increment may change anything and
-  requires a migration function from the previous major.
+- Each type has a schema version `major.minor`. A **minor** increment may only append fields at
+  the end of the field list, each of them optional or with a default. A **major** increment may
+  change anything and requires a migration function from the previous major.
 - Migrations are pure functions on decoded values: `vN → vN+1`, chained. They run when objects are
   loaded, in memory; the file changes only when the user saves.
 - Loading a document that contains a type of a newer **minor** version decodes the known fields and

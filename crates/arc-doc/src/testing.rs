@@ -11,7 +11,7 @@ use proptest::prelude::*;
 use crate::schema::{
     AssetHash, Cardinality, ColorSource, ColorValue, EnumVariant, ExternalRef, FieldDecl,
     GeometryBytes, GeometryEncoding, OnCopy, OnDelete, ReferenceSpec, RelationshipRule, Strength,
-    TypeKey, Value, ValueType, transform_from_entries,
+    TypeKey, Value, ValueType, is_invertible, transform_from_entries,
 };
 
 fn finite() -> impl Strategy<Value = f64> {
@@ -109,6 +109,8 @@ fn rule(cardinality: Cardinality) -> impl Strategy<Value = RelationshipRule> {
         on_copy: match c {
             0 => OnCopy::CopyTarget,
             1 if clearing => OnCopy::Clear,
+            // An owned target cannot be shared.
+            _ if s == 0 => OnCopy::CopyTarget,
             _ => OnCopy::ShareTarget,
         },
         cardinality,
@@ -168,7 +170,9 @@ pub fn value(value_type: &ValueType) -> BoxedStrategy<Value> {
             .prop_map(|(x, y, z)| Value::Vector3(Vector3::new(x, y, z)))
             .boxed(),
         ValueType::Transform => prop::array::uniform12(finite())
-            .prop_map(|entries| Value::Transform(transform_from_entries(&entries)))
+            .prop_map(|entries| transform_from_entries(&entries))
+            .prop_filter("invertible", is_invertible)
+            .prop_map(|t| Value::Transform(Box::new(t)))
             .boxed(),
         ValueType::Color => (
             prop::array::uniform4(finite32()),
@@ -178,18 +182,20 @@ pub fn value(value_type: &ValueType) -> BoxedStrategy<Value> {
             ]),
         )
             .prop_map(|([r, g, b, a], source)| {
-                Value::Color(ColorValue {
+                Value::Color(Box::new(ColorValue {
                     rgba: Color::new(r, g, b, a),
                     source,
-                })
+                }))
             })
             .boxed(),
         ValueType::Reference(_) => id().prop_map(Value::Reference).boxed(),
         ValueType::ExternalReference => (id(), id())
-            .prop_map(|(link, target)| Value::ExternalReference(ExternalRef { link, target }))
+            .prop_map(|(link, target)| {
+                Value::ExternalReference(Box::new(ExternalRef { link, target }))
+            })
             .boxed(),
         ValueType::Asset => any::<[u8; 32]>()
-            .prop_map(|hash| Value::Asset(AssetHash(hash)))
+            .prop_map(|hash| Value::Asset(Box::new(AssetHash(hash))))
             .boxed(),
         ValueType::Geometry(_) => bytes()
             .prop_map(|b| Value::Geometry(GeometryBytes(b)))

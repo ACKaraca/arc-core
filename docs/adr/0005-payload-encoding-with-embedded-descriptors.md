@@ -47,10 +47,10 @@ decode packages with the published descriptors.
 
 ## Amendment
 
-The field descriptor carries, for each field, everything the field declaration states: besides the
-names, value types, dimensions, optionality, enum codes and geometry encodings listed above, also
-the default, the valid range or length bound, indexing, the aspect and, for reference fields, the
-relationship rule. The list is maintained in
-[document-model.md](../architecture/document-model.md#fields-properties-and-schemas) and
-[document-package.md](../architecture/document-package.md#payload-encoding). The payload encoding
-is unchanged.
+The field descriptor carries, for each field, everything the field declaration states; the list
+is maintained in [document-package.md](../architecture/document-package.md#payload-encoding). An
+appended field of a minor version is optional or has a default, as stated in
+[document-model.md](../architecture/document-model.md#schema-migration). The descriptor grammar
+is specified in [arc-doc](../crates/arc-doc.md#field-descriptors-core-doc-004); its JSON Schema is
+not published yet. Canonical encoding means that bit-identical values give identical bytes. The
+payload encoding is unchanged.

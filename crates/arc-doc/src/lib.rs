@@ -28,5 +28,6 @@ pub use schema::{
     ReferenceSpec, RelationshipRule, Schema, SchemaVersion, Severity, Strength, TypeDecl, TypeKey,
     TypeValidator, Value, ValueType,
 };
+pub use schema::{FieldPath, PathSegment};
 pub use snapshot::{Change, Flags, Header, Object, Snapshot, SnapshotCell, WorkingSet};
 pub use store::Handle;

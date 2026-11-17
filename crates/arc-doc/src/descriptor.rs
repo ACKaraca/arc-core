@@ -17,9 +17,12 @@ use crate::schema::{
 pub const DESCRIPTOR_FORMAT: u32 = 1;
 
 /// The descriptor of `decl` at `version`, as pretty-printed JSON with two-space indentation and
-/// no trailing newline, or `None` when the declaration does not describe that version.
+/// no trailing newline, or `None` when the declaration does not describe that version or would
+/// not register (see [`crate::TypeRegistry::register`]), for example because a default is not
+/// finite.
 #[must_use]
 pub fn descriptor(decl: &TypeDecl, version: SchemaVersion) -> Option<String> {
+    crate::registry::validate(decl).ok()?;
     let schema = decl.schema(version.major)?;
     if version.minor > schema.version.minor {
         return None;
@@ -269,5 +272,14 @@ mod tests {
         assert!(descriptor(&decl, SchemaVersion::new(1, 0)).is_some());
         assert!(descriptor(&decl, SchemaVersion::new(1, 1)).is_none());
         assert!(descriptor(&decl, SchemaVersion::new(2, 0)).is_none());
+    }
+
+    #[test]
+    fn declarations_that_would_not_register_have_no_descriptor() {
+        let key = TypeKey::new("test.thing").unwrap();
+        let nan =
+            FieldDecl::new("x", crate::schema::ValueType::F64).with_default(Value::F64(f64::NAN));
+        let decl = TypeDecl::new(key, Schema::new(SchemaVersion::new(1, 0), vec![nan]));
+        assert!(descriptor(&decl, SchemaVersion::new(1, 0)).is_none());
     }
 }

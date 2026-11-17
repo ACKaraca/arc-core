@@ -75,12 +75,13 @@ CREATE TABLE arc_object (
   variant names and codes (for enums), the encoding name and version (for geometry), the
   relationship rule (for references), default, valid range or length bound, optionality, indexing
   and aspect. The descriptor is sufficient for a generic decoder to turn any payload into JSON
-  without Arc code. The descriptor
-  grammar is published as a JSON Schema in `schemas/package-descriptor.schema.json`.
+  without Arc code. The descriptor grammar is specified in
+  [arc-doc](../crates/arc-doc.md#field-descriptors-core-doc-004); its JSON Schema
+  (`schemas/package-descriptor.schema.json`) is not published yet.
 - Geometry values use encodings owned and documented by their crate (`arc-geom`, `arc-mesh`,
   `arc-brep`); the descriptor names the encoding and its version.
-- Encoding is deterministic: the same object value always produces the same bytes, so payload
-  hashes identify identical objects across files.
+- Encoding is deterministic: bit-identical object values always produce the same bytes, so
+  payload hashes identify identical objects across files.
 
 The rationale is recorded in [ADR-0005](../adr/0005-payload-encoding-with-embedded-descriptors.md).
 
