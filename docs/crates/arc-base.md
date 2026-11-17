@@ -71,7 +71,7 @@ WebAssembly set.
 |---|---|---|---|---|
 | CORE-BASE-005 | Dimensioned quantities | Stores values in SI base units with a dimension; addition and comparison of different dimensions fail with `base.unit.dimension_mismatch`, multiplication and division combine dimensions. | T1 | 0 |
 | CORE-BASE-006 | Built-in unit registry | Provides metric and imperial units for length, area, volume, angle, mass, time, temperature (with offset), force, pressure, velocity, density, energy, power, luminous and illuminance quantities, each with symbol and conversion to SI. | T1 | 0 |
-| CORE-BASE-007 | Unit conversion | Converts between any two units of the same dimension; conversions of a value to a unit and back reproduce the value within four units in the last place. | T1 | 0 |
+| CORE-BASE-007 | Unit conversion | Converts between any two units of the same dimension; conversions of a value to a unit and back reproduce the value within four units in the last place (for temperature scales with an offset, of the larger of the value and the offset). | T1 | 0 |
 | CORE-BASE-008 | Display formatting | Formats a quantity in display units with configured precision, rounding increment, trailing-zero rule and unit symbol, using the locale's decimal separator. | T1 | 0 |
 | CORE-BASE-009 | Architectural length formats | Formats and parses lengths as feet and inches with fractional inches (denominator up to 1/256) and as decimal feet or inches, round-tripping every value at the configured precision. | T2 | 1 |
 | CORE-BASE-010 | Angle formats | Formats angles as decimal degrees, degrees-minutes-seconds, radians, gradians and surveyor bearings (quadrant and angle). | T2 | 1 |
@@ -81,8 +81,8 @@ WebAssembly set.
 
 | ID | Capability | Behavior | Tier | Phase |
 |---|---|---|---|---|
-| CORE-BASE-012 | Tolerance context | Supplies linear, angular and tessellation tolerances with documented defaults; functions that compare geometry take a tolerance context and never use literals. | T1 | 0 |
-| CORE-BASE-013 | Limits profiles | Defines the `strict`, `default` and `large-models` hostile-input profiles with every limit value named; callers can derive custom profiles that only tighten or explicitly override named limits. | T1 | 0 |
+| CORE-BASE-012 | Tolerance context | Supplies linear, angular and tessellation tolerances with documented defaults (1 µm, 1 nrad, and a 1 mm chord with a 15° turning angle when the caller supplies no tessellation values); functions that compare geometry take a tolerance context and never use literals. | T1 | 0 |
+| CORE-BASE-013 | Limits profiles | Defines the `strict`, `default`, `large-models` and `constrained` hostile-input profiles with every limit value named; callers can derive custom profiles that only tighten or explicitly override named limits. | T1 | 0 |
 | CORE-BASE-014 | Cancellation tokens | Shares a token between a requester and workers; cancelling is observed by all clones and is irreversible for that token. | T1 | 0 |
 
 ### Errors
@@ -93,6 +93,19 @@ WebAssembly set.
 | CORE-BASE-016 | Localizable error messages | Errors carry a Fluent message identifier and typed arguments; formatting happens in the caller's locale, and the English catalog contains every registered message. | T1 | 0 |
 | CORE-BASE-017 | Error source chains | Errors keep the chain of underlying causes for logs and diagnostics without exposing internal details in user messages. | T1 | 0 |
 | CORE-BASE-018 | Machine-readable error form | Serializes an error to JSON with category, code, message identifier, arguments and details for protocols and CLI output. | T1 | 0 |
+
+### Error codes
+
+The codes `arc-base` owns. A code is never reused for a different meaning; messages are in
+`locales/en-US/arc-base.ftl`.
+
+| Code | Category | Raised when |
+|---|---|---|
+| `base.id.invalid` | `invalid_input` | A text is not an identifier in hyphenated or plain hexadecimal form |
+| `base.unit.dimension_mismatch` | `invalid_input` | Quantities or units of different dimensions are added, subtracted, compared or converted |
+| `base.unit.unknown` | `not_found` | A unit name or symbol is not in the built-in registry |
+| `base.display.invalid_increment` | `invalid_input` | A display rounding increment is not a positive finite number |
+| `base.cancelled` | `cancelled` | An operation observed a cancelled token |
 
 ### Color and math
 

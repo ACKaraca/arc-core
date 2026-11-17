@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4a180ce3946250b57959f5878d2e1da9e4083400cae99fc448b01da1c18f33f8 # shrinks to x = 2.242525525663335e99, a = Dimension([0, 0, 0, 0, 0, 0, 0, 0, 0])
