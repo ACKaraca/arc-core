@@ -77,6 +77,7 @@ fn run_ci() -> Result<(), Failure> {
     // nextest does not run documentation tests.
     cargo(&["test", "--workspace", "--doc"])?;
     cargo(&["deny", "check"])?;
+    cargo(&["audit"])?;
     println!("ci: all gates passed");
     Ok(())
 }

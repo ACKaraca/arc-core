@@ -115,8 +115,9 @@ The single gate command is **`cargo xtask ci`**. It runs, in order:
    tests on the software adapter, package compatibility, guard and panic-hunt tests)
 6. Feature matrix builds: each crate with default, no default and all non-unstable features
 7. `cargo deny check` (licenses, bans, advisories, sources)
-8. Localization catalog check (missing and unused message identifiers)
-9. Schema check (published JSON Schemas match the implementation)
+8. `cargo audit` (advisories against the locked dependency versions)
+9. Localization catalog check (missing and unused message identifiers)
+10. Schema check (published JSON Schemas match the implementation)
 
 The same command runs locally and in CI on Windows, macOS and Linux. Nightly jobs add: fuzzing,
 the corpus and golden-model runs, benchmarks, address-sanitizer runs of the FFI crates, image tests

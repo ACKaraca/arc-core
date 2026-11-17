@@ -32,15 +32,15 @@ docs/            architecture, crates, testing, roadmap, adr, glossary
 
 ## Commands
 
-The toolchain is pinned in `rust-toolchain.toml`; the gate also needs `cargo-nextest` and
-`cargo-deny`.
+The toolchain is pinned in `rust-toolchain.toml`; the gate also needs `cargo-nextest`,
+`cargo-deny` and `cargo-audit`.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo nextest run --workspace` (`cargo test --workspace --doc` for documentation tests)
 - `cargo xtask layers`
 - `cargo xtask wasm`
-- `cargo xtask ci` runs all gates, including the above and `cargo deny check`. CI runs it on
+- `cargo xtask ci` runs all gates, including the above, `cargo deny check` and `cargo audit`. CI runs it on
   Linux, Windows and macOS on every push to `main`.
 
 ## Suite rules
