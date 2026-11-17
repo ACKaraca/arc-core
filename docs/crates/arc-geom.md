@@ -234,26 +234,47 @@ form that cannot overflow when the plain one does, and stays exactly 0 at near a
 - Derivatives are taken with respect to the parameter in the table above, at the clamped
   parameter. The unit normal is the unit tangent turned a quarter turn counterclockwise;
   curvature is signed, positive where the curve turns counterclockwise. At an interior polyline
-  vertex the derivatives are those of the segment that starts there.
+  vertex the derivatives are those of the segment that starts there. A NaN parameter gives NaN
+  points and derivatives, except for segments, rays and lines, whose derivatives are constant.
+- A bulged polyline segment is differentiated and projected relative to its chord, like its
+  points: the tangent at angle fraction `f` is the chord direction turned by `(2f − 1)·α`, with
+  `α` the signed half included angle, and nothing is derived from the center. Its derivatives,
+  curvature and foot points stay accurate for every accepted bulge.
+- Lengths, speeds, distances and unit vectors are computed from values scaled by their largest
+  component, and ellipse computations from the axes divided by the major semi-axis length, so
+  every curve a constructor accepts evaluates without overflow or underflow. A query so far
+  from a curve, relative to its size, that its coordinates in the curve's frame overflow fails
+  with `geom.precision.insufficient`.
 - The length of a ray or line is infinite. The parameter at a length is measured from the start
   of the range (from parameter 0 for a line, negative lengths backwards); a length outside
   [0, length] by more than the linear tolerance fails with `geom.length.out_of_range`.
 - Elliptical arc lengths are integrated with an adaptive 8-point Gauss–Legendre rule split at
-  the quadrant angles, with an estimated error below a quarter of the linear tolerance and a
-  bounded number of intervals; the parameter at a length is found by safeguarded Newton
-  iteration, so its point is within the linear tolerance of the true point.
+  the quadrant angles, with an estimated error below a quarter of the linear tolerance (or 64
+  units in the last place of the length scale, when larger) and a bounded number of intervals;
+  the parameter at a length is found by safeguarded Newton iteration, so its point is within
+  the linear tolerance of the true point where `f64` resolves that.
 - Foot points are the parameters where the vector to the query point is perpendicular to the
   tangent within the linear tolerance. When every point of an arc or circle is one (the query
   is its center) the result is an interval covering it. Ellipse foot points are found by
   splitting the turn into at most six intervals on which the perpendicularity function has at
-  most one zero, then refining each sign change. The closest point is the nearest foot point or
-  end; candidates within the linear tolerance tie and the smallest parameter wins.
+  most one zero, then refining each sign change to convergence; the quadrant angles use exact
+  sines and cosines. A root is accepted when the function is within its rounding error or the
+  bracket cannot shrink further in `f64`; far from a large curve, where `f64` cannot resolve
+  the linear tolerance, the tangential residual is then of the order of
+  `ε·(a + |q − center|)·a / |C′(θ)|` for semi-major axis `a` and machine epsilon `ε`. Foot
+  points closer than the linear tolerance, or than the rounding of their coordinates, are
+  merged. The closest point is the nearest foot point or end; candidates within the linear
+  tolerance tie and the smallest parameter wins.
 - Flattening takes a chord tolerance, an angle tolerance (turning per segment) and a vertex
   limit; non-positive or non-finite tolerances fail with `geom.tolerance.invalid`, rays and
   lines with `geom.curve.unbounded`, and a result above the limit with
-  `geom.flatten.too_many_vertices`. End points and polyline vertices are exact. Circular arcs
-  use the minimal number of equal segments; ellipses are divided greedily, each segment as long
-  as both tolerances allow and turning at most a quarter turn.
+  `geom.flatten.too_many_vertices` (a result of exactly the limit is accepted). End points and
+  polyline vertices are exact. Circular arcs use the minimal number of equal segments; ellipses
+  are divided greedily, each segment as long as both tolerances allow, turning at most a
+  quarter turn and spanning at most a half turn of eccentric angle. When a circular or
+  elliptical part needs interior vertices and the chord tolerance is below 16 units in the last
+  place of the largest coordinate magnitude of its bounding box, flattening fails with
+  `geom.precision.insufficient`.
 
 ### Curve intersections
 
@@ -447,6 +468,10 @@ The codes `arc-geom` owns. A code is never reused for a different meaning; messa
 | `geom.triangulate.loop_collapsed` | `invalid_input` | A flattened loop has fewer than three vertices, no area, or the opposite orientation |
 | `geom.triangulate.nesting_invalid` | `invalid_input` | The flattened loops are not nested as the parts of the region say: a hole lies outside its outer loop or parts overlap |
 | `geom.mesh.invalid` | `invalid_input` | A triangle mesh has a non-finite vertex or a triangle index outside its vertex list |
+| `geom.length.out_of_range` | `invalid_input` | A requested arc length is negative or exceeds the curve's length by more than the linear tolerance |
+| `geom.curve.unbounded` | `unsupported` | A ray or line is given to an operation that needs a bounded curve, such as flattening |
+| `geom.flatten.too_many_vertices` | `limit_exceeded` | Flattening a curve needs more vertices than the caller's limit |
+| `geom.intersect.too_many_results` | `limit_exceeded` | Two curves have more intersections than the caller's limit |
 
 ### Spatial index (CORE-GEOM-027)
 
@@ -482,7 +507,3 @@ The property tests compare every query with a brute-force scan after random sequ
 remove and update, in 2D and 3D, on integer-grid boxes that force touching and exact ties. The
 nearest and ray results are also compared with exact integer and rational references that share
 no code with the index, on the grid scaled by powers of two from 2^-1000 to 2^1020.
-| `geom.length.out_of_range` | `invalid_input` | A requested arc length is negative or exceeds the curve's length by more than the linear tolerance |
-| `geom.curve.unbounded` | `unsupported` | A ray or line is given to an operation that needs a bounded curve, such as flattening |
-| `geom.flatten.too_many_vertices` | `limit_exceeded` | Flattening a curve needs more vertices than the caller's limit |
-| `geom.intersect.too_many_results` | `limit_exceeded` | Two curves have more intersections than the caller's limit |

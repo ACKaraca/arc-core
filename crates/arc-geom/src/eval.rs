@@ -9,6 +9,10 @@
 //!   the left of the direction of travel.
 //! - Curvature is signed: positive where the curve turns counterclockwise, negative where it
 //!   turns clockwise, zero on straight parts.
+//! - An arc taken from a bulged polyline segment is differentiated in its chord frame, like its
+//!   points: the unit tangent at angle fraction `f` is the chord direction turned by
+//!   `(2f − 1)·α` (`α` the signed half included angle), so the derivatives stay accurate for
+//!   every accepted bulge, however close to 0.
 //! - A polyline's derivatives jump at its vertices. At an interior vertex `k` (integer `t`) they
 //!   are those of the segment that starts at the vertex, as `point_at` selects it; at `t = n`
 //!   those of the last segment.
@@ -20,6 +24,9 @@
 //!   `tolerance.linear` (or of 64 units in the last place of the length scale when that is
 //!   larger); the finer sum is kept. At most [`MAX_QUADRATURE_INTERVALS`] intervals are split;
 //!   beyond that the computation fails with `geom.precision.insufficient`.
+//! - Lengths, speeds and unit vectors are computed from values scaled by their largest
+//!   component, so every curve a constructor accepts evaluates without intermediate overflow or
+//!   underflow.
 
 use std::f64::consts::{FRAC_PI_2, TAU};
 
@@ -29,7 +36,7 @@ use arc_base::{Error, Result, Tolerance};
 use crate::curve::Curve2;
 use crate::ensure_finite;
 use crate::error::codes;
-use crate::polyline::{Polyline2, PolylineSegment};
+use crate::polyline::{Chord, Polyline2, PolylineSegment};
 use crate::primitives::{Arc2, Circle2, Ellipse2, EllipticalArc2, Line2, Ray2, Segment2, perp};
 
 /// The positive nodes of the 8-point Gauss–Legendre rule on [−1, 1]; the rule is symmetric.
@@ -70,12 +77,27 @@ pub(crate) fn cross(a: &Vector2, b: &Vector2) -> f64 {
 
 /// `v` scaled to unit length without overflow or underflow; the zero vector stays zero.
 pub(crate) fn unit(v: Vector2) -> Vector2 {
-    let scale = v.x.abs().max(v.y.abs());
-    if scale == 0.0 || !scale.is_finite() {
-        return v;
-    }
-    let w = v / scale;
-    w / w.norm()
+    crate::unit(&v)
+}
+
+/// The Euclidean length of `v` without overflow or underflow.
+pub(crate) fn norm(v: Vector2) -> f64 {
+    crate::length(&v)
+}
+
+/// `v` turned counterclockwise by `angle`.
+fn rotate(v: Vector2, angle: f64) -> Vector2 {
+    let (sin, cos) = angle.sin_cos();
+    v * cos + perp(&v) * sin
+}
+
+/// The unit tangent of a bulged polyline segment at angle fraction `f` in [0, 1]: the chord
+/// direction turned by `(2f − 1)·α`.
+pub(crate) fn chord_tangent(chord: &Chord, f: f64) -> Vector2 {
+    rotate(
+        unit(chord.end() - chord.start()),
+        (2.0 * f - 1.0) * chord.half_angle(),
+    )
 }
 
 /// The ellipse frame of a circular or elliptical arc: `point(t) = center + a·cos θ + b·sin θ`
@@ -140,7 +162,7 @@ impl Conic {
         if width <= 0.0 {
             return Ok(0.0);
         }
-        let speed = |t: f64| self.d1(t).norm();
+        let speed = |t: f64| norm(self.d1(t));
         let rule = |lo: f64, hi: f64| {
             let (mid, half) = (0.5 * (lo + hi), 0.5 * (hi - lo));
             half * GAUSS_NODES
@@ -149,7 +171,7 @@ impl Conic {
                 .map(|(x, w)| w * (speed(mid - half * x) + speed(mid + half * x)))
                 .sum::<f64>()
         };
-        let scale = self.a.norm().max(self.b.norm());
+        let scale = norm(self.a).max(norm(self.b));
         let target = (0.25 * tolerance.linear).max(QUADRATURE_ULPS * f64::EPSILON * scale * width);
         // Split at the quadrant angles, where the speed has its extrema, so each piece is monotone.
         let quarter = FRAC_PI_2;
@@ -218,7 +240,7 @@ impl Conic {
             } else {
                 lo = t;
             }
-            let newton = t - residual / self.d1(t).norm();
+            let newton = t - residual / norm(self.d1(t));
             let mid = 0.5 * (lo + hi);
             if mid <= lo || mid >= hi {
                 return Ok(t);
@@ -328,6 +350,14 @@ impl Piece {
     }
 
     fn derivatives(&self, t: f64) -> (Vector2, Vector2) {
+        if let Self::Arc(arc) = self
+            && let Some(chord) = arc.chord()
+        {
+            let span = arc.sweep().abs();
+            let tangent = chord_tangent(chord, t.clamp(0.0, span) / span);
+            let r = arc.radius();
+            return (tangent * r, perp(&tangent) * (r * arc.sweep().signum()));
+        }
         match (self.linear(), self.conic()) {
             (Some((_, direction)), _) => (direction, Vector2::zeros()),
             (None, Some(conic)) => conic.derivatives(t),
@@ -342,7 +372,7 @@ impl Piece {
         match self {
             Self::Elliptical(arc) => Conic::of_elliptical(arc).length(a, b, tolerance),
             Self::Arc(arc) => Ok((b - a) * arc.radius()),
-            _ => Ok((b - a) * self.derivatives(a).0.norm()),
+            _ => Ok((b - a) * norm(self.derivatives(a).0)),
         }
     }
 
@@ -367,7 +397,7 @@ impl Piece {
                 Conic::of_elliptical(arc).parameter_at_length(s, total, tolerance)
             }
             Self::Arc(arc) => Ok((s / arc.radius()).min(arc.sweep().abs())),
-            _ => Ok((s / self.derivatives(0.0).0.norm()).min(self.range().1)),
+            _ => Ok((s / norm(self.derivatives(0.0).0)).min(self.range().1)),
         }
     }
 }
@@ -427,7 +457,8 @@ impl Shape<'_> {
                     let (lo, hi) = piece.range();
                     let scale = hi - lo;
                     let (d1, d2) = piece.derivatives(local);
-                    (d1 * scale, d2 * (scale * scale))
+                    // Scaled one factor at a time: the square of a tiny sweep underflows.
+                    (d1 * scale, d2 * scale * scale)
                 })
             }
         }
@@ -495,7 +526,8 @@ impl Shape<'_> {
 /// Evaluation of a 2D curve (CORE-GEOM-003), implemented by every curve kind and [`Curve2`].
 ///
 /// The parameter `t` follows the parameterization of the kind and is clamped to its range. A
-/// NaN parameter yields NaN results.
+/// NaN parameter yields NaN results, except that the derivatives of a segment, ray or line are
+/// constant and stay finite (and their curvature is 0).
 pub trait CurveEval: Shaped {
     /// The first derivative of the point with respect to `t`. It is never zero for a valid curve.
     #[must_use]
@@ -528,7 +560,7 @@ pub trait CurveEval: Shaped {
     #[must_use]
     fn curvature(&self, t: f64) -> f64 {
         let (d1, d2) = self.shape().derivatives(t);
-        let speed = d1.norm();
+        let speed = norm(d1);
         if speed == 0.0 {
             return 0.0;
         }
@@ -624,12 +656,131 @@ pub(crate) fn is_full_turn(span: f64) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::curve::tests::{curve, parameter};
+    use crate::curve::tests::{curve, extreme_curve, parameter, wide_curve};
     use crate::polyline::PolylineVertex;
+
+    /// An open polyline of one bulged segment from the origin along the x axis.
+    pub(crate) fn bulged(length: f64, bulge: f64) -> Polyline2 {
+        Polyline2::new(
+            vec![
+                PolylineVertex::new(Point2::origin(), bulge),
+                PolylineVertex::new(Point2::new(length, 0.0), 0.0),
+            ],
+            false,
+        )
+        .unwrap()
+    }
+
+    /// The largest coordinate magnitude of a curve's bounding box, or of its start for an
+    /// unbounded curve.
+    pub(crate) fn extent(c: &Curve2) -> f64 {
+        let corners = c.bounding_box().map_or_else(
+            || vec![c.point_at(c.parameter_range().0.max(0.0))],
+            |b| vec![b.min(), b.max()],
+        );
+        corners
+            .iter()
+            .fold(0.0_f64, |m, p| m.max(p.x.abs()).max(p.y.abs()))
+    }
+
+    #[test]
+    fn bulged_segments_are_differentiated_in_the_chord_frame() {
+        for (length, bulge) in [
+            (1.0, 1e-10),
+            (1000.0, 1e-10),
+            (1.0, 1e-200),
+            (1.0, -1e-200),
+            (3.0, 1e-300),
+            (1.0, 0.5),
+            (1.0, 1e10),
+            (2.0, -1e10),
+        ] {
+            let p = bulged(length, bulge);
+            let half = 2.0 * f64::atan(bulge);
+            let sin = 2.0 * bulge / (1.0 + bulge * bulge);
+            let arc_length = if half.abs() < 1e-100 {
+                length
+            } else {
+                length * half / sin
+            };
+            for f in [0.0, 0.25, 0.5, 0.9, 1.0] {
+                let turn = (2.0 * f - 1.0) * half;
+                let want = Vector2::new(turn.cos(), turn.sin()) * arc_length;
+                let got = p.derivative(f);
+                assert!(
+                    (got - want).norm() <= 1e-14 * arc_length,
+                    "{length} {bulge} {f}: {got} vs {want}"
+                );
+                // Signed curvature 1/r = 2·sin α / chord.
+                let kappa = 2.0 * sin / length;
+                let got = p.curvature(f);
+                assert!(
+                    (got - kappa).abs() <= 1e-12 * kappa.abs(),
+                    "{length} {bulge} {f}: {got} vs {kappa}"
+                );
+            }
+            let total = p.length(&TOL).unwrap();
+            assert!((total - arc_length).abs() <= 1e-14 * arc_length);
+            let t = p.parameter_at_length(0.5 * total, &TOL).unwrap();
+            assert!((t - 0.5).abs() * arc_length <= TOL.linear);
+        }
+    }
+
+    #[test]
+    fn extreme_magnitudes_evaluate_to_scale() {
+        for s in [1e-150, 1e-100, 1e100, 1e150] {
+            let o = Point2::origin();
+            let segment = Segment2::new(o, Point2::new(s, s)).unwrap();
+            let length = segment.length(&TOL).unwrap();
+            assert!((length / s - std::f64::consts::SQRT_2).abs() < 1e-15, "{s}");
+            assert_eq!(segment.parameter_at_length(0.0, &TOL).unwrap(), 0.0);
+            assert!((segment.parameter_at_length(0.5 * length, &TOL).unwrap() - 0.5).abs() < 1e-15);
+            let circle = Circle2::new(o, s).unwrap();
+            assert!((circle.curvature(0.3) * s - 1.0).abs() < 1e-15, "{s}");
+            assert!((circle.length(&TOL).unwrap() / s - TAU).abs() < 1e-14);
+            let ellipse = Ellipse2::new(o, Vector2::new(s, 0.0), 0.5).unwrap();
+            // Perimeter of the ellipse with semi-axes 1 and 1/2.
+            let unit_perimeter = 4.844_224_110_273_838;
+            assert!(
+                (ellipse.length(&TOL).unwrap() / s - unit_perimeter).abs() < 1e-9,
+                "{s}"
+            );
+            assert!((ellipse.curvature(0.0) * s - 4.0).abs() < 1e-12, "{s}");
+            assert!(ellipse.derivative(1.0).norm() > 0.0);
+        }
+    }
+
+    #[test]
+    fn eccentric_ellipse_lengths_approach_four_major_axes() {
+        for (a, ratio) in [(1.0_f64, 1e-12_f64), (1e6, 1e-12), (1e-3, 1e-12)] {
+            let e = Ellipse2::new(Point2::origin(), Vector2::new(a, 0.0), ratio).unwrap();
+            let total = e.length(&TOL).unwrap();
+            assert!(
+                (total - 4.0 * a).abs() <= TOL.linear,
+                "{a} {ratio}: {total}"
+            );
+            for f in [0.1, 0.3, 0.49, 0.77] {
+                let t = e.parameter_at_length(f * total, &TOL).unwrap();
+                let reached = e.length_between(0.0, t, &TOL).unwrap();
+                assert!((reached - f * total).abs() <= TOL.linear, "{a} {ratio} {f}");
+            }
+        }
+    }
+
+    #[test]
+    fn nan_parameters() {
+        let segment = Segment2::new(Point2::origin(), Point2::new(1.0, 0.0)).unwrap();
+        assert_eq!(segment.derivative(f64::NAN), Vector2::new(1.0, 0.0));
+        assert_eq!(segment.curvature(f64::NAN), 0.0);
+        let circle = Circle2::new(Point2::origin(), 1.0).unwrap();
+        assert!(circle.derivative(f64::NAN).x.is_nan());
+        assert!(circle.curvature(f64::NAN).is_nan());
+        assert!(bulged(1.0, 0.5).tangent(f64::NAN).x.is_nan());
+    }
 
     const TOL: Tolerance = Tolerance::DEFAULT;
 
@@ -777,6 +928,46 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn extreme_curves_evaluate_consistently(c in extreme_curve(), f in 0.0..=1.0_f64) {
+            let t = parameter(&c, f);
+            let d1 = c.derivative(t);
+            prop_assert!(d1.x.is_finite() && d1.y.is_finite() && (d1.x != 0.0 || d1.y != 0.0));
+            prop_assert!((c.tangent(t).norm() - 1.0).abs() < 1e-12);
+            prop_assert!(!c.curvature(t).is_nan());
+            let (lo, hi) = c.parameter_range();
+            let total = match c.length(&TOL) {
+                Ok(total) => total,
+                Err(e) => {
+                    prop_assert_eq!(e.code(), "geom.precision.insufficient");
+                    return Ok(());
+                }
+            };
+            if !hi.is_finite() {
+                prop_assert_eq!(total, f64::INFINITY);
+                return Ok(());
+            }
+            prop_assert!(total.is_finite() && total > 0.0);
+            let part = c.length_between(lo, t, &TOL).unwrap();
+            let rest = c.length_between(t, hi, &TOL).unwrap();
+            prop_assert!((part + rest - total).abs() <= TOL.linear + 1e-12 * total);
+            let s = f * total;
+            let u = c.parameter_at_length(s, &TOL).unwrap();
+            let reached = c.length_between(lo, u, &TOL).unwrap();
+            prop_assert!((reached - s).abs() <= TOL.linear + 1e-12 * total, "{reached} vs {s}");
+        }
+
+        #[test]
+        fn wide_curves_reach_the_length_within_the_tolerance(c in wide_curve(), f in 0.0..=1.0_f64) {
+            let total = c.length(&TOL).unwrap();
+            let s = f * total;
+            let t = c.parameter_at_length(s, &TOL).unwrap();
+            let reached = c.length_between(0.0, t, &TOL).unwrap();
+            // Where f64 cannot resolve the tolerance along the curve, its rounding.
+            let slack = TOL.linear.max(64.0 * f64::EPSILON * (total + extent(&c)));
+            prop_assert!((reached - s).abs() <= slack, "{reached} vs {s}");
+        }
+
         #[test]
         fn derivatives_match_finite_differences(c in curve(), f in 0.01..0.99_f64) {
             let t = parameter(&c, f);

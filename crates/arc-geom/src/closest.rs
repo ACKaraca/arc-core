@@ -10,19 +10,33 @@
 //! - When every point of a circle, arc or ellipse is a foot point (the query is at the center of
 //!   a circle or arc, or of an ellipse that is a circle within the tolerance) the result is one
 //!   [`FootPoint::Interval`] covering the whole piece instead of a sample of points.
+//! - An arc taken from a bulged polyline segment is projected in its chord frame, without its
+//!   center: with `(x, y)` the query relative to the chord midpoint in units of the chord length
+//!   (`x` along the chord, `y` to its left) and `h = (1/b − b)/4` the offset of the center, the
+//!   foot points lie at angle fraction `1/2 + atan2(s·x, s·σ·(h − y)) / (2|α|)` for `s = ±1`,
+//!   `σ` the sign of the bulge. For a half angle so small that it is near the subnormal range
+//!   this is evaluated as `1/2 + x / (1 − b² − 4b·y)`.
 //! - Ellipse foot points are the zeros of `f(θ) = (a² − b²)·sin θ·cos θ − a·u·sin θ + b·v·cos θ`
-//!   (query `(u, v)` in the frame of the axes). Dividing by `sin θ·cos θ` gives a function whose
-//!   derivative vanishes only where `a·u·sin³ θ + b·v·cos³ θ = 0`, which has two solutions half
-//!   a turn apart. Splitting the turn at the quadrant angles and those two angles leaves at most
-//!   six intervals on each of which `f` has at most one zero, found by a sign change and refined
-//!   by safeguarded Newton iteration; a zero at a split angle (a tangent, double zero included)
-//!   is found by testing the split angle itself.
+//!   (query `(u, v)` in the frame of the axes, all divided by `a`). Dividing by `sin θ·cos θ`
+//!   gives a function whose derivative vanishes only where `a·u·sin³ θ + b·v·cos³ θ = 0`, which
+//!   has two solutions half a turn apart. Splitting the turn at the quadrant angles and those
+//!   two angles leaves at most six intervals on each of which `f` has at most one zero, found by
+//!   a sign change and refined to convergence by safeguarded Newton iteration; a zero at a split
+//!   angle (a tangent, double zero included) is found by testing the split angle itself.
+//! - A refined zero is accepted when `f` is within its rounding error or the bracket cannot
+//!   shrink further in `f64`. Its tangential residual is then at most `tolerance.linear` where
+//!   `f64` resolves that, and otherwise of the order of
+//!   `ε·(a + |q − center|)·a / |C′(θ)|` (`ε` the machine epsilon): far from the curve or for a
+//!   very large curve the perpendicularity is as good as `f64` allows.
 //! - The closest point is chosen among the foot points and the ends of the range (and the
 //!   vertices of a polyline). Candidates whose distances differ by at most `tolerance.linear`
 //!   tie, and the one with the smallest parameter wins; the result is within
-//!   `tolerance.linear` of the true minimum distance.
+//!   `tolerance.linear` of the true minimum distance where `f64` resolves that.
+//! - Every length is computed from scaled values, so every curve a constructor accepts can be
+//!   projected; a query so far away that its scaled coordinates overflow fails with
+//!   `geom.precision.insufficient`.
 
-use std::f64::consts::{FRAC_PI_2, TAU};
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use arc_base::math::{Point2, Vector2};
 use arc_base::{Error, Result, Tolerance};
@@ -30,11 +44,15 @@ use arc_base::{Error, Result, Tolerance};
 use crate::curve::Curve2;
 use crate::error::codes;
 use crate::eval::{
-    Conic, MAX_ROOT_ITERATIONS, Piece, Shape, Shaped, ensure_tolerance, global_parameter,
+    Conic, MAX_ROOT_ITERATIONS, Piece, Shape, Shaped, ensure_tolerance, global_parameter, norm,
     segment_piece, unit,
 };
-use crate::polyline::Polyline2;
+use crate::polyline::{Chord, Polyline2, SMALL_HALF_ANGLE};
 use crate::primitives::{Arc2, Circle2, Ellipse2, EllipticalArc2, Line2, Ray2, Segment2, perp};
+
+/// The rounding error of the ellipse foot function, in units of the machine epsilon times the
+/// magnitude of its terms: a value within it is a zero to the precision of `f64`.
+const ROOT_ULPS: f64 = 16.0;
 
 /// A point on a curve with its parameter and its distance to a query point.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,14 +103,16 @@ pub trait CurveProject: Shaped {
     /// # Errors
     ///
     /// `geom.input.not_finite` for a non-finite query; `geom.tolerance.invalid` when
-    /// `tolerance.linear` is not finite and positive; `geom.precision.insufficient` when a foot
-    /// point cannot be located to the tolerance in `f64`.
+    /// `tolerance.linear` is not finite and positive; `geom.precision.insufficient` when the
+    /// query is so far from the curve, relative to its size, that its coordinates in the
+    /// curve's frame overflow.
     fn closest_point(&self, query: Point2, tolerance: &Tolerance) -> Result<CurvePoint> {
         closest(&self.shape(), query, tolerance)
     }
 
     /// Every perpendicular foot point of `query` inside the parameter range, sorted by
-    /// parameter, with foot points closer than `tolerance.linear` to each other merged.
+    /// parameter, with foot points closer than `tolerance.linear` (or than the rounding of
+    /// their coordinates) to each other merged.
     ///
     /// # Errors
     ///
@@ -112,12 +132,16 @@ impl CurveProject for EllipticalArc2 {}
 impl CurveProject for Polyline2 {}
 impl CurveProject for Curve2 {}
 
+fn insufficient() -> Error {
+    Error::new(codes::PRECISION_INSUFFICIENT).with_detail("operation", "foot_points")
+}
+
 fn curve_point(shape: &Shape<'_>, parameter: f64, query: Point2) -> CurvePoint {
     let point = shape.point(parameter);
     CurvePoint {
         parameter,
         point,
-        distance: (query - point).norm(),
+        distance: norm(query - point),
     }
 }
 
@@ -125,12 +149,26 @@ fn piece_point(piece: &Piece, parameter: f64, query: Point2) -> CurvePoint {
     curve_point(&Shape::Piece(*piece), parameter, query)
 }
 
+/// The interval foot point covering a whole piece.
+fn whole(piece: &Piece, query: Point2) -> FootPoint {
+    let (lo, hi) = piece.range();
+    FootPoint::Interval {
+        start: lo,
+        end: hi,
+        distance: norm(query - piece.point(lo)),
+    }
+}
+
 /// Foot points on one smooth piece, in its own parameter.
 fn piece_feet(piece: &Piece, query: Point2, tolerance: &Tolerance) -> Result<Vec<FootPoint>> {
     let (lo, hi) = piece.range();
     if let Some((origin, direction)) = piece.linear() {
-        let speed = direction.norm();
-        let t = (query - origin).dot(&unit(direction)) / speed;
+        let speed = norm(direction);
+        let along = (query - origin).dot(&unit(direction));
+        if !along.is_finite() {
+            return Err(insufficient());
+        }
+        let t = along / speed;
         let slack = tolerance.linear / speed;
         if t < lo - slack || t > hi + slack {
             return Ok(Vec::new());
@@ -141,18 +179,19 @@ fn piece_feet(piece: &Piece, query: Point2, tolerance: &Tolerance) -> Result<Vec
             query,
         ))]);
     }
+    if let Piece::Arc(arc) = piece
+        && let Some(chord) = arc.chord()
+    {
+        return chord_feet(piece, arc, chord, query, tolerance);
+    }
     let Some(conic) = piece.conic() else {
         return Ok(Vec::new());
     };
     let Some(angles) = conic_feet(&conic, query, tolerance)? else {
-        return Ok(vec![FootPoint::Interval {
-            start: lo,
-            end: hi,
-            distance: (query - piece.point(lo)).norm(),
-        }]);
+        return Ok(vec![whole(piece, query)]);
     };
     let span = conic.span();
-    let slack = tolerance.linear / conic.a.norm().max(conic.b.norm());
+    let slack = tolerance.linear / norm(conic.a).max(norm(conic.b));
     let mut out: Vec<FootPoint> = angles
         .into_iter()
         .filter_map(|angle| {
@@ -173,69 +212,152 @@ fn piece_feet(piece: &Piece, query: Point2, tolerance: &Tolerance) -> Result<Vec
     Ok(out)
 }
 
+/// Foot points on an arc taken from a bulged polyline segment, solved in its chord frame (see
+/// the [module documentation](self)).
+fn chord_feet(
+    piece: &Piece,
+    arc: &Arc2,
+    chord: &Chord,
+    query: Point2,
+    tolerance: &Tolerance,
+) -> Result<Vec<FootPoint>> {
+    let (start, bulge) = (chord.start(), chord.bulge());
+    let c = chord.end() - start;
+    let length = norm(c);
+    let direction = unit(c);
+    let relative = query - (start + c * 0.5);
+    let (x, y) = (
+        relative.dot(&direction) / length,
+        relative.dot(&perp(&direction)) / length,
+    );
+    let offset = 0.25 * (1.0 / bulge - bulge);
+    let w = bulge.signum() * (offset - y);
+    if !(x.is_finite() && w.is_finite()) {
+        return Err(insufficient());
+    }
+    // Every point is a foot point when the query is the center.
+    if length * x.hypot(w) <= tolerance.linear {
+        return Ok(vec![whole(piece, query)]);
+    }
+    let half = chord.half_angle().abs();
+    let fractions = if half < SMALL_HALF_ANGLE {
+        // atan2 of a tiny angle is its tangent; this form avoids subnormal angles.
+        vec![0.5 + x / ((1.0 - bulge * bulge) - 4.0 * bulge * y)]
+    } else {
+        [1.0, -1.0]
+            .iter()
+            .map(|s| 0.5 + (s * x).atan2(s * w) / (2.0 * half))
+            .collect()
+    };
+    let slack = tolerance.linear / (length * (half / chord.sin_half_angle().abs()));
+    let span = arc.sweep().abs();
+    let mut out: Vec<FootPoint> = fractions
+        .into_iter()
+        .filter(|f| *f >= -slack && *f <= 1.0 + slack)
+        .map(|f| FootPoint::Point(piece_point(piece, f.clamp(0.0, 1.0) * span, query)))
+        .collect();
+    out.sort_by(|x, y| x.parameter().total_cmp(&y.parameter()));
+    Ok(out)
+}
+
 /// The eccentric angles in [0, 2π) of the foot points of `query` on the full ellipse of
-/// `conic`, or `None` when every point is a foot point.
+/// `conic`, or `None` when every point is a foot point. Everything is divided by the major
+/// semi-axis length first, so no product overflows or underflows.
 fn conic_feet(conic: &Conic, query: Point2, tolerance: &Tolerance) -> Result<Option<Vec<f64>>> {
-    let (a, b) = (conic.a.norm(), conic.b.norm());
+    let scale = norm(conic.a).max(norm(conic.b));
+    let (a, b) = (norm(conic.a) / scale, norm(conic.b) / scale);
     let major = unit(conic.a);
     let d = query - conic.center;
-    let (u, v) = (d.dot(&major), d.dot(&perp(&major)));
+    let (u, v) = (d.dot(&major) / scale, d.dot(&perp(&major)) / scale);
+    if !(u.is_finite() && v.is_finite()) {
+        return Err(insufficient());
+    }
+    let tol = tolerance.linear / scale;
     let c = (a - b) * (a + b);
     // The tangential component of query − point is at most |d| + c / (2b) everywhere.
-    if d.norm() + c / (2.0 * b) <= tolerance.linear {
+    if u.hypot(v) + c / (2.0 * b) <= tol {
         return Ok(None);
     }
-    let f = |t: f64| {
+    let f_at = |sin: f64, cos: f64| c * sin * cos - a * u * sin + b * v * cos;
+    // The value of f at t with the rounding error of its evaluation there.
+    let f_with_rounding = |t: f64| {
         let (sin, cos) = t.sin_cos();
-        c * sin * cos - a * u * sin + b * v * cos
+        let terms = (c * sin * cos).abs() + (a * u * sin).abs() + (b * v * cos).abs();
+        (f_at(sin, cos), ROOT_ULPS * f64::EPSILON * terms)
     };
+    let fp_at = |sin: f64, cos: f64| c * (cos - sin) * (cos + sin) - a * u * cos - b * v * sin;
     let fp = |t: f64| {
         let (sin, cos) = t.sin_cos();
-        c * (cos - sin) * (cos + sin) - a * u * cos - b * v * sin
+        fp_at(sin, cos)
     };
-    let speed = |t: f64| {
-        let (sin, cos) = t.sin_cos();
-        Vector2::new(a * sin, b * cos).norm()
-    };
-    let mut cuts = vec![0.0, FRAC_PI_2, std::f64::consts::PI, 3.0 * FRAC_PI_2, TAU];
+    let floor = ROOT_ULPS * f64::EPSILON * (c + a * u.abs() + b * v.abs());
+    // Each cut with its sine and cosine; those of the quadrant angles are exact, since the f64
+    // nearest to π is not a zero of the sine and a sign at the cut must be the true one.
+    let mut cuts = vec![
+        (0.0, 0.0, 1.0),
+        (FRAC_PI_2, 1.0, 0.0),
+        (PI, 0.0, -1.0),
+        (3.0 * FRAC_PI_2, -1.0, 0.0),
+        (TAU, 0.0, 1.0),
+    ];
     let (p, q) = ((b * v).cbrt(), (a * u).cbrt());
     if p != 0.0 || q != 0.0 {
         let turn = (-p).atan2(q);
-        cuts.push(turn.rem_euclid(TAU));
-        cuts.push((turn + std::f64::consts::PI).rem_euclid(TAU));
+        for angle in [turn.rem_euclid(TAU), (turn + PI).rem_euclid(TAU)] {
+            let (sin, cos) = angle.sin_cos();
+            cuts.push((angle, sin, cos));
+        }
     }
-    cuts.sort_by(f64::total_cmp);
-    cuts.dedup();
+    // Stable, so a quadrant angle stays ahead of an equal computed one and is kept.
+    cuts.sort_by(|x, y| x.0.total_cmp(&y.0));
+    cuts.dedup_by(|x, y| x.0 == y.0);
     let mut angles = Vec::new();
     for pair in cuts.windows(2) {
-        let &[lo, hi] = pair else { continue };
-        let (f_lo, f_hi) = (f(lo), f(hi));
-        if f_lo.abs() <= tolerance.linear * speed(lo) {
+        let &[(lo, sin_lo, cos_lo), (hi, sin_hi, cos_hi)] = pair else {
+            continue;
+        };
+        let (f_lo, f_hi) = (f_at(sin_lo, cos_lo), f_at(sin_hi, cos_hi));
+        let speed = norm(Vector2::new(a * sin_lo, b * cos_lo));
+        if f_lo.abs() <= (tol * speed).max(floor) {
             angles.push(lo);
         }
-        if f_lo * f_hi < 0.0 {
-            angles.push(refine(lo, hi, f_lo, &f, &fp, &speed, tolerance)?);
+        // The sign of f just inside the interval: at a cut where f vanishes to rounding (a
+        // zero of sin θ or cos θ, or a foot at the cut), the sign of its slope there.
+        let inside_lo = if f_lo.abs() > floor {
+            f_lo
+        } else {
+            fp_at(sin_lo, cos_lo)
+        };
+        let inside_hi = if f_hi.abs() > floor {
+            f_hi
+        } else {
+            -fp_at(sin_hi, cos_hi)
+        };
+        if (inside_lo < 0.0 && inside_hi > 0.0) || (inside_lo > 0.0 && inside_hi < 0.0) {
+            angles.push(refine(lo, hi, inside_lo, &f_with_rounding, &fp));
         }
     }
     Ok(Some(angles))
 }
 
-/// The zero of `f` in (lo, hi), where `f(lo)` and `f(hi)` have opposite signs, by Newton
-/// iteration kept inside a shrinking bracket.
+/// The zero of `f` in (lo, hi), where `f` has the sign of `f_lo` just above `lo` and the
+/// opposite sign just below `hi`, by Newton
+/// iteration kept inside a bracket that at least halves every second step. It stops when `f`
+/// is within the rounding error of its evaluation, or when the bracket cannot shrink further in
+/// `f64`.
 fn refine(
     mut lo: f64,
     mut hi: f64,
     f_lo: f64,
-    f: &impl Fn(f64) -> f64,
+    f: &impl Fn(f64) -> (f64, f64),
     fp: &impl Fn(f64) -> f64,
-    speed: &impl Fn(f64) -> f64,
-    tolerance: &Tolerance,
-) -> Result<f64> {
+) -> f64 {
     let mut t = 0.5 * (lo + hi);
+    let mut width = hi - lo;
     for _ in 0..MAX_ROOT_ITERATIONS {
-        let value = f(t);
-        if value.abs() <= 0.5 * tolerance.linear * speed(t) {
-            return Ok(t);
+        let (value, rounding) = f(t);
+        if value.abs() <= rounding {
+            return t;
         }
         if (value < 0.0) == (f_lo < 0.0) {
             lo = t;
@@ -244,20 +366,18 @@ fn refine(
         }
         let mid = 0.5 * (lo + hi);
         if mid <= lo || mid >= hi {
-            // The bracket cannot shrink further in f64.
-            if value.abs() <= tolerance.linear * speed(t) {
-                return Ok(t);
-            }
-            break;
+            return t;
         }
         let newton = t - value / fp(t);
-        t = if newton > lo && newton < hi {
+        let halved = hi - lo <= 0.5 * width;
+        width = hi - lo;
+        t = if halved && newton > lo && newton < hi {
             newton
         } else {
             mid
         };
     }
-    Err(Error::new(codes::PRECISION_INSUFFICIENT).with_detail("operation", "foot_points"))
+    t
 }
 
 fn ensure_query(query: Point2, tolerance: &Tolerance) -> Result<()> {
@@ -307,8 +427,9 @@ fn polyline_feet(
     Ok(out)
 }
 
-/// Sorts foot points, joins touching intervals and drops points within the tolerance of an
-/// interval or of the previous point (and, on a closed curve, of the first point).
+/// Sorts foot points, joins touching intervals and drops points within the tolerance (or the
+/// coordinate rounding) of an interval or of the previous point (and, on a closed curve, of the
+/// first point).
 fn merge(
     shape: &Shape<'_>,
     mut raw: Vec<FootPoint>,
@@ -323,7 +444,13 @@ fn merge(
             FootPoint::Point(_) => None,
         })
         .collect();
-    let near = |a: Point2, b: Point2| (a - b).norm() <= tol.linear;
+    // Points closer than the rounding of their coordinates are the same point.
+    let near = |a: Point2, b: Point2| {
+        let extent = [a.x, a.y, b.x, b.y]
+            .iter()
+            .fold(0.0_f64, |m, x| m.max(x.abs()));
+        norm(a - b) <= tol.linear.max(ROOT_ULPS * f64::EPSILON * extent)
+    };
     let in_interval = |p: &CurvePoint| {
         intervals.iter().any(|&(s, e)| {
             (s..=e).contains(&p.parameter)
@@ -388,10 +515,193 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::curve::tests::curve;
+    use crate::curve::tests::{curve, extreme_curve, parameter, wide_curve};
     use crate::eval::CurveEval;
+    use crate::eval::tests::{bulged, extent};
     use crate::polyline::PolylineVertex;
-    use crate::testing::point;
+    use crate::testing::{far_point, point};
+
+    /// The bound on the rounding of a projection of `q` onto `c`: the tolerance, or a small
+    /// multiple of the rounding of the coordinates involved.
+    fn rounding(c: &Curve2, q: Point2) -> f64 {
+        TOL.linear
+            .max(1e3 * f64::EPSILON * (extent(c) + q.x.abs().max(q.y.abs())))
+    }
+
+    /// The documented bound on the tangential residual of a foot point: the rounding, times the
+    /// ratio of the major semi-axis to the speed for an ellipse.
+    fn residual_bound(c: &Curve2, q: Point2) -> f64 {
+        let ratio = match c {
+            Curve2::Ellipse(e) => e.ratio(),
+            Curve2::EllipticalArc(e) => e.ellipse().ratio(),
+            _ => 1.0,
+        };
+        rounding(c, q) / ratio
+    }
+
+    fn params(feet: &[FootPoint]) -> Vec<f64> {
+        feet.iter().map(FootPoint::parameter).collect()
+    }
+
+    #[test]
+    fn nearly_straight_bulged_segments_project_in_the_chord_frame() {
+        for (length, bulge) in [
+            (1.0, 1e-10),
+            (1000.0, 1e-10),
+            (100.0, 1e-8),
+            (1.0, 1e-150),
+            (1.0, 1e-200),
+            (1.0, -1e-200),
+            (3.0, 1e-300),
+        ] {
+            let p = bulged(length, bulge);
+            let q = Point2::new(0.5 * length, 1.0);
+            // The middle of the arc lies the sagitta, half the chord times the bulge, below it.
+            let want = 1.0 + 0.5 * length * bulge;
+            let found = p.closest_point(q, &TOL).unwrap();
+            assert!(
+                (found.parameter - 0.5).abs() < 1e-12,
+                "{length} {bulge}: {found:?}"
+            );
+            assert!(
+                (found.distance - want).abs() < 1e-12,
+                "{length} {bulge}: {found:?}"
+            );
+            let feet = p.foot_points(q, &TOL).unwrap();
+            assert_eq!(feet.len(), 1, "{feet:?}");
+            assert!(p.tangent(feet[0].parameter()).dot(&(q - found.point)).abs() <= TOL.linear);
+        }
+    }
+
+    #[test]
+    fn nearly_full_bulged_segments_project_in_the_chord_frame() {
+        // Counterclockwise with bulge 1e10: a circle of radius 2.5e9 through the chord, apex
+        // 5e9 below it; the query is 1 inside the apex.
+        let p = bulged(1.0, 1e10);
+        let found = p.closest_point(Point2::new(0.5, -5e9 + 1.0), &TOL).unwrap();
+        assert!((found.parameter - 0.5).abs() < 1e-9 && (found.distance - 1.0).abs() < 1e-5);
+        // Clockwise: the circle lies above the chord, so below the gap the ends are closest.
+        let p = bulged(1.0, -1e10);
+        let found = p.closest_point(Point2::new(0.5, -1.0), &TOL).unwrap();
+        assert_eq!(found.parameter, 0.0);
+        assert!((found.distance - 1.25_f64.sqrt()).abs() < 1e-15);
+    }
+
+    #[test]
+    fn extreme_sizes_project_to_scale() {
+        for s in [1e-150, 1e-100, 1e100, 1e150] {
+            let o = Point2::origin();
+            let segment = Segment2::new(o, Point2::new(s, s)).unwrap();
+            let found = segment.closest_point(Point2::new(0.0, s), &TOL).unwrap();
+            if s < TOL.linear {
+                // Every candidate ties within the tolerance; the start wins.
+                assert_eq!(found.parameter, 0.0);
+                assert!((found.distance / s - 1.0).abs() < 1e-15, "{s}");
+            } else {
+                assert!((found.parameter - 0.5).abs() < 1e-15);
+                assert!((found.distance / s - 0.5_f64.sqrt()).abs() < 1e-15, "{s}");
+            }
+            let circle = Circle2::new(o, s).unwrap();
+            let found = circle
+                .closest_point(Point2::new(2.0 * s, 0.0), &TOL)
+                .unwrap();
+            assert!((found.distance / s - 1.0).abs() < 1e-15, "{s}");
+            assert_eq!(found.parameter, 0.0);
+            // Below the tolerance the two feet are one point.
+            let feet = circle.foot_points(Point2::new(2.0 * s, 0.0), &TOL).unwrap();
+            assert_eq!(feet.len(), if s > TOL.linear { 2 } else { 1 });
+            let ellipse = Ellipse2::new(o, Vector2::new(s, 0.0), 0.5).unwrap();
+            let found = ellipse
+                .closest_point(Point2::new(0.0, 2.0 * s), &TOL)
+                .unwrap();
+            if s > TOL.linear {
+                assert!((found.parameter - FRAC_PI_2).abs() < 1e-15);
+                assert!((found.distance / s - 1.5).abs() < 1e-15, "{s}");
+            } else {
+                assert!(found.distance <= 1.5 * s + TOL.linear);
+            }
+        }
+    }
+
+    #[test]
+    fn far_queries_converge() {
+        let e = Ellipse2::new(Point2::origin(), Vector2::new(2.0, 0.0), 0.5).unwrap();
+        let c = Curve2::Ellipse(e);
+        for q in [Point2::new(1e12, 3e11), Point2::new(-3e11, 1e12)] {
+            let feet = c.foot_points(q, &TOL).unwrap();
+            assert_eq!(feet.len(), 2, "{feet:?}");
+            for foot in &feet {
+                let t = foot.parameter();
+                let residual = c.tangent(t).dot(&(q - c.point_at(t))).abs();
+                assert!(residual <= residual_bound(&c, q), "{residual}");
+            }
+            let found = c.closest_point(q, &TOL).unwrap();
+            assert!(found.distance < (q - Point2::origin()).norm());
+        }
+    }
+
+    #[test]
+    fn nearly_circular_ellipses_have_no_duplicate_feet() {
+        for ratio in [1.0 - 1e-12, 1.0 - 1e-9] {
+            let e = Ellipse2::new(Point2::origin(), Vector2::new(1e7, 0.0), ratio).unwrap();
+            let center = params(&e.foot_points(Point2::origin(), &TOL).unwrap());
+            assert_eq!(center.len(), 4, "{center:?}");
+            let off = params(&e.foot_points(Point2::new(1.0, 0.0), &TOL).unwrap());
+            assert_eq!(off.len(), 2, "{off:?}");
+        }
+    }
+
+    #[test]
+    fn flat_ellipses_project_their_own_points() {
+        // Found by the extreme-curve property: a quadrant angle rounded to f64 is not a zero
+        // of the sine, and a foot exactly at a quadrant angle hid the one next to it.
+        let flat = Ellipse2::new(
+            Point2::new(1.0, 1.0),
+            Vector2::new(1.0, 1.0),
+            1.194_593_958_155_402_9e-11,
+        )
+        .unwrap();
+        let arc =
+            Curve2::EllipticalArc(EllipticalArc2::new(flat, 4.337_990_582_423_08, -0.05).unwrap());
+        let huge = Curve2::Ellipse(
+            Ellipse2::new(
+                Point2::new(1.0, 4.601_197_943_847_03e88),
+                Vector2::new(2.746_456_378_470_755_5e137, 4.654_360_744_934_588e-75),
+                8.706_830_190_415_798e-149,
+            )
+            .unwrap(),
+        );
+        // Two feet a tiny angle apart: refinement stops at the rounding of f where it is
+        // evaluated, not at the rounding of its largest possible terms.
+        let clustered = Curve2::Ellipse(
+            Ellipse2::new(
+                Point2::new(1.0, 1.0),
+                Vector2::new(1.261_949_017_393_344_8e74, 1.0),
+                2.017_664_774_723_684_6e-34,
+            )
+            .unwrap(),
+        );
+        for (c, f) in [
+            (arc, 0.654_486_897_140_628_1),
+            (huge, 0.501_919_374_651_039_3),
+            (clustered, 0.499_449_654_329_216_7),
+        ] {
+            let q = c.point_at(parameter(&c, f));
+            let found = c.closest_point(q, &TOL).unwrap();
+            assert!(found.distance <= rounding(&c, q), "{found:?}");
+        }
+    }
+
+    #[test]
+    fn far_queries_on_tiny_curves_fail_instead_of_overflowing() {
+        let e = Ellipse2::new(Point2::origin(), Vector2::new(1e-300, 0.0), 0.5).unwrap();
+        assert_eq!(
+            e.closest_point(Point2::new(1e300, 0.0), &TOL)
+                .unwrap_err()
+                .code(),
+            "geom.precision.insufficient"
+        );
+    }
 
     const TOL: Tolerance = Tolerance::DEFAULT;
 
@@ -400,13 +710,32 @@ mod tests {
     fn reference_distance(c: &Curve2, q: Point2) -> f64 {
         let (lo, hi) = c.parameter_range();
         let (lo, hi) = (lo.max(-500.0), hi.min(500.0));
+        // A polyline's segments are built once; `point_at` would rebuild one per call.
+        let segments: Vec<_> = match c {
+            Curve2::Polyline(p) => p.segments().collect(),
+            _ => Vec::new(),
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "t lies in [0, n]"
+        )]
+        let point = |t: f64| match segments.len() {
+            0 => c.point_at(t),
+            count => {
+                let k = (t.max(0.0).floor() as usize).min(count - 1);
+                segments[k].point_at_fraction(t - k as f64)
+            }
+        };
+        let dist = |t: f64| (point(t) - q).norm();
         let n = 20_000;
         let h = (hi - lo) / f64::from(n);
-        let dist = |t: f64| (c.point_at(t) - q).norm();
         let best = (0..=n)
             .map(|i| lo + h * f64::from(i))
-            .min_by(|a, b| dist(*a).total_cmp(&dist(*b)))
-            .unwrap();
+            .map(|t| (dist(t), t))
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .unwrap()
+            .1;
         let (mut a, mut b) = ((best - h).max(lo), (best + h).min(hi));
         let g = 0.5 * (5.0_f64.sqrt() - 1.0);
         for _ in 0..200 {
@@ -535,10 +864,45 @@ mod tests {
 
     proptest! {
         #[test]
+        fn wide_closest_point_matches_dense_sampling(
+            c in wide_curve(), q in prop_oneof![point(), far_point()],
+        ) {
+            let found = c.closest_point(q, &TOL).unwrap();
+            prop_assert!(c.point_at(found.parameter) == found.point);
+            let reference = reference_distance(&c, q);
+            // The found point lies on the curve, so it cannot beat the true minimum; it must be
+            // at least as close as the sampled one.
+            prop_assert!(found.distance <= reference + rounding(&c, q), "{} vs {reference}", found.distance);
+        }
+
+        #[test]
+        fn wide_foot_points_are_perpendicular(
+            c in wide_curve(), q in prop_oneof![point(), far_point()],
+        ) {
+            let bound = residual_bound(&c, q);
+            for foot in c.foot_points(q, &TOL).unwrap() {
+                if let FootPoint::Point(p) = foot {
+                    let r = q - p.point;
+                    let ok = |tangent: Vector2| tangent.dot(&r).abs() <= bound;
+                    let t = p.parameter;
+                    prop_assert!(ok(c.tangent(t)) || ok(c.tangent(t - 1e-12)), "{foot:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn extreme_curves_project_their_own_points(c in extreme_curve(), f in 0.0..=1.0_f64) {
+            let q = c.point_at(parameter(&c, f));
+            let found = c.closest_point(q, &TOL).unwrap();
+            prop_assert!(c.point_at(found.parameter) == found.point);
+            prop_assert!(found.distance <= rounding(&c, q), "{found:?}");
+        }
+
+        #[test]
         fn closest_point_matches_dense_sampling(c in curve(), q in point()) {
             let found = c.closest_point(q, &TOL).unwrap();
             prop_assert!((c.point_at(found.parameter) - found.point).norm() == 0.0);
-            prop_assert!(((q - found.point).norm() - found.distance).abs() == 0.0);
+            prop_assert!((norm(q - found.point) - found.distance).abs() == 0.0);
             let reference = reference_distance(&c, q);
             prop_assert!(found.distance <= reference + TOL.linear, "{} vs {reference}", found.distance);
             prop_assert!(found.distance >= reference - TOL.linear - 1e-9, "{} vs {reference}", found.distance);

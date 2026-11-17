@@ -27,7 +27,7 @@ use crate::primitives::{Arc2, Segment2, perp};
 
 /// The half included angle below which `sin` returns its argument unchanged in `f64`, so the
 /// ratio `sin(f·α) / sin α` is `f` to rounding; it also keeps `f·α` away from subnormal values.
-const SMALL_HALF_ANGLE: f64 = f64::MIN_POSITIVE / f64::EPSILON;
+pub(crate) const SMALL_HALF_ANGLE: f64 = f64::MIN_POSITIVE / f64::EPSILON;
 
 /// A bulged polyline segment in its chord frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -38,6 +38,21 @@ pub(crate) struct Chord {
 }
 
 impl Chord {
+    /// The start vertex.
+    pub(crate) fn start(&self) -> Point2 {
+        self.start
+    }
+
+    /// The end vertex.
+    pub(crate) fn end(&self) -> Point2 {
+        self.end
+    }
+
+    /// The bulge.
+    pub(crate) fn bulge(&self) -> f64 {
+        self.bulge
+    }
+
     /// The same chord traversed from end to start.
     pub(crate) fn reversed(self) -> Self {
         Self {
@@ -48,12 +63,12 @@ impl Chord {
     }
 
     /// The signed half included angle `2·atan(bulge)`, in (−π, π).
-    fn half_angle(&self) -> f64 {
+    pub(crate) fn half_angle(&self) -> f64 {
         2.0 * self.bulge.atan()
     }
 
     /// `sin` of the half included angle, `2b / (1 + b²)`, without overflow.
-    fn sin_half_angle(&self) -> f64 {
+    pub(crate) fn sin_half_angle(&self) -> f64 {
         let b = self.bulge;
         if b.abs() <= 1.0 {
             2.0 * b / (1.0 + b * b)

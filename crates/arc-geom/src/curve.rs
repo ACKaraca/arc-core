@@ -153,7 +153,7 @@ pub(crate) mod tests {
     use crate::polyline::PolylineVertex;
     use crate::testing::{
         angle, extreme_angle, extreme_length, extreme_point, extreme_vector, log_uniform,
-        nonzero_vector, point, sweep,
+        nonzero_vector, point, sweep, wide_bulge, wide_ratio,
     };
 
     /// Any curve kind with moderate coordinates.
@@ -191,6 +191,33 @@ pub(crate) mod tests {
                 )
             ),
             polyline.prop_map(Curve2::Polyline),
+        ]
+    }
+
+    /// Moderate coordinates with the hard shapes: polylines with bulges from 1e-300 to 1e15 and
+    /// ellipses with ratios down to 1e-12.
+    pub(crate) fn wide_curve() -> impl Strategy<Value = Curve2> {
+        let polyline = (
+            prop::collection::vec((point(), wide_bulge()), 2..5),
+            any::<bool>(),
+        )
+            .prop_filter_map("valid polyline", |(v, closed)| {
+                let vertices = v
+                    .into_iter()
+                    .map(|(p, bulge)| PolylineVertex::new(p, bulge))
+                    .collect();
+                Polyline2::new(vertices, closed).ok()
+            });
+        prop_oneof![
+            1 => (point(), 0.1..50.0_f64).prop_map(|(c, r)| Curve2::Circle(Circle2::new(c, r).unwrap())),
+            1 => (point(), nonzero_vector(), wide_ratio())
+                .prop_map(|(c, u, k)| Curve2::Ellipse(Ellipse2::new(c, u, k).unwrap())),
+            1 => (point(), nonzero_vector(), wide_ratio(), angle(), sweep()).prop_map(
+                |(c, u, k, a, s)| Curve2::EllipticalArc(
+                    EllipticalArc2::new(Ellipse2::new(c, u, k).unwrap(), a, s).unwrap()
+                )
+            ),
+            3 => polyline.prop_map(Curve2::Polyline),
         ]
     }
 

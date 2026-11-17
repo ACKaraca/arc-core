@@ -227,4 +227,24 @@ pub(crate) mod testing {
     pub fn extreme_angle() -> impl Strategy<Value = f64> {
         -1e6..1e6_f64
     }
+
+    /// A nonzero bulge of either sign: ordinary values, or a magnitude log-uniform over 1e-300
+    /// to 1e15 (bulges of about 1e16 and more are rejected).
+    pub fn wide_bulge() -> impl Strategy<Value = f64> {
+        prop_oneof![
+            1 => -3.0..3.0_f64,
+            2 => (log_uniform(-300.0, 15.0), any::<bool>())
+                .prop_map(|(m, negative)| if negative { -m } else { m }),
+        ]
+    }
+
+    /// A minor-to-major ratio log-uniform over 1e-12 to 1.
+    pub fn wide_ratio() -> impl Strategy<Value = f64> {
+        log_uniform(-12.0, 0.0).prop_map(|k| k.min(1.0))
+    }
+
+    /// A query point at a distance log-uniform over 1e-3 to 1e12 from the origin.
+    pub fn far_point() -> impl Strategy<Value = Point2> {
+        (log_uniform(-3.0, 12.0), angle()).prop_map(|(r, a)| Point2::new(r * a.cos(), r * a.sin()))
+    }
 }
