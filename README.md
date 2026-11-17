@@ -4,15 +4,15 @@ The shared Rust foundation of the Arc suite: geometry, the document store and pa
 automation, drafting, rendering, the UI kit and interchange, written once and used by every Arc
 product.
 
-> **Status: design phase.** Implementation has started: the workspace, the CI gate and the first crate (`arc-base`) exist. No release is available yet; the documents in this repository describe the target that implementation follows.
+> **Status: foundation phase.** The workspace, the CI gate and the first crate (`arc-base`) exist; the other crates are specifications. No release is available yet; the documents in this repository describe the target that implementation follows.
 
 ## Building
 
-The toolchain is pinned in `rust-toolchain.toml`. The gate also needs `cargo-nextest` and
-`cargo-deny` (`cargo install --locked cargo-nextest cargo-deny`).
+The toolchain is pinned in `rust-toolchain.toml`. The gate also needs `cargo-nextest`,
+`cargo-deny` and `cargo-audit` (`cargo install --locked cargo-nextest cargo-deny cargo-audit`).
 
 ```sh
-cargo xtask ci      # every gate: format, clippy, layers, wasm, tests, deny
+cargo xtask ci      # every gate: format, clippy, layers, wasm, tests, deny, audit
 cargo xtask layers  # the layering check alone
 ```
 
