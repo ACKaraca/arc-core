@@ -443,38 +443,61 @@ transaction is open per document at a time; the document executor enforces that,
   missing map key adds the entry. A list changes length only as a whole: a list index must be
   within the list and cannot be set to `None`. A path that does not resolve against the object's
   schema, an index past the end of a list, a part of an absent value and `None` for a list
-  element fail with `doc.path.invalid`.
+  element fail with `doc.path.invalid`. `None` for a required field of a nested record fails
+  with `doc.value.missing`, since nested records are checked in full.
 - **Checks at call time.** An operation checks only what keeps the working state consistent:
   the object is live (`doc.object.not_found`), the type is registered (`doc.type.unknown`), a
   create has one value per field and its identifier is not live (`doc.object.duplicate_id`),
   the path resolves, and every given value has the addressed type, is finite and uses declared
-  enum codes (fields of nested records are checked in full). Required fields, bounds of the object's own fields, reference integrity, whether
-  an owner exists, the `read_only` flag and validators are checked at commit (CORE-DOC-015). A
-  failed operation changes nothing.
+  enum codes (fields of nested records are checked in full, and a list of references within its
+  `many` bound, `doc.value.out_of_range`). Required fields, bounds of the object's own fields,
+  reference integrity, whether an owner exists, the `read_only` flag and validators are checked
+  at commit (CORE-DOC-015). A failed operation changes nothing.
+- **Cost of a modify.** An object's values are one vector: a modify copies all of them with
+  one value written, so its time and memory grow with the object's values however small the
+  change, and a created object is shared by the operation and the store. Large data belongs in
+  assets.
 - **Reads.** `get`, `resolve` and `snapshot` (the candidate, for iteration) see the
   transaction's changes. A snapshot loaded from the `SnapshotCell` before or during the
   transaction sees none of them.
 - **Replay and inversion.** `Op::apply` applies an operation to a working set when the state
   holds its before values: a created identifier is not live, and a modified, relinked or
   deleted object is live with exactly the recorded before state (for a delete also the type and
-  schema version); otherwise it fails with `doc.op.mismatch` or the working set's code and
-  changes nothing. `Op::inverse` turns a create into a delete of the same object and back, and
+  schema version), values compared bit for bit (`Value::bits_eq`: `0.0` and `-0.0` differ, as
+  their payloads do); otherwise it fails with `doc.op.mismatch` or the working set's code and
+  changes nothing. Operations replayed from a journal are hostile input, so `apply` also checks
+  what it writes like the transaction's operations do: a create needs a registered type and
+  schema version and one value of the right type per field, and a written value must have the
+  addressed type, be finite and use declared enum codes. `Op::inverse` turns a create into a delete of the same object and back, and
   swaps the before and after values of the others; the inverse of a create drops the source
   identifier. Applying a transaction's operations in order to its base reproduces its
   candidate, and applying their inverses in reverse order to the candidate reproduces the base.
-- **Savepoints.** `savepoint` marks the working set and the number of operations;
-  `rollback_to` restores both, truncating the operation list, and the transaction stays open;
-  `release` drops the savepoint and every later one and keeps the changes. Savepoints nest in
-  last-in, first-out order with the rules of working-set savepoints: a savepoint of another
-  transaction, or one released or invalidated by a rollback to or release of an earlier one,
-  fails with `doc.savepoint.invalid` and changes nothing.
-- **Limits.** `TxnLimits` holds the most operations (10 million, from the document model) and
-  a memory budget, by default the `memory_bytes` of `Limits::DEFAULT`. The budget counts an
-  estimate of what the operation list retains: the size of each operation and of the values,
-  texts and path it holds, also for the deleted object a snapshot still shares. The copied
-  chunks of the working set are not counted. An operation that would exceed either fails with
-  `doc.txn.limit_exceeded` (argument `limit`: `operations` or `memory_bytes`), and the
-  transaction stays usable and unchanged.
+- **Savepoints.** `savepoint` marks the working set, the number of operations and the memory
+  estimate; `rollback_to` restores all three, truncating the operation list, and the
+  transaction stays open; `release` drops the savepoint and every later one and keeps the
+  changes. Savepoints nest in last-in, first-out order with the rules of working-set
+  savepoints: a savepoint of another transaction, or one released or invalidated by a rollback
+  to or release of an earlier one, fails with `doc.savepoint.invalid` and changes nothing.
+- **Limits.** `TxnLimits` holds the most operations (`MAX_OPERATIONS`, 10 million, from the
+  document model), the most savepoints held at a time (`MAX_SAVEPOINTS`, 1,024) and a memory
+  budget, by default the `memory_bytes` of `Limits::DEFAULT`. The budget counts an estimate of
+  what the transaction retains: the size of each operation and of the values, texts and path it
+  holds, also for the deleted object a snapshot still shares; 64 bytes per entry of the touched
+  map each savepoint copies; and each object version a live savepoint keeps alive after an
+  operation replaced it (a version current at an older savepoint is current at every later one
+  until it is replaced, so the newest savepoint decides). A released savepoint stays charged.
+  The copied chunks and index nodes of the working set are not counted. An operation or
+  savepoint that would exceed a limit fails with `doc.txn.limit_exceeded` (argument `limit`:
+  `operations`, `savepoints` or `memory_bytes`), and the transaction stays usable and
+  unchanged.
+- **Deletion rules.** `apply_delete_rules(limits)` applies the relationship rules to the
+  transaction's deletions (see the next section) and appends what they change as operations:
+  one `Delete` per cascade deletion in order, then one `Modify` per cleared field, with the
+  same count and memory charges as the transaction's own operations, so that the operation list
+  still replays to the candidate and inverts to the base. Owning references are read from the
+  state each object had when the transaction deleted it. Any failure restores the working set,
+  the operations and the estimate; the transaction's savepoints stay valid. Commit runs it
+  before the reference check.
 - **Finishing.** `into_parts` hands the working set, the operations and the `TxnMeta` to
   commit, which validates and publishes; `abandon` drops everything. `TxnMeta` holds the
   transaction identifier, the parent transaction (none for the first of a new document), the
@@ -483,6 +506,7 @@ transaction is open per document at a time; the document executor enforces that,
   parameters, the label, the group and the selection after are opaque canonical JSON text
   written by the command layer, the history list, grouping and the application. A transaction
   is not published without validation, so `Txn` has no publishing method.
+
 ### References, relationship rules and the reverse index (CORE-DOC-008, CORE-DOC-009, CORE-DOC-010)
 
 - **Where references are.** A reference is a `reference` field, an element of a `list` of
@@ -508,26 +532,48 @@ transaction is open per document at a time; the document executor enforces that,
   any identifier, live or not, in ascending order of source and field: `O(log n)` to reach the
   first of them for `n` references in the document, then amortized constant time each.
   `Snapshot::reference_count` is the number of entries. The index records what fields hold;
-  validity is the commit check's concern.
-- **Deletion rules.** `integrity::apply_delete_rules(set, limits)` applies the rules to every
-  object of the base the working set deleted and to every object deleted on the way. A live
-  referrer whose field says `cascade`, and every object whose owner is deleted, is deleted. The
-  targets of the `owning` references of a deleted object are deleted unless a live object holds
-  an owning reference to them by now: this is the strength's commit-time rule. A live referrer
-  whose field says `block` fails the call with `doc.reference.delete_blocked`, naming the field
-  and, in details, the source and target, unless the cascades delete that referrer as well; a
-  live referrer whose field says `clear` loses the reference (an optional field becomes absent,
-  a list loses the element). Cascades run first with an explicit work list and visit each object
-  once, so chains of any length and cycles of owning references terminate; more than
-  `limits.record_count` cascade deletions fail with `doc.reference.cascade_limit`. Blocks and
-  clears are decided after the cascades, so the result does not depend on the order in which
-  referrers are visited. The rules follow the net change: the owning references of a deleted
-  object of the base are read from the base, and an object created and deleted in the same
-  working set leaves no rule to apply, so a reference to it dangles. The returned
-  `DeleteReport` lists the cascade deletions in order (type key and object before) and the
-  cleared objects (object before and the changed object fields; a list is named as a whole);
-  the journal records them as one `delete` per deletion, then one `modify` per cleared object,
-  after the transaction's own operations. Any failure restores the working set.
+  validity is the commit check's concern. A replacement within one major schema version
+  updates the entries of the owner, when it changed, and of the fields whose values differ, so
+  its cost follows the changed fields, not every reference of the object; a list that changes
+  length renumbers its later elements' entries. Each entry takes about 130 bytes (a tree node
+  and its field path).
+- **Deletion rules.** `Txn::apply_delete_rules` inside a transaction, and
+  `integrity::apply_delete_rules(set, limits)` on a working set without one, apply the rules to
+  every object of the base the working set deleted, to every object of the base it recreated
+  with another type key, and to every object deleted on the way. A live referrer whose field
+  says `cascade`, and every object whose owner is deleted, is deleted. The targets of the
+  `owning` references of a deleted object are deleted unless a live object holds an owning
+  reference to them by now: this is the strength's commit-time rule. The owning references
+  are read from the state the object had when it was deleted: from the transaction's `Delete`
+  operations of its identifier, except one that a create of the same type key follows (a
+  replacement keeps what the object owned), or, for a bare working set, which keeps no
+  intermediate state, from the base. A live referrer whose field says `block` fails the call with
+  `doc.reference.delete_blocked`, naming the field and, in details, the source and target,
+  unless the cascades delete that referrer as well; a live referrer whose field says `clear`
+  loses the reference (an optional field becomes absent, a list loses the element). Cascades
+  run first with an explicit work list and visit each object once, so chains of any length and
+  cycles of owning references terminate; more than `limits.record_count` cascade deletions fail
+  with `doc.reference.cascade_limit`. Blocks and clears are decided after the cascades, so the
+  result does not depend on the order in which referrers are visited. An object created and
+  deleted in the same working set leaves no rule to apply, so a reference to it dangles.
+- **Type changes.** An object recreated with another type key is a delete followed by a create
+  for the block, owning and header-owner rules: the targets the old object owned are deleted
+  unless a live object owns them, and the references to it that the base holds and the working
+  set kept (entries of the base's reverse index still present in the candidate) refuse with
+  `block` or, as header owners, take their objects along. Other references to it stay and must
+  allow the new type at the reference check. A bare working set compares the type keys of the
+  base and the candidate; a transaction counts a type change whenever one of the identifier's
+  deletes contributes a state, so the result does not depend on how often the rules run. An object recreated with the same type key keeps
+  its referrers, and the targets the old object owned stay, as when an owning reference is
+  replaced.
+- **Report.** The `DeleteReport` lists the cascade deletions in order (type key and object
+  before) and the cleared objects (object before and after and the changed object fields; a
+  list is named as a whole). `DeleteReport::operations` gives the operations that reproduce it:
+  one `Delete` per deletion, then one `Modify` per changed field of each cleared object, which
+  the transaction appends after its own operations. Any failure restores the working set and
+  keeps savepoints taken before the call valid. The rules cost time proportional to the
+  deleted objects, the references they hold, their referrers and the referrers of the objects
+  they own.
 - **Reference check.** `integrity::check_references(set)` runs after the deletion rules. Every
   reference held by a created, modified or recreated object, owner included, must name a live
   object whose type key the field allows (an empty list allows any type); no live object may
@@ -536,14 +582,19 @@ transaction is open per document at a time; the document executor enforces that,
   source and target. A `one` field without a reference or a `many` list longer than its bound
   fails with `doc.reference.cardinality` (the field schema check, which runs first, rejects both
   as well). An object that would be the target of two owning references fails with
-  `doc.reference.owner_conflict`, since an owned target has one owner. The check costs time
-  proportional to the touched objects, their references, the referrers of the targets of their
-  owning references and the referrers of deleted and recreated identifiers.
+  `doc.reference.owner_conflict`, since an owned target has one owner; the details name the
+  source, the target and the other owning reference (`owner`, `owner_field`), which may be
+  another element of the same list. Only owning references the working set added are checked
+  for conflicts, since the base passed the check: a reference counts as added unless the base
+  state of the same identifier holds it at the same field path. The check costs time
+  proportional to the touched objects, their references, the referrers of the targets of the
+  owning references they added and the referrers of deleted and recreated identifiers.
 - **Strengths.** `owning` has the rules above; `associative` and `informational` have no
   commit-time rule beyond their field's on-delete rule and the reference check (the dependency
   graph uses the former). Replacing an owning reference does not delete the target it no longer
   owns.
-- **Copying.** `relationship::copy_references(snapshot, mapping)` plans the values of copies:
+- **Copying.** The on-copy rule is not checked at commit: it is planned by
+  `relationship::copy_references(snapshot, mapping)`, which computes the values of copies:
   `mapping` maps each object being copied to its copy's identifier. A reference to an object
   copied too names its copy, whatever the rule, so a copied group stays connected; any other
   reference follows its on-copy rule: `copy_target` keeps the original and lists it in
@@ -748,7 +799,7 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.snapshot.stale` | `conflict` | A working set is published, but its base is no longer the published snapshot |
 | `doc.savepoint.invalid` | `invalid_input` | A savepoint belongs to another working set, or was released or invalidated |
 | `doc.path.invalid` | `invalid_input` | A field path does not resolve against an object's schema or does not reach a value of the object |
-| `doc.txn.limit_exceeded` | `limit_exceeded` | A transaction would exceed its operation count or memory budget |
+| `doc.txn.limit_exceeded` | `limit_exceeded` | A transaction would exceed its operation count, savepoint count or memory budget |
 | `doc.op.mismatch` | `conflict` | An operation is applied to a state that does not hold its before values |
 | `doc.reference.delete_blocked` | `conflict` | A deletion is refused by an on-delete `block` rule of a reference to a deleted object |
 | `doc.reference.cascade_limit` | `limit_exceeded` | On-delete cascades would delete more objects than `Limits::record_count` |

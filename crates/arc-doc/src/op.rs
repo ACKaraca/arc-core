@@ -14,6 +14,7 @@ use arc_base::{Error, ObjectId, Result};
 use crate::error::codes;
 use crate::schema::{
     FieldDecl, FieldPath, PathSegment, Schema, SchemaVersion, TypeKey, Value, ValueType,
+    check_value, count, options_bits_eq, prefix_field,
 };
 use crate::snapshot::{Flags, Header, Object, WorkingSet};
 use crate::store::Handle;
@@ -152,18 +153,38 @@ impl Op {
     /// Applies the operation to `set`. The state it applies to must hold the before values:
     /// a modified, relinked or deleted object must be live with exactly the recorded before
     /// state (and, for a delete, the recorded type and schema version), and a created
-    /// identifier must not be live. Otherwise the operation fails with `doc.op.mismatch`, or
-    /// with the code of the working set or path that refused it, and changes nothing.
+    /// identifier must not be live. Values compare bit for bit, so `0.0` and `-0.0` differ
+    /// ([`Value::bits_eq`]). Otherwise the operation fails with `doc.op.mismatch`, or with the
+    /// code of the working set or path that refused it, and changes nothing.
+    ///
+    /// An operation may come from a journal or recovery file, so what it writes is checked like
+    /// the operations of a [`crate::txn::Txn`]: a create needs a registered type and schema
+    /// version and one value per field of that schema, and every written value must have the
+    /// addressed type, be finite and use declared enum codes (`doc.type.unknown`,
+    /// `doc.value.type_mismatch`, `doc.value.not_finite`, `doc.value.out_of_range`). Required
+    /// fields, bounds, references and validators remain the concern of commit validation.
     pub fn apply(&self, set: &mut WorkingSet) -> Result<()> {
         match self {
             Self::Create {
                 type_key, object, ..
-            } => set.create(type_key.as_str(), (**object).clone()).map(drop),
+            } => {
+                let decl = set
+                    .current()
+                    .registry()
+                    .get(type_key.as_str())
+                    .ok_or_else(|| unknown_type(type_key.as_str()))?;
+                let schema = decl
+                    .schema(object.version.major)
+                    .ok_or_else(|| unknown_type(type_key.as_str()))?;
+                check_shape(&schema.fields, &object.values)?;
+                set.create_shared(type_key.as_str(), Arc::clone(object))
+                    .map(drop)
+            }
             Self::Delete { type_key, object } => {
                 let handle = set.current().resolve(object.id)?;
                 let current = set.current().get(handle)?;
                 let same_type = set.current().type_key(handle) == Some(type_key);
-                if !same_type || !(Arc::ptr_eq(current, object) || **current == **object) {
+                if !same_type || !(Arc::ptr_eq(current, object) || same_object(current, object)) {
                     return Err(mismatch(object.id));
                 }
                 set.delete(handle).map(drop)
@@ -175,8 +196,14 @@ impl Op {
                 before,
                 after,
             } => {
+                check_write(set, *id, path, after.as_ref())?;
                 let found = modified(set, *id, path, after.clone())?;
-                if found.version != *version || found.before != *before {
+                if found.version != *version
+                    || !options_bits_eq(
+                        std::slice::from_ref(&found.before),
+                        std::slice::from_ref(before),
+                    )
+                {
                     return Err(mismatch(*id));
                 }
                 set.replace_values(found.handle, found.values).map(drop)
@@ -202,6 +229,93 @@ impl Op {
             }
         }
     }
+}
+
+/// Checks a write of `value` at `path` of the live object `id` of `set`: the path resolves, and
+/// the value has the addressed type, is finite and uses declared enum codes, nested records
+/// checked in full. Making a required field of a nested record absent fails with
+/// `doc.value.missing` for the same reason; the object's own required fields are checked at
+/// commit.
+pub(crate) fn check_write(
+    set: &WorkingSet,
+    id: ObjectId,
+    path: &FieldPath,
+    value: Option<&Value>,
+) -> Result<()> {
+    let (handle, object) = live(set, id)?;
+    let schema = schema_of(set, handle, &object)?;
+    let value_type = path.resolve(schema).ok_or_else(|| path_invalid(path))?;
+    match value {
+        Some(value) => check_value(value_type, None, value)
+            .map_err(|error| prefix_field(error, &path.to_string())),
+        None if nested_required(schema, path) => {
+            Err(Error::new(codes::VALUE_MISSING).with_arg("field", path.to_string()))
+        }
+        None => Ok(()),
+    }
+}
+
+/// True when `path` ends at a required field of a nested record. The walk is as long as the
+/// path, which has resolved against the schema.
+fn nested_required(schema: &Schema, path: &FieldPath) -> bool {
+    let mut current: Option<&ValueType> = None;
+    let mut required = false;
+    for segment in path.segments() {
+        match segment {
+            PathSegment::Field(name) => {
+                let fields = match current {
+                    None => schema.fields.as_slice(),
+                    Some(ValueType::Record(fields)) => fields.as_slice(),
+                    Some(_) => return false,
+                };
+                let Some(decl) = fields.iter().find(|field| field.name == *name) else {
+                    return false;
+                };
+                required = current.is_some() && !decl.optional;
+                current = Some(&decl.value_type);
+            }
+            PathSegment::Index(_) | PathSegment::Key(_) => {
+                required = false;
+                current = match current {
+                    Some(ValueType::List(element) | ValueType::Map(element)) => Some(element),
+                    _ => return false,
+                };
+            }
+        }
+    }
+    required
+}
+
+/// True when two objects are equal with values compared bit for bit.
+fn same_object(a: &Object, b: &Object) -> bool {
+    a.id == b.id
+        && a.version == b.version
+        && a.header == b.header
+        && options_bits_eq(&a.values, &b.values)
+}
+
+fn unknown_type(key: &str) -> Error {
+    Error::new(codes::TYPE_UNKNOWN).with_arg("type", key)
+}
+
+/// One entry per field, each present value of its field's type (bounds aside).
+pub(crate) fn check_shape(fields: &[FieldDecl], values: &[Option<Value>]) -> Result<()> {
+    if fields.len() != values.len() {
+        let field = fields
+            .get(values.len())
+            .map_or_else(|| fields.len().to_string(), |field| field.name.clone());
+        return Err(Error::new(codes::VALUE_TYPE_MISMATCH)
+            .with_arg("field", field)
+            .with_detail("expected_fields", count(fields.len()))
+            .with_detail("actual_fields", count(values.len())));
+    }
+    for (field, value) in fields.iter().zip(values) {
+        if let Some(value) = value {
+            check_value(&field.value_type, None, value)
+                .map_err(|error| prefix_field(error, &field.name))?;
+        }
+    }
+    Ok(())
 }
 
 fn mismatch(id: ObjectId) -> Error {
@@ -242,7 +356,7 @@ pub(crate) fn schema_of<'a>(
         .registry()
         .get(key.as_str())
         .and_then(|decl| decl.schema(object.version.major))
-        .ok_or_else(|| Error::new(codes::TYPE_UNKNOWN).with_arg("type", key.as_str()))
+        .ok_or_else(|| unknown_type(key.as_str()))
 }
 
 /// An object's values with one value written, from [`modified`].

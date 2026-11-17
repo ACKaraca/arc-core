@@ -11,13 +11,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arc_base::id::Identifier;
-use arc_base::{Limits, ObjectId};
+use arc_base::{Limits, ObjectId, SessionId, TransactionId};
 use arc_doc::relationship::copy_references;
 use arc_doc::{
     Cardinality, FieldDecl, FieldPath, Header, Object, OnCopy, OnDelete, ReferenceField,
     ReferenceSpec, RelationshipRule, Schema, SchemaVersion, Snapshot, Strength, TypeDecl, TypeKey,
     TypeRegistry, Value, ValueType, WorkingSet, apply_delete_rules, check_references,
 };
+use arc_doc::{Op, Txn, TxnLimits, TxnMeta};
 
 fn key(text: &str) -> TypeKey {
     TypeKey::new(text).unwrap()
@@ -335,22 +336,50 @@ fn a_recreated_identifier_must_keep_a_type_its_referrers_allow() {
         (
             2,
             N {
+                parent: Some(1),
+                ..N::default()
+            },
+        ),
+        (
+            3,
+            N {
                 pin: Some(1),
                 ..N::default()
             },
         ),
     ]);
+    // A type change is a delete for the block rule.
     let mut set = WorkingSet::new(&snapshot);
     delete(&mut set, 1);
     set.create("test.leaf", leaf(1)).unwrap();
+    let before = state(&set);
+    let error = apply_delete_rules(&mut set, &Limits::DEFAULT).unwrap_err();
+    assert_eq!(error.code(), "doc.reference.delete_blocked");
+    assert_eq!(detail(&error, "field"), "pin");
+    assert_eq!(state(&set), before);
+    // Without the block, the cascade rule of `parent` does not apply to a recreation: the
+    // referrer must allow the new type, and `parent` allows nodes only.
+    let mut set = WorkingSet::new(&snapshot);
+    delete(&mut set, 3);
+    delete(&mut set, 1);
+    set.create("test.leaf", leaf(1)).unwrap();
     let report = apply_delete_rules(&mut set, &Limits::DEFAULT).unwrap();
-    assert!(report.is_empty(), "a recreated object is not deleted");
+    assert!(
+        report.is_empty(),
+        "a recreated object's referrers are not deleted"
+    );
     let error = check_references(&set).unwrap_err();
     assert_eq!(error.code(), "doc.reference.dangling");
-    assert_eq!(detail(&error, "field"), "pin");
+    assert_eq!(detail(&error, "field"), "parent");
+    // A recreation with the same type keeps every referrer valid.
     let mut set = WorkingSet::new(&snapshot);
     delete(&mut set, 1);
     set.create("test.node", node(1, N::default())).unwrap();
+    assert!(
+        apply_delete_rules(&mut set, &Limits::DEFAULT)
+            .unwrap()
+            .is_empty()
+    );
     check_references(&set).unwrap();
 }
 
@@ -675,10 +704,46 @@ fn an_object_has_at_most_one_owning_reference() {
         ..N::default()
     };
     set.replace_values(handle, node(1, twice).values).unwrap();
-    assert_eq!(
-        check_references(&set).unwrap_err().code(),
-        "doc.reference.owner_conflict"
-    );
+    let error = check_references(&set).unwrap_err();
+    assert_eq!(error.code(), "doc.reference.owner_conflict");
+    // The other owning reference is a list element of the same object.
+    assert_eq!(detail(&error, "field"), "owns[1]");
+    assert_eq!(detail(&error, "owner"), id(1).to_string());
+    assert_eq!(detail(&error, "owner_field"), "owns[0]");
+}
+
+#[test]
+fn only_owning_references_the_working_set_added_are_checked_for_conflicts() {
+    // A base that holds a conflict (built without the check): an unrelated change of one owner
+    // does not look at the owner's unchanged owning references again.
+    let mut set = WorkingSet::new(&Snapshot::empty(registry()));
+    for n in [1, 2] {
+        let owner = N {
+            owns: vec![3],
+            ..N::default()
+        };
+        set.create("test.node", node(n, owner)).unwrap();
+    }
+    set.create("test.node", node(3, N::default())).unwrap();
+    let snapshot = set.current().clone();
+    let mut set = WorkingSet::new(&snapshot);
+    let handle = set.current().resolve(id(1)).unwrap();
+    let linked = N {
+        owns: vec![3],
+        link: Some(2),
+        ..N::default()
+    };
+    set.replace_values(handle, node(1, linked).values).unwrap();
+    check_references(&set).unwrap();
+    // Moving the owning reference to another list position adds it.
+    let moved = N {
+        owns: vec![2, 3],
+        ..N::default()
+    };
+    set.replace_values(handle, node(1, moved).values).unwrap();
+    let error = check_references(&set).unwrap_err();
+    assert_eq!(error.code(), "doc.reference.owner_conflict");
+    assert_eq!(detail(&error, "field"), "owns[1]");
 }
 
 #[test]
@@ -798,4 +863,302 @@ fn copies_follow_the_on_copy_rules() {
         copy_references(&snapshot, &missing).unwrap_err().code(),
         "doc.object.not_found"
     );
+}
+
+fn open(snapshot: &Snapshot) -> Txn {
+    let meta = TxnMeta::new(TransactionId::from_u128(1), SessionId::from_u128(1));
+    Txn::new(snapshot, meta, TxnLimits::default())
+}
+
+/// The objects of a snapshot by identifier, with type keys.
+fn objects(snapshot: &Snapshot) -> Vec<(String, Arc<Object>)> {
+    snapshot
+        .iter()
+        .map(|(handle, object)| {
+            let key = snapshot.type_key(handle).unwrap().to_string();
+            (key, Arc::clone(object))
+        })
+        .collect()
+}
+
+/// Replays `ops` on `base` and their inverses on the result.
+fn replay(base: &Snapshot, ops: &[Op]) -> (Snapshot, Snapshot) {
+    let mut forward = WorkingSet::new(base);
+    for op in ops {
+        op.apply(&mut forward).unwrap();
+    }
+    let candidate = forward.current().clone();
+    let mut backward = WorkingSet::new(&candidate);
+    for op in ops.iter().rev().map(Op::inverse) {
+        op.apply(&mut backward).unwrap();
+    }
+    (candidate, backward.current().clone())
+}
+
+#[test]
+fn a_transaction_records_the_operations_of_its_delete_rules() {
+    let snapshot = base(vec![
+        (
+            1,
+            N {
+                owns: vec![7],
+                ..N::default()
+            },
+        ),
+        (
+            2,
+            N {
+                parent: Some(1),
+                ..N::default()
+            },
+        ),
+        (
+            3,
+            N {
+                link: Some(1),
+                items: vec![1, 2, 7],
+                ..N::default()
+            },
+        ),
+        (
+            6,
+            N {
+                owner: Some(1),
+                ..N::default()
+            },
+        ),
+        (7, N::default()),
+    ]);
+    let mut txn = open(&snapshot);
+    txn.modify(
+        id(3),
+        FieldPath::new("items").index(0),
+        Some(Value::Reference(id(1))),
+    )
+    .unwrap();
+    txn.delete(id(1)).unwrap();
+    let report = txn.apply_delete_rules(&Limits::DEFAULT).unwrap();
+    assert_eq!(
+        report.deleted.len(),
+        3,
+        "the owned 7, the child 2 and the owned 6"
+    );
+    assert_eq!(report.cleared.len(), 1);
+    assert_eq!(live(txn.snapshot()), [3]);
+    assert_eq!(txn.ops().len(), 2 + report.operations().len());
+    assert_eq!(&txn.ops()[2..], report.operations().as_slice());
+    let (candidate, back) = replay(&snapshot, txn.ops());
+    assert_eq!(objects(&candidate), objects(txn.snapshot()));
+    assert_eq!(objects(&back), objects(&snapshot));
+    check_references(&txn.into_parts().set).unwrap();
+}
+
+#[test]
+fn a_failed_rule_run_restores_the_transaction() {
+    let snapshot = base(vec![
+        (1, N::default()),
+        (
+            2,
+            N {
+                parent: Some(1),
+                ..N::default()
+            },
+        ),
+        (
+            3,
+            N {
+                parent: Some(2),
+                ..N::default()
+            },
+        ),
+        (
+            4,
+            N {
+                pin: Some(1),
+                ..N::default()
+            },
+        ),
+    ]);
+    let limits = TxnLimits {
+        operations: 2,
+        ..TxnLimits::default()
+    };
+    let meta = TxnMeta::new(TransactionId::from_u128(1), SessionId::from_u128(1));
+    let mut txn = Txn::new(&snapshot, meta, limits);
+    let savepoint = txn.savepoint().unwrap();
+    txn.delete(id(4)).unwrap();
+    txn.delete(id(1)).unwrap();
+    let before = (
+        objects(txn.snapshot()),
+        txn.ops().to_vec(),
+        txn.memory_bytes(),
+    );
+    let error = txn.apply_delete_rules(&Limits::DEFAULT).unwrap_err();
+    assert_eq!(error.code(), "doc.txn.limit_exceeded");
+    let after = (
+        objects(txn.snapshot()),
+        txn.ops().to_vec(),
+        txn.memory_bytes(),
+    );
+    assert_eq!(before, after);
+    // A block fails the same way, and the savepoint survives both.
+    txn.rollback_to(&savepoint).unwrap();
+    txn.delete(id(1)).unwrap();
+    let error = txn.apply_delete_rules(&Limits::DEFAULT).unwrap_err();
+    assert_eq!(error.code(), "doc.reference.delete_blocked");
+    assert_eq!(txn.ops().len(), 1);
+    txn.rollback_to(&savepoint).unwrap();
+    assert!(txn.ops().is_empty());
+}
+
+#[test]
+fn owning_rules_follow_the_state_when_deleted() {
+    // 1 owns nothing in the base, takes 2 and is deleted: 2 goes with it.
+    let snapshot = base(vec![(1, N::default()), (2, N::default())]);
+    let takes = N {
+        owns: vec![2],
+        ..N::default()
+    };
+    let mut txn = open(&snapshot);
+    txn.modify(
+        id(1),
+        FieldPath::new("owns"),
+        node(1, takes.clone()).values[4].clone(),
+    )
+    .unwrap();
+    txn.delete(id(1)).unwrap();
+    txn.apply_delete_rules(&Limits::DEFAULT).unwrap();
+    assert!(live(txn.snapshot()).is_empty());
+    let (candidate, back) = replay(&snapshot, txn.ops());
+    assert_eq!(objects(&candidate), objects(txn.snapshot()));
+    assert_eq!(objects(&back), objects(&snapshot));
+    // A bare working set reads the base, where 1 owned nothing.
+    let mut set = WorkingSet::new(&snapshot);
+    let handle = set.current().resolve(id(1)).unwrap();
+    set.replace_values(handle, node(1, takes).values).unwrap();
+    delete(&mut set, 1);
+    assert!(
+        apply_delete_rules(&mut set, &Limits::DEFAULT)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(live(set.current()), [2]);
+
+    // 1 owns 2 in the base, lets it go and is deleted: 2 stays.
+    let snapshot = base(vec![
+        (
+            1,
+            N {
+                owns: vec![2],
+                ..N::default()
+            },
+        ),
+        (2, N::default()),
+    ]);
+    let mut txn = open(&snapshot);
+    txn.modify(id(1), FieldPath::new("owns"), Some(Value::List(vec![])))
+        .unwrap();
+    txn.delete(id(1)).unwrap();
+    assert!(txn.apply_delete_rules(&Limits::DEFAULT).unwrap().is_empty());
+    assert_eq!(live(txn.snapshot()), [2]);
+}
+
+#[test]
+fn a_type_change_deletes_what_the_old_object_owned() {
+    let snapshot = base(vec![
+        (
+            1,
+            N {
+                owns: vec![4],
+                ..N::default()
+            },
+        ),
+        (
+            3,
+            N {
+                owner: Some(1),
+                ..N::default()
+            },
+        ),
+        (4, N::default()),
+    ]);
+    let mut txn = open(&snapshot);
+    txn.delete(id(1)).unwrap();
+    txn.create("test.leaf", id(1), Header::default(), vec![None])
+        .unwrap();
+    // A child the transaction gives to the new object stays.
+    txn.create(
+        "test.node",
+        id(5),
+        Header {
+            owner: Some(id(1)),
+            ..Header::default()
+        },
+        node(5, N::default()).values,
+    )
+    .unwrap();
+    let report = txn.apply_delete_rules(&Limits::DEFAULT).unwrap();
+    assert_eq!(report.deleted.len(), 2, "the owned 4 and the child 3");
+    assert_eq!(live(txn.snapshot()), [1, 5]);
+    let (candidate, back) = replay(&snapshot, txn.ops());
+    assert_eq!(objects(&candidate), objects(txn.snapshot()));
+    assert_eq!(objects(&back), objects(&snapshot));
+    check_references(&txn.into_parts().set).unwrap();
+
+    // The same type keeps children and owned targets the new object does not own.
+    let mut txn = open(&snapshot);
+    txn.delete(id(1)).unwrap();
+    txn.create(
+        "test.node",
+        id(1),
+        Header::default(),
+        node(1, N::default()).values,
+    )
+    .unwrap();
+    assert!(txn.apply_delete_rules(&Limits::DEFAULT).unwrap().is_empty());
+    assert_eq!(live(txn.snapshot()), [1, 3, 4]);
+    check_references(&txn.into_parts().set).unwrap();
+}
+
+#[test]
+fn a_type_change_anywhere_in_a_transaction_counts_once_and_for_all() {
+    // 1 owns 4. The transaction turns 1 into a leaf and back into a node that owns nothing:
+    // the intermediate type change is a delete of what the old node owned, and running the
+    // rules again changes nothing more.
+    let snapshot = base(vec![
+        (
+            1,
+            N {
+                owns: vec![4],
+                ..N::default()
+            },
+        ),
+        (4, N::default()),
+    ]);
+    let mut txn = open(&snapshot);
+    txn.delete(id(1)).unwrap();
+    txn.create("test.leaf", id(1), Header::default(), vec![None])
+        .unwrap();
+    txn.delete(id(1)).unwrap();
+    txn.create(
+        "test.node",
+        id(1),
+        Header::default(),
+        node(1, N::default()).values,
+    )
+    .unwrap();
+    let report = txn.apply_delete_rules(&Limits::DEFAULT).unwrap();
+    assert_eq!(report.deleted.len(), 1);
+    assert_eq!(live(txn.snapshot()), [1]);
+    assert!(txn.apply_delete_rules(&Limits::DEFAULT).unwrap().is_empty());
+    // A bare working set sees only the net change: the same type, so 4 stays.
+    let mut set = WorkingSet::new(&snapshot);
+    delete(&mut set, 1);
+    set.create("test.node", node(1, N::default())).unwrap();
+    assert!(
+        apply_delete_rules(&mut set, &Limits::DEFAULT)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(live(set.current()), [1, 4]);
 }

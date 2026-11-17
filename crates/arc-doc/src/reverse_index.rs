@@ -19,7 +19,7 @@ use arc_base::ObjectId;
 use arc_base::id::Identifier;
 
 use crate::registry::TypeRegistry;
-use crate::relationship::{ReferenceField, references};
+use crate::relationship::{Reference, ReferenceField, changed_references, references};
 use crate::snapshot::{Object, Snapshot};
 
 const SHARDS: usize = 64;
@@ -73,7 +73,9 @@ fn shard_of(target: ObjectId) -> usize {
 
 impl ReverseIndex {
     /// Applies the change of one object from `old` to `new` (either absent for a create or a
-    /// delete): removes the references only `old` holds and adds those only `new` holds.
+    /// delete): removes the references only `old` holds and adds those only `new` holds. A
+    /// replacement within one major schema version walks only the owner, if it changed, and
+    /// the fields whose values differ.
     pub(crate) fn update(
         &mut self,
         registry: &TypeRegistry,
@@ -81,10 +83,19 @@ impl ReverseIndex {
         old: Option<&Object>,
         new: Option<&Object>,
     ) {
-        let entries = |object: Option<&Object>| {
-            let mut entries: Vec<(ObjectId, ReferenceField)> = object
+        let all = |object: Option<&Object>| {
+            object
                 .map(|object| references(registry, type_key, object))
                 .unwrap_or_default()
+        };
+        let (before, after) = match (old, new) {
+            (Some(old), Some(new)) if old.version.major == new.version.major => {
+                changed_references(registry, type_key, old, new)
+            }
+            _ => (all(old), all(new)),
+        };
+        let entries = |found: Vec<Reference<'_>>| {
+            let mut entries: Vec<(ObjectId, ReferenceField)> = found
                 .into_iter()
                 .map(|reference| (reference.target, reference.field))
                 .collect();
@@ -92,7 +103,7 @@ impl ReverseIndex {
             entries.dedup();
             entries
         };
-        let (before, after) = (entries(old), entries(new));
+        let (before, after) = (entries(before), entries(after));
         if before == after {
             return;
         }
@@ -423,6 +434,68 @@ mod tests {
         ));
         assert_eq!(before.referrers(id(7)).count(), 5_000);
         assert_eq!(index.referrers(id(7)).count(), 5_001);
+    }
+
+    #[test]
+    fn a_write_walks_only_the_fields_it_changes() {
+        use crate::registry::TypeRegistry;
+        use crate::schema::{
+            Cardinality, FieldDecl, OnCopy, OnDelete, ReferenceSpec, RelationshipRule, Schema,
+            SchemaVersion, Strength, TypeDecl, TypeKey, Value, ValueType,
+        };
+        use crate::snapshot::{Header, Snapshot, WorkingSet};
+
+        let reference = ValueType::Reference(ReferenceSpec {
+            targets: Vec::new(),
+            rule: RelationshipRule {
+                strength: Strength::Associative,
+                on_delete: OnDelete::Clear,
+                on_copy: OnCopy::ShareTarget,
+                cardinality: Cardinality::Many { max: 100_000 },
+            },
+        });
+        let schema = Schema::new(
+            SchemaVersion::new(1, 0),
+            vec![
+                FieldDecl::new("n", ValueType::I64),
+                FieldDecl::new("refs", ValueType::List(Box::new(reference))),
+            ],
+        );
+        let mut registry = TypeRegistry::new();
+        registry
+            .register(TypeDecl::new(TypeKey::new("test.a").unwrap(), schema))
+            .unwrap();
+        let refs = Value::List((0..100_000).map(|n| Value::Reference(id(n % 7))).collect());
+        let mut set = WorkingSet::new(&Snapshot::empty(Arc::new(registry)));
+        let object = Object::new(
+            id(1_000),
+            SchemaVersion::new(1, 0),
+            Header::default(),
+            vec![Some(Value::I64(0)), Some(refs.clone())],
+        );
+        let handle = set.create("test.a", object).unwrap();
+        let first = set.current().clone();
+        assert_eq!(first.reference_count(), 100_000);
+        let mut set = WorkingSet::new(&first);
+        set.replace_values(handle, vec![Some(Value::I64(1)), Some(refs)])
+            .unwrap();
+        let header = Header {
+            name: Some("x".into()),
+            ..Header::default()
+        };
+        set.replace_header(handle, header).unwrap();
+        // Neither write touched the index: the shard table is still the base's.
+        assert!(Arc::ptr_eq(
+            &first.reverse().shards,
+            &set.current().reverse().shards
+        ));
+        let owner = Header {
+            owner: Some(id(3)),
+            ..Header::default()
+        };
+        set.replace_header(handle, owner).unwrap();
+        assert_eq!(set.current().reference_count(), 100_001);
+        assert_eq!(set.current().referrers(id(3)).count(), 100_000 / 7 + 2);
     }
 
     proptest! {

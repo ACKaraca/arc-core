@@ -18,7 +18,7 @@ use crate::error::codes;
 use crate::registry::TypeRegistry;
 use crate::schema::{
     Cardinality, FieldDecl, FieldPath, OnCopy, OnDelete, ReferenceSpec, RelationshipRule, Strength,
-    TypeKey, Value, ValueType,
+    TypeKey, Value, ValueType, options_bits_eq,
 };
 use crate::snapshot::{Header, Object, Snapshot};
 
@@ -106,6 +106,47 @@ pub(crate) fn references_and_cardinality<'a>(
     }
     walk.fields(fields_of(registry, type_key, object), &object.values, None);
     (walk.found, walk.violation)
+}
+
+/// The references that differ between two states of one object of type `type_key` with the
+/// same major schema version: those `old` holds and those `new` holds in the header owner, if it
+/// changed, and in the reference-holding fields whose values differ. Unchanged fields are
+/// compared but not walked, so the cost is proportional to the changed fields, not to every
+/// reference the object holds.
+pub(crate) fn changed_references<'a>(
+    registry: &'a TypeRegistry,
+    type_key: &str,
+    old: &Object,
+    new: &Object,
+) -> (Vec<Reference<'a>>, Vec<Reference<'a>>) {
+    let (mut before, mut after) = (Walk::default(), Walk::default());
+    if old.header.owner != new.header.owner {
+        for (walk, owner) in [
+            (&mut before, old.header.owner),
+            (&mut after, new.header.owner),
+        ] {
+            if let Some(target) = owner {
+                walk.found.push(Reference {
+                    field: ReferenceField::Owner,
+                    target,
+                    spec: &OWNER_SPEC,
+                });
+            }
+        }
+    }
+    let fields = fields_of(registry, type_key, new);
+    for (at, field) in fields.iter().enumerate() {
+        let (Some(was), Some(is)) = (old.values.get(at..=at), new.values.get(at..=at)) else {
+            continue;
+        };
+        if !has_reference(&field.value_type) || was == is {
+            continue;
+        }
+        let field = std::slice::from_ref(field);
+        before.fields(field, was, None);
+        after.fields(field, is, None);
+    }
+    (before.found, after.found)
 }
 
 /// The spec of the reference at `field` of `object`, or `None` when the path does not address a
@@ -293,7 +334,9 @@ pub(crate) fn changed_fields(
     fields
         .iter()
         .zip(before.iter().zip(after))
-        .filter(|(_, (before, after))| before != after)
+        .filter(|(_, (before, after))| {
+            !options_bits_eq(std::slice::from_ref(*before), std::slice::from_ref(*after))
+        })
         .map(|(field, _)| FieldPath::new(field.name.as_str()))
         .collect()
 }

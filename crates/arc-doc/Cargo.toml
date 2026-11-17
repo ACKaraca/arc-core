@@ -1,6 +1,6 @@
 [package]
 name = "arc-doc"
-description = "The document store of the Arc suite: type registry, field descriptors, payload codec, typed stores and snapshots."
+description = "The document store of the Arc suite: type registry, field descriptors, payload codec, typed stores, snapshots, transactions, relationship rules and the reverse reference index."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -2,7 +2,8 @@
 //! operation sequences with savepoints, rollbacks, releases and an operation limit are compared
 //! against a reference model after every step; at the end the recorded operations replayed on
 //! the base reproduce the candidate, and their inverses replayed in reverse on the candidate
-//! reproduce the base.
+//! reproduce the base. The two types have different schemas, so creating an identifier again
+//! with the other type changes its type; one of them nests a record with a list.
 
 #![allow(
     clippy::unwrap_used,
@@ -25,15 +26,21 @@ const KEYS: [&str; 2] = ["test.a", "test.b"];
 
 fn registry() -> Arc<TypeRegistry> {
     let mut registry = TypeRegistry::new();
-    for key in KEYS {
-        let schema = Schema::new(
-            SchemaVersion::new(1, 0),
-            vec![
-                FieldDecl::new("n", ValueType::I64),
-                FieldDecl::new("tags", ValueType::Map(Box::new(ValueType::I64))).optional(),
-                FieldDecl::new("items", ValueType::List(Box::new(ValueType::I64))),
-            ],
-        );
+    let a = vec![
+        FieldDecl::new("n", ValueType::I64),
+        FieldDecl::new("tags", ValueType::Map(Box::new(ValueType::I64))).optional(),
+        FieldDecl::new("items", ValueType::List(Box::new(ValueType::I64))),
+    ];
+    let record = ValueType::Record(vec![
+        FieldDecl::new("x", ValueType::F64).optional(),
+        FieldDecl::new("l", ValueType::List(Box::new(ValueType::I64))),
+    ]);
+    let b = vec![
+        FieldDecl::new("n", ValueType::I64),
+        FieldDecl::new("rec", record).optional(),
+    ];
+    for (key, fields) in KEYS.into_iter().zip([a, b]) {
+        let schema = Schema::new(SchemaVersion::new(1, 0), fields);
         registry
             .register(TypeDecl::new(TypeKey::new(key).unwrap(), schema))
             .unwrap();
@@ -57,12 +64,34 @@ fn state(snapshot: &Snapshot) -> State {
         .collect()
 }
 
-fn values(n: i64, tags: bool, items: u8) -> Vec<Option<Value>> {
-    vec![
-        Some(Value::I64(n)),
-        tags.then(|| Value::Map(BTreeMap::new())),
-        Some(Value::List((0..i64::from(items)).map(Value::I64).collect())),
-    ]
+/// The state in a form that tells `0.0` from `-0.0`.
+fn bits(state: &State) -> String {
+    format!("{state:?}")
+}
+
+fn values(kind: usize, n: i64, tags: bool, items: u8) -> Vec<Option<Value>> {
+    let list = Value::List((0..i64::from(items)).map(Value::I64).collect());
+    if kind == 0 {
+        vec![
+            Some(Value::I64(n)),
+            tags.then(|| Value::Map(BTreeMap::new())),
+            Some(list),
+        ]
+    } else {
+        let x = (n % 3 == 0).then_some(Value::F64(if n < 0 { -0.0 } else { 0.0 }));
+        vec![
+            Some(Value::I64(n)),
+            tags.then_some(Value::Record(vec![x, Some(list)])),
+        ]
+    }
+}
+
+/// The record of a `test.b` object in the model, if the object is one and has it.
+fn record(entry: &mut (String, Header, Vec<Option<Value>>)) -> Option<&mut Vec<Option<Value>>> {
+    match (entry.0.as_str(), entry.2.get_mut(1)) {
+        ("test.b", Some(Some(Value::Record(values)))) => Some(values),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +117,15 @@ enum Step {
         value: Option<i64>,
     },
     SetItem {
+        pick: usize,
+        index: u8,
+        n: i64,
+    },
+    SetRecX {
+        pick: usize,
+        x: Option<i8>,
+    },
+    SetRecItem {
         pick: usize,
         index: u8,
         n: i64,
@@ -122,6 +160,8 @@ fn step() -> impl Strategy<Value = Step> {
         2 => (pick, 0..3_u8, prop::option::of(any::<i64>()))
             .prop_map(|(pick, key, value)| Step::SetTag { pick, key, value }),
         2 => (pick, 0..3_u8, any::<i64>()).prop_map(|(pick, index, n)| Step::SetItem { pick, index, n }),
+        2 => (pick, prop::option::of(any::<i8>())).prop_map(|(pick, x)| Step::SetRecX { pick, x }),
+        2 => (pick, 0..3_u8, any::<i64>()).prop_map(|(pick, index, n)| Step::SetRecItem { pick, index, n }),
         1 => (pick, prop::option::of(any::<u8>())).prop_map(|(pick, name)| Step::Rename { pick, name }),
         1 => (pick, prop::option::of(any::<usize>())).prop_map(|(pick, owner)| Step::Relink { pick, owner }),
         2 => pick.prop_map(|pick| Step::Delete { pick }),
@@ -145,7 +185,7 @@ fn base() -> Snapshot {
                 ObjectId::from_u128(u128::from(n) + 1),
                 SchemaVersion::new(1, 0),
                 Header::default(),
-                values(i64::from(n), n % 2 == 0, n),
+                values(0, i64::from(n), n % 2 == 0, n),
             ),
         )
         .unwrap();
@@ -178,9 +218,9 @@ impl Harness {
                 n,
                 tags,
                 items,
-            } => self.create(id, kind, values(n, tags, items)),
+            } => self.create(id, kind, values(kind, n, tags, items)),
             Step::Savepoint => {
-                self.taken.push(self.txn.savepoint());
+                self.taken.push(self.txn.savepoint().unwrap());
                 self.live
                     .push((self.taken.len() - 1, self.model.clone(), self.ops));
                 return;
@@ -264,6 +304,8 @@ impl Harness {
             | Step::SetTags { pick, .. }
             | Step::SetTag { pick, .. }
             | Step::SetItem { pick, .. }
+            | Step::SetRecX { pick, .. }
+            | Step::SetRecItem { pick, .. }
             | Step::Rename { pick, .. }
             | Step::Relink { pick, .. }
             | Step::Delete { pick } => *pick,
@@ -281,13 +323,33 @@ impl Harness {
             }
             Step::SetTags { present, .. } => {
                 let value = present.then(|| Value::Map(BTreeMap::new()));
-                entry.2[1] = value.clone();
-                (txn.modify(id, FieldPath::new("tags"), value), true)
+                let ok = entry.0 == "test.a";
+                if ok {
+                    entry.2[1] = value.clone();
+                }
+                (txn.modify(id, FieldPath::new("tags"), value), ok)
+            }
+            Step::SetRecX { x, .. } => {
+                // Negative zero and zero differ bitwise and both occur.
+                let value = x.map(|x| Value::F64(f64::from(x) * if x < 0 { 0.0 } else { 1.0 }));
+                let ok = record(entry)
+                    .map(|values| values[0] = value.clone())
+                    .is_some();
+                (txn.modify(id, FieldPath::new("rec").field("x"), value), ok)
+            }
+            Step::SetRecItem { index, n, .. } => {
+                let item = record(entry).and_then(|values| match &mut values[1] {
+                    Some(Value::List(items)) => items.get_mut(usize::from(index)),
+                    _ => None,
+                });
+                let ok = item.map(|item| *item = Value::I64(n)).is_some();
+                let path = FieldPath::new("rec").field("l").index(u64::from(index));
+                (txn.modify(id, path, Some(Value::I64(n))), ok)
             }
             Step::SetTag { key, value, .. } => {
                 let key = key.to_string();
                 let ok = match &mut entry.2[1] {
-                    Some(Value::Map(map)) => {
+                    Some(Value::Map(map)) if entry.0 == "test.a" => {
                         match value {
                             Some(v) => map.insert(key.clone(), Value::I64(v)),
                             None => map.remove(&key),
@@ -300,8 +362,8 @@ impl Harness {
                 (txn.modify(id, path, value.map(Value::I64)), ok)
             }
             Step::SetItem { index, n, .. } => {
-                let item = match &mut entry.2[2] {
-                    Some(Value::List(items)) => items.get_mut(usize::from(index)),
+                let item = match entry.2.get_mut(2) {
+                    Some(Some(Value::List(items))) => items.get_mut(usize::from(index)),
                     _ => None,
                 };
                 let ok = item.map(|item| *item = Value::I64(n)).is_some();
@@ -337,6 +399,7 @@ fn run(steps: &[Step], limit: u64) {
     let limits = TxnLimits {
         operations: limit,
         memory_bytes: None,
+        savepoints: arc_doc::txn::MAX_SAVEPOINTS,
     };
     let model = state(&base);
     let mut harness = Harness {
@@ -360,20 +423,20 @@ fn run(steps: &[Step], limit: u64) {
     for op in txn.ops() {
         op.apply(&mut forward).unwrap();
     }
-    assert_eq!(state(forward.current()), state(&candidate));
+    assert_eq!(bits(&state(forward.current())), bits(&state(&candidate)));
     assert_eq!(forward.touched(), txn.touched());
     let mut backward = WorkingSet::new(&candidate);
     for op in txn.ops().iter().rev().map(Op::inverse) {
         op.apply(&mut backward).unwrap();
     }
-    assert_eq!(state(backward.current()), state(&base));
+    assert_eq!(bits(&state(backward.current())), bits(&state(&base)));
     let parts = txn.into_parts();
     assert_eq!(parts.ops.len(), ops);
-    assert_eq!(state(parts.set.current()), state(&candidate));
+    assert_eq!(bits(&state(parts.set.current())), bits(&state(&candidate)));
 }
 
 fn check(txn: &Txn, model: &State, ops: usize) {
-    assert_eq!(&state(txn.snapshot()), model);
+    assert_eq!(bits(&state(txn.snapshot())), bits(model));
     assert_eq!(txn.ops().len(), ops);
     for id in model.keys() {
         assert_eq!(txn.get(*id).unwrap().id, *id);

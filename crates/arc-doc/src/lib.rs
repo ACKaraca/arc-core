@@ -1,11 +1,20 @@
 //! The document store of the Arc suite.
 //!
-//! This first part provides the value model of object fields and the declarations of object
-//! types ([`schema`]), the type registry (CORE-DOC-001, [`registry`]), JSON field descriptors
-//! (CORE-DOC-004, [`descriptor`]) and the payload codec ([`payload`]). Stores, snapshots,
-//! transactions, relationships, the journal, migration and the package build on these types.
+//! The parts that exist:
 //!
-//! No function in this crate panics.
+//! - the value model of object fields, field paths and the declarations of object types
+//!   ([`schema`]), the type registry (CORE-DOC-001, [`registry`]), JSON field descriptors
+//!   (CORE-DOC-004, [`descriptor`]) and the payload codec ([`payload`]);
+//! - typed copy-on-write stores, the identifier index, snapshots, working sets with savepoints
+//!   and snapshot publication (CORE-DOC-002, CORE-DOC-003, CORE-DOC-017, [`snapshot`]);
+//! - transactions with field-level operations and savepoints (CORE-DOC-013, CORE-DOC-014,
+//!   [`txn`], [`op`]);
+//! - references, relationship rules, the deletion rules and the reference check at commit and
+//!   the reverse reference index (CORE-DOC-008, CORE-DOC-009, CORE-DOC-010, [`relationship`],
+//!   [`integrity`], [`reverse_index`]).
+//!
+//! The journal, commit, the executor, migration, the dependency graph and the package build on
+//! these. No function in this crate panics.
 
 pub mod descriptor;
 pub mod error;
@@ -34,7 +43,9 @@ pub use graph::{
     ChangeSet, Derived, DerivedKey, DerivedValue, EvalContext, Evaluators, Graph, NodeKey,
     NodeState, NodeView, StateKind,
 };
-pub use integrity::{DeleteReport, apply_delete_rules, check_references};
+pub use integrity::{
+    CascadeDelete, ClearedFields, DeleteReport, apply_delete_rules, check_references,
+};
 pub use load::{
     DiagnosticKind, LoadCounts, LoadDiagnostic, LoadOptions, Loaded, LoadedRow, LoadedRows,
     StoredObject, StoredType, load,
@@ -54,5 +65,7 @@ pub use schema::{
 pub use schema::{FieldPath, PathSegment};
 pub use snapshot::{Change, Flags, Header, Object, Savepoint, Snapshot, SnapshotCell, WorkingSet};
 pub use store::Handle;
-pub use txn::{Txn, TxnKind, TxnLimits, TxnMeta, TxnParts, TxnSavepoint};
+pub use txn::{
+    MAX_OPERATIONS, MAX_SAVEPOINTS, Txn, TxnKind, TxnLimits, TxnMeta, TxnParts, TxnSavepoint,
+};
 pub use version::{NewerMajor, ReadOnlyReason};

@@ -217,6 +217,58 @@ pub enum Value {
     Opaque(Vec<u8>),
 }
 
+impl Value {
+    /// True when `self` and `other` are bit-identical: like `==`, except that floating-point
+    /// numbers compare by their bits, so `0.0` and `-0.0` differ, as their payload encodings do.
+    /// Recursion stops at the shallower of the two values.
+    #[must_use]
+    pub fn bits_eq(&self, other: &Self) -> bool {
+        fn same(a: &[f64], b: &[f64]) -> bool {
+            a.iter()
+                .map(|x| x.to_bits())
+                .eq(b.iter().map(|x| x.to_bits()))
+        }
+        match (self, other) {
+            (Self::F64(a), Self::F64(b)) => same(&[*a], &[*b]),
+            (Self::Quantity(a), Self::Quantity(b)) => {
+                a.dimension() == b.dimension() && same(&[a.value()], &[b.value()])
+            }
+            (Self::Point2(a), Self::Point2(b)) => same(&[a.x, a.y], &[b.x, b.y]),
+            (Self::Point3(a), Self::Point3(b)) => same(&[a.x, a.y, a.z], &[b.x, b.y, b.z]),
+            (Self::Vector3(a), Self::Vector3(b)) => same(&[a.x, a.y, a.z], &[b.x, b.y, b.z]),
+            (Self::Transform(a), Self::Transform(b)) => {
+                same(a.matrix().as_slice(), b.matrix().as_slice())
+            }
+            (Self::Color(a), Self::Color(b)) => {
+                let bits =
+                    |c: &ColorValue| [c.rgba.r, c.rgba.g, c.rgba.b, c.rgba.a].map(f32::to_bits);
+                a.source == b.source && bits(a) == bits(b)
+            }
+            (Self::List(a), Self::List(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.bits_eq(y))
+            }
+            (Self::Map(a), Self::Map(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b)
+                        .all(|((k, x), (l, y))| k == l && x.bits_eq(y))
+            }
+            (Self::Record(a), Self::Record(b)) => options_bits_eq(a, b),
+            _ => self == other,
+        }
+    }
+}
+
+/// [`Value::bits_eq`] for lists of optional values, such as the values of an object.
+#[must_use]
+pub fn options_bits_eq(a: &[Option<Value>], b: &[Option<Value>]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|pair| match pair {
+            (Some(x), Some(y)) => x.bits_eq(y),
+            (x, y) => x.is_none() && y.is_none(),
+        })
+}
+
 /// A variant of an enum value type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EnumVariant {

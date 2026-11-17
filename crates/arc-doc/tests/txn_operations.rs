@@ -363,10 +363,10 @@ fn savepoints_roll_back_in_order_and_keep_the_transaction_open() {
     let mut txn = open(&Snapshot::empty(registry()));
     txn.create("test.a", id(1), Header::default(), values(1))
         .unwrap();
-    let outer = txn.savepoint();
+    let outer = txn.savepoint().unwrap();
     txn.modify(id(1), FieldPath::new("n"), Some(Value::I64(2)))
         .unwrap();
-    let inner = txn.savepoint();
+    let inner = txn.savepoint().unwrap();
     txn.create(
         "test.b",
         id(2),
@@ -399,7 +399,7 @@ fn savepoints_roll_back_in_order_and_keep_the_transaction_open() {
     txn.rollback_to(&outer).unwrap();
     assert_eq!(txn.ops().len(), 1);
 
-    let foreign = open(&Snapshot::empty(registry())).savepoint();
+    let foreign = open(&Snapshot::empty(registry())).savepoint().unwrap();
     assert_eq!(
         txn.rollback_to(&foreign).unwrap_err().code(),
         "doc.savepoint.invalid"
@@ -425,11 +425,12 @@ fn limits_reject_operations_with_a_stable_code_and_leave_the_transaction_usable(
     let limits = TxnLimits {
         operations: 2,
         memory_bytes: None,
+        savepoints: arc_doc::txn::MAX_SAVEPOINTS,
     };
     let mut txn = Txn::new(&base, meta(), limits);
     txn.create("test.a", id(1), Header::default(), values(1))
         .unwrap();
-    let savepoint = txn.savepoint();
+    let savepoint = txn.savepoint().unwrap();
     txn.modify(id(1), FieldPath::new("n"), Some(Value::I64(2)))
         .unwrap();
     let error = txn.delete(id(1)).unwrap_err();
@@ -442,6 +443,7 @@ fn limits_reject_operations_with_a_stable_code_and_leave_the_transaction_usable(
     let limits = TxnLimits {
         operations: u64::MAX,
         memory_bytes: Some(4_096),
+        savepoints: arc_doc::txn::MAX_SAVEPOINTS,
     };
     let mut txn = Txn::new(&base, meta(), limits);
     txn.create("test.a", id(1), Header::default(), values(1))
@@ -543,4 +545,248 @@ fn metadata_carries_opaque_payloads_to_commit() {
     assert_eq!(parts.ops.len(), 1);
     assert_eq!(parts.set.touched().len(), 1);
     open(&Snapshot::empty(registry())).abandon();
+}
+
+/// A registry with one type holding a real number, for bitwise comparisons.
+fn real_registry() -> Arc<TypeRegistry> {
+    let schema = Schema::new(
+        SchemaVersion::new(1, 0),
+        vec![FieldDecl::new("x", ValueType::F64).optional()],
+    );
+    let mut registry = TypeRegistry::new();
+    registry
+        .register(TypeDecl::new(TypeKey::new("test.real").unwrap(), schema))
+        .unwrap();
+    Arc::new(registry)
+}
+
+fn real_base(x: f64) -> Snapshot {
+    let mut set = WorkingSet::new(&Snapshot::empty(real_registry()));
+    set.create(
+        "test.real",
+        arc_doc::Object::new(
+            id(1),
+            SchemaVersion::new(1, 0),
+            Header::default(),
+            vec![Some(Value::F64(x))],
+        ),
+    )
+    .unwrap();
+    set.current().clone()
+}
+
+#[test]
+fn strict_replay_tells_negative_zero_from_zero() {
+    let base = real_base(0.0);
+    let modify = Op::Modify {
+        id: id(1),
+        version: SchemaVersion::new(1, 0),
+        path: FieldPath::new("x"),
+        before: Some(Value::F64(-0.0)),
+        after: Some(Value::F64(2.0)),
+    };
+    let mut set = WorkingSet::new(&base);
+    assert_eq!(
+        modify.apply(&mut set).unwrap_err().code(),
+        "doc.op.mismatch"
+    );
+    let object = Arc::clone(base.get(base.resolve(id(1)).unwrap()).unwrap());
+    let mut negative = (*object).clone();
+    negative.values = vec![Some(Value::F64(-0.0))];
+    let delete = Op::Delete {
+        type_key: TypeKey::new("test.real").unwrap(),
+        object: Arc::new(negative),
+    };
+    assert_eq!(
+        delete.apply(&mut set).unwrap_err().code(),
+        "doc.op.mismatch"
+    );
+    assert!(set.touched().is_empty());
+    // The exact before value applies.
+    let mut txn = Txn::new(&base, meta(), TxnLimits::default());
+    txn.modify(id(1), FieldPath::new("x"), Some(Value::F64(-0.0)))
+        .unwrap();
+    let mut set = WorkingSet::new(&base);
+    txn.ops()[0].apply(&mut set).unwrap();
+    txn.ops()[0].inverse().apply(&mut set).unwrap();
+    let x = &set
+        .current()
+        .get(set.current().resolve(id(1)).unwrap())
+        .unwrap()
+        .values[0];
+    assert!(matches!(x, Some(Value::F64(x)) if x.to_bits() == 0.0_f64.to_bits()));
+}
+
+#[test]
+fn replayed_operations_are_checked_like_hostile_input() {
+    let base = real_base(1.0);
+    let forged = [
+        Op::Modify {
+            id: id(1),
+            version: SchemaVersion::new(1, 0),
+            path: FieldPath::new("x"),
+            before: Some(Value::F64(1.0)),
+            after: Some(Value::F64(f64::NAN)),
+        },
+        Op::Modify {
+            id: id(1),
+            version: SchemaVersion::new(1, 0),
+            path: FieldPath::new("x"),
+            before: Some(Value::F64(1.0)),
+            after: Some(Value::I64(3)),
+        },
+        Op::Create {
+            type_key: TypeKey::new("test.real").unwrap(),
+            object: Arc::new(arc_doc::Object::new(
+                id(2),
+                SchemaVersion::new(1, 0),
+                Header::default(),
+                vec![],
+            )),
+            copied_from: None,
+        },
+        Op::Create {
+            type_key: TypeKey::new("test.real").unwrap(),
+            object: Arc::new(arc_doc::Object::new(
+                id(2),
+                SchemaVersion::new(9, 0),
+                Header::default(),
+                vec![None],
+            )),
+            copied_from: None,
+        },
+        Op::Create {
+            type_key: TypeKey::new("test.real").unwrap(),
+            object: Arc::new(arc_doc::Object::new(
+                id(2),
+                SchemaVersion::new(1, 0),
+                Header::default(),
+                vec![Some(Value::F64(f64::INFINITY))],
+            )),
+            copied_from: None,
+        },
+    ];
+    let codes: Vec<_> = forged
+        .iter()
+        .map(|op| {
+            let mut set = WorkingSet::new(&base);
+            let code = op.apply(&mut set).unwrap_err().code();
+            assert!(set.touched().is_empty(), "{op:?}");
+            code
+        })
+        .collect();
+    assert_eq!(
+        codes,
+        [
+            "doc.value.not_finite",
+            "doc.value.type_mismatch",
+            "doc.value.type_mismatch",
+            "doc.type.unknown",
+            "doc.value.not_finite"
+        ]
+    );
+}
+
+#[test]
+fn a_created_object_is_shared_by_the_operation_and_the_store() {
+    let mut txn = open(&Snapshot::empty(registry()));
+    txn.create("test.a", id(1), Header::default(), values(1))
+        .unwrap();
+    let Op::Create { object, .. } = &txn.ops()[0] else {
+        panic!("a create");
+    };
+    assert!(Arc::ptr_eq(object, txn.get(id(1)).unwrap()));
+}
+
+#[test]
+fn savepoints_are_bounded_in_number_and_charged_for_what_they_keep() {
+    let base = Snapshot::empty(registry());
+    let limits = TxnLimits {
+        savepoints: 3,
+        ..TxnLimits::default()
+    };
+    let mut txn = Txn::new(&base, meta(), limits);
+    let first = txn.savepoint().unwrap();
+    let second = txn.savepoint().unwrap();
+    txn.savepoint().unwrap();
+    let error = txn.savepoint().unwrap_err();
+    assert_eq!(error.code(), "doc.txn.limit_exceeded");
+    assert_eq!(
+        error.arguments().get("limit"),
+        Some(&arc_base::error::Value::Text("savepoints".into()))
+    );
+    // Releasing and rolling back free places.
+    txn.release(&second).unwrap();
+    txn.savepoint().unwrap();
+    txn.rollback_to(&first).unwrap();
+    txn.savepoint().unwrap();
+    txn.savepoint().unwrap();
+    assert!(txn.savepoint().is_err());
+
+    // A savepoint keeps every version an operation replaces alive, and the budget counts it.
+    let mut setup = WorkingSet::new(&base);
+    let mut big = values(0);
+    big[2] = Some(Value::List(vec![Value::I64(0); 10_000]));
+    setup
+        .create(
+            "test.a",
+            arc_doc::Object::new(id(1), SchemaVersion::new(1, 2), Header::default(), big),
+        )
+        .unwrap();
+    let base = setup.current().clone();
+    let limits = TxnLimits {
+        memory_bytes: Some(4_000_000),
+        ..TxnLimits::default()
+    };
+    let mut txn = Txn::new(&base, meta(), limits);
+    for n in 0..20 {
+        txn.modify(id(1), FieldPath::new("n"), Some(Value::I64(n)))
+            .unwrap();
+    }
+    let without = txn.memory_bytes();
+    assert!(without < 10_000, "replaced versions nobody keeps are free");
+    let mut error = None;
+    for n in 0..20 {
+        let savepoint = txn.savepoint().unwrap();
+        let before = (txn.memory_bytes(), txn.ops().len());
+        if let Err(e) = txn.modify(id(1), FieldPath::new("n"), Some(Value::I64(n))) {
+            assert_eq!((txn.memory_bytes(), txn.ops().len()), before);
+            error = Some(e);
+            break;
+        }
+        assert!(txn.memory_bytes() > before.0 + 320_000);
+        txn.release(&savepoint).unwrap();
+    }
+    assert_eq!(error.unwrap().code(), "doc.txn.limit_exceeded");
+}
+
+#[test]
+fn a_required_field_of_a_nested_record_cannot_be_made_absent() {
+    let mut txn = open(&Snapshot::empty(registry()));
+    let mut start = values(0);
+    start[3] = Some(Value::Record(vec![Some(Value::I64(5)), None]));
+    txn.create("test.a", id(1), Header::default(), start)
+        .unwrap();
+    // Nested records are checked in full, so their inverses always apply.
+    let error = txn
+        .modify(id(1), FieldPath::new("rec").field("a"), None)
+        .unwrap_err();
+    assert_eq!(error.code(), "doc.value.missing");
+    assert_eq!(txn.ops().len(), 1);
+    // An optional nested field and the object's own required field may be absent until commit.
+    txn.modify(id(1), FieldPath::new("rec").field("b"), None)
+        .unwrap();
+    txn.modify(id(1), FieldPath::new("n"), None).unwrap();
+    let forged = Op::Modify {
+        id: id(1),
+        version: SchemaVersion::new(1, 2),
+        path: FieldPath::new("rec").field("a"),
+        before: Some(Value::I64(5)),
+        after: None,
+    };
+    let mut set = WorkingSet::new(txn.snapshot());
+    assert_eq!(
+        forged.apply(&mut set).unwrap_err().code(),
+        "doc.value.missing"
+    );
 }

@@ -423,6 +423,12 @@ impl WorkingSet {
     /// created again, in any store. The values are not checked against the schema here. On a
     /// read-only document every write of a working set fails with `doc.document.read_only`.
     pub fn create(&mut self, type_key: &str, object: Object) -> Result<Handle> {
+        self.create_shared(type_key, Arc::new(object))
+    }
+
+    /// [`WorkingSet::create`] for an object the caller also holds, such as the operation that
+    /// records it: the store shares it instead of copying it.
+    pub fn create_shared(&mut self, type_key: &str, object: Arc<Object>) -> Result<Handle> {
         self.writable()?;
         let store = self.current.store_index(type_key)?;
         let id = object.id;
@@ -430,7 +436,6 @@ impl WorkingSet {
             return Err(Error::new(codes::OBJECT_DUPLICATE_ID).with_arg("id", id.to_string()));
         }
         let roots = Arc::make_mut(&mut self.current.0);
-        let object = Arc::new(object);
         let (slot, generation) = Arc::make_mut(&mut roots.stores)
             .get_mut(usize_of(store))
             .and_then(|entry| entry.insert(Arc::clone(&object)))

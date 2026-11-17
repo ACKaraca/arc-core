@@ -140,8 +140,8 @@ live object of an allowed type, or the transaction is rejected with `doc.referen
 Relationships with attributes or more than two participants (a connection between members, a
 space boundary, an assignment to a system) are modeled as **relationship objects**: ordinary
 objects whose fields reference the participants. The document maintains a **reverse reference
-index** (target → sources with field and rule) so that deletes, change propagation and "used by"
-queries do not scan stores.
+index** (target → referring objects and fields) so that deletes, change propagation and "used
+by" queries do not scan stores.
 
 ### References across documents
 

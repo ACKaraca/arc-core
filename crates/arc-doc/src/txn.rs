@@ -16,34 +16,38 @@ use std::sync::Arc;
 use arc_base::{Error, Limits, ObjectId, Result, SessionId, TransactionId};
 
 use crate::error::codes;
-use crate::op::{Op, Properties, live, modified, path_invalid, schema_of, with_properties};
-use crate::schema::{
-    ColorValue, ExternalRef, FieldDecl, FieldPath, PathSegment, Value, check_value, count,
-    prefix_field,
-};
+use crate::integrity::{self, DeleteReport};
+use crate::op::{Op, Properties, check_shape, check_write, live, modified, with_properties};
+use crate::schema::{ColorValue, ExternalRef, FieldPath, PathSegment, TypeKey, Value};
 use crate::snapshot::{Change, Header, Object, Savepoint, Snapshot, WorkingSet};
 use crate::store::Handle;
 
 /// The most operations one transaction holds (document model, "Transactions").
 pub const MAX_OPERATIONS: u64 = 10_000_000;
 
+/// The most savepoints one transaction holds at a time.
+pub const MAX_SAVEPOINTS: u64 = 1_024;
+
 /// The bounds of one transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TxnLimits {
     /// The most operations.
     pub operations: u64,
-    /// The memory budget of the operation list in bytes, as estimated by the transaction;
-    /// `None` leaves the budget to the caller.
+    /// The memory budget in bytes of what the transaction retains, as estimated by it
+    /// ([`Txn::memory_bytes`]); `None` leaves the budget to the caller.
     pub memory_bytes: Option<u64>,
+    /// The most savepoints held at a time.
+    pub savepoints: u64,
 }
 
 impl TxnLimits {
-    /// [`MAX_OPERATIONS`] and the memory budget of `limits`.
+    /// [`MAX_OPERATIONS`], [`MAX_SAVEPOINTS`] and the memory budget of `limits`.
     #[must_use]
     pub fn from_limits(limits: &Limits) -> Self {
         Self {
             operations: MAX_OPERATIONS,
             memory_bytes: limits.memory_bytes,
+            savepoints: MAX_SAVEPOINTS,
         }
     }
 }
@@ -126,8 +130,17 @@ impl TxnMeta {
 #[derive(Debug, Clone)]
 pub struct TxnSavepoint {
     inner: Savepoint,
+    serial: u64,
     ops: usize,
     bytes: u64,
+}
+
+/// A live savepoint as the transaction keeps it: its serial number and the candidate it marks,
+/// which tells whether a replaced object stays alive because of a savepoint.
+#[derive(Debug)]
+struct Held {
+    serial: u64,
+    candidate: Snapshot,
 }
 
 /// What a finished transaction hands to commit: the working set, the operations and the
@@ -152,10 +165,13 @@ pub struct TxnParts {
 pub struct Txn {
     set: WorkingSet,
     ops: Vec<Op>,
-    /// The estimated memory of `ops`.
+    /// The estimated memory retained by `ops` and the live savepoints.
     bytes: u64,
     limits: TxnLimits,
     meta: TxnMeta,
+    /// The live savepoints, oldest first.
+    held: Vec<Held>,
+    next_serial: u64,
 }
 
 impl Txn {
@@ -168,6 +184,8 @@ impl Txn {
             bytes: 0,
             limits,
             meta,
+            held: Vec::new(),
+            next_serial: 0,
         }
     }
 
@@ -207,8 +225,11 @@ impl Txn {
         self.set.touched()
     }
 
-    /// The estimated memory of the operation list in bytes, charged against
-    /// [`TxnLimits::memory_bytes`].
+    /// The estimated memory the transaction retains in bytes, charged against
+    /// [`TxnLimits::memory_bytes`]: the operation list (each operation and the values, texts and
+    /// path it holds), each savepoint's copy of the touched map, and each object version that a
+    /// live savepoint keeps alive after an operation replaced it. Copied store chunks and index
+    /// nodes are not counted.
     #[must_use]
     pub fn memory_bytes(&self) -> u64 {
         self.bytes
@@ -229,9 +250,10 @@ impl Txn {
     ///
     /// Fails with `doc.type.unknown`, `doc.object.duplicate_id`,
     /// `doc.store.capacity_exceeded`, `doc.value.type_mismatch` (a wrong number of values, or a
-    /// value of the wrong type), `doc.value.not_finite`, `doc.value.out_of_range` (enum codes and
-    /// bounds of nested records) or `doc.txn.limit_exceeded`. Missing required values and field
-    /// bounds are checked at commit.
+    /// value of the wrong type), `doc.value.not_finite`, `doc.value.out_of_range` (enum codes,
+    /// bounds of nested records and the bound of a `many` reference list) or
+    /// `doc.txn.limit_exceeded`. Missing required values and the bounds of the object's own
+    /// fields are checked at commit. The operation and the store share the created object.
     pub fn create(
         &mut self,
         type_key: &str,
@@ -275,7 +297,7 @@ impl Txn {
             object: Arc::clone(&object),
             copied_from,
         };
-        self.record(op, |set| set.create(type_key, (*object).clone()))
+        self.record(op, 0, |set| set.create_shared(type_key, object))
     }
 
     /// Sets the value at `path` of the object `id` to `value`: a whole field when `path` is a
@@ -285,15 +307,16 @@ impl Txn {
     /// Fails with `doc.object.not_found`, `doc.path.invalid` (the path does not resolve against
     /// the object's schema or does not reach a value of the object: an index past the end of a
     /// list, a part of an absent value, `None` for a list element), the value checks of
-    /// [`Txn::create`] for the addressed type, or `doc.txn.limit_exceeded`.
+    /// [`Txn::create`] for the addressed type, `doc.value.missing` (`None` for a required field
+    /// of a nested record, whose records are checked in full) or `doc.txn.limit_exceeded`.
+    ///
+    /// The new state of the object is a copy of all its values with one value written, so a
+    /// modify costs time and memory proportional to the object's values, however small the
+    /// change; large data belongs in assets.
     pub fn modify(&mut self, id: ObjectId, path: FieldPath, value: Option<Value>) -> Result<()> {
-        if let Some(value) = &value {
-            let (handle, object) = live(&self.set, id)?;
-            let schema = schema_of(&self.set, handle, &object)?;
-            let value_type = path.resolve(schema).ok_or_else(|| path_invalid(&path))?;
-            check_value(value_type, None, value)
-                .map_err(|error| prefix_field(error, &path.to_string()))?;
-        }
+        let (_, object) = live(&self.set, id)?;
+        check_write(&self.set, id, &path, value.as_ref())?;
+        let retained = self.retained(id, &object);
         let found = modified(&self.set, id, &path, value.clone())?;
         let op = Op::Modify {
             id,
@@ -302,7 +325,7 @@ impl Txn {
             before: found.before,
             after: value,
         };
-        self.record(op, |set| {
+        self.record(op, retained, |set| {
             set.replace_values(found.handle, found.values).map(drop)
         })
     }
@@ -317,11 +340,15 @@ impl Txn {
             before: Properties::of(&object.header),
             after: properties,
         };
-        self.record(op, |set| set.replace_header(handle, header).map(drop))
+        let retained = self.retained(id, &object);
+        self.record(op, retained, |set| {
+            set.replace_header(handle, header).map(drop)
+        })
     }
 
     /// Deletes the object `id`. Fails with `doc.object.not_found` or
-    /// `doc.txn.limit_exceeded`. Cascades of relationship rules are added at commit.
+    /// `doc.txn.limit_exceeded`. The relationship rules it triggers are applied by
+    /// [`Txn::apply_delete_rules`].
     pub fn delete(&mut self, id: ObjectId) -> Result<()> {
         let (handle, object) = live(&self.set, id)?;
         let type_key = self
@@ -330,7 +357,7 @@ impl Txn {
             .cloned()
             .ok_or_else(|| Error::new(codes::OBJECT_NOT_FOUND))?;
         let op = Op::Delete { type_key, object };
-        self.record(op, |set| set.delete(handle).map(drop))
+        self.record(op, 0, |set| set.delete(handle).map(drop))
     }
 
     /// Sets the owner of the object `id`. Fails with `doc.object.not_found` or
@@ -346,34 +373,153 @@ impl Txn {
             before: object.header.owner,
             after: owner,
         };
-        self.record(op, |set| set.replace_header(handle, header).map(drop))
+        let retained = self.retained(id, &object);
+        self.record(op, retained, |set| {
+            set.replace_header(handle, header).map(drop)
+        })
+    }
+
+    /// Applies the deletion rules to the transaction's deletions and records what they change
+    /// as operations of the transaction ([`DeleteReport::operations`]), charged against the
+    /// limits like the transaction's own operations, so that the operation list still replays
+    /// to the candidate and inverts to the base.
+    ///
+    /// The rules are those of [`integrity::apply_delete_rules`], except that the owning
+    /// references of a deleted object, and of an object recreated with another type, are read
+    /// from the states it had when the transaction deleted it, not from the base: an owning
+    /// reference added before the delete takes its target along, and one removed before the
+    /// delete leaves it. Every [`Op::Delete`] of the identifier contributes its state, except one
+    /// that a create of the same type key follows, which replaces the object and keeps what it
+    /// owned. An identifier deleted and created again counts as a type change when one of its
+    /// deletes contributes, even if the last create restored the base's type key. Fails with the codes of the
+    /// rules or `doc.txn.limit_exceeded`; any failure restores the working set, the operations
+    /// and the memory estimate, and the transaction's savepoints stay valid. Running the rules
+    /// again without further deletions changes nothing.
+    pub fn apply_delete_rules(&mut self, limits: &Limits) -> Result<DeleteReport> {
+        let mut deleted: BTreeMap<ObjectId, Vec<(TypeKey, Arc<Object>)>> = BTreeMap::new();
+        for op in &self.ops {
+            match op {
+                Op::Delete { type_key, object } => deleted
+                    .entry(object.id)
+                    .or_default()
+                    .push((type_key.clone(), Arc::clone(object))),
+                // A create of the same type right after a delete replaces the object.
+                Op::Create {
+                    type_key, object, ..
+                } => {
+                    if let Some(states) = deleted.get_mut(&object.id)
+                        && states.last().is_some_and(|(key, _)| key == type_key)
+                    {
+                        states.pop();
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (ops, bytes) = (self.ops.len(), self.bytes);
+        let savepoint = self.set.savepoint();
+        let states = |id: ObjectId| Some(deleted.get(&id).cloned().unwrap_or_default());
+        let outcome = integrity::run(&mut self.set, limits, &states)
+            .and_then(|report| self.append_derived(&report).map(|()| report));
+        if outcome.is_err() {
+            self.set.rollback_to(&savepoint)?;
+            self.ops.truncate(ops);
+            self.bytes = bytes;
+        }
+        self.set.release_savepoint(&savepoint)?;
+        outcome
+    }
+
+    /// Charges and appends the operations of `report`, whose changes the working set already
+    /// holds.
+    fn append_derived(&mut self, report: &DeleteReport) -> Result<()> {
+        let retained = report
+            .cleared
+            .iter()
+            .map(|cleared| self.retained(cleared.before.id, &cleared.before))
+            .fold(0, u64::saturating_add);
+        self.bytes = self.bytes.saturating_add(retained);
+        for op in report.operations() {
+            self.bytes = self.admit(&op, 0)?;
+            self.ops.push(op);
+        }
+        Ok(())
     }
 
     /// Marks the current state and operation count so that [`Txn::rollback_to`] can restore
-    /// them.
-    pub fn savepoint(&mut self) -> TxnSavepoint {
-        TxnSavepoint {
-            inner: self.set.savepoint(),
-            ops: self.ops.len(),
-            bytes: self.bytes,
+    /// them. The savepoint is charged a copy of the touched map, and every object version it
+    /// keeps alive is charged when an operation replaces that version. Fails with
+    /// `doc.txn.limit_exceeded` (argument `limit`: `savepoints` when [`TxnLimits::savepoints`]
+    /// savepoints are live, or `memory_bytes`) and changes nothing.
+    pub fn savepoint(&mut self) -> Result<TxnSavepoint> {
+        let live = u64::try_from(self.held.len()).unwrap_or(u64::MAX);
+        if live >= self.limits.savepoints {
+            return Err(limit_exceeded("savepoints", self.limits.savepoints));
         }
+        let charge = bytes_of(self.set.touched().len())
+            .saturating_mul(TOUCHED_ENTRY_BYTES)
+            .saturating_add(bytes_of(size_of::<Held>()));
+        let bytes = self.within_budget(charge)?;
+        let serial = self.next_serial;
+        self.next_serial = serial.saturating_add(1);
+        self.held.push(Held {
+            serial,
+            candidate: self.set.current().clone(),
+        });
+        self.bytes = bytes;
+        Ok(TxnSavepoint {
+            inner: self.set.savepoint(),
+            serial,
+            ops: self.ops.len(),
+            bytes,
+        })
     }
 
-    /// Restores the state marked by `savepoint` and truncates the operations to their number
-    /// at the savepoint. The transaction stays open and the savepoint stays valid; savepoints
-    /// taken after it become invalid. A savepoint of another transaction, or one released or
-    /// invalidated, fails with `doc.savepoint.invalid` and changes nothing.
+    /// Restores the state marked by `savepoint`, with the operations and the memory estimate,
+    /// truncating the operations to their number at the savepoint. The transaction stays open
+    /// and the savepoint stays valid; savepoints taken after it become invalid. A savepoint of
+    /// another transaction, or one released or invalidated, fails with `doc.savepoint.invalid`
+    /// and changes nothing.
     pub fn rollback_to(&mut self, savepoint: &TxnSavepoint) -> Result<()> {
         self.set.rollback_to(&savepoint.inner)?;
         self.ops.truncate(savepoint.ops);
         self.bytes = savepoint.bytes;
+        let at = self.held_position(savepoint.serial);
+        self.held.truncate(at.saturating_add(1));
         Ok(())
     }
 
-    /// Releases `savepoint` and every later one, keeping the changes. A savepoint of another
-    /// transaction, or one released or invalidated, fails with `doc.savepoint.invalid`.
+    /// Releases `savepoint` and every later one, keeping the changes. The memory they were
+    /// charged stays charged. A savepoint of another transaction, or one released or
+    /// invalidated, fails with `doc.savepoint.invalid`.
     pub fn release(&mut self, savepoint: &TxnSavepoint) -> Result<()> {
-        self.set.release_savepoint(&savepoint.inner)
+        self.set.release_savepoint(&savepoint.inner)?;
+        let at = self.held_position(savepoint.serial);
+        self.held.truncate(at);
+        Ok(())
+    }
+
+    /// The position of the live savepoint `serial`, which the working set has just accepted.
+    fn held_position(&self, serial: u64) -> usize {
+        self.held
+            .binary_search_by_key(&serial, |held| held.serial)
+            .unwrap_or_else(|at| at)
+    }
+
+    /// The memory `object`, the live version of `id`, stays charged for when an operation
+    /// replaces it: its size when the newest savepoint holds it, otherwise nothing. A version
+    /// that an older savepoint holds is current at every later savepoint until it is replaced,
+    /// so the newest savepoint decides.
+    fn retained(&self, id: ObjectId, object: &Arc<Object>) -> u64 {
+        let Some(held) = self.held.last() else {
+            return 0;
+        };
+        let kept = held
+            .candidate
+            .resolve(id)
+            .and_then(|handle| held.candidate.get(handle))
+            .is_ok_and(|kept| Arc::ptr_eq(kept, object));
+        if kept { object_bytes(object) } else { 0 }
     }
 
     /// Ends the transaction and hands its working set, operations and metadata to commit.
@@ -389,9 +535,24 @@ impl Txn {
     /// Ends the transaction and drops every change.
     pub fn abandon(self) {}
 
-    /// Charges `op` against the limits, applies the change with `write` and appends `op`;
-    /// on any failure nothing changes.
-    fn record<T>(&mut self, op: Op, write: impl FnOnce(&mut WorkingSet) -> Result<T>) -> Result<T> {
+    /// Charges `op` and `retained` further bytes against the limits, applies the change with
+    /// `write` and appends `op`; on any failure nothing changes.
+    fn record<T>(
+        &mut self,
+        op: Op,
+        retained: u64,
+        write: impl FnOnce(&mut WorkingSet) -> Result<T>,
+    ) -> Result<T> {
+        let bytes = self.admit(&op, retained)?;
+        let written = write(&mut self.set)?;
+        self.ops.push(op);
+        self.bytes = bytes;
+        Ok(written)
+    }
+
+    /// The memory estimate with `op` and `retained` further bytes, if the limits allow one more
+    /// operation of that size.
+    fn admit(&self, op: &Op, retained: u64) -> Result<u64> {
         let within = u64::try_from(self.ops.len())
             .ok()
             .and_then(|n| n.checked_add(1))
@@ -399,41 +560,26 @@ impl Txn {
         if !within {
             return Err(limit_exceeded("operations", self.limits.operations));
         }
-        let bytes = self.bytes.saturating_add(op_bytes(&op));
-        if let Some(budget) = self.limits.memory_bytes.filter(|budget| bytes > *budget) {
-            return Err(limit_exceeded("memory_bytes", budget));
+        self.within_budget(op_bytes(op).saturating_add(retained))
+    }
+
+    /// The memory estimate with `charge` further bytes, if the budget allows it.
+    fn within_budget(&self, charge: u64) -> Result<u64> {
+        let bytes = self.bytes.saturating_add(charge);
+        match self.limits.memory_bytes.filter(|budget| bytes > *budget) {
+            Some(budget) => Err(limit_exceeded("memory_bytes", budget)),
+            None => Ok(bytes),
         }
-        let written = write(&mut self.set)?;
-        self.ops.push(op);
-        self.bytes = bytes;
-        Ok(written)
     }
 }
+
+/// The estimated memory of one entry of a touched map copied by a savepoint.
+const TOUCHED_ENTRY_BYTES: u64 = 64;
 
 fn limit_exceeded(limit: &str, value: u64) -> Error {
     Error::new(codes::TXN_LIMIT_EXCEEDED)
         .with_arg("limit", limit)
         .with_detail("value", i64::try_from(value).unwrap_or(i64::MAX))
-}
-
-/// One entry per field, each present value of its field's type (bounds aside).
-fn check_shape(fields: &[FieldDecl], values: &[Option<Value>]) -> Result<()> {
-    if fields.len() != values.len() {
-        let field = fields
-            .get(values.len())
-            .map_or_else(|| fields.len().to_string(), |field| field.name.clone());
-        return Err(Error::new(codes::VALUE_TYPE_MISMATCH)
-            .with_arg("field", field)
-            .with_detail("expected_fields", count(fields.len()))
-            .with_detail("actual_fields", count(values.len())));
-    }
-    for (field, value) in fields.iter().zip(values) {
-        if let Some(value) = value {
-            check_value(&field.value_type, None, value)
-                .map_err(|error| prefix_field(error, &field.name))?;
-        }
-    }
-    Ok(())
 }
 
 const VALUE_BYTES: u64 = size_of::<Value>() as u64;
@@ -447,9 +593,7 @@ fn bytes_of(n: usize) -> u64 {
 /// by the type's.
 fn op_bytes(op: &Op) -> u64 {
     let data = match op {
-        Op::Create { object, .. } | Op::Delete { object, .. } => {
-            header_bytes(&object.header).saturating_add(values_bytes(&object.values))
-        }
+        Op::Create { object, .. } | Op::Delete { object, .. } => object_bytes(object),
         Op::Modify {
             path,
             before,
@@ -466,6 +610,11 @@ fn op_bytes(op: &Op) -> u64 {
         Op::Relink { .. } => 0,
     };
     bytes_of(size_of::<Op>()).saturating_add(data)
+}
+
+/// The estimated memory of an object: its size, texts and values.
+fn object_bytes(object: &Object) -> u64 {
+    header_bytes(&object.header).saturating_add(values_bytes(&object.values))
 }
 
 fn header_bytes(header: &Header) -> u64 {
