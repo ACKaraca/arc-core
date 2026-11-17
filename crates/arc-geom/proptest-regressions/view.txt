@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 917b4bae8d35970be16cf034f9e836044f94b14b6079bac43520e673c98ec35f # shrinks to f = ViewFrame { eye: [0.0, 0.0, 0.0], target: [0.0, 0.0, 28.383313004663577], up_hint: [[-18.347793731554003, 39.733162005801596, 0.0]], projection: Perspective { vertical_fov: 0.2 }, near: 0.1, far: 1.1, right: [[-0.9078775465298544, -0.41923544757919984, 0.0]], up: [[-0.41923544757919984, 0.9078775465298544, 0.0]], forward: [[0.0, 0.0, 1.0]] }, scale = 169, up_scale = 0, p = [69.2115824833547, 0.0, 0.0], ndc = [0.0, 0.0, 0.0], aspect = 0.2
+cc 6822b4d8b593174523f8c9f49fd3cb3d33633d7e07f56e61de2f5166268d704f # shrinks to f = ViewFrame { eye: [0.0, 0.0, 0.0], target: [0.0, 0.0, -8.806643939487365], up_hint: [[0.0, -43.11959579494843, 0.0]], projection: Perspective { vertical_fov: 0.2 }, near: 0.1, far: 117.0786926691085, right: [[-1.0, 0.0, 0.0]], up: [[-0.0, -1.0, -0.0]], forward: [[0.0, 0.0, -1.0]] }, scale = -160, up_scale = 0, p = [0.0, 0.0, 0.0], ndc = [0.0, 0.0, 0.22546103689243263], aspect = 0.2

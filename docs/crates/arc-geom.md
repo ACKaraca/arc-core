@@ -209,10 +209,22 @@ z, and the basis `(right, up, forward)` satisfies `right x up = -forward`. Clip 
 in [-1, 1] and normalized depth 0 at near and 1 at far. The aspect ratio (width over height) is
 not stored; every function that needs it takes it, because one frame serves views of different
 sizes. World-to-view and view-to-world are rigid and computed from the basis without matrix
-inversion. `project` returns `None` for a perspective point at or behind the eye plane. The eye
-and target distance uses the linear tolerance and the up direction the angular tolerance passed
-to the constructor; deserialization validates with the default tolerance. Orthographic frames may
-have a zero or negative near distance.
+inversion. `project` returns `None` for a perspective point at or behind the eye plane.
+Orthographic frames may have a zero or negative near distance.
+
+Degeneracy is decided exactly, without a tolerance, so construction and deserialization accept
+the same frames: the eye must differ from the target, and the up hint must be nonzero and not
+parallel to the view direction (its cross product with the computed unit view direction, taken
+with accurate differences of products, is not exactly zero). Lengths and unit vectors are
+computed from components scaled by the largest one, so every finite, non-degenerate frame is
+accepted whatever its magnitude. A frame whose matrices cannot be represented in `f64` (a field
+of view or height whose reciprocal overflows, a depth span or perspective depth coefficient that
+overflows, or a world-to-view translation that overflows) is rejected with
+`geom.precision.insufficient`. Afterwards no function returns a non-finite value as a success:
+`projection_matrix`, `inverse_projection_matrix`, `unproject` and `ray_through` fail with
+`geom.precision.insufficient` when their result would not be finite (for example an aspect so
+extreme that a matrix entry overflows), and `project` returns `None`. The depth is computed in a
+form that cannot overflow when the plain one does, and stays exactly 0 at near and 1 at far.
 
 ### Evaluation, projection and flattening
 
@@ -385,8 +397,8 @@ The codes `arc-geom` owns. A code is never reused for a different meaning; messa
 | `geom.precision.insufficient` | `failed_operation` | A computation exceeds the range or precision of `f64`: a transform image that is not representable, a bulge whose arc is not representable, predicate coordinates that span too many binary exponents |
 | `geom.decode.invalid` | `corrupt_data` | Encoded geometry is malformed or oversized |
 | `geom.tolerance.invalid` | `invalid_input` | A tolerance is NaN, infinite or negative, or zero where the operation needs a positive value |
-| `geom.view.eye_at_target` | `invalid_input` | The eye and target of a view frame are closer than the linear tolerance |
-| `geom.view.up_invalid` | `invalid_input` | The up vector of a view frame is zero or within the angular tolerance of parallel to the view direction |
+| `geom.view.eye_at_target` | `invalid_input` | The eye and target of a view frame are the same point |
+| `geom.view.up_invalid` | `invalid_input` | The up vector of a view frame is zero or parallel to the view direction |
 | `geom.view.fov_invalid` | `invalid_input` | A perspective field of view is outside (0, π) |
 | `geom.view.scale_not_positive` | `invalid_input` | An orthographic view height is zero or negative |
 | `geom.view.clip_invalid` | `invalid_input` | Near is not smaller than far, or near is not positive for a perspective frame |
@@ -416,17 +428,25 @@ key.
   key.
 - `nearest(point, k)` returns the `k` entries with the smallest Euclidean distance from the point
   to their box (zero inside or on the box), sorted by distance then key; entries tied with the
-  k-th distance are resolved by key.
+  k-th distance are resolved by key. The ranking scales every gap by a power of two before
+  squaring, so it stays correct where the squared distance would overflow or underflow and equals
+  the plain sum of squares where that is a normal number; a distance above the largest `f64` is
+  reported as infinity but ranked by its true size.
 - `ray(origin, direction, max_distance)` returns entries the ray meets at a distance in
   `0..=max_distance` (the direction is normalized), with the entry distance, sorted by distance
   then key. The slab test treats a zero direction component as a hit only when the origin lies in
   that slab; an origin inside a box gives distance 0; a negative `max_distance` gives no hits.
-- An empty box is rejected with `geom.bbox.invalid`; a non-finite coordinate, point or
-  `max_distance` with `geom.input.not_finite`; a zero ray direction with `geom.direction.zero`.
-  A rejected call leaves the index unchanged.
+  The ray tested is the normalized one: a direction component smaller than about 1e-300 times
+  the largest becomes zero or loses precision when normalized, which can decide hits that only
+  graze a box face and distances measured through that component.
+- An empty box is rejected with `geom.bbox.invalid` (a box built from a NaN corner is empty); a
+  non-finite coordinate, point or `max_distance` with `geom.input.not_finite`; a zero ray
+  direction with `geom.direction.zero`. A rejected call leaves the index unchanged.
 
 The property tests compare every query with a brute-force scan after random sequences of insert,
-remove and update, in 2D and 3D, on integer-grid boxes that force touching and exact ties.
+remove and update, in 2D and 3D, on integer-grid boxes that force touching and exact ties. The
+nearest and ray results are also compared with exact integer and rational references that share
+no code with the index, on the grid scaled by powers of two from 2^-1000 to 2^1020.
 | `geom.length.out_of_range` | `invalid_input` | A requested arc length is negative or exceeds the curve's length by more than the linear tolerance |
 | `geom.curve.unbounded` | `unsupported` | A ray or line is given to an operation that needs a bounded curve, such as flattening |
 | `geom.flatten.too_many_vertices` | `limit_exceeded` | Flattening a curve needs more vertices than the caller's limit |

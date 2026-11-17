@@ -13,9 +13,14 @@
 //!   [`window`](SpatialIndex2::window) and [`crossing`](SpatialIndex2::crossing) sort by key;
 //!   [`nearest`](SpatialIndex2::nearest) and [`ray`](SpatialIndex2::ray) sort by distance, then
 //!   key. Distances are compared as computed `f64` values, so ties are exact.
+//! - [`nearest`](SpatialIndex2::nearest) ranks by the squared distance computed with an extended
+//!   exponent range: every gap is scaled by the same power of two first, so the ranking is
+//!   correct even where the squared distance would overflow or underflow, and agrees exactly with
+//!   the plain sum of squares where that is representable. A distance above the largest `f64`
+//!   is reported as infinity but still ranked by its true size.
 //! - An empty box, or a box or query input with a non-finite coordinate, is rejected with
 //!   `geom.bbox.invalid` or `geom.input.not_finite` before the index is touched; a failed call
-//!   never changes the index.
+//!   never changes the index. A box built from a NaN corner is the empty box.
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -54,6 +59,82 @@ fn distance_2<const N: usize>(lo: &[f64; N], hi: &[f64; N], point: &[f64; N]) ->
             gap * gap
         })
         .sum()
+}
+
+/// The binary exponent of a positive finite value: `2^e <= x < 2^(e+1)`, subnormals included.
+fn binary_exponent(x: f64) -> i32 {
+    let bits = x.to_bits();
+    let biased = i32::try_from((bits >> 52) & 0x7ff).unwrap_or_default();
+    if biased == 0 {
+        let width =
+            i32::try_from(64 - (bits & ((1 << 52) - 1)).leading_zeros()).unwrap_or_default();
+        width - 1075
+    } else {
+        biased - 1023
+    }
+}
+
+/// `x · 2^exponent`, exact unless the result leaves the normal range.
+fn times_power_of_two(mut x: f64, mut exponent: i32) -> f64 {
+    // Steps of 2^±960 keep every factor normal; |exponent| stays below 2200, so this is bounded.
+    let step = 960;
+    while exponent > step {
+        x *= 2_f64.powi(step);
+        exponent -= step;
+    }
+    while exponent < -step {
+        x *= 2_f64.powi(-step);
+        exponent += step;
+    }
+    x * 2_f64.powi(exponent)
+}
+
+/// The distance from a point to a box, ranked without overflow or underflow: the squared
+/// distance is `mantissa · 2^exponent` with `mantissa` in [1, 2), or zero with the smallest
+/// exponent. Where the plain sum of squared gaps is a normal number it is exactly that sum.
+struct Ranked {
+    exponent: i32,
+    mantissa: f64,
+    distance: f64,
+}
+
+impl Ranked {
+    fn new<const N: usize>(lo: &[f64; N], hi: &[f64; N], point: &[f64; N]) -> Self {
+        let gap = |scale: f64| {
+            std::array::from_fn::<f64, N, _>(|i| {
+                (lo[i] * scale - point[i] * scale)
+                    .max(point[i] * scale - hi[i] * scale)
+                    .max(0.0)
+            })
+        };
+        let (mut gaps, mut halved) = (gap(1.0), 0);
+        if gaps.iter().any(|g| g.is_infinite()) {
+            // Halving is exact for coordinates large enough to overflow a difference.
+            (gaps, halved) = (gap(0.5), 1);
+        }
+        let largest = gaps.iter().fold(0.0_f64, |m, g| m.max(*g));
+        if largest == 0.0 {
+            return Self {
+                exponent: i32::MIN,
+                mantissa: 0.0,
+                distance: 0.0,
+            };
+        }
+        let e = binary_exponent(largest);
+        let sum: f64 = gaps
+            .iter()
+            .map(|g| {
+                let scaled = times_power_of_two(*g, -e);
+                scaled * scaled
+            })
+            .sum();
+        let j = binary_exponent(sum);
+        Self {
+            exponent: 2 * (e + halved) + j,
+            mantissa: times_power_of_two(sum, -j),
+            distance: times_power_of_two(sum.sqrt(), e + halved),
+        }
+    }
 }
 
 impl<K, const N: usize> PointDistance for Entry<K, N> {
@@ -179,23 +260,34 @@ impl<K: Copy + Eq + Hash + Ord, const N: usize> Core<K, N> {
         if k == 0 {
             return Vec::new();
         }
-        let mut hits: Vec<(f64, K)> = Vec::new();
-        let mut kth = f64::NAN;
+        let mut candidates: Vec<&Entry<K, N>> = Vec::new();
+        let mut bound = f64::INFINITY;
         for (entry, d2) in self.tree.nearest_neighbor_iter_with_distance_2(point) {
-            if hits.len() == k {
-                kth = d2;
-            }
-            // Keep every entry tied with the k-th distance so the key tie-break is exact.
-            if hits.len() >= k && d2 > kth {
+            if candidates.len() >= k && d2 > bound {
                 break;
             }
-            hits.push((d2, entry.key));
+            candidates.push(entry);
+            if candidates.len() == k {
+                // Every entry not farther than the k-th one has a computed squared distance
+                // within a few rounding errors (relative, plus a few subnormal units) of the
+                // k-th one; collecting them all lets the exact ranking below decide.
+                bound = d2 * (1.0 + 16.0 * f64::EPSILON) + 16.0 * f64::from_bits(1);
+            }
         }
-        let mut sorted = Self::sorted_by_distance(hits);
-        sorted.truncate(k);
-        sorted
+        let mut ranked: Vec<(Ranked, K)> = candidates
             .into_iter()
-            .map(|(key, d2)| (key, d2.sqrt()))
+            .map(|e| (Ranked::new(&e.lo, &e.hi, &point), e.key))
+            .collect();
+        ranked.sort_unstable_by(|(a, ka), (b, kb)| {
+            a.exponent
+                .cmp(&b.exponent)
+                .then(a.mantissa.total_cmp(&b.mantissa))
+                .then(ka.cmp(kb))
+        });
+        ranked.truncate(k);
+        ranked
+            .into_iter()
+            .map(|(r, key)| (key, r.distance))
             .collect()
     }
 
@@ -370,8 +462,10 @@ macro_rules! spatial_index {
 
             /// The `k` entries nearest to `point` with their distances, ordered by distance and
             /// then key. The distance to a box is the Euclidean distance to its closest point,
-            /// zero inside or on it. Fewer than `k` are returned when the index is smaller;
-            /// `k == 0` gives an empty result.
+            /// zero inside or on it; it is computed without intermediate overflow or underflow,
+            /// and a distance above the largest `f64` is reported as infinity but ranked by its
+            /// true size. Fewer than `k` are returned when the index is smaller; `k == 0` gives
+            /// an empty result.
             ///
             /// # Errors
             ///
@@ -388,6 +482,12 @@ macro_rules! spatial_index {
             /// the ray meets it at a distance in `0..=max_distance`; touching counts. A zero
             /// direction component hits only boxes whose slab on that axis contains the origin
             /// coordinate. A negative `max_distance` yields an empty result.
+            ///
+            /// The direction is normalized by dividing by its largest component magnitude and
+            /// then by its length. A component smaller than about 1e-300 times the largest one
+            /// becomes zero or loses precision on the way, so the ray tested is the normalized
+            /// one, which can differ from the given direction by that much; this decides hits
+            /// that only graze a box face, and distances measured through such a component.
             ///
             /// # Errors
             ///
@@ -574,6 +674,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn nearest_ranks_correctly_where_squares_overflow_or_underflow() {
+        // Squared distances 1e400 and 1e500 both overflowed, 1e-400 and 4e-400 both underflowed,
+        // and the key decided the order.
+        let point = |x: f64| b2(x, 0.0, x, 0.0);
+        let origin = p2(0.0, 0.0);
+        let huge = SpatialIndex2::from_entries([(1_u32, point(1e250)), (2, point(1e200))]).unwrap();
+        assert_eq!(huge.nearest(&origin, 1).unwrap(), vec![(2, 1e200)]);
+        let tiny =
+            SpatialIndex2::from_entries([(1_u32, point(2e-200)), (2, point(1e-200))]).unwrap();
+        assert_eq!(
+            tiny.nearest(&origin, 2).unwrap(),
+            vec![(2, 1e-200), (1, 2e-200)]
+        );
+        // Beyond the largest f64: reported as infinity, ranked by true size.
+        let m = f64::MAX;
+        let beyond = SpatialIndex2::from_entries([
+            (1_u32, b2(m, m, m, m)),
+            (2, b2(m, 0.0, m, 0.0)),
+            (3, b2(0.5 * m, 0.0, 0.5 * m, 0.0)),
+        ])
+        .unwrap();
+        assert_eq!(
+            beyond.nearest(&p2(-m, 0.0), 3).unwrap(),
+            vec![(3, f64::INFINITY), (2, f64::INFINITY), (1, f64::INFINITY)]
+        );
+        assert_eq!(
+            beyond.nearest(&p2(0.0, 0.0), 1).unwrap(),
+            vec![(3, 0.5 * m)]
+        );
+    }
+
+    #[test]
+    fn nan_box_is_rejected() {
+        let mut index = SpatialIndex2::<u32>::new();
+        let nan_box = b2(f64::NAN, 0.0, 1.0, 1.0);
+        assert_eq!(
+            index.insert(1, nan_box).map_err(|e| e.code()),
+            Err("geom.bbox.invalid")
+        );
+        assert!(index.is_empty());
+    }
+
     #[derive(Debug, Clone)]
     enum Op<const N: usize> {
         Insert(u8, Corners<N>),
@@ -618,6 +761,107 @@ mod tests {
 
     fn intersects<const N: usize>(a: &Corners<N>, b: &Corners<N>) -> bool {
         (0..N).all(|i| a.0[i] <= b.1[i] && b.0[i] <= a.1[i])
+    }
+
+    /// A small integer-valued `f64` as an integer.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "grid values are small exact integers"
+    )]
+    fn grid(v: f64) -> i128 {
+        v as i128
+    }
+
+    /// Exact reference for nearest on the grid: four times the squared distance is an integer
+    /// for integer boxes and half-integer points.
+    fn exact_nearest<const N: usize>(
+        model: &BTreeMap<u8, Corners<N>>,
+        point: [f64; N],
+        k: usize,
+    ) -> Vec<(u8, i128)> {
+        let twice = |v: f64| grid(2.0 * v);
+        let mut all: Vec<(u8, i128)> = model
+            .iter()
+            .map(|(&key, (lo, hi))| {
+                let d4 = (0..N)
+                    .map(|i| {
+                        let g = (twice(lo[i]) - twice(point[i]))
+                            .max(twice(point[i]) - twice(hi[i]))
+                            .max(0);
+                        g * g
+                    })
+                    .sum();
+                (key, d4)
+            })
+            .collect();
+        all.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        all.truncate(k);
+        all
+    }
+
+    /// Exact rational reference for the ray on the grid, independent of the production slab
+    /// code: with `O = 2·origin`, `L = 2·lo`, `H = 2·hi` (integers) and the integer direction
+    /// `D`, the ray is `O + s·D` and the length along it is `s·|D|/2`. Returns, per hit, the key
+    /// and the entry parameter `s` as a fraction, or `None` for a case on the `max` boundary
+    /// that a rounded unit direction may decide either way.
+    fn exact_ray<const N: usize>(
+        model: &BTreeMap<u8, Corners<N>>,
+        origin: [f64; N],
+        direction: [f64; N],
+        max_halves: i128,
+    ) -> Option<Vec<(u8, (i128, i128))>> {
+        let int = |v: f64| grid(2.0 * v);
+        let d: [i128; N] = std::array::from_fn(|i| grid(direction[i]));
+        let d2: i128 = d.iter().map(|c| c * c).sum();
+        let axis_aligned = d.iter().filter(|c| **c != 0).count() == 1;
+        // Fractions with a positive denominator.
+        let less = |a: (i128, i128), b: (i128, i128)| a.0 * b.1 < b.0 * a.1;
+        let mut hits = Vec::new();
+        for (&key, (lo, hi)) in model {
+            let (mut near, mut far): ((i128, i128), Option<(i128, i128)>) = ((0, 1), None);
+            let mut miss = false;
+            for i in 0..N {
+                let (o, l, h) = (int(origin[i]), int(lo[i]), int(hi[i]));
+                if d[i] == 0 {
+                    miss |= o < l || o > h;
+                    continue;
+                }
+                let sign = d[i].signum();
+                let (a, b) = (((l - o) * sign, d[i].abs()), ((h - o) * sign, d[i].abs()));
+                let (low, high) = if less(b, a) { (b, a) } else { (a, b) };
+                if less(near, low) {
+                    near = low;
+                }
+                if far.is_none_or(|f| less(high, f)) {
+                    far = Some(high);
+                }
+            }
+            if miss || far.is_some_and(|f| less(f, near)) {
+                continue;
+            }
+            // s·|D|/2 <= max_halves/2  <=>  s² |D|² <= max_halves²
+            let lhs = near.0 * near.0 * d2;
+            let rhs = max_halves * max_halves * near.1 * near.1;
+            if lhs == rhs && !axis_aligned {
+                return None;
+            }
+            if lhs <= rhs {
+                hits.push((key, near));
+            }
+        }
+        hits.sort_by(|a, b| {
+            let (x, y) = (a.1.0 * b.1.1, b.1.0 * a.1.1);
+            x.cmp(&y).then(a.0.cmp(&b.0))
+        });
+        Some(hits)
+    }
+
+    /// The grid scaled by a power of two (exact), so squared distances overflow or underflow at
+    /// the extreme scales while the exact references stay valid.
+    const SCALES: [i32; 6] = [-1000, -540, 0, 500, 1015, 1020];
+
+    fn scaled<const N: usize>(v: [f64; N], exponent: i32) -> [f64; N] {
+        v.map(|c| times_power_of_two(c, exponent))
     }
 
     /// Replays `ops` on the core and on a `BTreeMap` model, then compares every query.
@@ -685,6 +929,76 @@ mod tests {
                     .collect();
                 hits.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
                 prop_assert_eq!(tree.ray(point, unit_dir, max), hits);
+            }
+        }
+
+        check_references(&model, point, direction, k, max)
+    }
+
+    /// Compares nearest and ray with the exact references, at every scale of [`SCALES`].
+    fn check_references<const N: usize>(
+        model: &BTreeMap<u8, Corners<N>>,
+        point: [f64; N],
+        direction: [f64; N],
+        k: usize,
+        max: f64,
+    ) -> std::result::Result<(), TestCaseError> {
+        let max_halves = (max * 2.0).floor();
+        for exponent in SCALES {
+            let s = times_power_of_two(1.0, exponent);
+            let model_s: BTreeMap<u8, Corners<N>> = model
+                .iter()
+                .map(|(&key, (lo, hi))| (key, (scaled(*lo, exponent), scaled(*hi, exponent))))
+                .collect();
+            let tree = Core::from_entries(model_s.iter().map(|(&key, &c)| (key, c)).collect());
+            let got = tree.nearest(scaled(point, exponent), k);
+            let want = exact_nearest(model, point, k);
+            prop_assert_eq!(
+                got.iter().map(|g| g.0).collect::<Vec<_>>(),
+                want.iter().map(|w| w.0).collect::<Vec<_>>(),
+                "scale 2^{}",
+                exponent
+            );
+            for ((_, distance), (_, d4)) in got.iter().zip(&want) {
+                let expected = (*d4 as f64).sqrt() / 2.0;
+                let reference = times_power_of_two(expected, exponent);
+                prop_assert!(
+                    *distance == reference
+                        || (distance - reference).abs() <= 4.0 * f64::EPSILON * reference,
+                    "{} vs {} at 2^{}",
+                    distance,
+                    reference,
+                    exponent
+                );
+            }
+            // Ray: max * s must stay finite.
+            if exponent > 1015 {
+                continue;
+            }
+            let Ok(unit_dir) = unit(direction) else {
+                continue;
+            };
+            let Some(want) = exact_ray(model, point, direction, grid(max_halves)) else {
+                continue;
+            };
+            let got = tree.ray(scaled(point, exponent), unit_dir, max_halves / 2.0 * s);
+            prop_assert_eq!(
+                got.iter().map(|g| g.0).collect::<Vec<_>>(),
+                want.iter().map(|w| w.0).collect::<Vec<_>>(),
+                "ray at scale 2^{}",
+                exponent
+            );
+            let length = direction.iter().map(|c| c * c).sum::<f64>().sqrt();
+            for ((_, t), (_, (num, den))) in got.iter().zip(&want) {
+                let reference =
+                    times_power_of_two(*num as f64 / *den as f64 * length / 2.0, exponent);
+                prop_assert!(
+                    (t - reference).abs() <= 8.0 * f64::EPSILON * reference,
+                    "{} vs {} at 2^{}",
+                    t,
+                    reference,
+                    exponent
+                );
             }
         }
         Ok(())

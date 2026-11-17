@@ -80,9 +80,14 @@ macro_rules! aabb {
                 }
             }
 
-            /// The smallest box containing both corners, in any order.
+            /// The smallest box containing both corners, in any order, or the empty box when a
+            /// coordinate is NaN.
             #[must_use]
             pub fn from_corners(a: $point, b: $point) -> Self {
+                // The componentwise minimum and maximum would drop a NaN instead of passing it on.
+                if a.iter().chain(b.iter()).any(|c| c.is_nan()) {
+                    return Self::EMPTY;
+                }
                 Self::ordered(a.inf(&b), a.sup(&b))
             }
 
@@ -296,6 +301,21 @@ mod tests {
         let b = Aabb3::from_corners(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 1.0));
         assert!(b.contains_point(&Point3::new(0.5, 1.0, 0.0)));
         assert!(b.expanded(1.0).contains(&b));
+    }
+
+    #[test]
+    fn nan_corner_gives_the_empty_box() {
+        let nan = Point2::new(f64::NAN, 0.0);
+        assert_eq!(
+            Aabb2::from_corners(nan, Point2::new(1.0, 1.0)),
+            Aabb2::EMPTY
+        );
+        assert_eq!(
+            Aabb2::from_corners(Point2::new(1.0, 1.0), nan),
+            Aabb2::EMPTY
+        );
+        let nan3 = Point3::new(0.0, 0.0, f64::NAN);
+        assert_eq!(Aabb3::from_corners(Point3::origin(), nan3), Aabb3::EMPTY);
     }
 
     #[test]

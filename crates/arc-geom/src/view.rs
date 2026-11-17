@@ -17,20 +17,30 @@
 //!   may use a zero or negative near distance (clipping behind the eye plane); perspective
 //!   frames need `near > 0`.
 //!
-//! Degeneracy of the eye/target distance and of the up vector is decided with the tolerance
-//! given to [`ViewFrame::new`] (linear for the eye/target distance, angular for the angle
-//! between up and the view direction). Deserialization validates with
-//! [`Tolerance::DEFAULT`]. Everything else is exact, as in the rest of the crate.
+//! Degeneracy is decided exactly, as in the rest of the crate, so the validity of a frame never
+//! depends on the tolerance of a document and deserialization validates exactly as
+//! [`ViewFrame::new`] does: the eye must differ from the target, and the up hint must be nonzero
+//! and not parallel to the view direction (its cross product with the computed unit view
+//! direction is not exactly zero). Lengths and unit vectors are computed without squaring
+//! unscaled components, so every finite magnitude is accepted.
+//!
+//! A frame whose matrices cannot be represented in `f64` (for example a field of view or height
+//! so small that its reciprocal overflows, a depth range whose span overflows, or an eye so far
+//! out that the world-to-view translation overflows) is rejected with
+//! `geom.precision.insufficient`. Functions that return a `Result` fail with the same code
+//! instead of returning a non-finite value; [`ViewFrame::project`] returns `None`. The point
+//! and vector mappings return plain values and are non-finite only when the exact result lies
+//! outside the range of `f64`.
 //!
 //! The mapping between world and view space is rigid and is computed directly from the basis;
 //! no general matrix inversion is used.
 
 use arc_base::math::{Matrix4, Point3, Vector3};
-use arc_base::{Error, Result, Tolerance};
+use arc_base::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::ensure_finite;
 use crate::error::codes;
+use crate::{deserialize_through_new, ensure_finite};
 
 /// The projection of a view frame.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -66,30 +76,53 @@ pub struct ViewFrame {
     forward: Vector3,
 }
 
-#[derive(Deserialize)]
-struct ViewFrameRaw {
-    eye: Point3,
-    target: Point3,
-    up: Vector3,
-    projection: Projection,
-    near: f64,
-    far: f64,
+deserialize_through_new!(
+    ViewFrame,
+    ViewFrameRaw {
+        eye: Point3,
+        target: Point3,
+        up: Vector3,
+        projection: Projection,
+        near: f64,
+        far: f64,
+    }
+);
+
+/// `a·b − c·d` to within two units in the last place, and exactly zero only when the exact
+/// value is zero (Kahan's algorithm with fused multiply-adds).
+fn difference_of_products(a: f64, b: f64, c: f64, d: f64) -> f64 {
+    let w = c * d;
+    // The rounding error of w, exactly.
+    let error = (-c).mul_add(d, w);
+    a.mul_add(b, -w) + error
 }
 
-impl TryFrom<ViewFrameRaw> for ViewFrame {
-    type Error = Error;
+/// The cross product with every component computed as an accurate difference of products.
+fn cross(a: &Vector3, b: &Vector3) -> Vector3 {
+    Vector3::new(
+        difference_of_products(a.y, b.z, a.z, b.y),
+        difference_of_products(a.z, b.x, a.x, b.z),
+        difference_of_products(a.x, b.y, a.y, b.x),
+    )
+}
 
-    fn try_from(raw: ViewFrameRaw) -> Result<Self> {
-        Self::new(
-            raw.eye,
-            raw.target,
-            raw.up,
-            raw.projection,
-            raw.near,
-            raw.far,
-            &Tolerance::DEFAULT,
-        )
+/// `v` scaled to unit length, or `None` for a zero or non-finite vector. It is divided by its
+/// largest component magnitude first, so no intermediate value overflows or underflows.
+fn unit(v: &Vector3) -> Option<Vector3> {
+    let largest = v.x.abs().max(v.y.abs()).max(v.z.abs());
+    if !(largest > 0.0 && largest.is_finite()) {
+        return None;
     }
+    let scaled = v / largest;
+    Some(scaled / scaled.norm())
+}
+
+fn all_finite(m: &Matrix4) -> bool {
+    m.iter().all(|value| value.is_finite())
+}
+
+fn insufficient() -> Error {
+    Error::new(codes::PRECISION_INSUFFICIENT)
 }
 
 impl ViewFrame {
@@ -99,12 +132,13 @@ impl ViewFrame {
     /// # Errors
     ///
     /// - `geom.input.not_finite` for a non-finite value.
-    /// - `geom.view.eye_at_target` when the eye and target are closer than `tolerance.linear`.
-    /// - `geom.view.up_invalid` when `up` is zero or its angle to the view direction (or its
-    ///   opposite) is at most `tolerance.angular`.
+    /// - `geom.view.eye_at_target` when the eye and target are the same point.
+    /// - `geom.view.up_invalid` when `up` is zero or parallel to the view direction.
     /// - `geom.view.fov_invalid` for a perspective field of view outside (0, π).
     /// - `geom.view.scale_not_positive` for an orthographic height that is not positive.
     /// - `geom.view.clip_invalid` when `near >= far`, or `near <= 0` for a perspective frame.
+    /// - `geom.precision.insufficient` when the frame's matrices cannot be represented in
+    ///   `f64` (see the [module documentation](self)).
     pub fn new(
         eye: Point3,
         target: Point3,
@@ -112,7 +146,6 @@ impl ViewFrame {
         projection: Projection,
         near: f64,
         far: f64,
-        tolerance: &Tolerance,
     ) -> Result<Self> {
         ensure_finite(&[
             eye.x, eye.y, eye.z, target.x, target.y, target.z, up.x, up.y, up.z, near, far,
@@ -143,25 +176,17 @@ impl ViewFrame {
                 .with_detail("near", near)
                 .with_detail("far", far));
         }
-        let to_target = target - eye;
-        let distance = to_target.norm();
-        if !distance.is_finite() || distance <= tolerance.linear.max(0.0) {
-            return Err(Error::new(codes::VIEW_EYE_AT_TARGET));
+        // Halving is exact for coordinates large enough to overflow the difference.
+        let mut to_target = target - eye;
+        if !to_target.iter().all(|c| c.is_finite()) {
+            to_target = target * 0.5 - eye * 0.5;
         }
-        let forward = to_target / distance;
-        let up_norm = up.norm();
-        let side = forward.cross(&up);
-        let side_norm = side.norm();
-        // sin(angle between forward and up); both parallel and antiparallel give ~0.
-        if !up_norm.is_finite()
-            || up_norm == 0.0
-            || side_norm / up_norm <= tolerance.angular.max(0.0)
-        {
-            return Err(Error::new(codes::VIEW_UP_INVALID));
-        }
-        let right = side / side_norm;
-        let view_up = right.cross(&forward);
-        Ok(Self {
+        // Distinct finite values never have a zero difference.
+        let forward = unit(&to_target).ok_or_else(|| Error::new(codes::VIEW_EYE_AT_TARGET))?;
+        let right = unit(&up)
+            .and_then(|up| unit(&cross(&forward, &up)))
+            .ok_or_else(|| Error::new(codes::VIEW_UP_INVALID))?;
+        let frame = Self {
             eye,
             target,
             up_hint: up,
@@ -169,9 +194,19 @@ impl ViewFrame {
             near,
             far,
             right,
-            up: view_up,
+            up: right.cross(&forward),
             forward,
-        })
+        };
+        // Aspect 1 gives exactly the entries that do not depend on the aspect; if one of them is
+        // not finite, no aspect gives finite matrices.
+        if all_finite(&frame.world_to_view())
+            && all_finite(&frame.raw_projection(1.0))
+            && all_finite(&frame.raw_inverse_projection(1.0))
+        {
+            Ok(frame)
+        } else {
+            Err(insufficient())
+        }
     }
 
     /// The eye position.
@@ -252,7 +287,7 @@ impl ViewFrame {
         self.right * v.x + self.up * v.y - self.forward * v.z
     }
 
-    /// The world-to-view matrix.
+    /// The world-to-view matrix. Its entries are finite for every valid frame.
     #[must_use]
     pub fn world_to_view(&self) -> Matrix4 {
         let (r, u, f) = (self.right, self.up, -self.forward);
@@ -290,11 +325,21 @@ impl ViewFrame {
     ///
     /// # Errors
     ///
-    /// `geom.view.aspect_invalid` unless `aspect` is finite and positive.
+    /// `geom.view.aspect_invalid` unless `aspect` is finite and positive;
+    /// `geom.precision.insufficient` when an entry that depends on `aspect` is not finite.
     pub fn projection_matrix(&self, aspect: f64) -> Result<Matrix4> {
         ensure_aspect(aspect)?;
+        let m = self.raw_projection(aspect);
+        if all_finite(&m) {
+            Ok(m)
+        } else {
+            Err(insufficient())
+        }
+    }
+
+    fn raw_projection(&self, aspect: f64) -> Matrix4 {
         let (n, f) = (self.near, self.far);
-        Ok(match self.projection {
+        match self.projection {
             Projection::Perspective { vertical_fov } => {
                 let k = 1.0 / (vertical_fov / 2.0).tan();
                 let a = -f / (f - n);
@@ -338,7 +383,7 @@ impl ViewFrame {
                     1.0,
                 )
             }
-        })
+        }
     }
 
     /// The inverse of [`Self::projection_matrix`], from clip space to view space, written in
@@ -346,11 +391,21 @@ impl ViewFrame {
     ///
     /// # Errors
     ///
-    /// `geom.view.aspect_invalid` unless `aspect` is finite and positive.
+    /// `geom.view.aspect_invalid` unless `aspect` is finite and positive;
+    /// `geom.precision.insufficient` when an entry that depends on `aspect` is not finite.
     pub fn inverse_projection_matrix(&self, aspect: f64) -> Result<Matrix4> {
         ensure_aspect(aspect)?;
+        let m = self.raw_inverse_projection(aspect);
+        if all_finite(&m) {
+            Ok(m)
+        } else {
+            Err(insufficient())
+        }
+    }
+
+    fn raw_inverse_projection(&self, aspect: f64) -> Matrix4 {
         let (n, f) = (self.near, self.far);
-        Ok(match self.projection {
+        match self.projection {
             Projection::Perspective { vertical_fov } => {
                 let k = 1.0 / (vertical_fov / 2.0).tan();
                 let a = -f / (f - n);
@@ -395,7 +450,7 @@ impl ViewFrame {
                     1.0,
                 )
             }
-        })
+        }
     }
 
     /// Projects a world point to normalized device coordinates (x, y in [-1, 1] inside the
@@ -416,18 +471,23 @@ impl ViewFrame {
                     return None;
                 }
                 let k = 1.0 / (vertical_fov / 2.0).tan();
-                Point3::new(
-                    k * v.x / (aspect * d),
-                    k * v.y / d,
-                    f * (d - n) / ((f - n) * d),
-                )
+                // The plain quotient is exactly 1 at the far plane; the factored one cannot
+                // overflow or underflow, so it is used when a product of the plain one would.
+                let (numerator, denominator) = (f * (d - n), (f - n) * d);
+                let depth =
+                    if denominator.is_normal() && (numerator == 0.0 || numerator.is_normal()) {
+                        numerator / denominator
+                    } else {
+                        f / (f - n) * ((d - n) / d)
+                    };
+                Point3::new(k * (v.x / d) / aspect, k * (v.y / d), depth)
             }
             Projection::Orthographic { height } => {
                 let h = height / 2.0;
-                Point3::new(v.x / (h * aspect), v.y / h, (-v.z - n) / (f - n))
+                Point3::new(v.x / h / aspect, v.y / h, (-v.z - n) / (f - n))
             }
         };
-        (ndc.x.is_finite() && ndc.y.is_finite() && ndc.z.is_finite()).then_some(ndc)
+        ndc.iter().all(|c| c.is_finite()).then_some(ndc)
     }
 
     /// Maps normalized device coordinates (depth 0 at near, 1 at far) to a world point.
@@ -436,7 +496,7 @@ impl ViewFrame {
     ///
     /// `geom.view.aspect_invalid` for an invalid `aspect`; `geom.input.not_finite` for a
     /// non-finite coordinate; `geom.precision.insufficient` for a perspective depth that maps
-    /// to infinity (the horizon, beyond the far plane).
+    /// to infinity (the horizon, beyond the far plane) or a point outside the range of `f64`.
     pub fn unproject(&self, ndc: &Point3, aspect: f64) -> Result<Point3> {
         ensure_aspect(aspect)?;
         ensure_finite(&[ndc.x, ndc.y, ndc.z])?;
@@ -446,10 +506,10 @@ impl ViewFrame {
                 let t = (vertical_fov / 2.0).tan();
                 // Solves z = f (d - n) / ((f - n) d) for the distance d along the view axis.
                 let denominator = f - ndc.z * (f - n);
-                let d = f * n / denominator;
-                if denominator <= 0.0 || !d.is_finite() {
-                    return Err(Error::new(codes::PRECISION_INSUFFICIENT));
+                if denominator <= 0.0 {
+                    return Err(insufficient());
                 }
+                let d = f / denominator * n;
                 Point3::new(ndc.x * aspect * t * d, ndc.y * t * d, -d)
             }
             Projection::Orthographic { height } => {
@@ -457,7 +517,12 @@ impl ViewFrame {
                 Point3::new(ndc.x * h * aspect, ndc.y * h, -(n + ndc.z * (f - n)))
             }
         };
-        Ok(self.view_to_world_point(&view))
+        let world = self.view_to_world_point(&view);
+        if view.iter().chain(world.iter()).all(|c| c.is_finite()) {
+            Ok(world)
+        } else {
+            Err(insufficient())
+        }
     }
 
     /// The pick ray through the normalized device position `(x, y)`: its origin and unit
@@ -469,23 +534,28 @@ impl ViewFrame {
     /// # Errors
     ///
     /// `geom.view.aspect_invalid` for an invalid `aspect`; `geom.input.not_finite` for a
-    /// non-finite coordinate.
+    /// non-finite coordinate; `geom.precision.insufficient` when the direction or origin is
+    /// outside the range of `f64`.
     pub fn ray_through(&self, x: f64, y: f64, aspect: f64) -> Result<(Point3, Vector3)> {
         ensure_aspect(aspect)?;
         ensure_finite(&[x, y])?;
-        Ok(match self.projection {
+        match self.projection {
             Projection::Perspective { vertical_fov } => {
                 let t = (vertical_fov / 2.0).tan();
-                let direction =
-                    self.view_to_world_vector(&Vector3::new(x * aspect * t, y * t, -1.0));
-                (self.eye, direction.normalize())
+                let view =
+                    unit(&Vector3::new(x * aspect * t, y * t, -1.0)).ok_or_else(insufficient)?;
+                Ok((self.eye, self.view_to_world_vector(&view)))
             }
             Projection::Orthographic { height } => {
                 let h = height / 2.0;
                 let origin = self.view_to_world_point(&Point3::new(x * h * aspect, y * h, 0.0));
-                (origin, self.forward)
+                if origin.iter().all(|c| c.is_finite()) {
+                    Ok((origin, self.forward))
+                } else {
+                    Err(insufficient())
+                }
             }
-        })
+        }
     }
 }
 
@@ -505,8 +575,6 @@ mod tests {
 
     use super::*;
 
-    const TOL: Tolerance = Tolerance::DEFAULT;
-
     fn frame(projection: Projection) -> ViewFrame {
         ViewFrame::new(
             Point3::new(1.0, 2.0, 3.0),
@@ -515,7 +583,6 @@ mod tests {
             projection,
             0.5,
             100.0,
-            &TOL,
         )
         .unwrap()
     }
@@ -526,8 +593,8 @@ mod tests {
         }
     }
 
-    fn code(r: Result<ViewFrame>) -> &'static str {
-        r.unwrap_err().code()
+    fn code<T>(r: Result<T>) -> &'static str {
+        r.err().map_or("ok", |e| e.code())
     }
 
     fn new(
@@ -538,7 +605,7 @@ mod tests {
         n: f64,
         f: f64,
     ) -> Result<ViewFrame> {
-        ViewFrame::new(eye, target, up, p, n, f, &TOL)
+        ViewFrame::new(eye, target, up, p, n, f)
     }
 
     #[test]
@@ -651,6 +718,217 @@ mod tests {
         assert!(serde_json::from_str::<ViewFrame>(&bad).is_err());
     }
 
+    fn x_frame(up: Vector3, projection: Projection, near: f64, far: f64) -> Result<ViewFrame> {
+        new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            up,
+            projection,
+            near,
+            far,
+        )
+    }
+
+    fn assert_orthonormal(f: &ViewFrame) {
+        let (r, u, fw) = (f.right(), f.up(), f.forward());
+        for v in [r, u, fw] {
+            assert!((v.norm() - 1.0).abs() < 1e-15, "{f:?}");
+        }
+        assert!(r.dot(&u).abs() < 1e-15 && r.dot(&fw).abs() < 1e-15 && u.dot(&fw).abs() < 1e-15);
+        assert!((r.cross(&u) + fw).norm() < 1e-15);
+    }
+
+    #[test]
+    fn validity_does_not_depend_on_a_tolerance_so_serde_round_trips() {
+        // Eye and target 1e-7 apart, and up 1e-10 rad from the view direction, were rejected
+        // on deserialization while a tighter tolerance accepted them on construction.
+        let close = new(
+            Point3::origin(),
+            Point3::new(1e-7, 0.0, 0.0),
+            Vector3::z(),
+            persp(),
+            0.1,
+            1.0,
+        )
+        .unwrap();
+        let nearly_parallel = x_frame(Vector3::new(1.0, 1e-10, 0.0), persp(), 0.1, 1.0).unwrap();
+        for f in [close, nearly_parallel] {
+            let json = serde_json::to_string(&f).unwrap();
+            assert_eq!(serde_json::from_str::<ViewFrame>(&json).unwrap(), f);
+            assert_orthonormal(&f);
+        }
+    }
+
+    #[test]
+    fn extreme_magnitudes_are_accepted() {
+        let far_apart = |e: f64, t: f64| {
+            new(
+                Point3::new(e, 0.0, 0.0),
+                Point3::new(t, 0.0, 0.0),
+                Vector3::z(),
+                persp(),
+                1.0,
+                2.0,
+            )
+        };
+        for (e, t) in [(-1e200, 1e200), (-f64::MAX, f64::MAX), (0.0, 5e-324)] {
+            let f = far_apart(e, t).unwrap();
+            assert_eq!(f.forward(), Vector3::x());
+            assert_orthonormal(&f);
+        }
+        for up in [
+            Vector3::z() * 1e-170,
+            Vector3::z() * 1e170,
+            Vector3::new(5e-324, 0.0, 5e-324),
+            Vector3::new(f64::MAX, -f64::MAX, f64::MAX),
+            // Within 1e-300 rad of parallel.
+            Vector3::new(1.0, 1e-300, 0.0),
+            Vector3::new(-1.0, 0.0, 1e-300),
+        ] {
+            let f = x_frame(up, persp(), 1.0, 2.0).unwrap();
+            assert_orthonormal(&f);
+            assert!(f.up().dot(&(up / up.amax())) > 0.0);
+        }
+        // Nearly parallel off the axes.
+        let d = Vector3::new(1.0, 2.0, 3.0);
+        let f = new(
+            Point3::origin(),
+            Point3::from(d),
+            d + Vector3::new(3.0, 0.0, -1.0) * 1e-14,
+            persp(),
+            1.0,
+            2.0,
+        )
+        .unwrap();
+        assert_orthonormal(&f);
+    }
+
+    #[test]
+    fn unrepresentable_frames_are_rejected() {
+        let ortho = |height| Projection::Orthographic { height };
+        let insufficient = "geom.precision.insufficient";
+        assert_eq!(
+            code(x_frame(Vector3::z(), ortho(1e-320), 0.1, 1.0)),
+            insufficient
+        );
+        assert_eq!(
+            code(x_frame(Vector3::z(), persp(), 1e-320, 1.0)),
+            insufficient
+        );
+        let tiny_fov = Projection::Perspective {
+            vertical_fov: 5e-324,
+        };
+        assert_eq!(
+            code(x_frame(Vector3::z(), tiny_fov, 0.1, 1.0)),
+            insufficient
+        );
+        // The depth span overflows.
+        assert_eq!(
+            code(x_frame(Vector3::z(), ortho(1.0), -1.7e308, 1.7e308)),
+            insufficient
+        );
+        // f n / (f - n) overflows.
+        let n = 1e300;
+        assert_eq!(
+            code(x_frame(Vector3::z(), persp(), n, n.next_up())),
+            insufficient
+        );
+        // The world-to-view translation overflows.
+        let m = f64::MAX;
+        let eye = Point3::new(m, m, m);
+        assert_eq!(
+            code(new(eye, Point3::origin(), Vector3::z(), persp(), 1.0, 2.0)),
+            insufficient
+        );
+    }
+
+    #[test]
+    fn non_finite_results_are_errors() {
+        let insufficient = "geom.precision.insufficient";
+        let wide = x_frame(
+            Vector3::z(),
+            Projection::Perspective { vertical_fov: 3.0 },
+            0.1,
+            1.0,
+        )
+        .unwrap();
+        // Was Ok with a zero direction.
+        let (_, direction) = wide.ray_through(1.0, 0.0, 1e300).unwrap();
+        assert!((direction.norm() - 1.0).abs() < 1e-15);
+        assert_eq!(code(wide.ray_through(1e300, 0.0, 1e300)), insufficient);
+        // Was Ok with NaN and infinite coordinates.
+        let far_out = Point3::new(1e300, 0.0, 0.5);
+        assert_eq!(code(wide.unproject(&far_out, 1e300)), insufficient);
+        let ortho = x_frame(
+            Vector3::z(),
+            Projection::Orthographic { height: 1.0 },
+            0.1,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(code(ortho.projection_matrix(1e-310)), insufficient);
+        assert_eq!(code(ortho.inverse_projection_matrix(1e300)), "ok");
+        assert_eq!(code(ortho.ray_through(1e300, 0.0, 1e300)), insufficient);
+        // Was None and precision.insufficient: f (d - n) overflowed.
+        let deep = x_frame(Vector3::z(), persp(), 1e200, 1e300).unwrap();
+        let depth = deep.project(&Point3::new(1e250, 0.0, 0.0), 1.0).unwrap().z;
+        assert!((0.0..=1.0).contains(&depth));
+        let middle = deep.unproject(&Point3::new(0.0, 0.0, 0.5), 1.0).unwrap();
+        assert!((deep.project(&middle, 1.0).unwrap().z - 0.5).abs() < 1e-12);
+        assert_eq!(
+            deep.project(&Point3::new(1e300, 0.0, 0.0), 1.0).unwrap().z,
+            1.0
+        );
+    }
+
+    #[test]
+    fn large_coordinates_keep_millimeter_detail() {
+        let eye = Point3::new(1e7 + 0.123, -2e7 + 0.456, 3e6);
+        let ahead = Vector3::new(3.0, 4.0, -1.0);
+        let f = new(
+            eye,
+            eye + ahead,
+            Vector3::new(0.1, 0.2, 1.0),
+            persp(),
+            0.01,
+            1e5,
+        )
+        .unwrap();
+        for i in 0..200 {
+            let i = f64::from(i);
+            let offset = Vector3::new((i * 0.37).sin(), (i * 0.91).cos(), (i * 0.13).sin());
+            let p = eye + ahead * (0.1 + i) + offset * 1e-3;
+            let back = f.view_to_world_point(&f.world_to_view_point(&p));
+            assert!((back - p).norm() < 1e-8);
+            let via_matrix = f.world_to_view().transform_point(&p);
+            assert!((via_matrix - f.world_to_view_point(&p)).norm() < 1e-7);
+            let ndc = f.project(&p, 1.5).unwrap();
+            assert!((f.unproject(&ndc, 1.5).unwrap() - p).norm() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn depth_is_exact_at_the_clip_planes_for_extreme_ratios() {
+        for (n, far) in [(0.5, 100.0), (1e-3, 1e9), (1e-6, 1e12), (1.0, 1.0 + 1e-9)] {
+            for p in [persp(), Projection::Orthographic { height: 3.0 }] {
+                let f = new(
+                    Point3::origin(),
+                    Point3::new(0.0, 0.0, -1.0),
+                    Vector3::y(),
+                    p,
+                    n,
+                    far,
+                )
+                .unwrap();
+                let depth = |d: f64| f.project(&Point3::new(0.0, 0.0, -d), 1.3).unwrap().z;
+                assert_eq!((depth(n), depth(far)), (0.0, 1.0));
+                let product =
+                    f.projection_matrix(1.3).unwrap() * f.inverse_projection_matrix(1.3).unwrap();
+                assert!((product - Matrix4::identity()).norm() < 1e-12);
+            }
+        }
+    }
+
     fn arb_frame() -> impl Strategy<Value = ViewFrame> {
         let p = || (-50.0..50.0_f64, -50.0..50.0_f64, -50.0..50.0_f64);
         let projection = prop_oneof![
@@ -667,7 +945,6 @@ mod tests {
                     projection,
                     near,
                     near + span,
-                    &TOL,
                 )
                 .ok()
                 .filter(|f| {
@@ -753,6 +1030,43 @@ mod tests {
                 }
                 Projection::Orthographic { .. } => prop_assert_eq!(direction, f.forward()),
             }
+        }
+
+        #[test]
+        fn scaled_frames_are_accepted_and_consistent(
+            f in arb_frame(),
+            scale in -300_i32..=300,
+            up_scale in -300_i32..=300,
+            p in arb_point(),
+            ndc in arb_ndc(),
+            aspect in 0.2..5.0_f64,
+        ) {
+            let s = 10_f64.powi(scale);
+            let projection = match f.projection() {
+                Projection::Orthographic { height } => Projection::Orthographic { height: height * s },
+                perspective @ Projection::Perspective { .. } => perspective,
+            };
+            let g = ViewFrame::new(
+                f.eye() * s,
+                f.target() * s,
+                f.up_hint() * 10_f64.powi(up_scale),
+                projection,
+                f.near() * s,
+                f.far() * s,
+            )
+            .unwrap();
+            for (a, b) in [(g.right(), f.right()), (g.up(), f.up()), (g.forward(), f.forward())] {
+                prop_assert!((a - b).norm() < 1e-9);
+            }
+            let q = p * s;
+            let back = g.view_to_world_point(&g.world_to_view_point(&q));
+            prop_assert!((back - q).amax() <= 1e-12 * s * (p.coords.norm() + f.eye().coords.norm()));
+            let world = g.unproject(&ndc, aspect).unwrap();
+            prop_assert!((g.project(&world, aspect).unwrap() - ndc).norm() < 1e-6);
+            let product = g.projection_matrix(aspect).unwrap() * g.inverse_projection_matrix(aspect).unwrap();
+            prop_assert!((product - Matrix4::identity()).norm() < 1e-9);
+            let (_, direction) = g.ray_through(ndc.x, ndc.y, aspect).unwrap();
+            prop_assert!((direction.norm() - 1.0).abs() < 1e-12);
         }
     }
 }
