@@ -31,6 +31,8 @@ the kernel.
 | `tessellation_chord` | Supplied by the caller (view-dependent or export setting) | Maximum distance between a curve and its polyline |
 | `tessellation_angle` | Supplied by the caller | Maximum turning angle per segment |
 
+- When the caller supplies no tessellation values, the `arc-base` defaults apply
+  ([CORE-BASE-012](../crates/arc-base.md)).
 - A document stores its model tolerance in metadata; operations take a tolerance context so results
   are reproducible.
 - Orientation, incidence and in-circle decisions use robust adaptive-precision predicates
