@@ -1,0 +1,19 @@
+[package]
+name = "arc-mesh"
+description = "Indexed triangle meshes, their normals and tangents, and their versioned encoding for the Arc suite."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+arc-base = { workspace = true }
+arc-geom = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

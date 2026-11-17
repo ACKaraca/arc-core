@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["crates/*", "xtask"]
 # Fuzz crates build with cargo-fuzz on a nightly toolchain, outside the workspace gate.
-exclude = ["crates/arc-geom/fuzz"]
+exclude = ["crates/arc-geom/fuzz", "crates/arc-mesh/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,6 +18,7 @@ publish = false
 arc-base = { path = "crates/arc-base" }
 arc-geom = { path = "crates/arc-geom" }
 arc-doc = { path = "crates/arc-doc" }
+arc-mesh = { path = "crates/arc-mesh" }
 
 # Lock-free publication of document snapshots in `arc-doc`; the optional `serde` feature stays off.
 arc-swap = { version = "1.9.5", default-features = false }

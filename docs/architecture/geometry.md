@@ -92,6 +92,8 @@ the kernel.
   used for picking, snapping and clash detection.
 - **Repair:** weld, remove degenerate faces, orient consistently, fill small holes, each reporting
   what it changed.
+- **The mesh encoding:** the versioned byte form of stored triangle meshes, exact or quantized
+  within a stated error bound, specified in [mesh-encoding.md](mesh-encoding.md).
 
 ## The arc-brep API
 
