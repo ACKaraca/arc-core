@@ -17,8 +17,10 @@ and the single-file document package with recovery. The architecture is specifie
 - Schema versions, migrations, preserved objects and quarantine.
 - The package format, the storage thread, the recovery journal, saving, locking, assets and
   inspection (feature `package`).
-- Core object types: `core.doc.link`, `core.doc.settings`, `core.doc.property_set_definition`,
-  `core.doc.preserved`.
+- Core object types: `core.doc.link`, `core.doc.settings`, `core.doc.property_set_definition`.
+  Preserved and quarantined objects are not objects of a core type: they are held beside the
+  typed stores and keep the type key of their stored row (see
+  [loading](#loading-migration-and-held-objects-core-doc-037-core-doc-038-core-doc-039)).
 
 ## Stays in products
 
@@ -366,7 +368,8 @@ object with CORE-DOC-005.
   stays deterministic and makes no operating-system calls.
 - **Snapshots.** A `Snapshot` is one `Arc` of its roots: the registry, the type keys, the
   revision number, the number of live objects, the table of store roots and the shard table of
-  the identifier index, and the root of the reverse reference index.
+  the identifier index, the root of the reverse reference index, the held objects and the
+  reasons the document is read-only.
   Cloning a snapshot copies one pointer, and `len` is constant time. `Snapshot::empty` has
   revision 0; the revision is a label that saturates at 2⁶⁴ − 1. Iteration yields live objects in
   handle order: by type key, then by ascending slot. Dropping the last holder of a snapshot
@@ -406,9 +409,8 @@ object with CORE-DOC-005.
   live again after it was deleted, in the same working set or a later one, when undo, redo or a
   type change re-creates the same object; a new object always gets a new identifier from the
   identifier generator.
-- **Not in this layer.** Preserved objects of unregistered types and a bulk path for loading
-  documents with millions of objects belong to the loading and migration unit; this layer
-  stores objects of registered types created one at a time.
+- **Not in this layer.** Preserved and quarantined objects and the bulk load path are specified
+  with [loading](#loading-migration-and-held-objects-core-doc-037-core-doc-038-core-doc-039).
 
 The `store_scale` test (ignored by default; run it in a release build) fills one store with one
 million objects. On a shared four-core development machine single-object operations measured
@@ -550,6 +552,102 @@ transaction is open per document at a time; the document executor enforces that,
   copy command itself (identifiers, creates, `copied_from`) belongs to an upper layer and is not
   part of phase 0 of this crate.
 
+### Loading, migration and held objects (CORE-DOC-037, CORE-DOC-038, CORE-DOC-039)
+
+`load(registry, types, rows, options)` builds the snapshot of a stored document. The package
+reads its tables into neutral rows: a `StoredType` per `arc_type` row (type key, major, minor,
+descriptor text) and a `StoredObject` per `arc_object` row with every column in its stored form
+(identifier bytes, type key, schema major and minor, owner bytes, name, partition, flags,
+encoding, payload, payload hash, last transaction); the payload is still encoded. The `flags`
+bits are 1 `hidden_from_ui`, 2 `system` and 4 `read_only`. `StoredObject::of` makes the row of
+an object at the version of a schema. Loading changes no input, writes nothing and appends no
+journal record: migrated values exist in memory only, and the file changes when a save writes
+them. A transaction of kind `migration` is reserved for an explicit command that rewrites stored
+data; loading writes none.
+
+- **Version policy.** For each type row of a registered type: the current version and older
+  minor versions of the current major decode, appended fields taking their default or staying
+  absent; older major versions migrate; a newer minor version of the current major decodes the
+  known fields and keeps the trailing bytes, and makes the document read-only
+  (`ReadOnlyReason::NewerMinor`, naming the type and the writing version); a newer major
+  version fails the load with `doc.load.newer_major` (arguments `type`, `version`, `current`)
+  before any object row is read, so nothing is created and the input is untouched. With
+  `NewerMajor::ReadOnlyView`, the explicit choice the document model offers, the document opens
+  read-only (`ReadOnlyReason::NewerMajor`) and the objects of that version are preserved. A type
+  row whose version numbers are out of range is ignored. An object row must name a version its
+  document declares; otherwise it is quarantined with `doc.load.version_undeclared`.
+- **Read-only documents.** The reasons travel with the snapshot (`Snapshot::read_only`) and with
+  every snapshot derived from it, so neither the executor nor the save path can lose them. Every
+  write of a working set on a read-only snapshot fails with `doc.document.read_only`, whose
+  arguments name the first reason's type and writing version.
+- **Migration.** `migrate::decode_current` decodes a payload of an older major version with the
+  source schema of that version, then applies the migrations one major version at a time; each
+  result must pass the field schema check of the next schema. A payload with trailing bytes of a
+  newer minor version of the old major, a failing migration function and a result that fails the
+  check fail with `doc.migration.failed` (arguments `type`, `from`; details `step`, the major
+  version of the failing step, and `reason`); decoding failures keep their codes. The object is
+  then quarantined.
+- **Load validation.** Decoded values pass the field schema check in the decoder; the type
+  validators run on every decoded object. An error finding quarantines the object with that
+  finding; a warning becomes a diagnostic.
+- **Held objects.** A row of an unregistered type is **preserved** (reason `doc.type.unknown`),
+  as is an object of a newer major version in the read-only view (reason `doc.load.newer_major`).
+  A row with a malformed column (`doc.load.header_invalid`, argument `column`: `type_key`,
+  `schema_major`, `schema_minor`, `owner`, `flags`, `name` or `partition` beyond
+  `string_bytes`), an unsupported encoding, an undeclared version, a payload that does not
+  decode, a failed migration or a validator error is **quarantined**. Both are `HeldObject`s:
+  the row unchanged, the type key of the row (`None` when it is malformed), the reason, and an
+  object with the identifier, the stored version (0.0 when malformed), the header as far as its
+  columns are valid and no field values. The snapshot holds them beside the typed stores, fixed
+  at load: they resolve through the identifier index, `get` and `type_key` answer for them,
+  `held` lists them in load order and `held_len` counts them, while `iter` and `len` cover the
+  typed stores only. Every write of a working set to a held object fails with
+  `doc.object.not_modifiable`; working sets, savepoints and publication share them unchanged. A
+  reference to a held object is not dangling, and its type check uses the row's type key. Of a
+  held object's own references only the header owner is kept for integrity and indexed; its
+  field references stay in its undecoded payload, since building a schema from a stored
+  descriptor is not provided yet. Deleting the owner of a held object fails with
+  `doc.object.not_modifiable`, because the owner's cascade would delete it.
+- **Rows without a usable identifier.** A row whose identifier is not 16 bytes or is nil
+  (`doc.load.header_invalid`, column `id`), and a later row with the identifier of an earlier
+  one (`doc.object.duplicate_id`; the first row wins), is kept in
+  `LoadedRows::unaddressable` and written back unchanged; it is not part of the snapshot.
+- **Limits.** `record_count` bounds the type rows and the object rows, and the load charges
+  every object row against `memory_bytes`: 256 bytes, its byte lengths and 32 bytes per payload
+  byte, an upper estimate of the values it can decode to. Exceeding either fails the whole load
+  with `doc.load.limit_exceeded` (argument `limit`) instead of quarantining rows one by one.
+  Per-payload limits apply through the payload codec and quarantine the one object;
+  `string_bytes` also bounds names and partitions.
+- **Reference integrity.** A dangling reference does not fail the load. After all rows, every
+  reference of every loaded and held object that names no loaded object, or an object of a type
+  its field does not allow, is reported; the objects stay as they are. Commit validation
+  rejects such references only when a transaction touches their source.
+- **Bulk load.** The snapshot is built without working sets: each object goes straight into its
+  store, the identifier index and the reverse reference index, on nodes private to the build,
+  so every invariant of those structures holds as after the same creates through a working
+  set. The result has revision 0 and its own generation counters.
+- **Result.** `Loaded` holds the snapshot; the diagnostics (`LoadDiagnostic`: kind `Preserved`,
+  `Quarantined`, `Unaddressable`, `Warning` or `Dangling`, the object, and the error), in row
+  order followed by the dangling references in handle order; the side table `LoadedRows`; and
+  `LoadCounts`.
+- **Write-back contract.** A save writes the row of every held object
+  (`HeldObject::row`) and every unaddressable row unchanged. `LoadedRows::get` gives the
+  original row of each loaded object whose stored form is not the encoding of its loaded values
+  at the current version (an older version, migrated or not, or a newer minor version, with the
+  trailing bytes beside it); objects at the current version have no entry, since their row is
+  that encoding. An object is untouched since load when the snapshot being saved holds the very
+  object that was loaded (`LoadedRows::untouched`, pointer identity: every write of a working
+  set replaces it). The row of an untouched object may be written back as it was; an object
+  with trailing bytes always is, since its document is read-only, and the original payload
+  equals the encoding of its values followed by the trailing bytes. Every other object is
+  encoded at the current version, which is how a save upgrades a file.
+
+The `load_scale` test (ignored by default; run it in a release build) loads one million objects
+of one integer field. On a shared four-core development machine it took about 1.6 s, decoding
+and validation included; building the same snapshot from decoded objects took about 1.4 s through
+the bulk path against 1.6 to 1.7 s through working-set creates. Insertion into the identifier index
+takes about half of that time.
+
 ### Error codes
 
 The codes `arc-doc` owns. A code is never reused for a different meaning; messages are in
@@ -586,3 +684,10 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.reference.cascade_limit` | `limit_exceeded` | On-delete cascades would delete more objects than `Limits::record_count` |
 | `doc.reference.cardinality` | `invalid_input` | A `one` reference field has no reference, or a `many` list holds more references than its bound |
 | `doc.reference.owner_conflict` | `conflict` | An object would be the target of more than one owning reference |
+| `doc.load.newer_major` | `unsupported` | A document contains a type of a newer major schema version than the registry, and the read-only view was not chosen |
+| `doc.load.limit_exceeded` | `limit_exceeded` | Loading would exceed the record count or the memory budget of its limits |
+| `doc.load.version_undeclared` | `corrupt_data` | A stored object names a schema version its document does not declare |
+| `doc.load.header_invalid` | `corrupt_data` | A column of a stored object other than the payload is malformed |
+| `doc.migration.failed` | `failed_operation` | An object of an older major version cannot be migrated: trailing bytes, a failing migration or an invalid result |
+| `doc.object.not_modifiable` | `conflict` | A preserved or quarantined object would be changed |
+| `doc.document.read_only` | `conflict` | A read-only document would be changed |

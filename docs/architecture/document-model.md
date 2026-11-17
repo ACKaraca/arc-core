@@ -404,6 +404,8 @@ dependency-graph node that produces diagnostics, not in a validator.
   chooses a read-only view that shows only objects of known versions; the file is never modified.
 - A type whose key is not registered at all (a product type opened by another product, a removed
   type) is loaded as a **preserved object**: header and encoded bytes kept, references kept for
-  integrity, shown in diagnostics, written back unchanged.
+  integrity, shown in diagnostics, written back unchanged. Until schemas can be built from stored
+  descriptors, the references a preserved object keeps for integrity are its header owner; its
+  field references stay in its encoded bytes.
 - Every migration ships with a test that loads a stored fixture of the old version and compares the
   result with the expected new value.

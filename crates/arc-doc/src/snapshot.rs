@@ -21,10 +21,16 @@ use arc_swap::ArcSwap;
 
 use crate::error::codes;
 use crate::index::IdIndex;
+use crate::preserved::HeldObject;
 use crate::registry::TypeRegistry;
 use crate::reverse_index::ReverseIndex;
 use crate::schema::{SchemaVersion, TypeKey, Value};
 use crate::store::{Handle, Store, usize_of};
+use crate::version::ReadOnlyReason;
+
+/// The store index of handles to held objects (preserved and quarantined objects), which live
+/// outside the typed stores.
+pub(crate) const HELD_STORE: u32 = u32::MAX;
 
 /// The flags of an object header.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -111,6 +117,10 @@ struct Roots {
     stores: Arc<Vec<Store>>,
     index: IdIndex,
     reverse: ReverseIndex,
+    /// The preserved and quarantined objects, fixed at load; a handle's slot indexes it.
+    held: Arc<Vec<HeldObject>>,
+    /// Why the document is read-only; empty for a writable document.
+    read_only: Arc<[ReadOnlyReason]>,
 }
 
 /// An immutable view of a document at one revision.
@@ -155,6 +165,8 @@ impl Snapshot {
             live: 0,
             index: IdIndex::default(),
             reverse: ReverseIndex::default(),
+            held: Arc::new(Vec::new()),
+            read_only: Arc::from(Vec::new()),
         }))
     }
 
@@ -181,8 +193,15 @@ impl Snapshot {
             .ok_or_else(|| not_found().with_detail("id", id.to_string()))
     }
 
-    /// The object at `handle`; a stale handle fails with `doc.object.not_found`.
+    /// The object at `handle`; a stale handle fails with `doc.object.not_found`. The object of
+    /// a held (preserved or quarantined) object has no field values.
     pub fn get(&self, handle: Handle) -> Result<&Arc<Object>> {
+        if handle.store == HELD_STORE {
+            return self
+                .held_object(handle)
+                .map(HeldObject::object)
+                .ok_or_else(not_found);
+        }
         self.0
             .stores
             .get(usize_of(handle.store))
@@ -190,13 +209,56 @@ impl Snapshot {
             .ok_or_else(not_found)
     }
 
-    /// The type key of the store `handle` points into.
+    /// The type key of the store `handle` points into; for a held object, the type key of its
+    /// stored row (`None` when that key is malformed).
     #[must_use]
     pub fn type_key(&self, handle: Handle) -> Option<&TypeKey> {
+        if handle.store == HELD_STORE {
+            return self.held_object(handle)?.type_key();
+        }
         self.0.keys.get(usize_of(handle.store))
     }
 
-    /// The number of live objects, in constant time.
+    /// The held object at `handle`, or `None` when `handle` does not point to a live held
+    /// object.
+    #[must_use]
+    pub fn held_object(&self, handle: Handle) -> Option<&HeldObject> {
+        if handle.store != HELD_STORE || handle.generation != 0 {
+            return None;
+        }
+        self.0.held.get(usize_of(handle.slot))
+    }
+
+    /// Every held object (preserved and quarantined objects) with its handle, in load order.
+    /// Held objects are not part of [`Snapshot::iter`] and [`Snapshot::len`].
+    pub fn held(&self) -> impl Iterator<Item = (Handle, &HeldObject)> + '_ {
+        self.0.held.iter().zip(0..).map(|(held, slot)| {
+            (
+                Handle {
+                    store: HELD_STORE,
+                    slot,
+                    generation: 0,
+                },
+                held,
+            )
+        })
+    }
+
+    /// The number of held objects, in constant time.
+    #[must_use]
+    pub fn held_len(&self) -> usize {
+        self.0.held.len()
+    }
+
+    /// Why the document is read-only, in type-key order; empty when it is writable. A working
+    /// set on a read-only snapshot refuses every write with `doc.document.read_only`.
+    #[must_use]
+    pub fn read_only(&self) -> &[ReadOnlyReason] {
+        &self.0.read_only
+    }
+
+    /// The number of live objects in the typed stores, in constant time; held objects are
+    /// counted by [`Snapshot::held_len`].
     #[must_use]
     pub fn len(&self) -> usize {
         self.0.live
@@ -358,8 +420,10 @@ impl WorkingSet {
     /// Fails with `doc.type.unknown` for an unregistered key, `doc.object.duplicate_id` when the
     /// identifier is live in the candidate, and `doc.store.capacity_exceeded` when the store has
     /// no slot or generation left. An identifier deleted earlier in this working set may be
-    /// created again, in any store. The values are not checked against the schema here.
+    /// created again, in any store. The values are not checked against the schema here. On a
+    /// read-only document every write of a working set fails with `doc.document.read_only`.
     pub fn create(&mut self, type_key: &str, object: Object) -> Result<Handle> {
+        self.writable()?;
         let store = self.current.store_index(type_key)?;
         let id = object.id;
         if self.current.0.index.get(id).is_some() {
@@ -392,7 +456,8 @@ impl WorkingSet {
     }
 
     /// Replaces the field values of the object at `handle` and returns the previous object. A
-    /// stale handle fails with `doc.object.not_found`.
+    /// stale handle fails with `doc.object.not_found`, a held object with
+    /// `doc.object.not_modifiable`.
     pub fn replace_values(
         &mut self,
         handle: Handle,
@@ -408,7 +473,7 @@ impl WorkingSet {
     }
 
     /// Replaces the header of the object at `handle` and returns the previous object. A stale
-    /// handle fails with `doc.object.not_found`.
+    /// handle fails with `doc.object.not_found`, a held object with `doc.object.not_modifiable`.
     pub fn replace_header(&mut self, handle: Handle, header: Header) -> Result<Arc<Object>> {
         let old = self.current.get(handle)?;
         let object = Object {
@@ -437,7 +502,8 @@ impl WorkingSet {
     }
 
     /// Deletes the object at `handle` and returns it. A stale handle fails with
-    /// `doc.object.not_found`. The handle and every copy of it are stale from now on.
+    /// `doc.object.not_found`, a held object with `doc.object.not_modifiable`. The handle and
+    /// every copy of it are stale from now on.
     pub fn delete(&mut self, handle: Handle) -> Result<Arc<Object>> {
         let old = self
             .store_mut(handle)?
@@ -510,9 +576,23 @@ impl WorkingSet {
         roots.reverse.update(&roots.registry, key, old, new);
     }
 
+    /// Fails with `doc.document.read_only` when the document is read-only.
+    fn writable(&self) -> Result<()> {
+        match self.current.read_only().first() {
+            Some(reason) => Err(reason.error()),
+            None => Ok(()),
+        }
+    }
+
     fn store_mut(&mut self, handle: Handle) -> Result<&mut Store> {
+        self.writable()?;
         // Check first, so a stale handle copies nothing.
-        self.current.get(handle)?;
+        let object = self.current.get(handle)?;
+        if handle.store == HELD_STORE {
+            return Err(
+                Error::new(codes::OBJECT_NOT_MODIFIABLE).with_arg("id", object.id.to_string())
+            );
+        }
         let roots = Arc::make_mut(&mut self.current.0);
         Arc::make_mut(&mut roots.stores)
             .get_mut(usize_of(handle.store))
@@ -522,6 +602,104 @@ impl WorkingSet {
 
 fn invalid_savepoint() -> Error {
     Error::new(codes::SAVEPOINT_INVALID)
+}
+
+/// Builds the snapshot of a loaded document from many objects at once (the bulk load path).
+///
+/// It keeps the invariants of a working set (stores, identifier index, reverse reference index,
+/// live count) without its bookkeeping: there is no base, no touched map and no savepoint, and
+/// every node it writes is private to it, so it is changed in place.
+pub(crate) struct BulkLoad {
+    roots: Roots,
+    held: Vec<HeldObject>,
+}
+
+impl BulkLoad {
+    /// An empty document of `registry`.
+    pub(crate) fn new(registry: Arc<TypeRegistry>) -> Self {
+        Self {
+            roots: Arc::unwrap_or_clone(Snapshot::empty(registry).0),
+            held: Vec::new(),
+        }
+    }
+
+    /// The registry of the document.
+    pub(crate) fn registry(&self) -> &Arc<TypeRegistry> {
+        &self.roots.registry
+    }
+
+    /// True when `id` is already loaded.
+    pub(crate) fn contains(&self, id: ObjectId) -> bool {
+        self.roots.index.get(id).is_some()
+    }
+
+    /// Adds `object` to the store of the registered `type_key` and returns it as stored.
+    /// Fails like [`WorkingSet::create`] for an unregistered key, a loaded identifier or a full
+    /// store.
+    pub(crate) fn insert(&mut self, type_key: &str, object: Object) -> Result<Arc<Object>> {
+        let index = self
+            .roots
+            .keys
+            .binary_search_by(|probe| probe.as_str().cmp(type_key))
+            .map_err(|_| unknown(type_key))?;
+        let id = object.id;
+        if self.contains(id) {
+            return Err(Error::new(codes::OBJECT_DUPLICATE_ID).with_arg("id", id.to_string()));
+        }
+        let object = Arc::new(object);
+        let (slot, generation) = Arc::make_mut(&mut self.roots.stores)
+            .get_mut(index)
+            .and_then(|entry| entry.insert(Arc::clone(&object)))
+            .ok_or_else(|| Error::new(codes::STORE_CAPACITY_EXCEEDED).with_arg("type", type_key))?;
+        let store = u32::try_from(index).map_err(|_| unknown(type_key))?;
+        self.roots.index.insert(
+            id,
+            Handle {
+                store,
+                slot,
+                generation,
+            },
+        );
+        self.roots
+            .reverse
+            .update(&self.roots.registry, type_key, None, Some(&object));
+        self.roots.live += 1;
+        Ok(object)
+    }
+
+    /// Adds a held object. Its header owner enters the reverse reference index; its fields hold
+    /// no values and so no references. Fails with `doc.object.duplicate_id` for a loaded
+    /// identifier.
+    pub(crate) fn hold(&mut self, held: HeldObject) -> Result<()> {
+        let id = held.object().id;
+        if self.contains(id) {
+            return Err(Error::new(codes::OBJECT_DUPLICATE_ID).with_arg("id", id.to_string()));
+        }
+        let slot = u32::try_from(self.held.len())
+            .map_err(|_| Error::new(codes::STORE_CAPACITY_EXCEEDED).with_arg("type", "(held)"))?;
+        self.roots.index.insert(
+            id,
+            Handle {
+                store: HELD_STORE,
+                slot,
+                generation: 0,
+            },
+        );
+        let key = held.type_key().map_or("", TypeKey::as_str);
+        self.roots
+            .reverse
+            .update(&self.roots.registry, key, None, Some(held.object()));
+        self.held.push(held);
+        Ok(())
+    }
+
+    /// The snapshot of revision 0 holding everything added, read-only for `read_only` reasons
+    /// when there are any.
+    pub(crate) fn finish(mut self, read_only: Vec<ReadOnlyReason>) -> Snapshot {
+        self.roots.held = Arc::new(self.held);
+        self.roots.read_only = Arc::from(read_only);
+        Snapshot(Arc::new(self.roots))
+    }
 }
 
 /// The latest published snapshot of a document.

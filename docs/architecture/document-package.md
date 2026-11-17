@@ -57,7 +57,7 @@ CREATE TABLE arc_object (
   owner       BLOB,               -- 16-byte id or NULL
   name        TEXT,
   partition   TEXT,               -- product-defined load unit, e.g. a storey or a sheet
-  flags       INTEGER NOT NULL,
+  flags       INTEGER NOT NULL,   -- 1 hidden_from_ui, 2 system, 4 read_only
   encoding    INTEGER NOT NULL,   -- 0 = postcard, 1 = postcard + zstd
   payload     BLOB NOT NULL,
   payload_hash BLOB NOT NULL,     -- BLAKE3 of the uncompressed payload

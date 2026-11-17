@@ -184,6 +184,49 @@ pub mod codes {
         message_id: "doc-reference-owner-conflict",
     };
 
+    /// A document contains a type of a newer major schema version than the registry knows.
+    pub const LOAD_NEWER_MAJOR: ErrorCode = ErrorCode {
+        code: "doc.load.newer_major",
+        category: Category::Unsupported,
+        message_id: "doc-load-newer-major",
+    };
+    /// Loading a document would exceed its record count or memory budget.
+    pub const LOAD_LIMIT_EXCEEDED: ErrorCode = ErrorCode {
+        code: "doc.load.limit_exceeded",
+        category: Category::LimitExceeded,
+        message_id: "doc-load-limit-exceeded",
+    };
+    /// A stored object names a schema version its document does not declare.
+    pub const LOAD_VERSION_UNDECLARED: ErrorCode = ErrorCode {
+        code: "doc.load.version_undeclared",
+        category: Category::CorruptData,
+        message_id: "doc-load-version-undeclared",
+    };
+    /// A column of a stored object other than the payload is malformed.
+    pub const LOAD_HEADER_INVALID: ErrorCode = ErrorCode {
+        code: "doc.load.header_invalid",
+        category: Category::CorruptData,
+        message_id: "doc-load-header-invalid",
+    };
+    /// An object of an older major version could not be migrated to the current one.
+    pub const MIGRATION_FAILED: ErrorCode = ErrorCode {
+        code: "doc.migration.failed",
+        category: Category::FailedOperation,
+        message_id: "doc-migration-failed",
+    };
+    /// A preserved or quarantined object is changed.
+    pub const OBJECT_NOT_MODIFIABLE: ErrorCode = ErrorCode {
+        code: "doc.object.not_modifiable",
+        category: Category::Conflict,
+        message_id: "doc-object-not-modifiable",
+    };
+    /// A read-only document is changed.
+    pub const DOCUMENT_READ_ONLY: ErrorCode = ErrorCode {
+        code: "doc.document.read_only",
+        category: Category::Conflict,
+        message_id: "doc-document-read-only",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         TYPE_DUPLICATE_KEY,
@@ -215,6 +258,13 @@ pub mod codes {
         REFERENCE_CASCADE_LIMIT,
         REFERENCE_CARDINALITY,
         REFERENCE_OWNER_CONFLICT,
+        LOAD_NEWER_MAJOR,
+        LOAD_LIMIT_EXCEEDED,
+        LOAD_VERSION_UNDECLARED,
+        LOAD_HEADER_INVALID,
+        MIGRATION_FAILED,
+        OBJECT_NOT_MODIFIABLE,
+        DOCUMENT_READ_ONLY,
     ];
 }
 
