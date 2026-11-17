@@ -18,12 +18,14 @@ pub mod polyline;
 pub mod predicates;
 pub mod primitives;
 pub mod transform;
+pub mod view;
 
 pub use bbox::{Aabb2, Aabb3};
 pub use curve::Curve2;
 pub use polyline::{Polyline2, PolylineSegment, PolylineVertex};
 pub use predicates::{Sign, incircle, orient2d};
 pub use primitives::{Arc2, Circle2, Ellipse2, EllipticalArc2, Line2, Ray2, Segment2};
+pub use view::{Projection, ViewFrame};
 
 use arc_base::math::Vector2;
 use arc_base::{Error, Result, Tolerance};

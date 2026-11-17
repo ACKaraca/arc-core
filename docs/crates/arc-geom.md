@@ -200,6 +200,20 @@ are magnitude ratios of up to about 1e272 and 1e128. A wider span fails with
 `geom.precision.insufficient`. Both exponents depend only on the set of coordinate values, so
 every argument order of the same points gives consistently permuted signs or fails alike.
 
+### View frame
+
+`ViewFrame` (CORE-GEOM-030) holds eye, target, an up hint, a projection (`Perspective` with a
+vertical field of view in radians, or `Orthographic` with a view height in model units) and near
+and far clip distances. View space is right-handed: x right, y up, the camera looks along negative
+z, and the basis `(right, up, forward)` satisfies `right x up = -forward`. Clip space has x and y
+in [-1, 1] and normalized depth 0 at near and 1 at far. The aspect ratio (width over height) is
+not stored; every function that needs it takes it, because one frame serves views of different
+sizes. World-to-view and view-to-world are rigid and computed from the basis without matrix
+inversion. `project` returns `None` for a perspective point at or behind the eye plane. The eye
+and target distance uses the linear tolerance and the up direction the angular tolerance passed
+to the constructor; deserialization validates with the default tolerance. Orthographic frames may
+have a zero or negative near distance.
+
 ### Error codes
 
 The codes `arc-geom` owns. A code is never reused for a different meaning; messages are in
@@ -222,3 +236,9 @@ The codes `arc-geom` owns. A code is never reused for a different meaning; messa
 | `geom.precision.insufficient` | `failed_operation` | A computation exceeds the range or precision of `f64`: a transform image that is not representable, a bulge whose arc is not representable, predicate coordinates that span too many binary exponents |
 | `geom.decode.invalid` | `corrupt_data` | Encoded geometry is malformed or oversized |
 | `geom.tolerance.invalid` | `invalid_input` | A linear or angular tolerance is NaN, infinite or negative |
+| `geom.view.eye_at_target` | `invalid_input` | The eye and target of a view frame are closer than the linear tolerance |
+| `geom.view.up_invalid` | `invalid_input` | The up vector of a view frame is zero or within the angular tolerance of parallel to the view direction |
+| `geom.view.fov_invalid` | `invalid_input` | A perspective field of view is outside (0, π) |
+| `geom.view.scale_not_positive` | `invalid_input` | An orthographic view height is zero or negative |
+| `geom.view.clip_invalid` | `invalid_input` | Near is not smaller than far, or near is not positive for a perspective frame |
+| `geom.view.aspect_invalid` | `invalid_input` | An aspect ratio is not a finite positive number |

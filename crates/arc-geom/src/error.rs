@@ -97,6 +97,42 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "geom-tolerance-invalid",
     };
+    /// The eye and target of a view frame coincide.
+    pub const VIEW_EYE_AT_TARGET: ErrorCode = ErrorCode {
+        code: "geom.view.eye_at_target",
+        category: Category::InvalidInput,
+        message_id: "geom-view-eye-at-target",
+    };
+    /// The up vector of a view frame is zero or parallel to the view direction.
+    pub const VIEW_UP_INVALID: ErrorCode = ErrorCode {
+        code: "geom.view.up_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-view-up-invalid",
+    };
+    /// The field of view of a perspective view frame is outside (0, π).
+    pub const VIEW_FOV_INVALID: ErrorCode = ErrorCode {
+        code: "geom.view.fov_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-view-fov-invalid",
+    };
+    /// The height of an orthographic view frame is not positive.
+    pub const VIEW_SCALE_NOT_POSITIVE: ErrorCode = ErrorCode {
+        code: "geom.view.scale_not_positive",
+        category: Category::InvalidInput,
+        message_id: "geom-view-scale-not-positive",
+    };
+    /// The clip distances of a view frame are not ordered, or the near distance of a perspective frame is not positive.
+    pub const VIEW_CLIP_INVALID: ErrorCode = ErrorCode {
+        code: "geom.view.clip_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-view-clip-invalid",
+    };
+    /// An aspect ratio is not a finite positive number.
+    pub const VIEW_ASPECT_INVALID: ErrorCode = ErrorCode {
+        code: "geom.view.aspect_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-view-aspect-invalid",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -115,6 +151,12 @@ pub mod codes {
         PRECISION_INSUFFICIENT,
         DECODE_INVALID,
         TOLERANCE_INVALID,
+        VIEW_EYE_AT_TARGET,
+        VIEW_UP_INVALID,
+        VIEW_FOV_INVALID,
+        VIEW_SCALE_NOT_POSITIVE,
+        VIEW_CLIP_INVALID,
+        VIEW_ASPECT_INVALID,
     ];
 }
 
