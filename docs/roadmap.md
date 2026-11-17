@@ -3,7 +3,8 @@
 Foundation milestones mapped onto the suite phases. Phases have exit criteria, not dates. Each
 milestone lists the crates it delivers, the capabilities in scope (every capability of that crate
 whose Phase column equals the milestone's phase, unless narrowed), and acceptance scenarios that
-must pass in CI on all three desktop platforms.
+must pass in CI on all three desktop platforms; the browser and mobile scenarios of phase 5 run in
+the nightly job.
 
 ```mermaid
 flowchart LR
@@ -139,12 +140,42 @@ outputs.
 | Milestone | Crates | Scope |
 |---|---|---|
 | F5.1 Multi-user change sets | `arc-doc`, `arc-hub-api` | CORE-DOC-027, CORE-DOC-028; CORE-HUBAPI-019, CORE-HUBAPI-020 |
-| F5.2 Native kernel families | `arc-brep` | CORE-BREP-034 |
+| F5.2 Native kernel families | `arc-brep` | CORE-BREP-034; the same gate applies to the native finite-element, meshing, slicing and multi-axis toolpath kernels that products introduce: each replaces its wrapped engine once it passes the validation suites the wrapped engine passes |
 | F5.3 Adaptive subdivision and immersive views | `arc-mesh`, `arc-gpu` | CORE-MESH-012; CORE-GPU-032 |
 | F5.4 Assistant panel | `arc-app` | CORE-APP-023 |
+| F5.5 Exchange package | `arc-io-exchange` | CORE-IO-041 to CORE-IO-048 |
+| F5.6 Open readers and licensed bridges | `arc-io-3dm`, `arc-io-fbx`, `arc-io-dgn`, `arc-io-bridge`, `arc-worker` | CORE-IO-049 to CORE-IO-054 |
+| F5.7 Touch, pen and small screens | `arc-ui` | CORE-UI-033 to CORE-UI-041 |
+| F5.8 Browser and mobile targets | `arc-app`, `arc-gpu`, `arc-io-*` | CORE-APP-027 to CORE-APP-036; CORE-GPU-034 to CORE-GPU-040; CORE-IO-055 |
 
 Exit criteria: two clients edit different fields of the same objects concurrently through a Hub
 and converge without conflicts; edits to the same field produce conflict records with both values
 kept and resolvable by command; an operation family switched to native code passes the golden-model
 corpus with identical results; the assistant panel proposes a command, shows its preview and applies
 it only after approval, with no request sent before the user acts.
+
+Exit criteria for the interchange and platform milestones:
+
+1. **Exchange round trip.** A reference connector written in a second language exports a test
+   model with types, parameters, relationships, B-rep and mesh geometry and drafting views; the
+   package passes all five validation levels in both validators; a product imports it, edits an
+   element, and writes a change-only package whose `source` ids update the same elements in the
+   reference host without duplicates.
+2. **Version tolerance.** The current reader reads fixtures of every released schema version, keeps
+   unknown fields, and refuses an unknown major version and an unimplemented required extension
+   without reading data.
+3. **Open readers.** Each file of the 3DM, FBX and DGN V7 corpora opens with a loss report and the
+   comparison against the independent reader passes; malformed files fail with errors; a 3DM file
+   that crashes the reader fails with `worker.crashed` while the application keeps running.
+4. **Licensed bridge.** A test adapter that crashes, hangs, exceeds its memory limit or returns an
+   invalid package fails its job with a stable error and leaves the document unchanged; no bridge
+   runs unless the user enabled its descriptor.
+5. **Browser.** The reference shell builds for WebAssembly, opens a document from a file handle and
+   from upload, edits, saves and undoes it, and recovers after the page is closed mid-edit, in
+   Chromium, Firefox and WebKit in the nightly job; commands that need the kernel are disabled with
+   a reason, and the same operation succeeds through a worker job after consent.
+6. **Tablet and phone.** The reference shell passes the same scenario in the iOS simulator and the
+   Android emulator with simulated touch and pen streams in the compact, medium and expanded size
+   classes, survives suspension at random points without losing committed work, and every control
+   has an accessible name and a single-pointer alternative for each gesture.
+

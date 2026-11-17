@@ -5,6 +5,7 @@ Terms used across the `arc-core` documentation, one line each.
 | Term | Meaning |
 |---|---|
 | Arc Automation Protocol (AAP) | JSON-RPC 2.0 protocol over stdio or a user-scoped local socket through which scripts, assistants, CLIs and workers drive an Arc application |
+| Arc exchange package | Open ZIP container (`.arcx`) of JSON Lines tables and binary geometry that connectors read and write to exchange a model with a product |
 | Arc Scene | Versioned renderable scene description and session protocol between products and the renderer process |
 | `arc-worker` | Helper executable that runs hostile-input parsing and crash-prone native work out of process |
 | Aspect | Named group of an object's fields used as the unit of dependency tracking |
@@ -12,10 +13,13 @@ Terms used across the `arc-core` documentation, one line each.
 | Baseline tag | The single `arc-core` release tag that every product of a suite release pins |
 | Branch stability | Solver property that a solution does not flip orientation unless the user changed it |
 | Change set | Base state plus ordered journal records, exchanged for multi-user editing |
+| Bridge descriptor | User-installed file that names a licensed bridge adapter, its accepted inputs and its output format |
 | Chunk | Fixed-size block of 1,024 store slots shared between revisions until written; also a content-defined piece of a large asset |
 | Command | Registered, typed, validated operation; the only way a document changes |
 | Command catalog | JSON export of all exposed commands, used for documentation, MCP tools, the Python client and tests |
 | Conflict record | Kept incoming and current values of a field changed concurrently, awaiting a resolving command |
+| Connector | Add-in running inside another application, through that application's public API, that reads or writes the Arc exchange package |
+| Constrained profile | Limits profile with reduced memory and size limits, the default in browser and tablet or phone builds |
 | Derived data | Data computed from document objects by the dependency graph and never journaled |
 | Derived key | Name of a kind of derived data registered with an evaluator |
 | Display list | Exact drafting primitives of a space, tagged with their source objects |
@@ -28,6 +32,7 @@ Terms used across the `arc-core` documentation, one line each.
 | Group | Set of transactions that undo as one step |
 | Handle | In-memory generational index into a typed store; never persisted |
 | Layer table | `xtask/layers.toml`, the authoritative crate layering enforced by `cargo xtask layers` |
+| Licensed bridge | User-installed, user-licensed conversion library run as a separate process by `arc-worker`; never distributed or required |
 | Limits profile | Named set of hostile-input limits passed to readers |
 | Loss report | Structured record of what an import or export mapped, approximated, preserved, dropped or failed |
 | Neutral model | A format crate's typed model of its format, free of product types |
@@ -42,6 +47,8 @@ Terms used across the `arc-core` documentation, one line each.
 | Recovery journal | Per-session database holding committed transactions since the last save |
 | Revision | Session-local counter incremented by each commit |
 | Second concrete user | The rule that code moves into `arc-core` only when two products need it |
+| Server-side worker | Headless Arc runner reached through Hub jobs that performs operations unavailable on a browser or mobile device |
+| Size class | Compact, medium or expanded window width class that selects the UI layout |
 | Snapshot | Immutable view of a whole document at one revision |
 | Source map | Mapping from imported objects to their identifiers in the source file |
 | Sub-object key | `(ObjectId, local key)` addressing a part of an object |
@@ -52,3 +59,4 @@ Terms used across the `arc-core` documentation, one line each.
 | Type key | Namespaced string that names a registered object type |
 | View source | Product interface supplying geometry and styles to derived views |
 | WebAssembly set | Crates that must build for `wasm32-unknown-unknown` |
+| `xid` | Exchange identifier of a record in an Arc exchange package, unique within the package |

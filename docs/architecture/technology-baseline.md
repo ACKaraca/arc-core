@@ -31,6 +31,12 @@ Status words: **ADOPT** (used directly), **WRAP** (used only behind an Arc-owned
 | STEP and IGES | Through the B-rep tier | WRAP | Exchange fidelity comes with the kernel | LGPL-2.1 with exception | `arc-io-step` over `arc-brep`; import in `arc-worker` | Follows the B-rep kernel |
 | USD | `openusd` (pure-Rust reader and writer); no C++ OpenUSD, no Hydra delegate | ADOPT | Reads and writes all USD encodings with composition, without a large C++ build | MIT | `arc-io-usd` | Conformance gaps against the OpenUSD checker that block exchange |
 | PDF | `krilla` for output; `lopdf` plus PDFium for import and underlays | ADOPT + WRAP | High-quality vector output with fonts and PDF/A; PDFium gives the best raster fidelity for underlays | MIT or Apache-2.0; MIT; BSD-3-Clause | PDFium only in `arc-worker` via `arc-pdfium` | Output defects that cannot be fixed upstream |
+| Exchange package | Arc-owned container and schemas (see [interchange](interchange.md#the-arc-exchange-package)) on `zip`, `serde_json`, `jsonschema` and `blake3`; connectors outside this repository write and read it | ADOPT + BUILD | Hosts that run connectors can read ZIP and JSON without a native library; the schemas are published and validated independently | Apache-2.0 (Arc); MIT; MIT; CC0-1.0 or Apache-2.0 | `arc-io-exchange` | Measured open time or random-access needs exceed the browser budget ([ADR-0011](../adr/0011-exchange-package-container.md)) |
+| 3DM | openNURBS behind the FFI crate `arc-opennurbs` | WRAP | The open reference library of the format; no pure-Rust reader has comparable coverage | openNURBS license (permissive, BSD-style; allowlist entry required before first build) | `arc-opennurbs`; import only in `arc-worker` | A pure-Rust reader passes the 3DM corpus ([ADR-0012](../adr/0012-opennurbs-ffi-crate.md)) |
+| FBX | `fbxcel` and `fbxcel-dom` (binary FBX 7.x reading) | ADOPT | An open reader exists; the vendor's SDK is not used | MIT or Apache-2.0 | `arc-io-fbx` | Corpus failures that cannot be fixed upstream |
+| DGN V7 | Arc-owned reader from the published specification | BUILD | The specification is public and the format is small | Apache-2.0 (Arc) | `arc-io-dgn` | Not planned |
+| Licensed bridges | Arc-owned process host and descriptors; the conversion library is user-installed, user-licensed and never distributed | BUILD | Lets a product use a library under a vendor or consortium license without depending on it | Apache-2.0 (Arc); the library keeps its own license | Separate process started by `arc-worker` | Not planned |
+| Browser and mobile targets | `wasm-bindgen`, `web-sys`, `js-sys`; `winit` web, iOS and Android backends; `wgpu` on WebGPU, Metal and Vulkan | ADOPT | The same Rust crates and UI kit reach the browser and mobile; generated glue holds no application logic ([ADR-0018](https://github.com/ACKaraca/arc-suite/blob/main/docs/adr/0018-web-and-mobile-targets.md)) | MIT or Apache-2.0 | `arc-app` and `arc-gpu` target modules | A required platform capability is unavailable through these crates for more than a year |
 | Point clouds and GIS | `las`, `laz`, `e57`; `proj`, `geo`; FlatGeobuf, GeoPackage and Shapefile readers | ADOPT | Mature format libraries; PROJ is the reference for coordinate operations | MIT, Apache-2.0 | `arc-io-pointcloud`, `arc-io-geo` | Library inactive and failing corpus cases |
 | Render building blocks | Embree (ray intersection, FFI crate), Open Image Denoise, `exr`, OpenColorIO | WRAP | Used by RenderBuilder; listed so the baseline covers the suite. `exr` is also used by `arc-io-mesh` | Apache-2.0; Apache-2.0; BSD-3-Clause; BSD-3-Clause | FFI crates live in RenderBuilder | Per RenderBuilder decisions |
 | Simulation | `rapier` (rigid bodies); CalculiX, Gmsh, EPA SWMM and EPANET as separate solver processes behind adapters | ADOPT + WRAP | Used by products; process boundaries keep copyleft solvers separate | Apache-2.0; solvers under their own licenses, never linked | Separate processes | Per product decisions |
@@ -66,9 +72,12 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `minidumper`, `crash-handler`, `sentry` | Out-of-process crash capture and opt-in reporting | MIT or Apache-2.0 |
 | `tokio` | Asynchronous runtime for networking in `arc-app` and `arc-hub-api` only | MIT |
 | `reqwest` | HTTP client in `arc-hub-api` and update checks | MIT or Apache-2.0 |
+| `wasm-bindgen`, `web-sys`, `js-sys` | Generated browser glue in `arc-app` and `arc-gpu` (browser target only) | MIT or Apache-2.0 |
 | `proptest` | Property tests | MIT or Apache-2.0 |
 
 ## Not built in the first two years
+
+The open readers and the exchange package listed above are built; the following are not.
 
 | Not built | Reason |
 |---|---|
@@ -76,10 +85,10 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | A GUI toolkit | egui meets the requirements with Arc widgets on top; toolkit work would compete with product work |
 | A GPU abstraction | `wgpu` covers every target backend |
 | A CRDT engine | Document invariants (valid joins, solvable constraints, unique numbering) cannot be enforced by automatic merges; change sets with conflict records are used instead |
-| An FEA solver or mesher | Open solvers run as separate processes behind adapters |
-| A slicer | Additive preparation exports to dedicated tools |
-| 5-axis CAM kernels | Out of scope until 2.5D and 3-axis machining are complete |
+| A native finite-element solver or mesher | Open solvers run as separate processes behind adapters; a native kernel replaces the wrapped engine once it passes the same validation suites |
+| A native slicer | Additive preparation uses a wrapped engine; a native kernel replaces it once it passes the same validation suites |
+| Native multi-axis toolpath kernels | 2.5D and 3-axis machining come first; wrapped engines serve multi-axis until a native kernel passes the same validation suites |
 | A DWG or IFC parser from scratch | Wrapped libraries exist under usable licenses; effort goes into mapping and validation |
-| A reader for unpublished proprietary formats (such as RVT) | No published specification exists; such data is exchanged through open formats |
+| A native reader for formats without a published specification (such as native BIM project files) | Their data is exchanged through connectors and the Arc exchange package, licensed bridges and open formats; formats with a published specification or an open reader are read natively |
 | An installer or updater | Velopack, `cargo-dist` and platform packaging cover distribution |
 | A scripting language | Python runs out of process through the automation protocol; the expression engine is deliberately not a general language |

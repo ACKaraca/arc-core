@@ -1,7 +1,8 @@
 # UI kit
 
-The widgets (`arc-ui`) and application shell (`arc-app`) shared by every Arc desktop product, and
-the interaction standards that make the products behave alike. All UI is egui on wgpu and winit;
+The widgets (`arc-ui`) and application shell (`arc-app`) shared by every Arc product on the desktop,
+in the browser and on tablets and phones, and the interaction standards that make the products
+behave alike. All UI is egui on wgpu and winit;
 upstream crates are used unmodified, and any fork carries a patch ledger with removal conditions.
 
 ## Structure
@@ -154,3 +155,120 @@ keyboard, also during a prompt (where they step back inside the command first).
 
 **Feedback for long work.** Operations longer than 300 ms show progress; longer than 2 s offer
 cancel; the UI never freezes on document work.
+
+## Browser, tablet and phone targets
+
+The same widgets and shell run in the browser (WebAssembly with WebGPU) and on tablets and phones
+(iOS and Android); what each layer guarantees there is in the
+[architecture overview](overview.md#platform-targets). This section specifies what changes for the
+user: input, layout, text entry, storage and accessibility. Nothing here changes the desktop
+behavior above.
+
+### Pointer sources
+
+Mouse, touch and pen are equal pointer sources. Widgets receive pointer events with a kind
+(mouse, touch, pen), position, pressure and tilt where the hardware reports them, and contact
+size. Interaction standards (selection, snapping, Escape and Enter, undo) hold for every kind.
+
+| Gesture | Effect |
+|---|---|
+| Tap | Select the object under the contact; with an active prompt, supply the point or pick |
+| Tap on the selection | Cycle through overlapping objects |
+| Long press | Open the context menu; press then drag draws a window or crossing selection by the same direction rule as the mouse |
+| One-finger drag on empty space | Pan in two-dimensional views, orbit in three-dimensional views; with a drawing tool active it moves the pending point instead |
+| Two-finger drag, pinch, twist | Pan, zoom about the contact center, rotate the view |
+| Double tap | Zoom to the point or to the selection |
+| Two-finger tap, three-finger tap | Undo, redo (configurable) |
+| Pen contact | Selects, picks and draws like the primary mouse button |
+| Pen barrel button, eraser end | Configurable command, by default pan and delete-under-pen |
+| Pen hover | Where the hardware reports hover: pre-selection highlight and snap markers as with a mouse |
+
+Rules:
+
+- **Pen and touch together.** While a pen is in range, touch navigates and the pen draws; touch
+  contacts larger than the palm threshold, or made while the pen touches, are ignored. A setting
+  makes touch draw as well.
+- **Pick radius.** Hit-test and snap radii scale with the pointer kind: 4, 6 and 12 logical pixels
+  for mouse, pen and touch as defaults. Grips and manipulators draw at 12 px and hit-test at 44 px.
+- **Target size.** Interactive controls are at least 44 logical pixels (about 9 mm) in each
+  dimension with at least 8 px between them; touch density is `comfortable` by default.
+- **Precision.** While a finger places a point, a loupe shows the area under the contact above it,
+  the snap marker is acquired continuously, and the point is committed on release; an offset-cursor
+  mode moves the pending point by relative drag, and nudge buttons move it one snap step.
+- **No hover dependence.** Every hover-only feature has a touch equivalent: pre-selection while the
+  contact is down and before it lifts, tooltips on long press, and the status strip for snap names.
+- **Single-pointer alternatives.** Every multi-finger gesture has a button or menu command, and no
+  gesture requires a path or a timing the user cannot adjust.
+
+### Size classes and layouts
+
+The layout follows the window's size class, not the device type, and changes live when the window
+is resized, rotated or split.
+
+| Class | Width in logical pixels | Layout |
+|---|---|---|
+| Compact | Below 600 | The viewport fills the window. Panels open one at a time as bottom sheets or full pages; the toolbar sits at the bottom; the command line is a button that opens the palette and a soft input row; dialogs are sheets |
+| Medium | 600 to 1,024 | The viewport plus one docked panel group that the user switches between tabs; floating palettes and the tool option bar in a bottom strip |
+| Expanded | Above 1,024 | The full docking workspace as on the desktop |
+
+- A workspace stores its dock layout separately for each class; a new class starts from the
+  product's default for that class.
+- Orientation and size changes keep the camera, selection, active command and prompt.
+- Safe areas (notches, system bars, the home indicator) are respected by every panel and by the
+  viewport overlay.
+- UI scale composes with the platform's text scale setting; layouts are tested at 200 % combined.
+- Long menus become scrollable sheets; context menus open beside the contact and never under the
+  finger.
+
+### Text entry
+
+- An on-screen keyboard appears for text and quantity fields and shifts the layout so the focused
+  field and the active prompt stay visible. Quantity fields request a numeric keypad with an
+  accessory row for units and operators; the command line shows an accessory row with Enter,
+  Escape, Tab, and the separators used in coordinate input.
+- Input method composition is preserved in every text field. Hardware keyboards work in full,
+  including every key binding.
+- Escape and Enter are always available as buttons in the tool option bar, so touch-only users can
+  cancel and accept.
+
+### Storage and file access
+
+The shell reaches storage only through a file-access layer with one implementation per platform.
+Documents are packages (or the product's native file) read and written as whole files through it.
+
+| Platform | User files | Private storage |
+|---|---|---|
+| Desktop | Native dialogs and paths | Configuration and cache directories |
+| Browser | A file picker with a retained file handle where the browser supports it, otherwise upload and download; drag and drop | The origin-private file system for the recovery journal, settings, thumbnails and caches |
+| Tablet and phone | The application sandbox and the system document picker, with access retained across launches through persisted permissions (security-scoped bookmarks or storage access framework grants); the share sheet for export and open-in | The application sandbox |
+
+- **Saving.** Platforms without in-place file access use the full-rewrite save strategy of the
+  [document package](document-package.md): a complete package is written to a temporary location
+  and replaces the target through the provider; in the browser the package is an in-memory image
+  persisted by this layer. A location behind a provider that cannot guarantee atomic replacement is
+  flagged unreliable and warns on save.
+- **Recovery.** The recovery journal lives in private storage, is flushed on every suspend or page
+  hide notification, and is offered at the next start like on the desktop.
+- **Locks.** Where a lock file cannot be created beside the document, the lock is advisory inside
+  the application (the Web Locks API between browser tabs); a Hub lock governs a checked-out
+  document.
+- **Quota and eviction.** The shell reads the storage quota, shows usage, asks for persistent
+  storage through an explicit user action, evicts caches first and never evicts documents or
+  recovery data without a prompt.
+- **Memory pressure.** On a memory warning the shell releases caches, lowers levels of detail, and
+  then asks the user to save and close secondary views; it never ends a document silently.
+- **Offline.** The browser build is installable and runs offline from cached assets; Hub
+  synchronization resumes when a connection returns. No request is made without a user-enabled
+  feature (CORE-APP-019).
+
+### Accessibility and tests
+
+- Screen readers use AccessKit platform adapters on mobile; the browser exposes the same tree
+  through a generated accessible mirror. Names, roles and focus order are the ones of the desktop
+  tests.
+- System settings for text size, bold text, contrast and reduced motion are followed; switch and
+  keyboard navigation reach every control.
+- `egui_kittest` tests drive simulated touch and pen event streams; gesture recognizers have unit
+  tests over recorded streams; panel snapshots are taken in each size class at 100 % and 200 %
+  scale. The nightly job builds the browser target and runs it in Chromium, Firefox and WebKit, and
+  runs the mobile targets in the iOS simulator and the Android emulator.

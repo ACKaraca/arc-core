@@ -77,16 +77,17 @@ in `arc-suite`; change it there first.
 
 - The layer table in `xtask/layers.toml` is the authority; L0–L4 never depend on `winit`, `wgpu`,
   `egui` or other UI crates. Changing the table needs an ADR.
-- `unsafe` exists only in `arc-brep-occt` and `arc-pdfium`. STEP, IGES and PDFium work runs in
-  `arc-worker`.
+- `unsafe` exists only in `arc-brep-occt`, `arc-pdfium` and `arc-opennurbs`. STEP, IGES, PDFium and
+  3DM work runs in `arc-worker`; licensed bridges run only as separate processes the user enabled.
 - Objects are addressed by `ObjectId` (UUIDv7) everywhere outside one snapshot; handles are never
   persisted or sent.
 - Every document change is a transaction from a command; journal records are field-level and
   self-inverting; derived data is never journaled.
 - A regeneration result is applied only if none of its inputs changed after the revision it read.
-- The package format, the automation protocol, the Arc Scene contract and the plug-in interface are
-  versioned independently of crates; changing any of them needs an ADR and fixtures.
-- Format crates expose neutral models; product mapping never enters `arc-io-*`.
+- The package format, the exchange package schema, the automation protocol, the Arc Scene contract
+  and the plug-in interface are versioned independently of crates; changing any of them needs an ADR and fixtures.
+- Format crates expose neutral models; product mapping never enters `arc-io-*`. Format crates read byte
+  buffers and streams, not paths, and the WebAssembly set builds for the browser.
 - Tolerances come from `arc-base`, never from literals. User-visible strings are Fluent message
   identifiers.
 - Error codes are stable and never reused.

@@ -15,6 +15,8 @@ The architecture is specified in [rendering.md](../architecture/rendering.md#the
 - The render thread, viewport targets and frame scheduling.
 - Headless rendering to images and the image-comparison harness used by tests.
 - Re-export of the pinned `wgpu` version for products.
+- Backend selection and budgets for the browser (WebGPU) and tablet and phone (Metal, Vulkan)
+  targets: device limits, memory budgets, lifecycle recovery and device-loss handling.
 
 ## Stays in products
 
@@ -51,7 +53,10 @@ mode and line feature, with a perceptual difference threshold; pick tests that r
 and assert identifiers at pixel positions; precision tests at georeferenced coordinates
 (10^7 m from origin) asserting sub-millimetre vertex placement; culling equivalence tests (GPU path
 and CPU path produce the same visible set); benchmarks for frame time on the reference large models
-in the nightly job on real GPUs.
+in the nightly job on real GPUs. Browser and mobile: the image-comparison suite runs on WebGPU in
+Chromium, Firefox and WebKit and on the iOS simulator and Android emulator; device-loss tests destroy
+the device mid-frame and assert that the scene is restored without re-extraction; budget tests lower
+the memory limit and assert eviction order and that no allocation exceeds the limit.
 
 ## Capabilities
 
@@ -112,3 +117,19 @@ in the nightly job on real GPUs.
 | CORE-GPU-031 | Headless rendering | Renders views to images without a window on any adapter including software adapters, for thumbnails, automation and tests. | T1 | 0 |
 | CORE-GPU-032 | Multiview cameras | Accepts several view frames per scene render for stereo and immersive review without duplicating scene data. | T3 | 5 |
 | CORE-GPU-033 | WebGPU backend | Builds and renders in browsers through the WebGPU backend with the CPU culling path. | T2 | 2 |
+
+### Browser, tablet and phone
+
+Rendering on these targets follows the same scene, items and pipelines; what differs is the device
+contract. The platform guarantees are in the
+[architecture overview](../architecture/overview.md#platform-targets).
+
+| ID | Capability | Behavior | Tier | Phase |
+|---|---|---|---|---|
+| CORE-GPU-034 | Mobile backends | Renders through Metal on iOS and Vulkan on Android with the same pipelines, reporting reduced features when an OpenGL ES fallback is used. | T3 | 5 |
+| CORE-GPU-035 | Browser device limits | Reads the adapter's WebGPU limits and splits buffers, textures and tiles to fit; WebGPU is required and no WebGL fallback is provided in the first release. | T3 | 5 |
+| CORE-GPU-036 | Surface and device lifecycle | Recreates surfaces on suspend, resume, resize and scale change and restores the scene after device loss from retained CPU data without re-extraction. | T3 | 5 |
+| CORE-GPU-037 | Memory budget | Sets GPU memory budgets from device limits and platform warnings, evicting texture levels, tiles and levels of detail in a documented order and reporting the budget in frame statistics. | T3 | 5 |
+| CORE-GPU-038 | Mobile performance targets | Sustains 30 frames per second orbiting 2 million triangles and 500,000 line segments on the reference tablet, with adaptive quality always enabled during navigation. | T3 | 5 |
+| CORE-GPU-039 | Pointer-sized picking | Sizes the identifier-pass region from the pointer kind's pick radius so touch and pen picks resolve the intended object within 16 ms. | T3 | 5 |
+| CORE-GPU-040 | Thermal and power response | Lowers frame rate cap and expensive effects when the platform reports thermal pressure or low-power mode and restores them afterward. | T3 | 5 |

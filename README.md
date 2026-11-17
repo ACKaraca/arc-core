@@ -92,7 +92,7 @@ the crate's capabilities with permanent identifiers (`CORE-<AREA>-NNN`).
   table and fails the build on an upward edge or on a UI, windowing or GPU dependency below L5.
 - **L0–L4 are headless.** They build and run without a window, a GPU or a display server, so the
   same code serves desktop applications, headless CLIs, Hub workers and tests. A listed subset also
-  builds for WebAssembly.
+  builds for WebAssembly (the browser build); the same crates also build for iOS and Android.
 - **One baseline tag.** `arc-core` is released as a whole under one version tag. Every product pins
   exactly one tag, and a suite release names the single tag all its products ship on.
 - **Format crates produce neutral models.** An `arc-io-*` crate reads and writes a faithful model of
@@ -111,7 +111,9 @@ until an API is declared stable.
 
 A product never depends on another product. Products cooperate at run time through three
 contracts defined here: the Arc document package (`arc-doc`), the Arc Scene contract
-(`arc-scene`) and the Hub API (`arc-hub-api`).
+(`arc-scene`) and the Hub API (`arc-hub-api`). Connectors running inside other
+applications exchange models with products through a fourth, the Arc exchange package
+(`arc-io-exchange`).
 
 ## Documentation
 

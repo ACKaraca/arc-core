@@ -74,9 +74,10 @@ the edge and the rule. Changing the table needs an architecture decision record
 The WebAssembly set builds for `wasm32-unknown-unknown` in CI (`cargo xtask wasm`): `arc-base`,
 `arc-geom`, `arc-mesh`, `arc-solve`, `arc-doc` with the `package` feature disabled, `arc-command`
 without the `server` and `wasm-plugins` features, `arc-draft`, `arc-view`, `arc-scene`,
-`arc-nodes`, `arc-io-mesh`, `arc-io-ifc`, `arc-io-bcf` and `arc-gpu` with the `webgpu` backend.
-The browser viewer of Arc Review is the consumer of this set. `arc-brep` (C++ kernel), SQLite
-packages, PDFium, PROJ and process isolation are outside it.
+`arc-nodes`, `arc-io-mesh`, `arc-io-ifc`, `arc-io-bcf`, `arc-io-exchange`, `arc-io-dgn`,
+`arc-io-fbx` and `arc-gpu` with the `webgpu` backend. Browser builds of the products consume this
+set ([platform targets](#platform-targets)). `arc-brep` (C++ kernel), file-backed SQLite packages,
+PDFium, PROJ, openNURBS and process isolation are outside it.
 
 ## Unsafe code and FFI crates
 
@@ -86,6 +87,7 @@ packages, PDFium, PROJ and process isolation are outside it.
 |---|---|---|---|
 | `arc-brep-occt` | Open CASCADE through an Arc-owned C++ shim | Dynamic | Private to `arc-brep`; see [geometry](geometry.md#kernel-isolation) |
 | `arc-pdfium` | PDFium for PDF import and underlay rasterization | Dynamic, loaded at run time | Used only inside `arc-worker` |
+| `arc-opennurbs` | openNURBS for reading Rhino 3DM files | Static | Used only inside `arc-worker`; see [ADR-0012](../adr/0012-opennurbs-ffi-crate.md) |
 
 Adding an FFI crate requires an architecture decision record. Every FFI crate exposes a safe API,
 documents the invariant behind each `unsafe` block in a `SAFETY:` comment, runs its tests under
@@ -102,6 +104,8 @@ survive:
 |---|---|
 | STEP and IGES import through the kernel | Native parser on untrusted files |
 | PDF import and underlay rasterization through PDFium | Native parser on untrusted files |
+| 3DM import through openNURBS | Native parser on untrusted files |
+| Licensed bridge conversions (`bridge.convert`) | A user-licensed third-party library runs in its own process under resource limits; see [licensed bridges](interchange.md#licensed-bridges) |
 | Kernel operations in batch and Hub jobs when isolation is requested | A kernel fault ends the worker, not the job runner |
 | Out-of-process test oracles in CI | License and dependency separation |
 
@@ -109,13 +113,60 @@ The worker speaks the Arc Automation Protocol framing on stdio, runs with the co
 rules of the caller, and is restarted on failure. A job that crashes the worker fails with a
 `worker.crashed` error and leaves the calling document unchanged.
 
+## Platform targets
+
+Products ship for Windows, macOS and Linux, and may also ship a **browser build** (the same crates
+compiled to WebAssembly, rendering through WebGPU) and **tablet and phone builds** for iOS and
+Android. These are targets of the same code with the same UI kit, not separate applications; the
+desktop applications still contain no web view and no application logic in JavaScript or TypeScript.
+The glue that a platform requires (a generated loader page for the browser; an activity or
+application delegate stub on mobile) is generated from templates in `arc-core` and contains no
+application logic. The decision is
+[ADR-0018](https://github.com/ACKaraca/arc-suite/blob/main/docs/adr/0018-web-and-mobile-targets.md).
+
+### What each layer must guarantee
+
+| Layer | Guarantee on browser and tablet or phone |
+|---|---|
+| L0 | No direct operating-system calls. Time, randomness and paths come from traits that the shell implements per platform, so identifiers, quantities and tolerances behave identically everywhere. |
+| L1–L2 | `arc-geom` and `arc-solve` build for every target. `arc-mesh` builds everywhere; its Manifold-backed booleans, like `arc-brep`, are native code and follow the table below. |
+| L3 | `arc-doc` runs with one executor thread and a worker pool of any size down to one: results are identical, only latency differs. Commits flush the recovery journal on a suspend notification within the time the platform grants. `arc-command` builds without its `server` and `wasm-plugins` features in the browser. |
+| L4 | Every `arc-io-*` crate reads and writes byte buffers and streams, never paths. Readers default to the `constrained` limits profile. Format crates start no process; bridge and worker jobs are started by `arc-worker`, which these targets do not have. |
+| L5 | `arc-gpu` runs on WebGPU in the browser, Metal on iOS and Vulkan on Android, with the CPU culling path when multi-draw indirect is missing, quality and memory budgets adapted to the device, and recovery from device loss and surface changes without losing the scene. |
+| L6 | `arc-ui` and `arc-app` accept touch, pen and mouse as equal pointer sources, adapt layouts to the window size class, and reach storage and files only through the shell's file-access layer ([UI kit](ui-kit.md#browser-tablet-and-phone-targets)). |
+
+### What is unavailable and what replaces it
+
+| Capability | Desktop | Browser | Tablet and phone |
+|---|---|---|---|
+| B-rep kernel (STEP and IGES import, booleans, blends) | In process or `arc-worker` | Server-side worker | Server-side worker; compiled into the application only where the license and the platform allow |
+| Mesh booleans (Manifold) | In process | Server-side worker | Compiled into the application |
+| PDF rasterization (PDFium), 3DM import, PROJ coordinate operations | `arc-worker` or in process | Server-side worker | Server-side worker; PROJ compiled in where it builds |
+| Licensed bridges | Supported | Not available; run on a worker the user operates | Not available; run on a worker the user operates |
+| `arc-worker` and process isolation | Supported | Not available | Not available; isolation relies on the platform sandbox |
+| Automation socket, CLI, Python, MCP endpoint | Supported | Not available | Not available; headless jobs run on Hub workers |
+| WebAssembly plug-ins | Supported | Not available | Interpreter backend of the engine, where provided |
+| Threads | All cores | Web Workers when the page is cross-origin isolated, otherwise one thread | All cores within the memory budget |
+| Document package | File on disk with edit lock | In-memory image persisted by the shell | File in the application sandbox |
+| Native menus and dialogs, crash monitor, update check | `muda`, `rfd`, monitor process, Velopack | In-application menus, browser file pickers, page reload | In-application menus, system document picker, store-managed updates |
+
+A **server-side worker** is a headless Arc runner reached through Hub jobs
+([`arc-hub-api`](../crates/arc-hub-api.md)); it receives input only after an explicit user action,
+and the result returns as a document change or an asset. Compiling a native library for a platform
+that forbids dynamic loading needs static linking; for LGPL libraries that is enabled only after an
+architecture decision records how the license terms are met.
+
+Commands that depend on an unavailable capability are listed as disabled with a reason that names
+the alternative (CORE-APP-033), so no command fails after the user starts it.
+
 ## Feature-flag policy
 
 - Features are additive. Enabling a feature never changes the meaning of an existing type or
   function; it only adds items or backends.
 - Default features give the most common desktop configuration of the crate. Heavy or native
   optional dependencies are features: `package` (SQLite, `arc-doc`), `server` (protocol endpoints,
-  `arc-command`), `wasm-plugins` (`arc-command`), `occt` (`arc-brep`), `webgpu` (`arc-gpu`).
+  `arc-command`), `wasm-plugins` (`arc-command`), `occt` (`arc-brep`), `webgpu` (`arc-gpu`), `package-memory`
+  (`arc-doc`, SQLite operating on an in-memory image that the shell persists, for browser builds).
 - No feature is named after a product. Products select capabilities, not profiles.
 - `unstable-*` features expose APIs that may change in a patch release; a product release must
   not enable them. The release check rejects a product lock file that resolves an `unstable-*`
@@ -172,10 +223,11 @@ asynchronous runtime; blocking I/O runs on the storage or worker threads.
 - Products depend on `arc-core` crates by git URL and tag. A product pins exactly one tag. A suite
   release names the single tag all products ship on; the suite release check fails if two products
   resolve different `arc-core` revisions.
-- Three version numbers are independent of the crate version and change only by decision record:
+- Four version numbers are independent of the crate version and change only by decision record:
   the document package format (`document-package.md`), the Arc Automation Protocol
-  (`commands-and-automation.md`) and the plug-in interface (`extensibility.md`). The Arc Scene
-  contract and the Hub API carry their own versions as well.
+  (`commands-and-automation.md`), the plug-in interface (`extensibility.md`) and the Arc exchange
+  package schema ([interchange](interchange.md#versioning)). The Arc Scene contract and the Hub API
+  carry their own versions as well.
 - Third-party versions are pinned once, in the `arc-core` workspace, and re-exported where
   products need the same types (`wgpu`, `egui`). Products do not add their own versions of a
   re-exported crate.
