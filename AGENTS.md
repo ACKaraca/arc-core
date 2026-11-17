@@ -40,6 +40,7 @@ The toolchain is pinned in `rust-toolchain.toml`; the gate also needs `cargo-nex
 - `cargo nextest run --workspace` (`cargo test --workspace --doc` for documentation tests)
 - `cargo xtask layers`
 - `cargo xtask wasm`
+- `cargo xtask features`, `cargo xtask catalogs` and `cargo xtask schemas` (single gates of `ci`)
 - `cargo xtask ci` runs all gates, including the above, `cargo deny check` and `cargo audit`. CI runs it on
   Linux, Windows and macOS on every push to `main`.
 

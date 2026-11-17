@@ -26,6 +26,8 @@ struct Package {
     id: String,
     name: String,
     manifest_path: PathBuf,
+    #[serde(default)]
+    features: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -70,8 +72,35 @@ pub fn load_table() -> Result<Table, Failure> {
     toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Runs `cargo metadata` and reads manifests and sources of the workspace crates.
-pub fn load_facts() -> Result<Facts, Failure> {
+/// A workspace crate as far as the catalog and feature gates need it.
+pub struct Member {
+    pub name: String,
+    /// The crate directory.
+    pub dir: PathBuf,
+    /// The names of the features the manifest declares.
+    pub features: Vec<String>,
+}
+
+/// The workspace crates, from `cargo metadata`.
+pub fn load_members() -> Result<Vec<Member>, Failure> {
+    let metadata = run_metadata()?;
+    Ok(metadata
+        .packages
+        .iter()
+        .filter(|p| metadata.workspace_members.contains(&p.id))
+        .map(|p| Member {
+            name: p.name.clone(),
+            dir: p
+                .manifest_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            features: p.features.keys().cloned().collect(),
+        })
+        .collect())
+}
+
+fn run_metadata() -> Result<Metadata, Failure> {
     let output = Command::new(cargo())
         .args(["metadata", "--format-version", "1"])
         .current_dir(root())
@@ -83,9 +112,12 @@ pub fn load_facts() -> Result<Facts, Failure> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let metadata: Metadata =
-        serde_json::from_slice(&output.stdout).map_err(|e| format!("cargo metadata: {e}"))?;
+    serde_json::from_slice(&output.stdout).map_err(|e| format!("cargo metadata: {e}"))
+}
 
+/// Runs `cargo metadata` and reads manifests and sources of the workspace crates.
+pub fn load_facts() -> Result<Facts, Failure> {
+    let metadata = run_metadata()?;
     let forbids_unsafe = workspace_forbids_unsafe(&metadata.workspace_root)?;
     let names: BTreeMap<&str, &Package> = metadata
         .packages

@@ -14,6 +14,8 @@ const HEADLESS_MAX_LAYER: u8 = 4;
 #[serde(deny_unknown_fields)]
 pub struct Table {
     ui_deny: BTreeSet<String>,
+    /// Crates that cannot build for WebAssembly and must stay out of the `wasm` set's dependencies.
+    wasm_deny: BTreeSet<String>,
     third_party: BTreeSet<String>,
     /// Crates built for WebAssembly; read by `cargo xtask wasm`.
     pub wasm: Vec<String>,
@@ -109,6 +111,8 @@ pub enum Rule {
     SameLayer,
     /// A crate of L0-L4 reaches a windowing, GPU or UI crate.
     Ui,
+    /// A crate of the WebAssembly set reaches a crate that cannot build for WebAssembly.
+    Wasm,
     /// `unsafe` code outside an FFI crate.
     Unsafe,
     /// A dependency on an application, tool or (outside dev-dependencies) test-kit crate.
@@ -172,8 +176,14 @@ pub fn check(table: &Table, facts: &Facts) -> Vec<Violation> {
             }
         }
         if class.layer().is_some_and(|n| n <= HEADLESS_MAX_LAYER) {
-            out.extend(ui_path(table, facts, krate).map(|path| {
+            out.extend(reach(&table.ui_deny, facts, krate).map(|path| {
                 violation(Rule::Ui, &krate.name, format!("reaches a UI crate: {path}"))
+            }));
+        }
+        if table.wasm.contains(&krate.name) {
+            out.extend(reach(&table.wasm_deny, facts, krate).map(|path| {
+                let detail = format!("reaches a crate that cannot build for WebAssembly: {path}");
+                violation(Rule::Wasm, &krate.name, detail)
             }));
         }
     }
@@ -221,8 +231,8 @@ fn check_edge(
     None
 }
 
-/// Finds a chain of normal dependencies from `root` to a crate of the UI deny list.
-fn ui_path(table: &Table, facts: &Facts, root: &Crate) -> Option<String> {
+/// Finds a chain of normal dependencies from `root` to a crate of `deny`.
+fn reach(deny: &BTreeSet<String>, facts: &Facts, root: &Crate) -> Option<String> {
     let normal_deps = |name: &str| -> Vec<&str> {
         match facts.workspace.iter().find(|c| c.name == name) {
             Some(krate) => krate
@@ -245,7 +255,7 @@ fn ui_path(table: &Table, facts: &Facts, root: &Crate) -> Option<String> {
         if !seen.insert(name) {
             continue;
         }
-        if table.ui_deny.contains(name) {
+        if deny.contains(name) {
             return Some(path);
         }
         for dep in normal_deps(name) {
@@ -263,8 +273,9 @@ mod tests {
         toml::from_str(
             r#"
             ui_deny = ["winit", "wgpu", "egui"]
+            wasm_deny = ["rusqlite", "tokio"]
             third_party = ["serde", "wgpu", "middle"]
-            wasm = []
+            wasm = ["low"]
             [crates]
             low = "layer(0)"
             mid = "layer(1)"
@@ -368,6 +379,48 @@ mod tests {
     #[test]
     fn ui_dev_dependency_is_not_a_ui_violation() {
         assert_eq!(rules(vec![krate("low", &[("wgpu", Dev)])]), vec![]);
+    }
+
+    fn wasm_facts(low_deps: &[(&str, DepKind)]) -> Facts {
+        let mut facts = Facts {
+            workspace: vec![krate("low", low_deps), krate("mid", &[("tokio", Normal)])],
+            ..Facts::default()
+        };
+        facts
+            .external
+            .insert("middle".to_owned(), vec!["rusqlite".to_owned()]);
+        facts
+    }
+
+    #[test]
+    fn direct_wasm_deny_dependency_fails() {
+        let found = check(&table(), &wasm_facts(&[("tokio", Normal)]));
+        let wasm: Vec<_> = found.iter().filter(|v| v.rule == Rule::Wasm).collect();
+        assert_eq!(wasm.len(), 1);
+        assert!(
+            wasm[0].detail.ends_with("low -> tokio"),
+            "{}",
+            wasm[0].detail
+        );
+    }
+
+    #[test]
+    fn transitive_wasm_deny_dependency_fails() {
+        let found = check(&table(), &wasm_facts(&[("middle", Normal)]));
+        let wasm: Vec<_> = found.iter().filter(|v| v.rule == Rule::Wasm).collect();
+        assert_eq!(wasm.len(), 1);
+        assert!(
+            wasm[0].detail.contains("low -> middle -> rusqlite"),
+            "{}",
+            wasm[0].detail
+        );
+    }
+
+    #[test]
+    fn wasm_deny_dev_dependency_and_crates_outside_the_set_pass() {
+        // `mid` is not in the wasm set, so its `tokio` dependency is allowed.
+        let found = check(&table(), &wasm_facts(&[("tokio", Dev)]));
+        assert!(found.iter().all(|v| v.rule != Rule::Wasm), "{found:?}");
     }
 
     #[test]

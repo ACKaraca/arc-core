@@ -12,7 +12,7 @@ The toolchain is pinned in `rust-toolchain.toml`. The gate also needs `cargo-nex
 `cargo-deny` and `cargo-audit` (`cargo install --locked cargo-nextest cargo-deny cargo-audit`).
 
 ```sh
-cargo xtask ci      # every gate: format, clippy, layers, wasm, tests, deny, audit
+cargo xtask ci      # every gate: format, clippy, layers, wasm, tests, features, deny, audit, catalogs, schemas
 cargo xtask layers  # the layering check alone
 ```
 

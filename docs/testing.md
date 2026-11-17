@@ -107,17 +107,24 @@ automatically, and a regression beyond a budget blocks release.
 
 The single gate command is **`cargo xtask ci`**. It runs, in order:
 
-1. `cargo fmt --check`
+1. `cargo fmt --all --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`
 3. `cargo xtask layers`
 4. `cargo xtask wasm`
 5. `cargo nextest run --workspace` (unit, integration, property, snapshot, UI snapshot and image
-   tests on the software adapter, package compatibility, guard and panic-hunt tests)
-6. Feature matrix builds: each crate with default, no default and all non-unstable features
+   tests on the software adapter, package compatibility, guard and panic-hunt tests), then
+   `cargo test --workspace --doc` for the documentation tests
+6. Feature matrix builds: for each crate that declares features, `cargo check` without default
+   features, with default features and with all features except `unstable` and `unstable-*`;
+   crates without features are skipped
 7. `cargo deny check` (licenses, bans, advisories, sources)
 8. `cargo audit` (advisories against the locked dependency versions)
-9. Localization catalog check (missing and unused message identifiers)
-10. Schema check (published JSON Schemas match the implementation)
+9. Localization catalog check: every message identifier of `locales/en-US/<crate>.ftl` is
+   referenced by a `message_id` in that crate's sources and the reverse; duplicates, catalogs
+   without a crate and crates with identifiers but no catalog fail
+10. Schema check: every `schemas/*.json` parses and has `$schema` and `$id`; without a `schemas/`
+    directory the step reports that there is nothing to check. Whether a schema matches the
+    implementation is checked by the tests of the crate that owns it.
 
 The same command runs locally and in CI on Windows, macOS and Linux. Nightly jobs add: fuzzing,
 the corpus and golden-model runs, benchmarks, address-sanitizer runs of the FFI crates, image tests

@@ -14,6 +14,21 @@ ui_deny = [
   "raw-window-handle",
 ]
 
+# Crates that cannot build for wasm32-unknown-unknown. A crate of the `wasm` set below must not
+# reach any of them through normal dependencies.
+wasm_deny = [
+  "rusqlite",
+  "libsqlite3-sys",
+  "zstd",
+  "zstd-sys",
+  "cxx",
+  "tokio",
+  "reqwest",
+  "minidumper",
+  "crash-handler",
+  "sentry",
+]
+
 # Third-party crates a workspace crate may depend on directly. Mirrors the crates of
 # docs/architecture/technology-baseline.md that are in use.
 third_party = [

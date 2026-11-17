@@ -43,3 +43,11 @@ decision on topology sets the layer numbers; this repository must make them hold
 
 The table needs exceptions in more than three crates for the same reason, which would indicate that
 the layer boundaries themselves are wrong.
+
+## Amendment: WebAssembly deny list
+
+The layer table gains a list, `wasm_deny`: crates that cannot build for `wasm32-unknown-unknown`
+(native database, compression, C++ bridge, async runtime, network and crash-reporting crates). The
+rule function fails when a crate of the `wasm` set reaches one of them through normal dependencies
+and names the chain, so the violation is found by `cargo xtask layers` and not only by a failing
+`cargo xtask wasm` build. Dev-dependencies are not followed.
