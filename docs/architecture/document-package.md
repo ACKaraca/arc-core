@@ -90,8 +90,9 @@ The rationale is recorded in [ADR-0005](../adr/0005-payload-encoding-with-embedd
 Every row of `arc_object` names the schema version its payload was written with. A package may
 contain the same type at several versions only transiently during a save that migrates; a saved
 package holds each type at exactly one version, the current one of the saving application, except
-for preserved objects of unknown or newer types, which keep their original version. Migration rules
-are in [document-model.md](document-model.md#schema-migration).
+for preserved objects of unknown or newer types and quarantined objects, whose rows are written
+back unchanged with their original version. Migration rules are in
+[document-model.md](document-model.md#schema-migration).
 
 ## Assets
 

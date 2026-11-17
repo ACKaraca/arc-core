@@ -268,6 +268,12 @@ pub mod codes {
         category: Category::Conflict,
         message_id: "doc-document-read-only",
     };
+    /// A type validator panicked while a loaded object was validated.
+    pub const LOAD_VALIDATOR_PANICKED: ErrorCode = ErrorCode {
+        code: "doc.load.validator_panicked",
+        category: Category::Internal,
+        message_id: "doc-load-validator-panicked",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -314,6 +320,7 @@ pub mod codes {
         GRAPH_BLOCKED,
         GRAPH_DEPTH_EXCEEDED,
         GRAPH_STALE,
+        LOAD_VALIDATOR_PANICKED,
     ];
 }
 

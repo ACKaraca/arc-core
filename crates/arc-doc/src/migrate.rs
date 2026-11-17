@@ -9,9 +9,12 @@
 //!
 //! An object is not migrated, and fails with `doc.migration.failed`, when its payload holds
 //! trailing bytes of a newer minor version of its old major version (a migration sees decoded
-//! values only and would drop them), when a migration function fails, or when its result fails
-//! the field schema check. Failures of decoding keep their own codes. The loader quarantines such
+//! values only and would drop them), when a migration function fails or panics (detail
+//! `reason`: `migration failed` or `panicked`; the panic is contained only where panics
+//! unwind), or when its result fails the field schema check. Failures of decoding keep their own codes. The loader quarantines such
 //! objects.
+
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use arc_base::{Error, Limits, Result};
 
@@ -69,7 +72,9 @@ pub fn decode_current(
         let next = decl
             .schema(major.saturating_add(1))
             .ok_or_else(|| failed(major, "no migration"))?;
-        values = (migration.migrate)(values)
+        // A panicking migration is a defect of its type; it fails this object only.
+        values = catch_unwind(AssertUnwindSafe(|| (migration.migrate)(values)))
+            .map_err(|_| failed(major, "panicked"))?
             .map_err(|cause| failed(major, "migration failed").with_source(cause))?;
         check_values(&next.fields, &values)
             .map_err(|cause| failed(major, "invalid result").with_source(cause))?;

@@ -44,3 +44,4 @@ doc-graph-cycle = The derived data { $node } depends on itself through { $member
 doc-graph-blocked = The derived data { $node } cannot be computed because an input failed.
 doc-graph-depth-exceeded = Computing the derived data needs more than { $limit } nested steps.
 doc-graph-stale = The derived data { $node } was computed from an outdated state of the document.
+doc-load-validator-panicked = A validator of { $type } failed unexpectedly; the object is kept read-only.

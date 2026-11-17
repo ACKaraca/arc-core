@@ -21,7 +21,7 @@ use arc_swap::ArcSwap;
 
 use crate::error::codes;
 use crate::index::IdIndex;
-use crate::preserved::HeldObject;
+use crate::preserved::{HeldKind, HeldObject};
 use crate::registry::TypeRegistry;
 use crate::reverse_index::ReverseIndex;
 use crate::schema::{SchemaVersion, TypeKey, Value};
@@ -592,11 +592,17 @@ impl WorkingSet {
     fn store_mut(&mut self, handle: Handle) -> Result<&mut Store> {
         self.writable()?;
         // Check first, so a stale handle copies nothing.
-        let object = self.current.get(handle)?;
-        if handle.store == HELD_STORE {
-            return Err(
-                Error::new(codes::OBJECT_NOT_MODIFIABLE).with_arg("id", object.id.to_string())
-            );
+        self.current.get(handle)?;
+        if let Some(held) = self.current.held_object(handle) {
+            // Preserved and quarantined objects survive every save; `id` names the held object,
+            // also when the write is the cascade of deleting its owner.
+            let kind = match held.kind() {
+                HeldKind::Preserved => "preserved",
+                HeldKind::Quarantined => "quarantined",
+            };
+            return Err(Error::new(codes::OBJECT_NOT_MODIFIABLE)
+                .with_arg("id", held.object().id.to_string())
+                .with_detail("kind", kind));
         }
         let roots = Arc::make_mut(&mut self.current.0);
         Arc::make_mut(&mut roots.stores)

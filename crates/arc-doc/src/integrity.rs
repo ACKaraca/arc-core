@@ -424,11 +424,14 @@ pub fn check_references(set: &WorkingSet) -> Result<()> {
         // The owning references of the base state, computed when the first owning one is met.
         let mut owned_before: Option<BTreeSet<(ObjectId, ReferenceField)>> = None;
         for reference in &held {
-            let target_key = current
-                .resolve(reference.target)
-                .ok()
-                .and_then(|target| current.type_key(target));
-            if !target_key.is_some_and(|key| allows(reference.spec, key)) {
+            // A held object whose row has no valid type key is a target of fields of any type.
+            let allowed = current.resolve(reference.target).is_ok_and(|target| {
+                reference.spec.targets.is_empty()
+                    || current
+                        .type_key(target)
+                        .is_some_and(|key| allows(reference.spec, key))
+            });
+            if !allowed {
                 return Err(dangling(id, &reference.field, reference.target));
             }
             if reference.spec.rule.strength != Strength::Owning

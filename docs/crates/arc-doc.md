@@ -626,7 +626,11 @@ data; loading writes none.
   `NewerMajor::ReadOnlyView`, the explicit choice the document model offers, the document opens
   read-only (`ReadOnlyReason::NewerMajor`) and the objects of that version are preserved. A type
   row whose version numbers are out of range is ignored. An object row must name a version its
-  document declares; otherwise it is quarantined with `doc.load.version_undeclared`.
+  document declares; otherwise it is quarantined with `doc.load.version_undeclared`. A newer
+  minor version of an older major version (newer than the source schema of its migration) is
+  not migrated, since a migration would drop its trailing bytes: its objects are quarantined
+  (`doc.migration.failed`, reason `trailing bytes`) and the document stays writable, because
+  their rows are written back unchanged.
 - **Read-only documents.** The reasons travel with the snapshot (`Snapshot::read_only`) and with
   every snapshot derived from it, so neither the executor nor the save path can lose them. Every
   write of a working set on a read-only snapshot fails with `doc.document.read_only`, whose
@@ -636,11 +640,19 @@ data; loading writes none.
   result must pass the field schema check of the next schema. A payload with trailing bytes of a
   newer minor version of the old major, a failing migration function and a result that fails the
   check fail with `doc.migration.failed` (arguments `type`, `from`; details `step`, the major
-  version of the failing step, and `reason`); decoding failures keep their codes. The object is
-  then quarantined.
+  version of the failing step, and `reason`: `trailing bytes`, `no migration`, `migration
+  failed`, `panicked` or `invalid result`); decoding failures keep their codes. The object is
+  then quarantined. Each step looks its migration up in the declaration, so an object of major
+  version 1 of a type at major version `N` costs O(`N`²) comparisons; `N` comes from the
+  registry, not from the file.
 - **Load validation.** Decoded values pass the field schema check in the decoder; the type
   validators run on every decoded object. An error finding quarantines the object with that
   finding; a warning becomes a diagnostic.
+- **Panics of registered functions.** A migration or validator that panics is a defect of its
+  type. The load contains the panic with `catch_unwind` and quarantines the one object: a
+  migration with `doc.migration.failed` (reason `panicked`), a validator with
+  `doc.load.validator_panicked` (argument `type`). Registered functions must not rely on this:
+  on targets where panics abort instead of unwinding, the process ends.
 - **Held objects.** A row of an unregistered type is **preserved** (reason `doc.type.unknown`),
   as is an object of a newer major version in the read-only view (reason `doc.load.newer_major`).
   A row with a malformed column (`doc.load.header_invalid`, argument `column`: `type_key`,
@@ -648,8 +660,9 @@ data; loading writes none.
   `string_bytes`), an unsupported encoding, an undeclared version, a payload that does not
   decode, a failed migration or a validator error is **quarantined**. Both are `HeldObject`s:
   the row unchanged, the type key of the row (`None` when it is malformed), the reason, and an
-  object with the identifier, the stored version (0.0 when malformed), the header as far as its
-  columns are valid and no field values. The snapshot holds them beside the typed stores, fixed
+  object with the identifier, the stored version (0.0 when malformed), the header with each
+  valid column (owner, name, partition and flags are parsed independently; an invalid one takes
+  its default and the first invalid one is the reason) and no field values. The snapshot holds them beside the typed stores, fixed
   at load: they resolve through the identifier index, `get` and `type_key` answer for them,
   `held` lists them in load order and `held_len` counts them, while `iter` and `len` cover the
   typed stores only. Every write of a working set to a held object fails with
@@ -657,18 +670,30 @@ data; loading writes none.
   reference to a held object is not dangling, and its type check uses the row's type key. Of a
   held object's own references only the header owner is kept for integrity and indexed; its
   field references stay in its undecoded payload, since building a schema from a stored
-  descriptor is not provided yet. Deleting the owner of a held object fails with
-  `doc.object.not_modifiable`, because the owner's cascade would delete it.
+  descriptor is not provided yet. Preserved and quarantined objects survive every save, so
+  nothing deletes them: deleting the owner of a held object, or the source of an owning
+  reference to one, fails with `doc.object.not_modifiable`, because the cascade would delete
+  it; the argument `id` names the held object and the detail `kind` says `preserved` or
+  `quarantined`.
 - **Rows without a usable identifier.** A row whose identifier is not 16 bytes or is nil
   (`doc.load.header_invalid`, column `id`), and a later row with the identifier of an earlier
   one (`doc.object.duplicate_id`; the first row wins), is kept in
-  `LoadedRows::unaddressable` and written back unchanged; it is not part of the snapshot.
-- **Limits.** `record_count` bounds the type rows and the object rows, and the load charges
-  every object row against `memory_bytes`: 256 bytes, its byte lengths and 32 bytes per payload
-  byte, an upper estimate of the values it can decode to. Exceeding either fails the whole load
-  with `doc.load.limit_exceeded` (argument `limit`) instead of quarantining rows one by one.
+  `LoadedRows::unaddressable` and written back unchanged; it is not part of the snapshot. A
+  package cannot hold a duplicate, since the identifier is the primary key of `arc_object`; a
+  save to another target writes unaddressable rows after the loaded ones, so the loaded row of
+  an identifier still comes first.
+- **Limits.** `record_count` bounds the type rows and the object rows. The load charges what
+  the loaded document retains against `memory_bytes`: every type row 256 bytes, its descriptor
+  and twice its key; every object row 256 bytes, its byte lengths and 32 bytes per payload byte
+  (an upper estimate of the values it can decode to); a held or unaddressable row 2,048 bytes
+  more and four times its type key; a loaded object 64 bytes and its `last_txn` value when that
+  value is new; and an original row kept in a read-only document 768 bytes more and its
+  trailing bytes. The charges come from the `load_scale` measurement below, so the estimate
+  stays above the measured memory. Exceeding either limit fails the whole load with
+  `doc.load.limit_exceeded` (argument `limit`) instead of quarantining rows one by one.
   Per-payload limits apply through the payload codec and quarantine the one object;
-  `string_bytes` also bounds names and partitions.
+  `string_bytes` also bounds type keys, names and partitions, and a longer column quarantines
+  the row. The loader does not enforce `wall_clock_seconds`; the caller does.
 - **Reference integrity.** A dangling reference does not fail the load. After all rows, every
   reference of every loaded and held object that names no loaded object, or an object of a type
   its field does not allow, is reported; the objects stay as they are. Commit validation
@@ -679,19 +704,35 @@ data; loading writes none.
   set. The result has revision 0 and its own generation counters.
 - **Result.** `Loaded` holds the snapshot; the diagnostics (`LoadDiagnostic`: kind `Preserved`,
   `Quarantined`, `Unaddressable`, `Warning` or `Dangling`, the object, and the error), in row
-  order followed by the dangling references in handle order; the side table `LoadedRows`; and
-  `LoadCounts`.
-- **Write-back contract.** A save writes the row of every held object
-  (`HeldObject::row`) and every unaddressable row unchanged. `LoadedRows::get` gives the
-  original row of each loaded object whose stored form is not the encoding of its loaded values
-  at the current version (an older version, migrated or not, or a newer minor version, with the
-  trailing bytes beside it); objects at the current version have no entry, since their row is
-  that encoding. An object is untouched since load when the snapshot being saved holds the very
-  object that was loaded (`LoadedRows::untouched`, pointer identity: every write of a working
-  set replaces it). The row of an untouched object may be written back as it was; an object
-  with trailing bytes always is, since its document is read-only, and the original payload
-  equals the encoding of its values followed by the trailing bytes. Every other object is
-  encoded at the current version, which is how a save upgrades a file.
+  order followed by the dangling references in handle order; the type rows as read
+  (`Loaded::types`); the side table `LoadedRows`; and `LoadCounts`.
+- **Side table.** `LoadedRows` keeps what a save cannot derive from the snapshot: the
+  unaddressable rows; the stored `last_txn` of every object loaded into the typed stores
+  (`LoadedRows::last_txn`), interned as a sorted entry of identifier and index per object (20
+  bytes) and each distinct value once; and, only in a read-only document, the original row of
+  each loaded object whose stored row is not the encoding of its loaded values (an older version
+  or a newer minor version, with the trailing bytes beside it; `LoadedRows::get`). A writable
+  document keeps no original rows: a save re-encodes those objects anyway. The held objects
+  carry their own rows.
+- **Write-back contract.** A save of a writable document writes:
+  - the row of every held object (`HeldObject::row`), preserved or quarantined, of any type,
+    unchanged, and then every unaddressable row unchanged;
+  - every object of the typed stores encoded at the current version of its type, migrated and
+    older-minor objects included, so the saved package holds each registered type at exactly
+    one version; its `last_txn` is the transaction that last changed it since load, which the
+    save knows from the journal, or `LoadedRows::last_txn` for an object no transaction
+    changed; the package derives `payload_hash` from the payload bytes it writes;
+  - the current type row of every registered type it writes objects of, with the descriptor of
+    the registry, and the stored type row (from `Loaded::types`) of every row it writes
+    unchanged.
+
+  A copy of a read-only document writes every row as stored: the held and unaddressable rows,
+  the original row (`LoadedRows::get`) of every object that has one, and every other object
+  encoded at the current version with `LoadedRows::last_txn`, which reproduces its stored row;
+  and every type row as read. The original payload of an object with trailing bytes equals the
+  encoding of its values followed by those bytes. The `load_writeback` test checks the contract
+  differentially: random documents saved by it come back row for row, and load again to the
+  same document.
 
 The `load_scale` test (ignored by default; run it in a release build) loads one million objects
 of one integer field. On a shared four-core development machine it took about 1.6 s, decoding
@@ -768,6 +809,15 @@ jobs (CORE-DOC-031, CORE-DOC-032), `ensure` (CORE-DOC-033) and the diagnostics l
   later successful evaluation clears a failure. `Graph::node` returns a node's view,
   `non_clean` the views of all nodes that are not clean in time proportional to them, and
   `drain_transitions` the state changes since the previous drain, one per node.
+of one integer field. On a shared four-core development machine it took about 1.6 to 1.7 s,
+decoding and validation included; building the same snapshot from decoded objects took about
+1.4 s through the bulk path against 1.6 to 1.7 s through working-set creates. Insertion into the
+identifier index takes about half of that time; a constructor that builds the index in bulk is
+left for later. Its `memory_of_*` tests measure the resident memory per loaded object of one
+integer field, side table included, and check that the `memory_bytes` charge stays above it:
+about 350 bytes for an object at the current version or migrated in a writable document, about
+1,050 bytes for a migrated object of a read-only document, and about 1,900 bytes for a held
+row.
 
 ### Error codes
 
@@ -809,7 +859,7 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.load.limit_exceeded` | `limit_exceeded` | Loading would exceed the record count or the memory budget of its limits |
 | `doc.load.version_undeclared` | `corrupt_data` | A stored object names a schema version its document does not declare |
 | `doc.load.header_invalid` | `corrupt_data` | A column of a stored object other than the payload is malformed |
-| `doc.migration.failed` | `failed_operation` | An object of an older major version cannot be migrated: trailing bytes, a failing migration or an invalid result |
+| `doc.migration.failed` | `failed_operation` | An object of an older major version cannot be migrated: trailing bytes, a failing or panicking migration or an invalid result |
 | `doc.object.not_modifiable` | `conflict` | A preserved or quarantined object would be changed |
 | `doc.document.read_only` | `conflict` | A read-only document would be changed |
 | `doc.graph.malformed_key` | `invalid_input` | A derived key does not follow the key grammar |
@@ -819,3 +869,4 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.graph.blocked` | `failed_operation` | A node reads a node that is failed, blocked or cyclic |
 | `doc.graph.depth_exceeded` | `limit_exceeded` | Nested demands on one thread exceed the depth limit of the graph |
 | `doc.graph.stale` | `conflict` | A result was computed from a revision whose inputs changed since, or keeps being superseded |
+| `doc.load.validator_panicked` | `internal` | A type validator panicked while a loaded object was validated |

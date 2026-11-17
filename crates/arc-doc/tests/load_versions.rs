@@ -92,9 +92,11 @@ fn an_older_minor_version_takes_the_defaults_of_appended_fields() {
     );
     assert_eq!(loaded.counts.older_minor, 1);
     assert!(loaded.snapshot.read_only().is_empty());
+    // A save writes the object at the current version: no original row is kept.
+    assert!(loaded.rows.get(ObjectId::from_u128(1)).is_none());
     assert_eq!(
-        loaded.rows.get(ObjectId::from_u128(1)).unwrap().stored,
-        stored
+        loaded.rows.last_txn(ObjectId::from_u128(1)),
+        Some(stored.last_txn.as_slice())
     );
 }
 

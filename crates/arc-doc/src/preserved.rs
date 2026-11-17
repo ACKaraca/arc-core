@@ -4,16 +4,17 @@
 //! A **preserved** object is a stored object of a type the registry does not know (or, in the
 //! read-only view of a document with a newer major version, of that newer version). A
 //! **quarantined** object is a stored object that is invalid: its payload does not decode or
-//! validate, a column is malformed, or its migration failed. Both are **held objects**: the
-//! snapshot keeps them beside the typed stores, fixed at load.
+//! validate, a column is malformed, or its migration or a validator failed or panicked. Both
+//! are **held objects**: the snapshot keeps them beside the typed stores, fixed at load.
 //!
 //! - A held object has its identifier, resolves through the identifier index
 //!   ([`crate::Snapshot::resolve`], [`crate::Snapshot::get`] and [`crate::Snapshot::type_key`]
 //!   give its object without field values and the type key of its row), and is listed by
 //!   [`crate::Snapshot::held`] and counted by [`crate::Snapshot::held_len`].
-//! - It cannot change: every write of a working set to it fails with
-//!   `doc.object.not_modifiable`. Working sets, savepoints and publication share the held objects
-//!   unchanged.
+//! - It cannot change and survives every save: every write of a working set to it fails with
+//!   `doc.object.not_modifiable` (argument `id`, detail `kind`), also the cascade of deleting its
+//!   owner, which is therefore refused. Working sets, savepoints and publication share the held
+//!   objects unchanged.
 //! - It takes part in reference integrity as a target: a reference to it is not dangling, and the
 //!   type check of the reference uses the type key of its row. Its own header owner is a
 //!   reference ("references kept for integrity"): it enters the reverse reference index. Its

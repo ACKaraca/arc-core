@@ -17,7 +17,7 @@ use arc_doc::error::codes;
 use arc_doc::{
     Bound, DiagnosticKind, FieldDecl, Header, HeldKind, LoadOptions, Migration, Object, Schema,
     SchemaVersion, StoredObject, StoredType, TypeDecl, TypeKey, TypeRegistry, Value, ValueType,
-    WorkingSet, load, payload,
+    load, payload,
 };
 
 const FIXTURE_V1: &str = include_str!("fixtures/load_wall_v1_0.hex");
@@ -140,6 +140,7 @@ fn row(id: u128, major: i64, minor: i64, payload: Vec<u8>) -> StoredObject {
         minor,
         name: Some(format!("wall {id}")),
         payload,
+        last_txn: vec![7; 16],
         ..StoredObject::default()
     }
 }
@@ -202,11 +203,13 @@ fn a_version_1_fixture_migrates_through_both_steps() {
         snapshot.read_only().is_empty(),
         "migration does not make a document read-only"
     );
-    // In memory only: the side table returns the stored row with its original bytes.
-    let original = loaded.rows.get(ObjectId::from_u128(1)).unwrap();
-    assert_eq!(original.stored, stored);
-    assert_eq!(original.written, SchemaVersion::new(1, 0));
-    assert!(original.trailing.is_empty());
+    // In memory only: the row is not changed, and a save re-encodes the object at 3.0, so a
+    // writable document keeps no original row; the stored `last_txn` is kept.
+    assert!(loaded.rows.get(ObjectId::from_u128(1)).is_none());
+    assert_eq!(
+        loaded.rows.last_txn(ObjectId::from_u128(1)),
+        Some(stored.last_txn.as_slice())
+    );
 }
 
 #[test]
@@ -223,10 +226,7 @@ fn a_version_2_fixture_migrates_through_the_last_step() {
         values_of(&loaded.snapshot, 2),
         expected(2.5, "wall", 3, Some("n"))
     );
-    assert_eq!(
-        loaded.rows.get(ObjectId::from_u128(2)).unwrap().stored,
-        stored
-    );
+    assert!(loaded.rows.is_empty());
 }
 
 #[test]
@@ -263,43 +263,30 @@ fn an_older_minor_of_an_older_major_takes_the_defaults_before_migrating() {
 }
 
 #[test]
-fn the_side_table_tells_untouched_objects_from_changed_ones() {
-    let loaded = load(
-        registry(),
-        &types(),
-        [row(1, 1, 0, hex(FIXTURE_V1)), row(2, 2, 1, hex(FIXTURE_V2))],
-        &LoadOptions::default(),
-    )
-    .unwrap();
-    let base = &loaded.snapshot;
-    let mut set = WorkingSet::new(base);
-    let handle = base.resolve(ObjectId::from_u128(1)).unwrap();
-    set.replace_header(handle, Header::default()).unwrap();
-    let edited = set.current();
-    assert!(
-        loaded
-            .rows
-            .untouched(base, ObjectId::from_u128(1))
-            .is_some()
+fn a_read_only_document_keeps_the_original_rows_of_migrated_objects() {
+    // A declared newer minor version makes the document read-only; a copy of it writes the
+    // stored rows, so the side table keeps them.
+    let mut types = types();
+    types.push(StoredType {
+        type_key: "test.wall".into(),
+        major: 3,
+        minor: 1,
+        descriptor: String::new(),
+    });
+    let stored = [row(1, 1, 0, hex(FIXTURE_V1)), row(2, 2, 1, hex(FIXTURE_V2))];
+    let loaded = load(registry(), &types, stored.clone(), &LoadOptions::default()).unwrap();
+    assert_eq!(loaded.snapshot.read_only().len(), 1);
+    assert_eq!(loaded.rows.len(), 2);
+    for (n, stored) in (1..).zip(&stored) {
+        let original = loaded.rows.get(ObjectId::from_u128(n)).unwrap();
+        assert_eq!(&original.stored, stored);
+        assert!(original.trailing.is_empty());
+    }
+    assert_eq!(
+        loaded.rows.get(ObjectId::from_u128(1)).unwrap().written,
+        SchemaVersion::new(1, 0)
     );
-    assert!(
-        loaded
-            .rows
-            .untouched(edited, ObjectId::from_u128(1))
-            .is_none()
-    );
-    assert!(
-        loaded
-            .rows
-            .untouched(edited, ObjectId::from_u128(2))
-            .is_some()
-    );
-    assert!(
-        loaded
-            .rows
-            .untouched(edited, ObjectId::from_u128(9))
-            .is_none()
-    );
+    assert_eq!(loaded.types, types, "the type rows are kept as read");
 }
 
 fn quarantined(stored: StoredObject) -> Error {

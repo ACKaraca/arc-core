@@ -51,3 +51,13 @@ excluded.
 
 Field reports show data loss or corruption attributable to either save strategy, or incremental
 saves on reference large models exceed the save-time budget.
+
+## Amendment
+
+The `flags` column of `arc_object` is a bit set: 1 `hidden_from_ui`, 2 `system` and 4
+`read_only`, the header flags of the
+[document model](../architecture/document-model.md#objects-and-typed-stores). No other bit is
+defined; a row with another bit set is loaded as a quarantined object and written back
+unchanged. The bits are listed in
+[document-package.md](../architecture/document-package.md#example-outline); no package has been
+released before this amendment, so no fixture changes.
