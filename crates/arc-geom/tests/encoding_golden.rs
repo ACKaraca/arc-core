@@ -14,8 +14,8 @@ use arc_base::math::{Point2, Point3, Vector2, Vector3};
 use arc_base::{Limits, Tolerance};
 use arc_geom::{
     Aabb2, Aabb3, Arc2, Circle2, Curve2, Ellipse2, EllipticalArc2, GeomCodec, Line2, Loop2,
-    Polyline2, PolylineVertex, Projection, Ray2, Region, RegionPart, Segment2, TriangleMesh2,
-    ViewFrame,
+    Polyline2, PolylineSegment, PolylineVertex, Projection, Ray2, Region, RegionPart, Segment2,
+    TriangleMesh2, ViewFrame,
 };
 
 fn hex(bytes: &[u8]) -> String {
@@ -97,10 +97,29 @@ fn curves() {
         000000000000f03f000000000000e03f000000000000d03f0000000000000040\
         0000000000000000000000000000000000000000000000000000000000000000",
     );
+    // A curve has exactly the bytes of the kind it holds.
     golden(
-        &Curve2::Polyline(polyline.clone()),
-        &hex(&polyline.encode()),
+        &Curve2::Polyline(polyline),
+        "4152434701001700020000000000000000000000000000000000000000000000\
+        000000000000f03f000000000000e03f000000000000d03f0000000000000040\
+        0000000000000000000000000000000000000000000000000000000000000000",
     );
+    // The arc of a polyline segment is stored in its chord form: start, end, bulge.
+    let bulged = Polyline2::new(
+        vec![
+            PolylineVertex::new(p(0.0, 0.0), 0.5),
+            PolylineVertex::new(p(2.0, 0.0), 0.0),
+        ],
+        false,
+    )
+    .unwrap();
+    let Some(PolylineSegment::Arc(chord_arc)) = bulged.segment(0) else {
+        panic!("not an arc");
+    };
+    let chord_form = "4152434701001800000000000000000000000000000000000000000000004000\
+        00000000000000000000000000e03f";
+    golden(&chord_arc, chord_form);
+    golden(&Curve2::Arc(chord_arc), chord_form);
 }
 
 #[test]

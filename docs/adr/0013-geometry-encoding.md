@@ -24,6 +24,16 @@ round-trip bit for bit) and safe against hostile input, with every failure repor
 - The decoder works on a byte slice with an `arc_base::Limits` profile, checks every count against
   the limit and the remaining input before allocating, nests at most three levels, and builds
   values only through their validating constructors.
+- Values carry no length prefix. A reader cannot skip a value of a kind it does not know, so a
+  new kind is a new version and a reader of an older version rejects the whole value that
+  contains it, not only the unknown part.
+- The version in the header of a value is authoritative for it; the version a descriptor names
+  for the field must agree. Every top-level value has a header, so a stream may mix versions at
+  top-level value boundaries and nowhere else.
+- The byte contract is structural. The geometric validation of loops and regions (closure within
+  the default linear tolerance, orientation, nonzero area) is applied by the reader on top of it
+  and is implementation-defined at its boundary; the layout document says how a writer stays
+  clear of it.
 - Any change to the bytes of a value or their meaning is a new version; a decoder rejects
   versions and kind tags it does not implement. Golden vectors in the test suite fix the bytes of
   each kind.
@@ -37,6 +47,9 @@ round-trip bit for bit) and safe against hostile input, with every failure repor
 - The encoder and decoder are maintained by hand beside the types; each new field needs code in
   both and a property test.
 - Decoding costs a second encoding pass for the canonical check, linear in the input.
+- A document written by a newer version with a new kind is unreadable as a whole to an older
+  reader of that value; partial reading of geometry is given up for a layout without redundancy,
+  in which a length can never disagree with the content it prefixes.
 
 ## Alternatives considered
 
@@ -46,6 +59,25 @@ round-trip bit for bit) and safe against hostile input, with every failure repor
   library's behavior.
 - **A text form (JSON).** Readable, but larger and slower, with exactness depending on the number
   formatter and parser, and with no single canonical spelling of a number.
+
+- **Length-prefixed values.** A byte length before every value would let an older reader skip
+  kinds it does not know. It adds a second source of truth that a decoder must check against the
+  content, makes the canonical form depend on it, and a loop or region with a skipped curve is not
+  a usable value anyway. Rejected; the consequence is recorded above.
+
+## Amendment before first release
+
+Version 1 was changed after review, before any document was stored with it, so the version
+number stays 1:
+
+- The arc of a polyline segment has its own kind, the chord arc (tag `0x18`: start, end, bulge).
+  Before, it was written in center-radius form, lost its chord, and a loop holding a nearly
+  straight one could not be read back.
+- `decode_prefix` counts only the bytes of the value toward `input_bytes`, and memory for arrays
+  is reserved fallibly.
+- The structural contract and the reader's geometric validation are specified separately, and
+  the rules on the header version, mixed streams, nesting depth, clockwise full circles and
+  boxes with infinite corners are stated.
 
 ## Reopen when
 

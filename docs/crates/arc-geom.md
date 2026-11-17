@@ -386,6 +386,10 @@ an outer loop with holes (CORE-GEOM-021).
   loop is so small that the square of its size underflows (a circle of radius 1e-300), the zero
   says nothing and the error is `geom.precision.insufficient`, as for an area that overflows.
   Positive area is counterclockwise.
+- `Loop2::reversed` reverses every curve; where the recomputed end points of two reversed arcs
+  come apart by more than the default linear tolerance it inserts a segment, so the reversed loop
+  is valid in its stored form, and the arc of a polyline segment becomes the arc of the reversed
+  segment.
 - `Region::new(parts)` turns outer loops counterclockwise and holes clockwise, and checks that
   there is a part and that each hole's bounding box lies inside its outer loop's. That loops
   neither cross nor touch and that holes lie inside their outer loops is the caller's
@@ -467,15 +471,21 @@ larger under a generous time bound), and hostile meshes.
 specified in [geometry-encoding.md](../architecture/geometry-encoding.md) (CORE-GEOM-032).
 
 - `encode` returns the canonical bytes and `encoded_len` their length; equal values give equal
-  bytes, and −0.0 is written as +0.0.
+  bytes, and −0.0 is written as +0.0. Decoding an encoding returns the value. The one value that
+  encodes and does not decode is a bounding box with an infinite corner, which `from_corners`
+  accepts and no stored form holds.
 - `decode(bytes, limits)` reads a value that fills the input; `decode_prefix` returns the bytes
   after it. A `Curve2` has the bytes of the curve kind it holds, so `Curve2::decode` reads any
   curve and `Segment2::decode` only a segment.
+- An `Arc2` built from a polyline segment is stored as a chord arc (start, end, bulge) and read
+  back with its chord, so its end points stay the vertices; a plain arc is stored by center,
+  radius and angles. `Arc2::decode` reads both, and they are different values.
 - Values are built through their validating constructors, and input that is not the canonical
   encoding of the value it decodes to is rejected, so the byte form of a value is unique. Counts
-  are checked against `Limits::array_length` and the remaining input before allocating, the input
-  length against `input_bytes`, and the nesting of values against `nesting_depth`. Every failure
-  is `geom.decode.invalid` with the details `offset` and `reason`.
+  are checked against `Limits::array_length` and the remaining input before memory is reserved,
+  the reservation is fallible, the bytes of the value are checked against `input_bytes`, and the
+  nesting of values, counted from 1 in each call, against `nesting_depth`. Every failure is
+  `geom.decode.invalid` with the details `offset` and `reason`.
 
 ### Error codes
 

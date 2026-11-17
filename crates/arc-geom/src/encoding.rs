@@ -9,18 +9,28 @@
 //! The byte layout of every kind is documented in `docs/architecture/geometry-encoding.md`.
 //!
 //! - **Canonical.** Equal values give equal bytes: the sign of zero is not part of a value, so
-//!   −0.0 is written as +0.0, and every other number is written bit for bit. Decoding a value
-//!   and encoding it again gives the same value; the arc of a polyline segment
-//!   ([`crate::Polyline2::segment`]) loses the chord it keeps for evaluation, as with serde.
+//!   −0.0 is written as +0.0, and every other number is written bit for bit. Decoding an
+//!   encoding gives the value back. An arc of a polyline segment
+//!   ([`crate::Polyline2::segment`]) keeps its chord: it is written in its chord form (start,
+//!   end, bulge) under its own tag and rebuilt from it, so its end points stay the vertices
+//!   exactly and a loop that holds it reads back. A chord arc and the plain arc with the same
+//!   center, radius and angles are different values with different bytes.
 //! - **Unique.** The decoder accepts only the canonical form: it builds every value with the
 //!   type's validating constructor, encodes the result again and rejects the input unless the
 //!   bytes are identical, so input that a constructor would normalize (an arc start angle
 //!   outside [0, 2π), a bulge on the last vertex of an open polyline, a region loop with the
 //!   wrong orientation) is rejected.
-//! - **Bounded.** Decoding takes [`Limits`]: the input length is checked against
+//! - **Bounded.** Decoding takes [`Limits`]: the bytes a value occupies are checked against
 //!   `input_bytes`, every count against `array_length` and against the input that remains
-//!   before anything is allocated, and the nesting of values (at most three levels: region,
-//!   loop, curve) against `nesting_depth`. Nothing recurses beyond that depth.
+//!   before anything is reserved, and the nesting of values (at most three levels: region,
+//!   loop, curve, counted from 1 in every call) against `nesting_depth`. Nothing recurses beyond
+//!   that depth. Memory for an array is reserved fallibly: a reservation that fails is an error,
+//!   never a panic or an abort.
+//!
+//! The byte contract is structural; the geometric validation of loops and regions that the
+//! decoder applies on top of it is described in `docs/architecture/geometry-encoding.md`. A
+//! bounding box with an infinite corner (`from_corners` accepts one) is not storable: its
+//! encoding is rejected by the decoder, as its serialized form is by deserialization.
 //!
 //! Every failure is `geom.decode.invalid` with the details `offset` (the byte position) and
 //! `reason`; a value that its constructor rejects also carries the constructor's code as
@@ -32,7 +42,8 @@ use arc_base::{Error, Limits, Result};
 use crate::error::codes;
 use crate::{
     Aabb2, Aabb3, Arc2, Circle2, Curve2, Ellipse2, EllipticalArc2, Line2, Loop2, Polyline2,
-    PolylineVertex, Projection, Ray2, Region, RegionPart, Segment2, TriangleMesh2, ViewFrame,
+    PolylineSegment, PolylineVertex, Projection, Ray2, Region, RegionPart, Segment2, TriangleMesh2,
+    ViewFrame,
 };
 
 /// The name and version of a geometry encoding, as a document descriptor names it.
@@ -55,7 +66,7 @@ impl GeomEncoding {
     pub const MAGIC: [u8; 4] = *b"ARCG";
 }
 
-// Kind tags. 0x18-0x1F are reserved for further 2D curve kinds (NURBS, spirals, composites),
+// Kind tags. 0x19-0x1F are reserved for further 2D curve kinds (NURBS, spirals, composites),
 // 0x60-0x6F for 3D curves, 0x70-0x7F for surfaces; every unassigned tag is rejected.
 const SEGMENT: u8 = 0x10;
 const RAY: u8 = 0x11;
@@ -65,6 +76,7 @@ const ARC: u8 = 0x14;
 const ELLIPSE: u8 = 0x15;
 const ELLIPTICAL_ARC: u8 = 0x16;
 const POLYLINE: u8 = 0x17;
+const CHORD_ARC: u8 = 0x18;
 const LOOP: u8 = 0x20;
 const REGION: u8 = 0x21;
 const AABB2: u8 = 0x30;
@@ -101,6 +113,9 @@ const MIN_PART: u64 = MIN_LOOP + 8;
 /// assert_eq!(Segment2::decode(&bytes, &Limits::STRICT).unwrap(), segment);
 /// assert_eq!(Curve2::decode(&bytes, &Limits::STRICT).unwrap(), Curve2::Segment(segment));
 /// ```
+///
+/// An [`Arc2`] has two kinds: the plain arc, and the chord arc of a polyline segment;
+/// [`Arc2::decode`] reads both.
 pub trait GeomCodec: sealed::Value {
     /// The canonical encoding: header and value.
     #[must_use]
@@ -143,15 +158,19 @@ pub trait GeomCodec: sealed::Value {
     /// # Errors
     ///
     /// `geom.decode.invalid` for input that is malformed, not canonical or exceeds `limits`.
+    /// Only the bytes of the value count toward `input_bytes`, not the bytes after it.
     fn decode_prefix<'a>(bytes: &'a [u8], limits: &Limits) -> Result<(Self, &'a [u8])> {
-        if !u64::try_from(bytes.len()).is_ok_and(|len| len <= limits.input_bytes) {
-            return Err(invalid(0, "input exceeds the input byte limit"));
-        }
+        // The reader sees at most `input_bytes` bytes, so a value that needs more ends early.
+        let window = usize::try_from(limits.input_bytes)
+            .ok()
+            .filter(|limit| *limit < bytes.len())
+            .and_then(|limit| bytes.get(..limit));
         let mut reader = Reader {
-            bytes,
+            bytes: window.unwrap_or(bytes),
             pos: 0,
             limits,
             depth: 0,
+            limited: window.is_some(),
         };
         if reader.take::<4>()? != GeomEncoding::MAGIC {
             return Err(invalid(0, "not a geometry encoding"));
@@ -196,6 +215,8 @@ mod sealed {
         pub(super) pos: usize,
         pub(super) limits: &'a Limits,
         pub(super) depth: u32,
+        /// Whether `bytes` was cut at the input byte limit.
+        pub(super) limited: bool,
     }
 
     /// A value with a kind tag and a body; not implementable outside this crate.
@@ -297,13 +318,22 @@ impl Writer {
 }
 
 impl Reader<'_> {
+    /// The error for a value that needs more bytes than the reader has.
+    fn ended(&self, at: usize, reason: &'static str) -> Error {
+        if self.limited {
+            invalid(self.bytes.len(), "input exceeds the input byte limit")
+        } else {
+            invalid(at, reason)
+        }
+    }
+
     fn take<const N: usize>(&mut self) -> Result<[u8; N]> {
         let bytes = self
             .pos
             .checked_add(N)
             .and_then(|end| self.bytes.get(self.pos..end))
             .and_then(|slice| <[u8; N]>::try_from(slice).ok())
-            .ok_or_else(|| invalid(self.pos, "unexpected end of input"))?;
+            .ok_or_else(|| self.ended(self.pos, "unexpected end of input"))?;
         self.pos += N;
         Ok(bytes)
     }
@@ -316,7 +346,7 @@ impl Reader<'_> {
         self.bytes
             .get(self.pos)
             .copied()
-            .ok_or_else(|| invalid(self.pos, "unexpected end of input"))
+            .ok_or_else(|| self.ended(self.pos, "unexpected end of input"))
     }
 
     fn flag(&mut self) -> Result<bool> {
@@ -360,8 +390,11 @@ impl Reader<'_> {
         Ok(Vector3::new(self.f64()?, self.f64()?, self.f64()?))
     }
 
-    /// A count of elements whose encoding takes at least `min_size` bytes each.
-    fn count(&mut self, min_size: u64) -> Result<usize> {
+    /// A count of elements whose encoding takes at least `min_size` bytes each, with an empty
+    /// vector that has room for them. The count is checked against the array length limit and
+    /// the remaining input first, so the reservation is at most `size_of::<T>() / min_size`
+    /// times the remaining input, and a reservation that fails is an error.
+    fn counted<T>(&mut self, min_size: u64) -> Result<(usize, Vec<T>)> {
         let at = self.pos;
         let count = u64::from_le_bytes(self.take()?);
         if count > self.limits.array_length {
@@ -372,9 +405,15 @@ impl Reader<'_> {
             .checked_mul(min_size)
             .is_none_or(|needed| needed > remaining)
         {
-            return Err(invalid(at, "count exceeds the remaining input"));
+            return Err(self.ended(at, "count exceeds the remaining input"));
         }
-        usize::try_from(count).map_err(|_| invalid(at, "count exceeds the address space"))
+        let count =
+            usize::try_from(count).map_err(|_| invalid(at, "count exceeds the address space"))?;
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(count)
+            .map_err(|_| invalid(at, "count exceeds the available memory"))?;
+        Ok((count, values))
     }
 
     /// Reads a value one nesting level deeper.
@@ -388,9 +427,9 @@ impl Reader<'_> {
         value
     }
 
-    /// Reads `count` values one nesting level deeper.
-    fn nested_values<T: Value>(&mut self, count: usize) -> Result<Vec<T>> {
-        let mut values = Vec::with_capacity(count);
+    /// Reads a count and that many values one nesting level deeper.
+    fn nested_values<T: Value>(&mut self, min_size: u64) -> Result<Vec<T>> {
+        let (count, mut values) = self.counted(min_size)?;
         for _ in 0..count {
             values.push(self.nested()?);
         }
@@ -480,20 +519,52 @@ impl Body for Circle2 {
     }
 }
 
-impl Body for Arc2 {
-    const TAG: u8 = ARC;
+/// The arc of the polyline segment from `start` to `end` with `bulge`, exactly as
+/// [`Polyline2::segment`] builds it.
+pub(crate) fn chord_arc(start: Point2, end: Point2, bulge: f64) -> Result<Option<Arc2>> {
+    let vertices = vec![
+        PolylineVertex::new(start, bulge),
+        PolylineVertex::new(end, 0.0),
+    ];
+    Ok(match Polyline2::new(vertices, false)?.segment(0) {
+        Some(PolylineSegment::Arc(arc)) => Some(arc),
+        _ => None,
+    })
+}
 
-    fn write_body(&self, w: &mut Writer) {
-        w.point2(&self.center());
-        w.f64(self.radius());
-        w.f64(self.start_angle());
-        w.f64(self.sweep());
+// An arc has two kinds: the plain arc, and the chord arc of a polyline segment.
+impl Value for Arc2 {
+    fn write(&self, w: &mut Writer) {
+        if let Some(chord) = self.chord() {
+            w.u8(CHORD_ARC);
+            w.point2(&chord.start());
+            w.point2(&chord.end());
+            w.f64(chord.bulge());
+        } else {
+            w.u8(ARC);
+            w.point2(&self.center());
+            w.f64(self.radius());
+            w.f64(self.start_angle());
+            w.f64(self.sweep());
+        }
     }
 
-    fn read_body(r: &mut Reader<'_>) -> Result<Self> {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        let tag_at = r.pos;
+        let tag = r.u8()?;
         let at = r.pos;
-        let (center, radius, start, sweep) = (r.point2()?, r.f64()?, r.f64()?, r.f64()?);
-        constructed(at, Self::new(center, radius, start, sweep))
+        match tag {
+            ARC => {
+                let (center, radius, start, sweep) = (r.point2()?, r.f64()?, r.f64()?, r.f64()?);
+                constructed(at, Self::new(center, radius, start, sweep))
+            }
+            CHORD_ARC => {
+                let (start, end, bulge) = (r.point2()?, r.point2()?, r.f64()?);
+                constructed(at, chord_arc(start, end, bulge))?
+                    .ok_or_else(|| invalid(at, "chord arc with a zero bulge"))
+            }
+            _ => Err(invalid(tag_at, "unexpected kind tag")),
+        }
     }
 }
 
@@ -555,8 +626,7 @@ impl Body for Polyline2 {
     fn read_body(r: &mut Reader<'_>) -> Result<Self> {
         let at = r.pos;
         let closed = r.flag()?;
-        let count = r.count(MIN_VERTEX)?;
-        let mut vertices = Vec::with_capacity(count);
+        let (count, mut vertices) = r.counted(MIN_VERTEX)?;
         for _ in 0..count {
             vertices.push(PolylineVertex {
                 point: r.point2()?,
@@ -589,7 +659,7 @@ impl Value for Curve2 {
             RAY => Self::Ray(Ray2::read(r)?),
             LINE => Self::Line(Line2::read(r)?),
             CIRCLE => Self::Circle(Circle2::read(r)?),
-            ARC => Self::Arc(Arc2::read(r)?),
+            ARC | CHORD_ARC => Self::Arc(Arc2::read(r)?),
             ELLIPSE => Self::Ellipse(Ellipse2::read(r)?),
             ELLIPTICAL_ARC => Self::EllipticalArc(EllipticalArc2::read(r)?),
             POLYLINE => Self::Polyline(Polyline2::read(r)?),
@@ -610,8 +680,7 @@ impl Body for Loop2 {
 
     fn read_body(r: &mut Reader<'_>) -> Result<Self> {
         let at = r.pos;
-        let count = r.count(MIN_CURVE)?;
-        let curves = r.nested_values(count)?;
+        let curves = r.nested_values(MIN_CURVE)?;
         constructed(at, Self::from_stored(curves))
     }
 }
@@ -632,12 +701,10 @@ impl Body for Region {
 
     fn read_body(r: &mut Reader<'_>) -> Result<Self> {
         let at = r.pos;
-        let count = r.count(MIN_PART)?;
-        let mut parts = Vec::with_capacity(count);
+        let (count, mut parts) = r.counted(MIN_PART)?;
         for _ in 0..count {
             let outer = r.nested()?;
-            let holes = r.count(MIN_LOOP)?;
-            parts.push(RegionPart::new(outer, r.nested_values(holes)?));
+            parts.push(RegionPart::new(outer, r.nested_values(MIN_LOOP)?));
         }
         constructed(at, Self::new(parts))
     }
@@ -749,13 +816,11 @@ impl Body for TriangleMesh2 {
 
     fn read_body(r: &mut Reader<'_>) -> Result<Self> {
         let at = r.pos;
-        let count = r.count(MIN_POINT)?;
-        let mut vertices = Vec::with_capacity(count);
+        let (count, mut vertices) = r.counted(MIN_POINT)?;
         for _ in 0..count {
             vertices.push(r.point2()?);
         }
-        let count = r.count(MIN_TRIANGLE)?;
-        let mut triangles = Vec::with_capacity(count);
+        let (count, mut triangles) = r.counted(MIN_TRIANGLE)?;
         for _ in 0..count {
             triangles.push([r.u32()?, r.u32()?, r.u32()?]);
         }
@@ -791,6 +856,7 @@ codec!(
 mod tests {
     use std::fmt::Debug;
 
+    use arc_base::Tolerance;
     use arc_base::error::Value as Detail;
     use proptest::prelude::*;
 
@@ -799,7 +865,7 @@ mod tests {
     use crate::region::tests::region;
     use crate::testing::{extreme_coordinate, extreme_point, point};
 
-    const ALL_TAGS: [u8; 14] = [
+    const ALL_TAGS: [u8; 15] = [
         SEGMENT,
         RAY,
         LINE,
@@ -808,6 +874,7 @@ mod tests {
         ELLIPSE,
         ELLIPTICAL_ARC,
         POLYLINE,
+        CHORD_ARC,
         LOOP,
         REGION,
         AABB2,
@@ -1038,8 +1105,39 @@ mod tests {
         })
     }
 
-    fn positions() -> impl Strategy<Value = Vec<usize>> {
-        prop::collection::vec(any::<usize>(), 24)
+    /// The arc of a polyline segment, with bulges from nearly straight to nearly a full turn.
+    fn chord_arc_value() -> impl Strategy<Value = Arc2> {
+        (
+            point(),
+            point(),
+            crate::testing::log_uniform(-12.0, 3.0),
+            any::<bool>(),
+        )
+            .prop_filter_map("a representable bulged segment", |(a, b, bulge, flip)| {
+                chord_arc(a, b, if flip { -bulge } else { bulge })
+                    .ok()
+                    .flatten()
+            })
+    }
+
+    /// A clockwise loop of three arcs of a radius up to 1e12 around the origin, joined within a
+    /// tolerance in proportion to the radius.
+    fn large_radius_loop() -> impl Strategy<Value = Loop2> {
+        (crate::testing::log_uniform(3.0, 12.0), 0.0..6.0_f64).prop_map(|(r, a)| {
+            let arc = |start: f64, sweep: f64| {
+                Curve2::Arc(Arc2::new(Point2::origin(), r, start, sweep).unwrap())
+            };
+            let tolerance = Tolerance {
+                linear: 1e-8 * r,
+                ..Tolerance::DEFAULT
+            };
+            let curves = vec![
+                arc(a, -2.0),
+                arc(a - 2.0, -2.0),
+                arc(a - 4.0, 4.0 - std::f64::consts::TAU),
+            ];
+            Loop2::new(curves, &tolerance).unwrap()
+        })
     }
 
     proptest! {
@@ -1053,19 +1151,73 @@ mod tests {
             exercise(&c, xor, &every_position(&c));
         }
 
+    }
+
+    /// Every byte position of a region is mutated, so the default case count is small;
+    /// `PROPTEST_CASES` overrides it.
+    fn region_cases() -> u32 {
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(16)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(region_cases()))]
+
         #[test]
-        fn regions_and_loops_round_trip_canonically(
-            r in region(),
-            xor in 1..=255_u8,
-            at in positions(),
-        ) {
-            exercise(&r, xor, &at);
+        fn regions_and_loops_round_trip_canonically(r in region(), xor in 1..=255_u8) {
+            exercise(&r, xor, &every_position(&r));
             for part in r.parts() {
-                exercise(part.outer(), xor, &at);
+                exercise(part.outer(), xor, &every_position(part.outer()));
                 for hole in part.holes() {
                     prop_assert_eq!(&Loop2::decode(&hole.encode(), &Limits::STRICT).unwrap(), hole);
                 }
             }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn reversed_chord_arcs_round_trip(arc in chord_arc_value()) {
+            let reversed = arc.reversed();
+            prop_assert_eq!(Arc2::decode(&reversed.encode(), &Limits::STRICT).unwrap(), reversed);
+        }
+
+        #[test]
+        fn chord_arcs_round_trip_with_their_chord(arc in chord_arc_value(), xor in 1..=255_u8) {
+            prop_assert_eq!(arc.encode()[6], CHORD_ARC);
+            exercise(&arc, xor, &every_position(&arc));
+            let curve = Curve2::Arc(arc);
+            prop_assert_eq!(curve.encode(), arc.encode());
+            exercise(&curve, xor, &every_position(&curve));
+            // The plain arc with the same center, radius and angles is another value.
+            let plain =
+                Arc2::new(arc.center(), arc.radius(), arc.start_angle(), arc.sweep()).unwrap();
+            prop_assert_ne!(plain, arc);
+            prop_assert_eq!(plain.encode()[6], ARC);
+            // A loop of the arc and its chord reads back, in both directions, however far the
+            // center-radius form is from the vertices.
+            let (start, end) = (arc.point_at(0.0), arc.point_at(arc.sweep().abs()));
+            let back = Curve2::Segment(Segment2::new(end, start).unwrap());
+            if let Ok(lp) = Loop2::new(vec![curve, back], &Tolerance::DEFAULT) {
+                exercise(&lp, xor, &every_position(&lp));
+                let reversed = lp.reversed();
+                exercise(&reversed, xor, &every_position(&reversed));
+                let region = Region::new(vec![RegionPart::new(lp, vec![])]).unwrap();
+                exercise(&region, xor, &every_position(&region));
+            }
+        }
+
+        #[test]
+        fn reoriented_large_radius_loops_round_trip(lp in large_radius_loop(), xor in 1..=255_u8) {
+            exercise(&lp, xor, &every_position(&lp));
+            let reversed = lp.reversed();
+            exercise(&reversed, xor, &every_position(&reversed));
+            // The region constructor turns the clockwise loop.
+            let region = Region::new(vec![RegionPart::new(lp, vec![])]).unwrap();
+            prop_assert!(region.parts()[0].outer().is_counterclockwise());
+            exercise(&region, xor, &every_position(&region));
         }
 
         #[test]
@@ -1117,7 +1269,7 @@ mod tests {
         assert_eq!(decode(&with(4, &[2, 0])), "unsupported encoding version");
         assert_eq!(decode(&with(4, &[0, 0])), "unsupported encoding version");
         assert_eq!(decode(&with(6, &[RAY])), "unexpected kind tag");
-        for tag in [0x00, 0x18, 0x1F, 0x60, 0x70, 0xFF] {
+        for tag in [0x00, 0x19, 0x1F, 0x60, 0x70, 0xFF] {
             assert_eq!(
                 reason(&Curve2::decode(&with(6, &[tag]), &Limits::STRICT).unwrap_err()),
                 "unknown curve kind tag"
@@ -1271,20 +1423,120 @@ mod tests {
     }
 
     #[test]
-    fn a_polyline_arc_encodes_its_center_radius_form() {
+    fn a_polyline_arc_keeps_its_chord() {
         let polyline = Polyline2::new(
             vec![
-                PolylineVertex::new(Point2::origin(), 0.5),
+                PolylineVertex::new(Point2::origin(), 1e-12),
                 PolylineVertex::new(Point2::new(1.0, 0.0), 0.0),
             ],
             false,
         )
         .unwrap();
-        let Some(crate::PolylineSegment::Arc(arc)) = polyline.segment(0) else {
+        let Some(PolylineSegment::Arc(arc)) = polyline.segment(0) else {
             panic!("not an arc");
         };
-        let plain = Arc2::new(arc.center(), arc.radius(), arc.start_angle(), arc.sweep()).unwrap();
-        assert_eq!(arc.encode(), plain.encode());
-        assert_eq!(Arc2::decode(&arc.encode(), &Limits::STRICT).unwrap(), plain);
+        let bytes = arc.encode();
+        assert_eq!((bytes[6], bytes.len()), (CHORD_ARC, 47));
+        assert_eq!(Arc2::decode(&bytes, &Limits::STRICT).unwrap(), arc);
+        // The center of this arc is 2.5e11 away: a loop reads back only through the chord.
+        let back = Segment2::new(Point2::new(1.0, 0.0), Point2::origin()).unwrap();
+        let lp = Loop2::new(
+            vec![Curve2::Arc(arc), Curve2::Segment(back)],
+            &Tolerance::DEFAULT,
+        )
+        .unwrap();
+        assert_eq!(Loop2::decode(&lp.encode(), &Limits::STRICT).unwrap(), lp);
+        let reversed = lp.reversed();
+        assert_eq!(
+            Loop2::decode(&reversed.encode(), &Limits::STRICT).unwrap(),
+            reversed
+        );
+        // A chord arc without a bulge is not an arc, and a chord of no length is invalid.
+        let mut straight = bytes.clone();
+        straight.splice(39..47, 0.0_f64.to_le_bytes());
+        assert_eq!(
+            reason(&Arc2::decode(&straight, &Limits::STRICT).unwrap_err()),
+            "chord arc with a zero bulge"
+        );
+        let mut empty = bytes.clone();
+        empty.splice(23..39, [0; 16]);
+        let error = Curve2::decode(&empty, &Limits::STRICT).unwrap_err();
+        assert_eq!(
+            error.details().get("cause"),
+            Some(&Detail::Text("geom.polyline.zero_length_segment".into()))
+        );
+    }
+
+    #[test]
+    fn a_reoriented_loop_of_large_arcs_reads_back() {
+        let r = 1e12;
+        let arc = |start: f64, sweep: f64| {
+            Curve2::Arc(Arc2::new(Point2::origin(), r, start, sweep).unwrap())
+        };
+        let tolerance = Tolerance {
+            linear: 1e4,
+            ..Tolerance::DEFAULT
+        };
+        let curves = vec![
+            arc(0.3, -2.0),
+            arc(0.3 - 2.0, -2.0),
+            arc(0.3 - 4.0, 4.0 - std::f64::consts::TAU),
+        ];
+        let lp = Loop2::new(curves, &tolerance).unwrap();
+        let reversed = lp.reversed();
+        assert_eq!(
+            Loop2::decode(&reversed.encode(), &Limits::STRICT).unwrap(),
+            reversed
+        );
+        let region = Region::new(vec![RegionPart::new(lp, vec![])]).unwrap();
+        assert_eq!(
+            Region::decode(&region.encode(), &Limits::STRICT).unwrap(),
+            region
+        );
+    }
+
+    #[test]
+    fn only_the_bytes_of_the_value_count_toward_the_input_limit() {
+        let circle = Circle2::new(Point2::origin(), 2.0).unwrap();
+        let mut stream = circle.encode();
+        let len = stream.len();
+        stream.extend(circle.encode());
+        let exact = Limits {
+            input_bytes: len as u64,
+            ..Limits::STRICT
+        };
+        let (first, rest) = Circle2::decode_prefix(&stream, &exact).unwrap();
+        assert_eq!((first, rest.len()), (circle, len));
+        let short = Limits {
+            input_bytes: len as u64 - 1,
+            ..Limits::STRICT
+        };
+        for bytes in [&stream[..], &stream[..len]] {
+            let error = Circle2::decode_prefix(bytes, &short).unwrap_err();
+            assert_eq!(reason(&error), "input exceeds the input byte limit");
+        }
+        // A count that the limited input cannot hold is the limit, not a truncation.
+        let square = crate::region::tests::square(0.0, 0.0, 1.0).encode();
+        let cut = Limits {
+            input_bytes: 20,
+            ..Limits::STRICT
+        };
+        assert_eq!(
+            reason(&Loop2::decode(&square, &cut).unwrap_err()),
+            "input exceeds the input byte limit"
+        );
+        assert_eq!(
+            reason(&Loop2::decode(&square[..20], &cut).unwrap_err()),
+            "count exceeds the remaining input"
+        );
+    }
+
+    #[test]
+    fn a_box_with_an_infinite_corner_is_not_storable() {
+        let boxed = Aabb2::from_corners(Point2::new(f64::NEG_INFINITY, 0.0), Point2::new(1.0, 1.0));
+        assert_eq!(
+            reason(&Aabb2::decode(&boxed.encode(), &Limits::STRICT).unwrap_err()),
+            "number is not finite"
+        );
     }
 }

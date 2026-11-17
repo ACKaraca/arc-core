@@ -441,6 +441,14 @@ impl Arc2 {
     /// is reversed as well.
     #[must_use]
     pub fn reversed(&self) -> Self {
+        // A chord arc is rebuilt from its reversed chord, so it equals the arc that a polyline
+        // with the reversed segment gives and survives encoding.
+        if let Some(chord) = self.chord
+            && let Ok(Some(arc)) =
+                crate::encoding::chord_arc(chord.end(), chord.start(), -chord.bulge())
+        {
+            return arc;
+        }
         Self {
             start_angle: normalize_angle(self.start_angle + self.sweep),
             sweep: -self.sweep,

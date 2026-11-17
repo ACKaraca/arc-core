@@ -1,5 +1,5 @@
-//! Decodes arbitrary bytes as every geometry kind with the strict limits profile; a decoded value
-//! must encode to exactly the input.
+//! Decodes arbitrary bytes as every geometry kind with two limits profiles; a decoded value
+//! must encode to exactly the input, and a decoded prefix to exactly the bytes it consumed.
 
 #![no_main]
 
@@ -12,10 +12,34 @@ use arc_geom::{
 };
 use libfuzzer_sys::fuzz_target;
 
-fn check<T: GeomCodec + Debug>(data: &[u8]) {
-    match T::decode(data, &Limits::STRICT) {
-        Ok(value) => assert_eq!(value.encode(), data, "{value:?}"),
-        Err(error) => assert_eq!(error.code(), "geom.decode.invalid"),
+/// Small enough for the fuzzer to reach every limit.
+const TIGHT: Limits = Limits {
+    input_bytes: 96,
+    array_length: 3,
+    nesting_depth: 2,
+    ..Limits::STRICT
+};
+
+fn check<T: GeomCodec + Debug + PartialEq>(data: &[u8]) {
+    for limits in [&Limits::STRICT, &TIGHT] {
+        let whole = T::decode(data, limits);
+        match &whole {
+            Ok(value) => assert_eq!(value.encode(), data, "{value:?}"),
+            Err(error) => assert_eq!(error.code(), "geom.decode.invalid"),
+        }
+        match T::decode_prefix(data, limits) {
+            Ok((value, rest)) => {
+                let consumed = &data[..data.len() - rest.len()];
+                assert_eq!(value.encode(), consumed, "{value:?}");
+                assert!(consumed.len() as u64 <= limits.input_bytes);
+                // The whole input decodes exactly when nothing follows the prefix.
+                assert_eq!(whole.as_ref().ok(), rest.is_empty().then_some(&value));
+            }
+            Err(error) => {
+                assert_eq!(error.code(), "geom.decode.invalid");
+                assert!(whole.is_err());
+            }
+        }
     }
 }
 

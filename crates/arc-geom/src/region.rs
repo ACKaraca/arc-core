@@ -129,9 +129,9 @@ impl Loop2 {
             return Err(Error::new(codes::CURVE_UNBOUNDED)
                 .with_detail("curve", i64::try_from(index).unwrap_or(i64::MAX)));
         }
-        let mut joined = Vec::with_capacity(curves.len());
+        // The joints that close gaps, each with the index of the curve it follows.
+        let mut joints = Vec::new();
         for (index, curve) in curves.iter().enumerate() {
-            joined.push(curve.clone());
             let next = curves.get((index + 1) % curves.len());
             let (Some(end), Some(start)) = (curve.end_point(), next.and_then(Curve2::start_point))
             else {
@@ -144,9 +144,10 @@ impl Loop2 {
                     .with_detail("gap", gap));
             }
             if join && gap > 0.0 {
-                joined.push(Curve2::Segment(Segment2::new(end, start)?));
+                joints.push((index, Curve2::Segment(Segment2::new(end, start)?)));
             }
         }
+        let joined = Self::with_joints(curves, joints);
         let built = Self { curves: joined };
         let area = built.signed_area();
         if !area.is_finite() {
@@ -188,17 +189,66 @@ impl Loop2 {
         self.signed_area() > 0.0
     }
 
-    /// The same loop traversed in the opposite direction.
+    /// `curves` with each joint inserted after the curve at its index; the joints are in
+    /// ascending order of index.
+    fn with_joints(curves: Vec<Curve2>, joints: Vec<(usize, Curve2)>) -> Vec<Curve2> {
+        if joints.is_empty() {
+            return curves;
+        }
+        let mut joined = Vec::with_capacity(curves.len() + joints.len());
+        let mut joints = joints.into_iter().peekable();
+        for (index, curve) in curves.into_iter().enumerate() {
+            joined.push(curve);
+            if let Some((_, joint)) = joints.next_if(|(at, _)| *at == index) {
+                joined.push(joint);
+            }
+        }
+        joined
+    }
+
+    /// The same loop traversed in the opposite direction. The reverse of an arc recomputes its
+    /// end points from its angles, which can move them by the rounding of the radius; a gap
+    /// wider than the default linear tolerance that this opens between two reversed curves is
+    /// closed with a straight segment, so the reversed loop is valid in its stored form. The
+    /// reverse of the arc of a polyline segment is the arc of the reversed segment.
     #[must_use]
     pub fn reversed(&self) -> Self {
-        Self {
-            curves: self
-                .curves
-                .iter()
-                .rev()
+        let curves: Vec<Curve2> = self
+            .curves
+            .iter()
+            .rev()
+            .map(|c| {
+                // A chord arc is rebuilt from its reversed chord, so the reverse is the arc a
+                // polyline segment in that direction has, which is the form that is stored.
+                let rebuilt = match c {
+                    Curve2::Arc(arc) => arc.chord().and_then(|chord| {
+                        crate::encoding::chord_arc(chord.end(), chord.start(), -chord.bulge())
+                            .ok()
+                            .flatten()
+                    }),
+                    _ => None,
+                };
                 // Every stored curve is bounded, and only rays have no reverse.
-                .map(|c| c.reversed().unwrap_or_else(|| c.clone()))
-                .collect(),
+                rebuilt
+                    .map(Curve2::Arc)
+                    .or_else(|| c.reversed())
+                    .unwrap_or_else(|| c.clone())
+            })
+            .collect();
+        let mut joints = Vec::new();
+        for (index, curve) in curves.iter().enumerate() {
+            let next = curves.get((index + 1) % curves.len());
+            // A gap within the default tolerance is valid in a stored loop and stays.
+            if let (Some(end), Some(start)) =
+                (curve.end_point(), next.and_then(Curve2::start_point))
+                && crate::length(&(start - end)) > Tolerance::DEFAULT.linear
+                && let Ok(joint) = Segment2::new(end, start)
+            {
+                joints.push((index, Curve2::Segment(joint)));
+            }
+        }
+        Self {
+            curves: Self::with_joints(curves, joints),
         }
     }
 
