@@ -23,3 +23,6 @@ doc-object-duplicate-id = An object with the identifier { $id } already exists.
 doc-store-capacity-exceeded = The document cannot hold more objects of the type { $type }.
 doc-snapshot-stale = The changes were made on an outdated state of the document.
 doc-savepoint-invalid = The savepoint does not belong to these changes or is no longer available.
+doc-path-invalid = The path { $path } does not address a value of the object.
+doc-txn-limit-exceeded = The change is too large for one transaction ({ $limit }); split it into smaller steps.
+doc-op-mismatch = The change does not fit the current state of the object.

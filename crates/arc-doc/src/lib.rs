@@ -10,16 +10,19 @@
 pub mod descriptor;
 pub mod error;
 mod index;
+pub mod op;
 pub mod payload;
 pub mod registry;
 pub mod schema;
 pub mod snapshot;
 mod store;
+pub mod txn;
 
 #[cfg(test)]
 mod testing;
 
 pub use descriptor::descriptor;
+pub use op::{Op, Properties};
 pub use payload::{Decoded, Encoding, Payload};
 pub use registry::TypeRegistry;
 pub use schema::{
@@ -31,3 +34,4 @@ pub use schema::{
 pub use schema::{FieldPath, PathSegment};
 pub use snapshot::{Change, Flags, Header, Object, Savepoint, Snapshot, SnapshotCell, WorkingSet};
 pub use store::Handle;
+pub use txn::{Txn, TxnKind, TxnLimits, TxnMeta, TxnParts, TxnSavepoint};

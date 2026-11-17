@@ -418,6 +418,70 @@ the budgets of 50 µs and 2 ms in [testing.md](../testing.md); the rare rounds a
 coincided with equally long stalls of the constant-time snapshot load, that is, with the thread
 being descheduled. Memory overhead is about 77 bytes per object beyond the object itself.
 
+### Transactions and savepoints (CORE-DOC-013, CORE-DOC-014)
+
+A `Txn` is an open transaction: a working set on a base snapshot, the ordered list of operations
+that made its candidate, its limits and the metadata of its journal record. Exactly one
+transaction is open per document at a time; the document executor enforces that, not `Txn`.
+
+- **Operations.** `create` (type key, a new `ObjectId` from the caller, header and values, at the
+  type's current schema version; `create_copy` also records the source identifier), `modify`
+  (sets the value at a `FieldPath`: a whole field, a record field, a list element or a map
+  entry), `set_properties` (name, partition and flags), `delete` and `relink` (owner). Each
+  appends one `Op` naming the object by `ObjectId` and, for creates and deletes, its type key:
+  `Create` and `Delete` hold the whole object, `Modify` the schema version, the path and the
+  before and after values, `ModifyProperties` and `Relink` the before and after header parts.
+  Every successful call appends an operation, also when it writes the value already there and
+  when it changes the same field again; coalescing belongs to the journal. Values are kept
+  decoded; the journal encodes them with the payload codec.
+- **Property operation.** The document model defines `modify_properties` on property sets
+  (CORE-DOC-005, phase 1). Until property sets exist, the operation carries the header fields
+  besides the owner: name, partition and flags. Property-set values join it with CORE-DOC-005.
+- **Paths.** `None` makes a field or record field absent or removes a map entry, and setting a
+  missing map key adds the entry. A list changes length only as a whole: a list index must be
+  within the list and cannot be set to `None`. A path that does not resolve against the object's
+  schema, an index past the end of a list, a part of an absent value and `None` for a list
+  element fail with `doc.path.invalid`.
+- **Checks at call time.** An operation checks only what keeps the working state consistent:
+  the object is live (`doc.object.not_found`), the type is registered (`doc.type.unknown`), a
+  create has one value per field and its identifier is not live (`doc.object.duplicate_id`),
+  the path resolves, and every given value has the addressed type, is finite and uses declared
+  enum codes (fields of nested records are checked in full). Required fields, bounds of the object's own fields, reference integrity, whether
+  an owner exists, the `read_only` flag and validators are checked at commit (CORE-DOC-015). A
+  failed operation changes nothing.
+- **Reads.** `get`, `resolve` and `snapshot` (the candidate, for iteration) see the
+  transaction's changes. A snapshot loaded from the `SnapshotCell` before or during the
+  transaction sees none of them.
+- **Replay and inversion.** `Op::apply` applies an operation to a working set when the state
+  holds its before values: a created identifier is not live, and a modified, relinked or
+  deleted object is live with exactly the recorded before state (for a delete also the type and
+  schema version); otherwise it fails with `doc.op.mismatch` or the working set's code and
+  changes nothing. `Op::inverse` turns a create into a delete of the same object and back, and
+  swaps the before and after values of the others; the inverse of a create drops the source
+  identifier. Applying a transaction's operations in order to its base reproduces its
+  candidate, and applying their inverses in reverse order to the candidate reproduces the base.
+- **Savepoints.** `savepoint` marks the working set and the number of operations;
+  `rollback_to` restores both, truncating the operation list, and the transaction stays open;
+  `release` drops the savepoint and every later one and keeps the changes. Savepoints nest in
+  last-in, first-out order with the rules of working-set savepoints: a savepoint of another
+  transaction, or one released or invalidated by a rollback to or release of an earlier one,
+  fails with `doc.savepoint.invalid` and changes nothing.
+- **Limits.** `TxnLimits` holds the most operations (10 million, from the document model) and
+  a memory budget, by default the `memory_bytes` of `Limits::DEFAULT`. The budget counts an
+  estimate of what the operation list retains: the size of each operation and of the values,
+  texts and path it holds, also for the deleted object a snapshot still shares. The copied
+  chunks of the working set are not counted. An operation that would exceed either fails with
+  `doc.txn.limit_exceeded` (argument `limit`: `operations` or `memory_bytes`), and the
+  transaction stays usable and unchanged.
+- **Finishing.** `into_parts` hands the working set, the operations and the `TxnMeta` to
+  commit, which validates and publishes; `abandon` drops everything. `TxnMeta` holds the
+  transaction identifier, the parent transaction (none for the first of a new document), the
+  session, the author, the UTC time in milliseconds since the Unix epoch and the kind
+  (`normal`, `undo_of`, `redo_of`, `merge`, `migration`, `link_reload`). The command with its
+  parameters, the label, the group and the selection after are opaque canonical JSON text
+  written by the command layer, the history list, grouping and the application. A transaction
+  is not published without validation, so `Txn` has no publishing method.
+
 ### Error codes
 
 The codes `arc-doc` owns. A code is never reused for a different meaning; messages are in
@@ -447,3 +511,6 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.store.capacity_exceeded` | `limit_exceeded` | A typed store has no slot or generation left for another object |
 | `doc.snapshot.stale` | `conflict` | A working set is published, but its base is no longer the published snapshot |
 | `doc.savepoint.invalid` | `invalid_input` | A savepoint belongs to another working set, or was released or invalidated |
+| `doc.path.invalid` | `invalid_input` | A field path does not resolve against an object's schema or does not reach a value of the object |
+| `doc.txn.limit_exceeded` | `limit_exceeded` | A transaction would exceed its operation count or memory budget |
+| `doc.op.mismatch` | `conflict` | An operation is applied to a state that does not hold its before values |

@@ -141,6 +141,24 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "doc-savepoint-invalid",
     };
+    /// A field path does not resolve against an object's schema or does not reach a value of it.
+    pub const PATH_INVALID: ErrorCode = ErrorCode {
+        code: "doc.path.invalid",
+        category: Category::InvalidInput,
+        message_id: "doc-path-invalid",
+    };
+    /// A transaction would exceed its operation count or memory budget.
+    pub const TXN_LIMIT_EXCEEDED: ErrorCode = ErrorCode {
+        code: "doc.txn.limit_exceeded",
+        category: Category::LimitExceeded,
+        message_id: "doc-txn-limit-exceeded",
+    };
+    /// An operation is applied to a state that does not hold its before values.
+    pub const OP_MISMATCH: ErrorCode = ErrorCode {
+        code: "doc.op.mismatch",
+        category: Category::Conflict,
+        message_id: "doc-op-mismatch",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -166,6 +184,9 @@ pub mod codes {
         STORE_CAPACITY_EXCEEDED,
         SNAPSHOT_STALE,
         SAVEPOINT_INVALID,
+        PATH_INVALID,
+        TXN_LIMIT_EXCEEDED,
+        OP_MISMATCH,
     ];
 }
 
