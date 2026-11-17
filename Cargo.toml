@@ -1,0 +1,61 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "Apache-2.0"
+repository = "https://github.com/ACKaraca/arc-core"
+publish = false
+
+# Third-party versions are pinned once, here. Every crate listed must also appear in
+# docs/architecture/technology-baseline.md and in xtask/layers.toml.
+[workspace.dependencies]
+arc-base = { path = "crates/arc-base" }
+
+glam = "0.34"
+nalgebra = { version = "0.35", default-features = false, features = ["std", "serde-serialize"] }
+proptest = { version = "1.12", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+# `float_roundtrip`: a number read back from JSON is the number that was written.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+thiserror = "2"
+toml = "1"
+uuid = { version = "1.29", default-features = false, features = ["std", "serde"] }
+
+# The suite lint table (arc-suite docs/engineering/coding-standards.md). Every crate inherits it
+# with `[lints] workspace = true`; `cargo xtask layers` fails a crate that does not.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+
+[workspace.lints.clippy]
+# No-panic policy (tests are exempted in clippy.toml).
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+# Diagnostics output.
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "deny"
+# Hygiene.
+wildcard_imports = "deny"
+mem_forget = "deny"
+exit = "deny"
+# Complexity.
+cognitive_complexity = "warn"
+too_many_arguments = "warn"
+too_many_lines = "warn"
+# Casting.
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"

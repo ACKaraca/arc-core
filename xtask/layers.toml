@@ -1,0 +1,81 @@
+# The layer table (ADR-0001). `cargo xtask layers` checks the workspace against it.
+# Changing this file needs an architecture decision record.
+
+# Crates that nothing in L0-L4 may reach through normal dependencies.
+ui_deny = [
+  "winit",
+  "wgpu",
+  "egui",
+  "eframe",
+  "egui_dock",
+  "accesskit",
+  "muda",
+  "rfd",
+  "raw-window-handle",
+]
+
+# Third-party crates a workspace crate may depend on directly. Mirrors the crates of
+# docs/architecture/technology-baseline.md that are in use.
+third_party = [
+  "glam",
+  "nalgebra",
+  "proptest",
+  "serde",
+  "serde_json",
+  "thiserror",
+  "toml",
+  "uuid",
+]
+
+# Crates built for wasm32-unknown-unknown by `cargo xtask wasm`.
+wasm = ["arc-base"]
+
+# Class of every workspace crate: layer(n), ffi(n), app, testkit or tool.
+[crates]
+arc-base = "layer(0)"
+arc-geom = "layer(1)"
+arc-mesh = "layer(1)"
+arc-brep = "layer(2)"
+arc-brep-occt = "ffi(2)"
+arc-solve = "layer(2)"
+arc-doc = "layer(3)"
+arc-command = "layer(3)"
+arc-draft = "layer(4)"
+arc-view = "layer(4)"
+arc-scene = "layer(4)"
+arc-nodes = "layer(4)"
+arc-hub-api = "layer(4)"
+arc-pdfium = "ffi(4)"
+arc-opennurbs = "ffi(4)"
+arc-gpu = "layer(5)"
+arc-ui = "layer(6)"
+arc-app = "layer(6)"
+arc-shell = "app"
+arc-shell-cli = "app"
+arc-worker = "app"
+xtask = "tool"
+
+# Allowed edges between crates of the same layer.
+[[same_layer]]
+from = "arc-mesh"
+to = "arc-geom"
+
+[[same_layer]]
+from = "arc-command"
+to = "arc-doc"
+
+[[same_layer]]
+from = "arc-view"
+to = "arc-draft"
+
+[[same_layer]]
+from = "arc-io-pdf"
+to = "arc-draft"
+
+[[same_layer]]
+from = "arc-scene"
+to = "arc-io-usd"
+
+[[same_layer]]
+from = "arc-app"
+to = "arc-ui"
