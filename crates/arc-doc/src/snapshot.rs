@@ -22,6 +22,7 @@ use arc_swap::ArcSwap;
 use crate::error::codes;
 use crate::index::IdIndex;
 use crate::registry::TypeRegistry;
+use crate::reverse_index::ReverseIndex;
 use crate::schema::{SchemaVersion, TypeKey, Value};
 use crate::store::{Handle, Store, usize_of};
 
@@ -109,7 +110,7 @@ struct Roots {
     live: usize,
     stores: Arc<Vec<Store>>,
     index: IdIndex,
-    // The reverse reference index root (CORE-DOC-010) joins these roots here.
+    reverse: ReverseIndex,
 }
 
 /// An immutable view of a document at one revision.
@@ -153,6 +154,7 @@ impl Snapshot {
             revision: 0,
             live: 0,
             index: IdIndex::default(),
+            reverse: ReverseIndex::default(),
         }))
     }
 
@@ -234,6 +236,10 @@ impl Snapshot {
             .ok()
             .and_then(|index| u32::try_from(index).ok())
             .ok_or_else(|| unknown(key))
+    }
+
+    pub(crate) fn reverse(&self) -> &ReverseIndex {
+        &self.0.reverse
     }
 
     #[cfg(test)]
@@ -360,9 +366,10 @@ impl WorkingSet {
             return Err(Error::new(codes::OBJECT_DUPLICATE_ID).with_arg("id", id.to_string()));
         }
         let roots = Arc::make_mut(&mut self.current.0);
+        let object = Arc::new(object);
         let (slot, generation) = Arc::make_mut(&mut roots.stores)
             .get_mut(usize_of(store))
-            .and_then(|entry| entry.insert(Arc::new(object)))
+            .and_then(|entry| entry.insert(Arc::clone(&object)))
             .ok_or_else(|| Error::new(codes::STORE_CAPACITY_EXCEEDED).with_arg("type", type_key))?;
         let handle = Handle {
             store,
@@ -370,6 +377,9 @@ impl WorkingSet {
             generation,
         };
         roots.index.insert(id, handle);
+        roots
+            .reverse
+            .update(&roots.registry, type_key, None, Some(&object));
         roots.live += 1;
         // Only an object of the base is listed as deleted.
         let change = if self.touched.get(&id) == Some(&Change::Deleted) {
@@ -411,10 +421,12 @@ impl WorkingSet {
 
     fn replace(&mut self, handle: Handle, object: Object) -> Result<Arc<Object>> {
         let id = object.id;
+        let object = Arc::new(object);
         let old = self
             .store_mut(handle)?
-            .replace(handle.slot, handle.generation, Arc::new(object))
+            .replace(handle.slot, handle.generation, Arc::clone(&object))
             .ok_or_else(not_found)?;
+        self.update_reverse(handle, Some(&old), Some(&object));
         if !matches!(
             self.touched.get(&id),
             Some(Change::Created | Change::Recreated)
@@ -431,6 +443,7 @@ impl WorkingSet {
             .store_mut(handle)?
             .remove(handle.slot, handle.generation)
             .ok_or_else(not_found)?;
+        self.update_reverse(handle, Some(&old), None);
         let roots = Arc::make_mut(&mut self.current.0);
         roots.index.remove(old.id);
         roots.live = roots.live.saturating_sub(1);
@@ -486,6 +499,15 @@ impl WorkingSet {
         self.savepoints
             .binary_search_by_key(&savepoint.sequence, |saved| saved.sequence)
             .map_err(|_| invalid_savepoint())
+    }
+
+    fn update_reverse(&mut self, handle: Handle, old: Option<&Object>, new: Option<&Object>) {
+        let roots = Arc::make_mut(&mut self.current.0);
+        let key = roots
+            .keys
+            .get(usize_of(handle.store))
+            .map_or("", TypeKey::as_str);
+        roots.reverse.update(&roots.registry, key, old, new);
     }
 
     fn store_mut(&mut self, handle: Handle) -> Result<&mut Store> {

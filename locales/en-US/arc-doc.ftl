@@ -26,3 +26,7 @@ doc-savepoint-invalid = The savepoint does not belong to these changes or is no 
 doc-path-invalid = The path { $path } does not address a value of the object.
 doc-txn-limit-exceeded = The change is too large for one transaction ({ $limit }); split it into smaller steps.
 doc-op-mismatch = The change does not fit the current state of the object.
+doc-reference-delete-blocked = The object cannot be deleted: the field { $field } of another object refers to it and does not allow the deletion.
+doc-reference-cascade-limit = Deleting these objects would delete more than { $limit } dependent objects.
+doc-reference-cardinality = The field { $field } holds a number of references that its relationship rule does not allow.
+doc-reference-owner-conflict = The field { $field } cannot own an object that another reference already owns.

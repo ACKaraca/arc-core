@@ -366,7 +366,7 @@ object with CORE-DOC-005.
   stays deterministic and makes no operating-system calls.
 - **Snapshots.** A `Snapshot` is one `Arc` of its roots: the registry, the type keys, the
   revision number, the number of live objects, the table of store roots and the shard table of
-  the identifier index; the root of the reverse reference index joins them with CORE-DOC-010.
+  the identifier index, and the root of the reverse reference index.
   Cloning a snapshot copies one pointer, and `len` is constant time. `Snapshot::empty` has
   revision 0; the revision is a label that saturates at 2⁶⁴ − 1. Iteration yields live objects in
   handle order: by type key, then by ascending slot. Dropping the last holder of a snapshot
@@ -481,6 +481,74 @@ transaction is open per document at a time; the document executor enforces that,
   parameters, the label, the group and the selection after are opaque canonical JSON text
   written by the command layer, the history list, grouping and the application. A transaction
   is not published without validation, so `Txn` has no publishing method.
+### References, relationship rules and the reverse index (CORE-DOC-008, CORE-DOC-009, CORE-DOC-010)
+
+- **Where references are.** A reference is a `reference` field, an element of a `list` of
+  references that is the type of a field, or such a field or list inside nested records reached
+  through records, lists and maps; the registry allows them nowhere else. A reference is named by
+  a `ReferenceField`: the `FieldPath` of the value (a list element's path ends in its index) or
+  the header `Owner`. `relationship::references` lists what an object holds, owner first, then in
+  field, list and map-key order, each with its target and `ReferenceSpec`; `spec_of` finds the
+  spec of one `ReferenceField`. A list may hold one target more than once; each element is its
+  own reference.
+- **The header owner.** The document model gives the owner no rule of its own, so it is a
+  reference with the fixed spec `OWNER_SPEC`: any target type, cardinality `optional`, on-delete
+  `cascade` (an object is deleted with its owner), on-copy `share_target`. Its strength is
+  `associative`, because the owned object holds the reference and depends on its owner. An owner
+  must be a live object like any other target. Cycles of owners are not detected.
+- **Reverse reference index.** Every snapshot holds a persistent ordered set of entries
+  (target, source, field), spread over 64 shards by target, each shard an AVL tree of
+  reference-counted nodes. `WorkingSet::create`, `replace_values`, `replace_header` and `delete`
+  update it with the difference between the object's references before and after; a rollback to
+  a savepoint restores it with the rest of the candidate. A write copies the shard table once
+  per working set and the nodes on the path to its entry; every other node is shared with
+  earlier snapshots. `Snapshot::referrers(target)` yields the `Referrer`s (source and field) of
+  any identifier, live or not, in ascending order of source and field: `O(log n)` to reach the
+  first of them for `n` references in the document, then amortized constant time each.
+  `Snapshot::reference_count` is the number of entries. The index records what fields hold;
+  validity is the commit check's concern.
+- **Deletion rules.** `integrity::apply_delete_rules(set, limits)` applies the rules to every
+  object of the base the working set deleted and to every object deleted on the way. A live
+  referrer whose field says `cascade`, and every object whose owner is deleted, is deleted. The
+  targets of the `owning` references of a deleted object are deleted unless a live object holds
+  an owning reference to them by now: this is the strength's commit-time rule. A live referrer
+  whose field says `block` fails the call with `doc.reference.delete_blocked`, naming the field
+  and, in details, the source and target, unless the cascades delete that referrer as well; a
+  live referrer whose field says `clear` loses the reference (an optional field becomes absent,
+  a list loses the element). Cascades run first with an explicit work list and visit each object
+  once, so chains of any length and cycles of owning references terminate; more than
+  `limits.record_count` cascade deletions fail with `doc.reference.cascade_limit`. Blocks and
+  clears are decided after the cascades, so the result does not depend on the order in which
+  referrers are visited. The rules follow the net change: the owning references of a deleted
+  object of the base are read from the base, and an object created and deleted in the same
+  working set leaves no rule to apply, so a reference to it dangles. The returned
+  `DeleteReport` lists the cascade deletions in order (type key and object before) and the
+  cleared objects (object before and the changed object fields; a list is named as a whole);
+  the journal records them as one `delete` per deletion, then one `modify` per cleared object,
+  after the transaction's own operations. Any failure restores the working set.
+- **Reference check.** `integrity::check_references(set)` runs after the deletion rules. Every
+  reference held by a created, modified or recreated object, owner included, must name a live
+  object whose type key the field allows (an empty list allows any type); no live object may
+  still refer to a deleted one; every live referrer of a recreated identifier must allow its new
+  type. A violation fails with `doc.reference.dangling`, naming the field and, in details, the
+  source and target. A `one` field without a reference or a `many` list longer than its bound
+  fails with `doc.reference.cardinality` (the field schema check, which runs first, rejects both
+  as well). An object that would be the target of two owning references fails with
+  `doc.reference.owner_conflict`, since an owned target has one owner. The check costs time
+  proportional to the touched objects, their references, the referrers of the targets of their
+  owning references and the referrers of deleted and recreated identifiers.
+- **Strengths.** `owning` has the rules above; `associative` and `informational` have no
+  commit-time rule beyond their field's on-delete rule and the reference check (the dependency
+  graph uses the former). Replacing an owning reference does not delete the target it no longer
+  owns.
+- **Copying.** `relationship::copy_references(snapshot, mapping)` plans the values of copies:
+  `mapping` maps each object being copied to its copy's identifier. A reference to an object
+  copied too names its copy, whatever the rule, so a copied group stays connected; any other
+  reference follows its on-copy rule: `copy_target` keeps the original and lists it in
+  `copy_targets`, which the caller adds to the mapping before planning again, `share_target`
+  keeps it, `clear` removes it. The owner is the copy of the owner when that is copied too. The
+  copy command itself (identifiers, creates, `copied_from`) belongs to an upper layer and is not
+  part of phase 0 of this crate.
 
 ### Error codes
 
@@ -514,3 +582,7 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.path.invalid` | `invalid_input` | A field path does not resolve against an object's schema or does not reach a value of the object |
 | `doc.txn.limit_exceeded` | `limit_exceeded` | A transaction would exceed its operation count or memory budget |
 | `doc.op.mismatch` | `conflict` | An operation is applied to a state that does not hold its before values |
+| `doc.reference.delete_blocked` | `conflict` | A deletion is refused by an on-delete `block` rule of a reference to a deleted object |
+| `doc.reference.cascade_limit` | `limit_exceeded` | On-delete cascades would delete more objects than `Limits::record_count` |
+| `doc.reference.cardinality` | `invalid_input` | A `one` reference field has no reference, or a `many` list holds more references than its bound |
+| `doc.reference.owner_conflict` | `conflict` | An object would be the target of more than one owning reference |

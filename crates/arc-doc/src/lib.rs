@@ -10,9 +10,12 @@
 pub mod descriptor;
 pub mod error;
 mod index;
+pub mod integrity;
 pub mod op;
 pub mod payload;
 pub mod registry;
+pub mod relationship;
+pub mod reverse_index;
 pub mod schema;
 pub mod snapshot;
 mod store;
@@ -22,9 +25,12 @@ pub mod txn;
 mod testing;
 
 pub use descriptor::descriptor;
+pub use integrity::{DeleteReport, apply_delete_rules, check_references};
 pub use op::{Op, Properties};
 pub use payload::{Decoded, Encoding, Payload};
 pub use registry::TypeRegistry;
+pub use relationship::{Reference, ReferenceField};
+pub use reverse_index::{Referrer, Referrers};
 pub use schema::{
     AssetHash, Bound, Cardinality, ColorSource, ColorValue, EnumVariant, ExternalRef, FieldDecl,
     Finding, GeometryBytes, GeometryEncoding, MigrateFn, Migration, OnCopy, OnDelete,

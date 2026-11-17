@@ -159,6 +159,30 @@ pub mod codes {
         category: Category::Conflict,
         message_id: "doc-op-mismatch",
     };
+    /// A deletion is refused by an on-delete `block` rule of a reference to the deleted object.
+    pub const REFERENCE_DELETE_BLOCKED: ErrorCode = ErrorCode {
+        code: "doc.reference.delete_blocked",
+        category: Category::Conflict,
+        message_id: "doc-reference-delete-blocked",
+    };
+    /// On-delete cascades would delete more objects than the limit allows.
+    pub const REFERENCE_CASCADE_LIMIT: ErrorCode = ErrorCode {
+        code: "doc.reference.cascade_limit",
+        category: Category::LimitExceeded,
+        message_id: "doc-reference-cascade-limit",
+    };
+    /// A reference field holds a number of references its cardinality does not allow.
+    pub const REFERENCE_CARDINALITY: ErrorCode = ErrorCode {
+        code: "doc.reference.cardinality",
+        category: Category::InvalidInput,
+        message_id: "doc-reference-cardinality",
+    };
+    /// An object would be the target of more than one owning reference.
+    pub const REFERENCE_OWNER_CONFLICT: ErrorCode = ErrorCode {
+        code: "doc.reference.owner_conflict",
+        category: Category::Conflict,
+        message_id: "doc-reference-owner-conflict",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -187,6 +211,10 @@ pub mod codes {
         PATH_INVALID,
         TXN_LIMIT_EXCEEDED,
         OP_MISMATCH,
+        REFERENCE_DELETE_BLOCKED,
+        REFERENCE_CASCADE_LIMIT,
+        REFERENCE_CARDINALITY,
+        REFERENCE_OWNER_CONFLICT,
     ];
 }
 
