@@ -12,8 +12,11 @@
 //! No function in this crate panics.
 
 pub mod bbox;
+pub mod closest;
 pub mod curve;
 pub mod error;
+pub mod eval;
+pub mod flatten;
 pub mod index;
 pub mod polyline;
 pub mod predicates;
@@ -22,7 +25,10 @@ pub mod transform;
 pub mod view;
 
 pub use bbox::{Aabb2, Aabb3};
+pub use closest::{CurvePoint, CurveProject, FootPoint};
 pub use curve::Curve2;
+pub use eval::CurveEval;
+pub use flatten::CurveFlatten;
 pub use index::{SpatialIndex2, SpatialIndex3};
 pub use polyline::{Polyline2, PolylineSegment, PolylineVertex};
 pub use predicates::{Sign, incircle, orient2d};

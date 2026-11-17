@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 40bebef774199894233e11f4c2bab11e6754f8df54e088cb483aa75d188cf336 # shrinks to c = Polyline(Polyline2 { vertices: [PolylineVertex { point: [0.0, 0.0], bulge: -0.2568530925514817, start_width: 0.0, end_width: 0.0 }, PolylineVertex { point: [0.0, 40.06795636516081], bulge: 0.0, start_width: 0.0, end_width: 0.0 }], closed: false }), chord_exp = 0.0, angle = 0.05

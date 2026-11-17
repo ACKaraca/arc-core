@@ -91,7 +91,7 @@ pub mod codes {
         category: Category::CorruptData,
         message_id: "geom-decode-invalid",
     };
-    /// A linear or angular tolerance is NaN, infinite or negative.
+    /// A tolerance is NaN, infinite, negative, or zero where the operation needs a positive one.
     pub const TOLERANCE_INVALID: ErrorCode = ErrorCode {
         code: "geom.tolerance.invalid",
         category: Category::InvalidInput,
@@ -134,6 +134,25 @@ pub mod codes {
         message_id: "geom-view-aspect-invalid",
     };
 
+    /// A requested arc length is negative or exceeds the length of the curve.
+    pub const LENGTH_OUT_OF_RANGE: ErrorCode = ErrorCode {
+        code: "geom.length.out_of_range",
+        category: Category::InvalidInput,
+        message_id: "geom-length-out-of-range",
+    };
+    /// A ray or line was given to an operation that needs a bounded curve.
+    pub const CURVE_UNBOUNDED: ErrorCode = ErrorCode {
+        code: "geom.curve.unbounded",
+        category: Category::Unsupported,
+        message_id: "geom-curve-unbounded",
+    };
+    /// Flattening a curve needs more vertices than the limit allows.
+    pub const FLATTEN_TOO_MANY_VERTICES: ErrorCode = ErrorCode {
+        code: "geom.flatten.too_many_vertices",
+        category: Category::LimitExceeded,
+        message_id: "geom-flatten-too-many-vertices",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         INPUT_NOT_FINITE,
@@ -157,6 +176,9 @@ pub mod codes {
         VIEW_SCALE_NOT_POSITIVE,
         VIEW_CLIP_INVALID,
         VIEW_ASPECT_INVALID,
+        LENGTH_OUT_OF_RANGE,
+        CURVE_UNBOUNDED,
+        FLATTEN_TOO_MANY_VERTICES,
     ];
 }
 

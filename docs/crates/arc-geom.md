@@ -214,6 +214,35 @@ and target distance uses the linear tolerance and the up direction the angular t
 to the constructor; deserialization validates with the default tolerance. Orthographic frames may
 have a zero or negative near distance.
 
+### Evaluation, projection and flattening
+
+`CurveEval`, `CurveProject` and `CurveFlatten` are implemented by every 2D curve type and by
+`Curve2` (CORE-GEOM-003, CORE-GEOM-004, CORE-GEOM-011).
+
+- Derivatives are taken with respect to the parameter in the table above, at the clamped
+  parameter. The unit normal is the unit tangent turned a quarter turn counterclockwise;
+  curvature is signed, positive where the curve turns counterclockwise. At an interior polyline
+  vertex the derivatives are those of the segment that starts there.
+- The length of a ray or line is infinite. The parameter at a length is measured from the start
+  of the range (from parameter 0 for a line, negative lengths backwards); a length outside
+  [0, length] by more than the linear tolerance fails with `geom.length.out_of_range`.
+- Elliptical arc lengths are integrated with an adaptive 8-point Gauss–Legendre rule split at
+  the quadrant angles, with an estimated error below a quarter of the linear tolerance and a
+  bounded number of intervals; the parameter at a length is found by safeguarded Newton
+  iteration, so its point is within the linear tolerance of the true point.
+- Foot points are the parameters where the vector to the query point is perpendicular to the
+  tangent within the linear tolerance. When every point of an arc or circle is one (the query
+  is its center) the result is an interval covering it. Ellipse foot points are found by
+  splitting the turn into at most six intervals on which the perpendicularity function has at
+  most one zero, then refining each sign change. The closest point is the nearest foot point or
+  end; candidates within the linear tolerance tie and the smallest parameter wins.
+- Flattening takes a chord tolerance, an angle tolerance (turning per segment) and a vertex
+  limit; non-positive or non-finite tolerances fail with `geom.tolerance.invalid`, rays and
+  lines with `geom.curve.unbounded`, and a result above the limit with
+  `geom.flatten.too_many_vertices`. End points and polyline vertices are exact. Circular arcs
+  use the minimal number of equal segments; ellipses are divided greedily, each segment as long
+  as both tolerances allow and turning at most a quarter turn.
+
 ### Error codes
 
 The codes `arc-geom` owns. A code is never reused for a different meaning; messages are in
@@ -235,7 +264,7 @@ The codes `arc-geom` owns. A code is never reused for a different meaning; messa
 | `geom.transform.not_similarity` | `unsupported` | A polyline with arcs or widths is given a transform that is not a similarity within tolerance |
 | `geom.precision.insufficient` | `failed_operation` | A computation exceeds the range or precision of `f64`: a transform image that is not representable, a bulge whose arc is not representable, predicate coordinates that span too many binary exponents |
 | `geom.decode.invalid` | `corrupt_data` | Encoded geometry is malformed or oversized |
-| `geom.tolerance.invalid` | `invalid_input` | A linear or angular tolerance is NaN, infinite or negative |
+| `geom.tolerance.invalid` | `invalid_input` | A tolerance is NaN, infinite or negative, or zero where the operation needs a positive value |
 | `geom.view.eye_at_target` | `invalid_input` | The eye and target of a view frame are closer than the linear tolerance |
 | `geom.view.up_invalid` | `invalid_input` | The up vector of a view frame is zero or within the angular tolerance of parallel to the view direction |
 | `geom.view.fov_invalid` | `invalid_input` | A perspective field of view is outside (0, π) |
@@ -269,3 +298,6 @@ key.
 
 The property tests compare every query with a brute-force scan after random sequences of insert,
 remove and update, in 2D and 3D, on integer-grid boxes that force touching and exact ties.
+| `geom.length.out_of_range` | `invalid_input` | A requested arc length is negative or exceeds the curve's length by more than the linear tolerance |
+| `geom.curve.unbounded` | `unsupported` | A ray or line is given to an operation that needs a bounded curve, such as flattening |
+| `geom.flatten.too_many_vertices` | `limit_exceeded` | Flattening a curve needs more vertices than the caller's limit |
