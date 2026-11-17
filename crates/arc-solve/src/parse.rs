@@ -2,7 +2,9 @@
 //!
 //! The grammar is in `docs/crates/arc-solve.md`. The parser recurses only for parentheses, lists
 //! and calls, counts that nesting, and resolves operators on explicit stacks, so no input exhausts
-//! the stack; the depth of the resulting tree is bounded by the same limit.
+//! the stack; the depth of the resulting tree is bounded by the same limit. A run of
+//! left-associative operators of one precedence level becomes one [`ExprKind::Chain`] node, so
+//! its length does not count toward the depth.
 
 use arc_base::{Dimension, Quantity, Result, Unit};
 
@@ -13,7 +15,10 @@ use crate::{ExprLimits, Span};
 
 /// A prefix operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UnaryOp {
+    /// `+x`: a number unchanged.
+    Plus,
     /// `-x`.
     Neg,
     /// `!x`.
@@ -22,6 +27,7 @@ pub enum UnaryOp {
 
 /// An infix operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BinaryOp {
     /// `+`.
     Add,
@@ -53,11 +59,15 @@ pub enum BinaryOp {
 
 /// The kind of an expression node.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ExprKind {
     /// A number written without a unit.
     Bare(f64),
     /// A number with a unit or in feet and inches, converted to SI base units.
     Quantity(Quantity),
+    /// A reading on a temperature scale with an offset (`20 °C`): an absolute temperature in
+    /// kelvin.
+    Absolute(Quantity),
     /// `true` or `false`.
     Bool(bool),
     /// A text literal with its escapes resolved.
@@ -68,8 +78,12 @@ pub enum ExprKind {
     List(Vec<Expr>),
     /// A prefix operator and its operand.
     Unary(UnaryOp, Box<Expr>),
-    /// An infix operator and its operands.
+    /// `^` or a comparison and its operands.
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
+    /// A left-associative run of operators of one precedence level (`+` and `-`, `*` and `/`,
+    /// `&&`, or `||`): the first operand, then each operator with its right operand. `a - b + c`
+    /// is `(a - b) + c`.
+    Chain(Box<Expr>, Vec<(BinaryOp, Expr)>),
     /// A function name and its arguments.
     Call(String, Vec<Expr>),
 }
@@ -80,6 +94,11 @@ pub struct Expr {
     kind: ExprKind,
     span: Span,
     depth: u32,
+    /// Written in parentheses; a parenthesized chain is not extended.
+    grouped: bool,
+    /// For a number literal with a unit without offset, the number as written and the scale of
+    /// the unit.
+    written: Option<(f64, f64)>,
 }
 
 impl Expr {
@@ -152,6 +171,12 @@ impl Expr {
     pub fn depth(&self) -> u32 {
         self.depth
     }
+
+    /// For a number literal with a unit without offset, the number as written in that unit and
+    /// the scale of the unit (feet and inches in inches).
+    pub(crate) fn written(&self) -> Option<(f64, f64)> {
+        self.written
+    }
 }
 
 const END: Token = Token {
@@ -171,29 +196,35 @@ struct Parser<'a> {
 /// An operator waiting on the parser's stack for its right operand.
 #[derive(Clone, Copy)]
 enum Pending {
-    /// A prefix operator; `None` is the prefix `+`.
-    Prefix(Option<UnaryOp>),
+    Prefix(UnaryOp),
     Infix(BinaryOp),
 }
 
+/// The binding strength of an infix operator: `||`, `&&`, comparisons, sums, products, `^`.
+/// Prefix operators bind at 6, between products and `^`.
+fn level(op: BinaryOp) -> u8 {
+    match op {
+        BinaryOp::Or => 1,
+        BinaryOp::And => 2,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            3
+        }
+        BinaryOp::Add | BinaryOp::Sub => 4,
+        BinaryOp::Mul | BinaryOp::Div => 5,
+        BinaryOp::Pow => 7,
+    }
+}
+
+/// Whether `op` forms [`ExprKind::Chain`] runs: the left-associative operators.
+fn chains(op: BinaryOp) -> bool {
+    !matches!(level(op), 3 | 7)
+}
+
 impl Pending {
-    /// The binding strength: `||`, `&&`, comparisons, sums, products, prefix operators, `^`.
     fn precedence(self) -> u8 {
         match self {
-            Self::Infix(BinaryOp::Or) => 1,
-            Self::Infix(BinaryOp::And) => 2,
-            Self::Infix(
-                BinaryOp::Eq
-                | BinaryOp::Ne
-                | BinaryOp::Lt
-                | BinaryOp::Le
-                | BinaryOp::Gt
-                | BinaryOp::Ge,
-            ) => 3,
-            Self::Infix(BinaryOp::Add | BinaryOp::Sub) => 4,
-            Self::Infix(BinaryOp::Mul | BinaryOp::Div) => 5,
             Self::Prefix(_) => 6,
-            Self::Infix(BinaryOp::Pow) => 7,
+            Self::Infix(op) => level(op),
         }
     }
 }
@@ -257,6 +288,10 @@ impl Parser<'_> {
             ExprKind::List(items) | ExprKind::Call(_, items) => {
                 items.iter().map(child).max().unwrap_or(0)
             }
+            ExprKind::Chain(first, rest) => rest
+                .iter()
+                .map(|(_, e)| e.depth)
+                .fold(first.depth, u32::max),
             ExprKind::Unary(_, operand) => operand.depth,
             ExprKind::Binary(_, left, right) => left.depth.max(right.depth),
             _ => 0,
@@ -265,7 +300,13 @@ impl Parser<'_> {
         if depth > self.max_depth {
             return Err(limit("depth", span));
         }
-        Ok(Expr { kind, span, depth })
+        Ok(Expr {
+            kind,
+            span,
+            depth,
+            grouped: false,
+            written: None,
+        })
     }
 
     /// Runs `inner` one nesting level deeper.
@@ -287,23 +328,41 @@ impl Parser<'_> {
         if !(number && self.at(self.pos + 2).tok == Tok::Ident) {
             return false;
         }
-        let (unit, _) = self.unit_suffix(self.pos + 2);
-        resolve(self.source(unit)).is_ok_and(|unit| unit.offset != 0.0)
+        self.unit_suffix(self.pos + 2)
+            .and_then(|(unit, _)| resolve(self.source(unit)))
+            .is_ok_and(|unit| unit.offset != 0.0)
     }
 
     /// Applies the operator on top of `pending` to the operands on top of `operands`.
     fn reduce(&self, operands: &mut Vec<Expr>, pending: &mut Vec<(Pending, Span)>) -> Result<()> {
         let missing = || at(codes::EXPR_SYNTAX, self.peek().span);
         let (operator, at_span) = pending.pop().ok_or_else(missing)?;
-        let mut right = operands.pop().ok_or_else(missing)?;
+        let right = operands.pop().ok_or_else(missing)?;
         let node = match operator {
-            Pending::Prefix(None) => {
-                right.span = at_span.to(right.span);
-                right
-            }
-            Pending::Prefix(Some(op)) => {
+            Pending::Prefix(op) => {
                 let span = at_span.to(right.span);
                 self.node(ExprKind::Unary(op, Box::new(right)), span)?
+            }
+            Pending::Infix(op) if chains(op) => {
+                let mut left = operands.pop().ok_or_else(missing)?;
+                let span = left.span.to(right.span);
+                if let ExprKind::Chain(_, rest) = &mut left.kind
+                    && !left.grouped
+                    && rest
+                        .first()
+                        .is_some_and(|(first, _)| level(*first) == level(op))
+                {
+                    let depth = left.depth.max(right.depth.saturating_add(1));
+                    if depth > self.max_depth {
+                        return Err(limit("depth", span));
+                    }
+                    rest.push((op, right));
+                    left.span = span;
+                    left.depth = depth;
+                    left
+                } else {
+                    self.node(ExprKind::Chain(Box::new(left), vec![(op, right)]), span)?
+                }
             }
             Pending::Infix(op) => {
                 let left = operands.pop().ok_or_else(missing)?;
@@ -324,9 +383,9 @@ impl Parser<'_> {
             loop {
                 let token = self.peek();
                 let prefix = match token.tok {
-                    Tok::Minus if !self.offset_reading() => Some(UnaryOp::Neg),
-                    Tok::Bang => Some(UnaryOp::Not),
-                    Tok::Plus => None,
+                    Tok::Minus if !self.offset_reading() => UnaryOp::Neg,
+                    Tok::Bang => UnaryOp::Not,
+                    Tok::Plus => UnaryOp::Plus,
                     _ => break,
                 };
                 self.bump();
@@ -397,6 +456,7 @@ impl Parser<'_> {
                     return Err(at(codes::EXPR_SYNTAX, close.span));
                 }
                 inner.span = token.span.to(close.span);
+                inner.grouped = true;
                 Ok(inner)
             }
             Tok::LBracket => {
@@ -469,7 +529,12 @@ impl Parser<'_> {
 
     /// The extent of a unit suffix starting with the name at token `index`: the factors joined
     /// by `*` or `/` and exponents written without spaces. Returns its span and the next index.
-    fn unit_suffix(&self, index: usize) -> (Span, usize) {
+    ///
+    /// # Errors
+    ///
+    /// `solve.expr.syntax` when a `^` directly after the unit is not directly followed by an
+    /// integer exponent (`m^+2`, `m^ 2`, `m^0.5`).
+    fn unit_suffix(&self, index: usize) -> Result<(Span, usize)> {
         let mut span = self.at(index).span;
         let mut next = index + 1;
         loop {
@@ -483,7 +548,10 @@ impl Parser<'_> {
                     if self.at(k).tok == Tok::Minus && self.adjacent(k) {
                         k += 1;
                     }
-                    (self.integer(k).is_some() && self.adjacent(k)).then_some(k)
+                    if !(self.integer(k).is_some() && self.adjacent(k)) {
+                        return Err(at(codes::EXPR_SYNTAX, token.span.to(self.at(k).span)));
+                    }
+                    Some(k)
                 }
                 Tok::Star | Tok::Slash => (self.at(next + 1).tok == Tok::Ident
                     && self.adjacent(next + 1))
@@ -494,7 +562,7 @@ impl Parser<'_> {
             span.end = self.at(last).span.end;
             next = last + 1;
         }
-        (span, next)
+        Ok((span, next))
     }
 
     /// The literal at the current number token, its number multiplied by `sign`.
@@ -505,8 +573,11 @@ impl Parser<'_> {
             return Err(at(codes::EXPR_SYNTAX, first.span));
         };
         let value = sign * value;
+        let inch = unit_named("inch")?;
+        let mut written = None;
         let (kind, next) = if let Some((inches, next)) = self.inches(index) {
-            let si = unit_named("inch")?.to_si(inches);
+            let si = inch.to_si(inches);
+            written = Some((inches, inch.scale));
             (
                 ExprKind::Quantity(Quantity::new(si, Dimension::LENGTH)),
                 next,
@@ -519,31 +590,47 @@ impl Parser<'_> {
                 && self.adjacent(index + 3);
             let start = if hyphen { index + 3 } else { index + 2 };
             let (si, next) = match self.inches(start) {
-                Some((inches, next)) => (feet + unit_named("inch")?.to_si(inches), next),
+                // A foot holds 12 inches; more after a feet part is a typing error.
+                Some((inches, next)) if inches >= 12.0 => {
+                    let span = self.at(start).span.to(self.at(next - 1).span);
+                    return Err(at(codes::EXPR_SYNTAX, span));
+                }
+                Some((inches, next)) => (feet + inch.to_si(inches), next),
                 None => (feet, index + 2),
             };
+            let inches = value * 12.0 + self.inches(start).map_or(0.0, |(inches, _)| inches);
+            written = Some((inches, inch.scale));
             (
                 ExprKind::Quantity(Quantity::new(si, Dimension::LENGTH)),
                 next,
             )
         } else if self.at(index + 1).tok == Tok::Ident {
-            let (span, next) = self.unit_suffix(index + 1);
+            let (span, next) = self.unit_suffix(index + 1)?;
             let unit = resolve(self.source(span)).map_err(|e| with_span(e, span))?;
             let quantity = Quantity::new(unit.to_si(value), unit.dimension);
-            (ExprKind::Quantity(quantity), next)
+            written = (unit.offset == 0.0).then_some((value, unit.scale));
+            if unit.offset == 0.0 {
+                (ExprKind::Quantity(quantity), next)
+            } else {
+                (ExprKind::Absolute(quantity), next)
+            }
         } else {
             (ExprKind::Bare(value), index + 1)
         };
         let span = first.span.to(self.at(next - 1).span);
         let finite = match &kind {
-            ExprKind::Quantity(quantity) => quantity.value().is_finite(),
+            ExprKind::Quantity(quantity) | ExprKind::Absolute(quantity) => {
+                quantity.value().is_finite()
+            }
             _ => value.is_finite(),
         };
         if !finite {
             return Err(at(codes::EXPR_DOMAIN, span));
         }
         self.pos = next;
-        self.node(kind, span)
+        let mut literal = self.node(kind, span)?;
+        literal.written = written;
+        Ok(literal)
     }
 }
 
@@ -560,7 +647,7 @@ mod tests {
 
     fn quantity(text: &str) -> Quantity {
         match parse(text).unwrap().kind {
-            ExprKind::Quantity(quantity) => quantity,
+            ExprKind::Quantity(quantity) | ExprKind::Absolute(quantity) => quantity,
             other => panic!("{text}: {other:?}"),
         }
     }
@@ -597,6 +684,34 @@ mod tests {
         assert!(close(quantity("20 °C").value(), 293.15));
         assert!(close(quantity("-40 °C").value(), 233.15));
         assert!(close(quantity("-40 degF").value(), 233.15));
+        assert!(matches!(
+            parse("20 °C").unwrap().kind,
+            ExprKind::Absolute(_)
+        ));
+        assert!(matches!(parse("20 K").unwrap().kind, ExprKind::Quantity(_)));
+    }
+
+    #[test]
+    fn unit_exponents_are_written_directly() {
+        // `^` directly after a unit takes an integer exponent written directly after it.
+        for text in ["2 m^+2", "2 m^ 2", "2 m^0.5", "2 m^", "2 m^-x"] {
+            assert_eq!(code(text), "solve.expr.syntax", "{text:?}");
+        }
+        let error = parse("2 m^+2").unwrap_err();
+        assert_eq!(span_of(&error), Some(Span { start: 3, end: 5 }));
+        // With white space before it, `^` raises the quantity.
+        assert!(matches!(
+            parse("2 m ^2").unwrap().kind,
+            ExprKind::Binary(BinaryOp::Pow, ..)
+        ));
+        for text in ["2 m0", "2 m^0", "2 µm", "2 \u{3bc}m"] {
+            assert_eq!(code(text), "solve.expr.unknown_unit", "{text:?}");
+        }
+        for text in ["2 m^200", "2 m^-129", "1 m^127*m"] {
+            assert_eq!(code(text), "solve.expr.limit_exceeded", "{text:?}");
+        }
+        // A unit cannot follow a parenthesis.
+        assert_eq!(code("(2 + 3) mm"), "solve.expr.syntax");
     }
 
     #[test]
@@ -610,22 +725,36 @@ mod tests {
         assert!(close(quantity("6\"").value(), 6.0 * inch));
         assert!(close(quantity("1/2\"").value(), 0.5 * inch));
         assert!(close(quantity("8'").value(), 96.0 * inch));
+        assert!(close(quantity("8' 11 3/4\"").value(), 107.75 * inch));
+        assert!(close(quantity("13\"").value(), 13.0 * inch));
         // With spaces around the hyphen it subtracts.
         let difference = parse("8' - 6\"").unwrap();
         assert!(matches!(
             difference.kind(),
-            ExprKind::Binary(BinaryOp::Sub, ..)
+            ExprKind::Chain(_, rest) if rest[0].0 == BinaryOp::Sub
         ));
         assert_eq!(code("1/0\""), "solve.expr.domain");
+        // A foot holds 12 inches.
+        for text in ["8' 12\"", "8' 13\"", "8'-12 1/2\"", "8' 25/2\""] {
+            assert_eq!(code(text), "solve.expr.syntax", "{text:?}");
+        }
+        let error = parse("x + 8' 13\"").unwrap_err();
+        assert_eq!(span_of(&error), Some(Span { start: 7, end: 10 }));
     }
 
     #[test]
     fn precedence_and_associativity() {
         let e = parse("1 + 2 * 3 ^ 2 ^ 2").unwrap();
-        let ExprKind::Binary(BinaryOp::Add, _, right) = e.kind() else {
+        let ExprKind::Chain(_, sum) = e.kind() else {
             panic!("{e:?}")
         };
-        let ExprKind::Binary(BinaryOp::Mul, _, power) = right.kind() else {
+        let [(BinaryOp::Add, right)] = sum.as_slice() else {
+            panic!()
+        };
+        let ExprKind::Chain(_, product) = right.kind() else {
+            panic!()
+        };
+        let [(BinaryOp::Mul, power)] = product.as_slice() else {
             panic!()
         };
         let ExprKind::Binary(BinaryOp::Pow, _, exponent) = power.kind() else {
@@ -641,9 +770,39 @@ mod tests {
         ));
         assert!(matches!(
             parse("a || b && c").unwrap().kind(),
-            ExprKind::Binary(BinaryOp::Or, ..)
+            ExprKind::Chain(_, rest) if rest.len() == 1 && rest[0].0 == BinaryOp::Or
+        ));
+        assert!(matches!(
+            parse("+x").unwrap().kind(),
+            ExprKind::Unary(UnaryOp::Plus, _)
         ));
         assert_eq!(code("1 < 2 < 3"), "solve.expr.syntax");
+    }
+
+    #[test]
+    fn runs_of_one_level_form_one_chain() {
+        let ops = |text: &str| match parse(text).unwrap().kind {
+            ExprKind::Chain(_, rest) => rest.iter().map(|(op, _)| *op).collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        use BinaryOp::{Add, And, Div, Mul, Sub};
+        assert_eq!(ops("1 - 2 + 3 - 4"), [Sub, Add, Sub]);
+        assert_eq!(ops("1 * 2 / 3"), [Mul, Div]);
+        assert_eq!(ops("a && b && c"), [And, And]);
+        // A parenthesized run is an operand, not extended.
+        assert_eq!(ops("(1 + 2) + 3"), [Add]);
+        assert_eq!(ops("1 + (2 + 3)"), [Add]);
+        // Thousands of terms stay shallow.
+        let long = format!("1{}", " + 1".repeat(5_000));
+        let e = parse(&long).unwrap();
+        assert_eq!(e.depth(), 2);
+        assert_eq!(
+            e.span(),
+            Span {
+                start: 0,
+                end: long.len()
+            }
+        );
     }
 
     #[test]
@@ -669,7 +828,7 @@ mod tests {
     fn spans_cover_the_source() {
         let e = parse(" (1 m + 2 m) * 3").unwrap();
         assert_eq!(e.span(), Span { start: 1, end: 16 });
-        let ExprKind::Binary(_, left, _) = e.kind() else {
+        let ExprKind::Chain(left, _) = e.kind() else {
             panic!()
         };
         assert_eq!(left.span(), Span { start: 1, end: 12 });
@@ -691,12 +850,11 @@ mod tests {
 
     #[test]
     fn limits_bound_length_depth_and_lists() {
-        let tight = ExprLimits {
-            text_bytes: 9,
-            depth: 4,
-            list_length: 2,
-            steps: 10,
-        };
+        let tight = ExprLimits::DEFAULT
+            .with_text_bytes(9)
+            .with_depth(4)
+            .with_list_length(2)
+            .with_steps(10);
         let limit_of = |text: &str| {
             let error = Expr::parse(text, &tight).unwrap_err();
             assert_eq!(error.code(), "solve.expr.limit_exceeded", "{text}");
@@ -704,7 +862,8 @@ mod tests {
         };
         assert_eq!(limit_of("1234567890"), Some("text_bytes".into()));
         assert_eq!(limit_of("((((1))))"), Some("depth".into()));
-        assert_eq!(limit_of("1+1+1+1+1"), Some("depth".into()));
+        assert_eq!(limit_of("2^2^2^2^2"), Some("depth".into()));
+        assert_eq!(limit_of("----1"), Some("depth".into()));
         assert_eq!(limit_of("[1,2,3]"), Some("list_length".into()));
         assert!(Expr::parse("1+1+1", &tight).is_ok());
     }

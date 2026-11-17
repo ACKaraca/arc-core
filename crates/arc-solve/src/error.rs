@@ -26,7 +26,8 @@ pub mod codes {
         message_id: "solve-expr-unknown-unit",
     };
     /// A unit with an offset (a temperature scale) is raised to a power or combined with other
-    /// units.
+    /// units, or an absolute temperature is negated, rounded, raised to a power, or added to or
+    /// multiplied by another.
     pub const EXPR_OFFSET_UNIT: ErrorCode = ErrorCode {
         code: "solve.expr.offset_unit",
         category: Category::InvalidInput,
@@ -70,8 +71,8 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "solve-expr-domain",
     };
-    /// The input length, nesting depth, a list length, a text length, the evaluation steps or a
-    /// dimension exponent exceeded its limit.
+    /// The input length, nesting depth, a list length, a text length, the evaluation steps, the
+    /// total size of values or a dimension exponent exceeded its limit.
     pub const EXPR_LIMIT_EXCEEDED: ErrorCode = ErrorCode {
         code: "solve.expr.limit_exceeded",
         category: Category::LimitExceeded,

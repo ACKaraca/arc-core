@@ -43,10 +43,7 @@ fn format(
 }
 
 fn field(unit: Unit) -> Context<'static> {
-    Context {
-        bare_unit: Some(unit),
-        ..Context::default()
-    }
+    Context::new().with_bare_unit(unit)
 }
 
 proptest! {

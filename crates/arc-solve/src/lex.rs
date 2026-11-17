@@ -49,8 +49,9 @@ pub(crate) struct Token {
     pub span: Span,
 }
 
-/// Characters that may start a name or unit besides ASCII letters and `_`.
-const UNIT_START: [char; 4] = ['°', '′', '″', 'µ'];
+/// Characters that may start a name or unit besides ASCII letters and `_`: degree, prime, double
+/// prime, the micro sign (U+00B5) and the Greek letter mu (U+03BC), which reads as the micro sign.
+const UNIT_START: [char; 5] = ['°', '′', '″', '\u{b5}', '\u{3bc}'];
 /// Characters that may continue a name or unit besides those that start one and ASCII digits.
 const UNIT_CONTINUE: [char; 3] = ['²', '³', '·'];
 
@@ -327,6 +328,10 @@ mod tests {
         );
         assert_eq!(kinds("90°"), [number(90.0, true), Tok::Ident, Tok::End]);
         assert_eq!(kinds("ft·lbf m²"), [Tok::Ident, Tok::Ident, Tok::End]);
+        assert_eq!(
+            kinds("2\u{3bc}m \u{b5}m")[1..],
+            [Tok::Ident, Tok::Ident, Tok::End]
+        );
         assert!(lex("a = b", '.').is_err());
         assert!(lex("a & b", '.').is_err());
         assert!(lex("#", '.').is_err());

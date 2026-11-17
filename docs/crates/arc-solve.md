@@ -120,21 +120,27 @@ fraction    = digits , "/" , digits ;
 
 text        = '"' , { character | "\\" , ( '"' | "\\" | "n" | "t" ) } , '"' ;
 name        = name-start , { name-start | digit | "²" | "³" | "·" } ;
-name-start  = letter | "_" | "°" | "′" | "″" | "µ" ;
+name-start  = letter | "_" | "°" | "′" | "″" | "µ" | "μ" ;
 ```
 
-Letters and digits are ASCII. White space separates tokens and is otherwise ignored, with these
-exceptions, which keep units apart from arithmetic:
+Letters and digits are ASCII; `µ` is the micro sign (U+00B5) and `μ` the Greek letter mu
+(U+03BC), which reads as the micro sign. White space separates tokens and is otherwise ignored,
+with these exceptions, which keep units apart from arithmetic:
 
 - A unit follows its number directly or after white space (`2400mm`, `2400 mm`). The factors,
   operators and exponents of one unit are written without white space: `12 kN/m` is a line load,
   `12 kN / m` divides 12 kN by the name `m`. A name that directly follows a number is always a
-  unit, so `2 x` fails with `solve.expr.unknown_unit`.
+  unit, so `2 x` fails with `solve.expr.unknown_unit`. A unit follows a number only, never a
+  parenthesis: `(2 + 3) mm` fails with `solve.expr.syntax`; write `(2 + 3) * 1 mm`.
+- A `^` directly after a unit takes an integer exponent written directly after it, so `2 m^+2`,
+  `2 m^ 2` and `2 m^0.5` fail with `solve.expr.syntax`. With white space before it, `^` raises
+  the quantity: `2 m ^2` is 4 m².
 - Unit operators apply left to right: `kN/m/s` is kN per meter per second.
 - `'` and `"` are the foot and inch marks only directly after a number; elsewhere `"` starts a
   text. `8' 6"`, `8'6"` and `8'-6"` are 8 feet 6 inches; the joining hyphen has no white space on
   either side, so `8' - 6"` subtracts. A fraction is written without white space and follows a whole
-  number of inches after white space: `8' 6 1/2"`, `1/2"`. `1 / 2"` divides.
+  number of inches after white space: `8' 6 1/2"`, `1/2"`. `1 / 2"` divides. Inches after a feet
+  part are fewer than 12 (`8' 13"` fails with `solve.expr.syntax`); inches alone are not limited.
 - `^` binds tighter than the prefix operators and associates to the right: `-2^2` is −4 and
   `2^3^2` is 2^9. Comparisons do not chain.
 
@@ -148,52 +154,78 @@ is accepted.
 Numbers are decimal and are converted with correct rounding. A literal that is not finite in SI
 units fails with `solve.expr.domain`.
 
+A run of left-associative operators of one precedence level (`+` and `-`, `*` and `/`, `&&`, or
+`||`) is one node of the tree (`ExprKind::Chain`), evaluated left to right; its length does not
+count toward the depth limit.
+
 #### Units
 
 A unit name is the symbol or the name of a unit of the `arc-base` registry (`mm`, `m²`, `kg/m³`,
 `°C`, `millimeter`), or one of the ASCII aliases `deg`, `arcmin`, `arcsec`, `degC` and `degF`. The
-engine defines no units of its own. A unit text that is not one registry unit is resolved factor
-by factor: scales multiply, dimensions combine, and a trailing integer is an exponent (`m2`,
-`mm^-2`, `kg*m/s^2`). An exponent is an integer from −128 to 127; a dimension exponent outside that
-range fails with `solve.expr.limit_exceeded` and a product whose scale leaves the range of `f64`
-with `solve.expr.domain`.
+engine defines no units of its own; the registry has no units with the micro prefix, so `µm` and
+`μm` fail with `solve.expr.unknown_unit`. A unit text that is not one registry unit is resolved
+factor by factor: scales multiply, dimensions combine, and a trailing integer is an exponent
+(`m2`, `mm^-2`, `kg*m/s^2`). An exponent is a non-zero integer: `m0` and `m^0` fail with
+`solve.expr.unknown_unit`. An exponent outside −128 to 127, written or resulting from a product or
+power, fails with `solve.expr.limit_exceeded` (detail `limit` = `dimension_exponent`), and a
+product whose scale leaves the range of `f64` with `solve.expr.domain`.
 
-Units with an offset (`°C`, `°F`) stand alone and denote absolute temperatures, as in `arc-base`:
-`20 °C` is 293.15 K, and `20 °C + 5 °C` adds two absolute temperatures. Inside a product or power
-they fail with `solve.expr.offset_unit`; temperature differences are written in `K`. A minus sign
-before a number with an offset unit belongs to the reading: `-40 °C` is 233.15 K.
+Units with an offset (`°C`, `°F`) stand alone; inside a product or power they fail with
+`solve.expr.offset_unit`. A number in such a unit is an *absolute temperature* (`Value::Absolute`),
+in kelvin: `20 °C` is 293.15 K. A minus sign before the number belongs to the reading: `-40 °C`
+is 233.15 K. Every other temperature (a number in `K`, or the difference of two absolute
+temperatures) is a *temperature difference* (`Value::Number`).
+
+| Operation | Result |
+|---|---|
+| absolute ± difference, difference + absolute | Absolute |
+| absolute − absolute | Difference |
+| absolute + absolute, difference − absolute | `solve.expr.offset_unit` |
+| −absolute, absolute ^ e, `sqrt` of an absolute | `solve.expr.offset_unit` |
+| absolute × or ÷ absolute | `solve.expr.offset_unit` |
+| absolute × or ÷ any other number | A plain quantity (in kelvin) |
+| `round`, `floor`, `ceil` with an absolute value or increment | `solve.expr.offset_unit` |
+| comparisons, `min`, `max`, `abs`, `format` | As for any quantity, in kelvin |
 
 #### Values and bare numbers
 
-A value is a number with a dimension (stored in SI base units), a truth value, a text or a list.
-A number written without a unit is a *bare number*:
+A value is a number with a dimension (stored in SI base units), an absolute temperature, a truth
+value, a text or a list. A number written without a unit is a *bare number*:
 
 - Arithmetic among bare numbers stays bare.
 - Where a bare number meets a dimensioned number in an addition, subtraction, comparison, `min`,
   `max`, `sum`, `atan2` or a rounding increment, it is read in the context unit if that unit has the
   other operand's dimension; otherwise the operation fails with `solve.expr.dimension_mismatch`.
   Meeting a dimensionless number it is dimensionless.
+- In an addition or subtraction with a temperature, when the context unit has an offset, the bare
+  number is a temperature difference in that unit (its scale only): in a °C field `20 °C + 10` is
+  30 °C. Everywhere else it is a reading: in a °C field `20 °C < 25` is true.
 - In a product, quotient or power a bare number is a dimensionless factor.
-- A result that is bare is read in the context unit. `evaluate_as(dimension)` reads it in the
-  context unit when the unit has that dimension, as dimensionless when `dimension` is none, and
-  fails with `solve.expr.dimension_mismatch` otherwise.
+- The argument of `sin`, `cos` and `tan` is read in the context unit when that unit is an angle,
+  otherwise as radians: in a degree field `sin(90)` is 1.
+- The branches of `if` are independent: each is read on its own, and they need not have one
+  dimension.
+- A result that is bare is read in the context unit (an absolute temperature when that unit has an
+  offset). `evaluate_as(dimension)` reads it in the context unit when the unit has that dimension,
+  as dimensionless when `dimension` is none, and fails with `solve.expr.dimension_mismatch`
+  otherwise.
 
-The caller sets the context unit (`Context::bare_unit`), for a numeric field the field's display
-unit. Without one, bare numbers are dimensionless everywhere, which is how a caller forbids a bare
-number where a dimensioned value is expected. In a millimeter field `1200 + 3 in` is 1.2762 m and
-`2 * 600 mm` is 1.2 m.
+The caller sets the context unit (`Context::with_bare_unit`), for a numeric field the field's
+display unit. Without one, bare numbers are dimensionless everywhere, which is how a caller forbids
+a bare number where a dimensioned value is expected. In a millimeter field `1200 + 3 in` is
+1.2762 m and `2 * 600 mm` is 1.2 m.
 
 #### Operators
 
 | Operator | Operands | Result |
 |---|---|---|
-| `+` `-` | Numbers of equal dimension | That dimension |
+| `+` `-` | Numbers of equal dimension | That dimension; for temperatures see the table above |
 | `*` `/` | Numbers | Product or quotient of the dimensions |
 | `^` | Number, dimensionless exponent | See below |
 | `==` `!=` | Numbers of equal dimension, two truth values or two texts | Truth value |
 | `<` `<=` `>` `>=` | Numbers of equal dimension | Truth value |
 | `&&` `\|\|` `!` | Truth values; the right operand is evaluated only when needed | Truth value |
-| prefix `-` `+` | Number | Same dimension |
+| prefix `-` `+` | Number | Same dimension (`-` of an absolute temperature fails) |
 
 Comparisons are exact. A dimensionless base takes any exponent. A dimensioned base takes an
 exponent equal to n/d with d from 1 to 4 for which every resulting dimension exponent is an
@@ -202,8 +234,10 @@ arithmetic result must be finite: division by zero, the root of a negative numbe
 with `solve.expr.domain`. Underflow rounds to zero as IEEE 754 specifies.
 
 Errors carry the byte span of the offending sub-expression (parentheses included) in the details
-`start` and `end`: for an operator the whole operation, for a function the whole call, for
-`evaluate_as` the whole expression.
+`start` and `end`: for an operator the operation from its first operand to its right operand (the
+whole run, with its parentheses, for the last operator of a run), for a function the whole call,
+for `evaluate_as` the whole expression, and for a name the name. Where one operand is of the
+wrong kind for `&&`, `||` or the condition of `if`, the span is that operand.
 
 #### Functions
 
@@ -229,15 +263,28 @@ The built-in set is closed. "Same" means arguments of one dimension under the ba
 
 A dimensioned value has no rounding without an increment, because the result would depend on a
 unit: `round(1234 mm, 50 mm)` is 1.25 m, `round(1234 mm)` fails with
-`solve.expr.dimension_mismatch`.
+`solve.expr.dimension_mismatch`. Rounding to an increment happens in the unit the increment is
+written in (a literal such as `1 in`, or a bare number in the context unit), otherwise in SI units.
+The quotient of the value and the increment is taken as a whole number, or for `round` as a half
+(a tie, rounded away from zero), when it lies within 8 × `f64::EPSILON` (relative) of one; this
+bound covers the rounding of the unit conversions and the division and is not a geometric
+tolerance. A value that is already a multiple is returned unchanged, so `floor(6 in, 1 in)` is
+exactly `6 in` and `round(1.5 in, 1 in)` is `2 in`; another multiple is computed as a literal in
+the increment's unit would be, dividing by the reciprocal of the increment when that is a whole
+number, so `round(0.74 m, 0.1 m)` is exactly `0.7 m`.
 
 Hosts add pure functions with `Functions::register(name, min_args, max_args, function)`. A name
 must be an ASCII identifier that is not a built-in function, `true`, `false` or already registered
-(`solve.function.invalid`). A host function receives evaluated values, its argument count is
-checked, its result is checked against the limits, and an error it returns is passed on with the
-span of the call. Names that are not literals are resolved by the caller's `Names` lookup, a trait
-that closures from name to value implement; its results are checked against the limits too. This
-lookup is the hook for parameter scopes (CORE-SOLVE-020).
+(`solve.function.invalid`). A host function receives the evaluated arguments, in which a number
+written without a unit is `Value::Bare`, and the context unit, and decides whether a bare argument
+is a count or a value in that unit. Its argument count is checked, its result is checked against
+the limits without recursion (and dropped without recursion when it fails them), and an error it
+returns is passed on with the span of the call. Names that are not literals are resolved by the
+caller's `Names` lookup, a trait that closures from name to `Result<Option<Value>>` implement:
+`Ok(None)` is an unknown name, and an error, such as that of a parameter the name stands for, is
+passed on with the span of the name. Its results are checked like those of host functions. This
+lookup is the hook for parameter scopes (CORE-SOLVE-020). Texts and lists are shared: a value a
+lookup keeps and returns again is not copied.
 
 #### Limits
 
@@ -249,14 +296,18 @@ lookup is the hook for parameter scopes (CORE-SOLVE-020).
 | `text_bytes` | 65,536 | Length of the input text and of every text value |
 | `depth` | 64 | Nesting of parentheses, lists, calls and operators (the depth of the expression tree) and of list values; never above 128 |
 | `list_length` | 10,000 | Elements of a list, arguments of a call |
-| `steps` | 1,000,000 | Evaluated nodes, list elements visited by a function, and values admitted from names and host functions |
+| `steps` | 1,000,000 | Evaluated nodes and operators, list elements visited by a function, and values admitted from names, host functions and copies of list elements |
+| `value_bytes` | 16,777,216 | Total size of the values one evaluation creates or copies: text bytes plus 32 per list element, counted for every literal text, list, `concat` and `format` result, value from a name or host function, and element taken by `first` or `last` |
 | `dimension_exponent` | −128 to 127 | Every exponent of a dimension |
 
 `ExprLimits::tightened_by` lowers text length, depth and list length to the string length, nesting
-depth and array length of an `arc-base` limits profile. A chain of infix operators is as deep as it
-is long. An expression is checked against the depth limit of the context again when it is
+depth and array length of an `arc-base` limits profile. A run of operators of one precedence level
+is one level deep however long it is; operators of different levels and right-associative `^`
+nest. An expression is checked against the depth limit of the context again when it is
 evaluated. The cancellation token of the context is checked on the first step and every 1,024
-steps after it.
+steps after it. Values from names and host functions are checked for depth without recursion; a
+value nested deeper than the limit is rejected and dropped without recursion. Dropping a deeply
+nested `Value` elsewhere is recursive in Rust, so a host does not build or keep such values.
 
 #### Determinism
 
@@ -286,7 +337,7 @@ The codes `arc-solve` owns. A code is never reused for a different meaning; mess
 |---|---|---|
 | `solve.expr.syntax` | `invalid_input` | The text is not a well-formed expression |
 | `solve.expr.unknown_unit` | `not_found` | A unit suffix or the unit argument of `format` names no registry unit or product of registry units |
-| `solve.expr.offset_unit` | `invalid_input` | A unit with an offset is raised to a power or combined with other units |
+| `solve.expr.offset_unit` | `invalid_input` | A unit with an offset is raised to a power or combined with other units, or an absolute temperature takes an operation the temperature table excludes |
 | `solve.expr.unknown_function` | `not_found` | A call names neither a built-in nor a registered function |
 | `solve.expr.unknown_name` | `not_found` | A name is not known to the caller's lookup |
 | `solve.expr.dimension_mismatch` | `invalid_input` | Operands or arguments have dimensions the operation cannot combine, or the result does not have the expected dimension |

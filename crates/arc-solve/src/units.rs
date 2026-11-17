@@ -13,8 +13,12 @@ pub(crate) const ALIASES: [(&str, &str); 5] = [
     ("degF", "degree_fahrenheit"),
 ];
 
-/// A built-in unit by symbol, name or alias.
+/// A built-in unit by symbol, name or alias. The Greek letter mu (U+03BC) reads as the micro
+/// sign (U+00B5).
 pub(crate) fn lookup(atom: &str) -> Option<Unit> {
+    if atom.contains('\u{3bc}') {
+        return lookup(&atom.replace('\u{3bc}', "\u{b5}"));
+    }
     let name = ALIASES
         .iter()
         .find(|(alias, _)| *alias == atom)
@@ -40,7 +44,11 @@ fn unknown(text: &str) -> Error {
     Error::new(codes::EXPR_UNKNOWN_UNIT).with_arg("name", text)
 }
 
-/// A unit factor with its integer exponent: `m`, `m^-2`, `mm2`, `m²`.
+fn exponent_limit() -> Error {
+    Error::new(codes::EXPR_LIMIT_EXCEEDED).with_detail("limit", "dimension_exponent")
+}
+
+/// A unit factor with its non-zero integer exponent: `m`, `m^-2`, `mm2`, `m²`.
 fn factor(text: &str) -> Result<(Unit, i32)> {
     if let Some(unit) = lookup(text) {
         return Ok((unit, 1));
@@ -56,7 +64,16 @@ fn factor(text: &str) -> Result<(Unit, i32)> {
         (base, text.get(base.len()..).unwrap_or(""))
     };
     let unit = lookup(base).ok_or_else(|| unknown(text))?;
-    let exponent = exponent.parse::<i8>().map_err(|_| unknown(text))?;
+    let digits = exponent.strip_prefix('-').unwrap_or(exponent);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(unknown(text));
+    }
+    // Digits that overflow `i64` are out of range like any exponent beyond `i8`.
+    let exponent = exponent.parse::<i64>().map_err(|_| exponent_limit())?;
+    if exponent == 0 {
+        return Err(unknown(text));
+    }
+    let exponent = i8::try_from(exponent).map_err(|_| exponent_limit())?;
     Ok((unit, i32::from(exponent)))
 }
 
@@ -65,9 +82,9 @@ fn factor(text: &str) -> Result<(Unit, i32)> {
 ///
 /// # Errors
 ///
-/// `solve.expr.unknown_unit` for a factor that is no unit, `solve.expr.offset_unit` for a unit
-/// with an offset inside a product or power, `solve.expr.limit_exceeded` when a dimension
-/// exponent leaves the range of `i8`, and `solve.expr.domain` when the scale is not a positive
+/// `solve.expr.unknown_unit` for a factor that is no unit or has the exponent 0,
+/// `solve.expr.offset_unit` for a unit with an offset inside a product or power,
+/// `solve.expr.limit_exceeded` when an exponent or a dimension exponent leaves the range of `i8`, and `solve.expr.domain` when the scale is not a positive
 /// finite number.
 pub(crate) fn resolve(text: &str) -> Result<Unit> {
     if let Some(unit) = lookup(text) {
@@ -85,9 +102,7 @@ pub(crate) fn resolve(text: &str) -> Result<Unit> {
             return Err(Error::new(codes::EXPR_OFFSET_UNIT).with_arg("name", part));
         }
         let power = if divide { -exponent } else { exponent };
-        dimension = combine(dimension, unit.dimension, power).ok_or_else(|| {
-            Error::new(codes::EXPR_LIMIT_EXCEEDED).with_detail("limit", "dimension_exponent")
-        })?;
+        dimension = combine(dimension, unit.dimension, power).ok_or_else(exponent_limit)?;
         for _ in 0..power.unsigned_abs() {
             if power > 0 {
                 scale *= unit.scale;
@@ -151,7 +166,9 @@ mod tests {
 
     #[test]
     fn unknown_offset_and_overflowing_units_fail() {
-        for text in ["cubit", "m^x", "m^999", "m//s", "", "2"] {
+        for text in [
+            "cubit", "m^x", "m//s", "", "2", "m0", "m^0", "m^-0", "m^+2", "µm", "μm",
+        ] {
             assert_eq!(
                 resolve(text).unwrap_err().code(),
                 "solve.expr.unknown_unit",
@@ -171,6 +188,16 @@ mod tests {
             "solve.expr.limit_exceeded"
         );
         assert_eq!(resolve("km^120").unwrap_err().code(), "solve.expr.domain");
+        // One code for every exponent out of range, written or combined.
+        for text in ["m^999", "m^-129", "m^128", "m^99999999999999999999999"] {
+            let error = resolve(text).unwrap_err();
+            assert_eq!(error.code(), "solve.expr.limit_exceeded", "{text}");
+            assert_eq!(
+                error.details().get("limit"),
+                Some(&"dimension_exponent".into())
+            );
+        }
+        assert!(resolve("m^-128").is_ok() && resolve("m^127").is_ok());
     }
 
     #[test]

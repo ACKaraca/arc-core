@@ -19,15 +19,12 @@ fn unit(symbol: &str) -> Unit {
 }
 
 fn mm() -> Context<'static> {
-    Context {
-        bare_unit: Some(unit("mm")),
-        ..Context::default()
-    }
+    Context::new().with_bare_unit(unit("mm"))
 }
 
 fn number(text: &str, context: &Context<'_>) -> Quantity {
     match evaluate(text, context) {
-        Ok(Value::Number(quantity)) => quantity,
+        Ok(Value::Number(quantity) | Value::Absolute(quantity)) => quantity,
         other => panic!("{text}: {other:?}"),
     }
 }
@@ -160,10 +157,7 @@ fn bare_numbers_take_the_context_unit_where_a_dimension_is_needed() {
         failure("1200 + 3 s", &field).code(),
         "solve.expr.dimension_mismatch"
     );
-    let celsius = Context {
-        bare_unit: Some(unit("°C")),
-        ..Context::default()
-    };
+    let celsius = Context::new().with_bare_unit(unit("°C"));
     check("20", &celsius, 293.15, Dimension::TEMPERATURE);
 }
 
@@ -268,7 +262,7 @@ fn lists_and_text() {
     check("last([4 m, 5 m])", &none, 5.0, Dimension::LENGTH);
     check("sum([1200, 1 m])", &mm(), 2.2, Dimension::LENGTH);
     let text = |source: &str| match evaluate(source, &none).unwrap() {
-        Value::Text(text) => text,
+        Value::Text(text) => text.to_string(),
         other => panic!("{other:?}"),
     };
     assert_eq!(text("format(1.2345 m, \"mm\", 1)"), "1234.5 mm");
@@ -310,17 +304,18 @@ fn calls_are_checked() {
 
 #[test]
 fn names_come_from_the_callers_lookup() {
-    let names = |name: &str| match name {
-        "width" => Some(Value::Number(Quantity::new(2.0, Dimension::LENGTH))),
-        "count" => Some(Value::Bare(3.0)),
-        "bad" => Some(Value::Bare(f64::NAN)),
-        "long" => Some(Value::List(vec![Value::Bool(true); 20_000])),
-        _ => None,
+    let names = |name: &str| {
+        Ok(match name {
+            "width" => Some(Value::Number(Quantity::new(2.0, Dimension::LENGTH))),
+            "count" => Some(Value::Bare(3.0)),
+            "bad" => Some(Value::Bare(f64::NAN)),
+            "long" => Some(Value::list(vec![Value::Bool(true); 20_000])),
+            // A parameter whose own expression failed passes its error on.
+            "broken" => return Err(Error::new(arc_solve::error::codes::EXPR_DOMAIN)),
+            _ => None,
+        })
     };
-    let context = Context {
-        names: Some(&names),
-        ..mm()
-    };
+    let context = mm().with_names(&names);
     check("width * count + 500", &context, 6.5, Dimension::LENGTH);
     assert_eq!(
         failure("height", &context).code(),
@@ -331,24 +326,27 @@ fn names_come_from_the_callers_lookup() {
         failure("long", &context).code(),
         "solve.expr.limit_exceeded"
     );
+    let error = failure("1 + broken", &context);
+    assert_eq!(error.code(), "solve.expr.domain");
+    assert_eq!(span_of(&error), Some(Span { start: 4, end: 10 }));
 }
 
 #[test]
 fn hosts_register_pure_functions_under_the_same_limits() {
     let mut functions = Functions::new();
     functions
-        .register("double", 1, 1, |args| match args {
+        .register("double", 1, 1, |args, _| match args {
             [Value::Number(quantity)] => Ok(Value::Number(*quantity * 2.0)),
             _ => Err(Error::new(arc_solve::error::codes::EXPR_TYPE_MISMATCH)),
         })
         .unwrap();
     functions
-        .register("flood", 0, 0, |_| {
-            Ok(Value::List(vec![Value::Bare(0.0); 20_000]))
+        .register("flood", 0, 0, |_, _| {
+            Ok(Value::list(vec![Value::Bare(0.0); 20_000]))
         })
         .unwrap();
     functions
-        .register("fail", 0, 0, |_| {
+        .register("fail", 0, 0, |_, _| {
             Err(Error::new(arc_base::error::codes::UNIT_UNKNOWN))
         })
         .unwrap();
@@ -362,15 +360,29 @@ fn hosts_register_pure_functions_under_the_same_limits() {
         ("f", 2, 1),
     ] {
         let error = functions
-            .register(name, min, max, |_| Ok(Value::Bool(true)))
+            .register(name, min, max, |_, _| Ok(Value::Bool(true)))
             .unwrap_err();
         assert_eq!(error.code(), "solve.function.invalid", "{name}");
     }
-    let context = Context {
-        functions: Some(&functions),
-        ..Context::default()
-    };
+    // A host function receives the context unit and decides what a bare argument means.
+    functions
+        .register("width", 1, 1, |args, unit| match (args, unit) {
+            ([Value::Bare(x)], Some(unit)) => Ok(Value::Number(unit.quantity(*x))),
+            _ => Err(Error::new(arc_solve::error::codes::EXPR_TYPE_MISMATCH)),
+        })
+        .unwrap();
+    let context = Context::new().with_functions(&functions);
     check("double(2 m) + 1 m", &context, 5.0, Dimension::LENGTH);
+    check(
+        "width(1200)",
+        &mm().with_functions(&functions),
+        1.2,
+        Dimension::LENGTH,
+    );
+    assert_eq!(
+        failure("width(1200)", &context).code(),
+        "solve.expr.type_mismatch"
+    );
     assert_eq!(
         failure("double()", &context).code(),
         "solve.expr.argument_count"
@@ -387,54 +399,34 @@ fn hosts_register_pure_functions_under_the_same_limits() {
 
 #[test]
 fn evaluation_is_bounded() {
-    let limited = |limits: ExprLimits| Context {
-        limits,
-        ..Context::default()
-    };
+    let limited = |limits: ExprLimits| Context::new().with_limits(limits);
     let limit_of = |text: &str, context: &Context<'_>| {
         let error = failure(text, context);
         assert_eq!(error.code(), "solve.expr.limit_exceeded", "{text}");
         assert_eq!(error.category(), arc_base::Category::LimitExceeded);
         error.details().get("limit").cloned().unwrap()
     };
-    let steps = limited(ExprLimits {
-        steps: 5,
-        ..ExprLimits::DEFAULT
-    });
-    assert_eq!(limit_of("1+1+1+1", &steps), "steps".into());
+    let steps = limited(ExprLimits::DEFAULT.with_steps(5));
+    assert_eq!(limit_of("1+1+1", &steps), "steps".into());
     assert_eq!(limit_of("sum([1,1,1])", &steps), "steps".into());
     assert!(evaluate("1+1", &steps).is_ok());
-    let lists = limited(ExprLimits {
-        list_length: 3,
-        ..ExprLimits::DEFAULT
-    });
+    let lists = limited(ExprLimits::DEFAULT.with_list_length(3));
     assert_eq!(limit_of("[1,2,3,4]", &lists), "list_length".into());
     assert_eq!(limit_of("max(1,2,3,4)", &lists), "list_length".into());
-    let depth = limited(ExprLimits {
-        depth: 3,
-        ..ExprLimits::DEFAULT
-    });
+    let depth = limited(ExprLimits::DEFAULT.with_depth(3));
     assert_eq!(limit_of("[[[[1]]]]", &depth), "depth".into());
     assert_eq!(limit_of("----1", &depth), "depth".into());
     assert_eq!(limit_of("2^2^2^2", &depth), "depth".into());
-    let text = limited(ExprLimits {
-        text_bytes: 12,
-        ..ExprLimits::DEFAULT
-    });
+    let text = limited(ExprLimits::DEFAULT.with_text_bytes(12));
     assert_eq!(limit_of("1 + 1 + 1 + 1", &text), "text_bytes".into());
-    let long = |_: &str| Some(Value::Text("x".repeat(20)));
-    let texts = Context {
-        names: Some(&long),
-        limits: ExprLimits {
-            text_bytes: 30,
-            ..ExprLimits::DEFAULT
-        },
-        ..Context::default()
-    };
+    let long = |_: &str| Ok(Some(Value::text("x".repeat(20))));
+    let texts = Context::new()
+        .with_names(&long)
+        .with_limits(ExprLimits::DEFAULT.with_text_bytes(30));
     assert_eq!(limit_of("concat(t, t)", &texts), "text_bytes".into());
 
     // An expression parsed under looser limits is checked again when it is evaluated.
-    let deep = Expr::parse("((1+1)+1)+1", &ExprLimits::DEFAULT).unwrap();
+    let deep = Expr::parse("-(-(-(-1)))", &ExprLimits::DEFAULT).unwrap();
     assert_eq!(
         deep.evaluate(&depth).unwrap_err().code(),
         "solve.expr.limit_exceeded"
@@ -442,10 +434,7 @@ fn evaluation_is_bounded() {
 
     let cancel = Cancel::new();
     cancel.cancel();
-    let cancelled = Context {
-        cancel: Some(&cancel),
-        ..Context::default()
-    };
+    let cancelled = Context::new().with_cancel(&cancel);
     assert_eq!(failure("1", &cancelled).code(), "base.cancelled");
 }
 
@@ -459,4 +448,231 @@ fn evaluation_is_repeatable_bit_for_bit() {
     assert_eq!(plain("3^5").value(), 243.0);
     assert_eq!(plain("2^-2").value(), 0.25);
     assert_eq!(plain("0.1 + 0.2").value(), 0.1 + 0.2);
+}
+
+fn truth(text: &str, context: &Context<'_>) -> bool {
+    match evaluate(text, context) {
+        Ok(Value::Bool(truth)) => truth,
+        other => panic!("{text}: {other:?}"),
+    }
+}
+
+#[test]
+fn rounding_to_increments_is_exact_on_multiples_and_ties() {
+    let none = Context::default();
+    // Multiples written in the increment's unit stay exactly as written.
+    for text in [
+        "floor(6 in, 1 in) == 6 in",
+        "ceil(6 in, 1 in) == 6 in",
+        "round(6 in, 1 in) == 6 in",
+        "floor(0.3 m, 0.1 m) == 0.3 m",
+        "ceil(0.3 m, 0.1 m) == 0.3 m",
+        "floor(700 mm, 100 mm) == 700 mm",
+        "ceil(1100 mm, 100 mm) == 1100 mm",
+        "floor(5 ft, 6 in) == 5 ft",
+        "ceil(1 in, 1/8\") == 1 in",
+        "floor(-0.3 m, 0.1 m) == -0.3 m",
+        "floor(90°, 15°) == 90°",
+        // Ties go away from zero.
+        "round(1.5 in, 1 in) == 2 in",
+        "round(-1.5 in, 1 in) == -2 in",
+        "round(2 1/4\", 1/2\") == 2 1/2\"",
+        "round(15 mm, 10 mm) == 20 mm",
+        "round(-15 mm, 10 mm) == -20 mm",
+        "round(0.15, 0.1) == 0.2",
+        // Decimal increments give the nearest decimal.
+        "round(0.74 m, 0.1 m) == 0.7 m",
+        "round(1234 mm, 50 mm) == 1.25 m",
+        "floor(0.79, 0.1) == 0.7",
+        "ceil(0.71, 0.1) == 0.8",
+    ] {
+        assert!(truth(text, &none), "{text}");
+    }
+    check("round(1225, 50)", &mm(), 1.25, Dimension::LENGTH);
+    check("floor(7.5, 0.5)", &none, 7.5, Dimension::NONE);
+}
+
+#[test]
+fn absolute_temperatures_follow_the_rules_of_readings() {
+    let none = Context::default();
+    let celsius = Context::new().with_bare_unit(unit("°C"));
+    let absolute = |text: &str, context: &Context<'_>| match evaluate(text, context) {
+        Ok(Value::Absolute(q)) => q.value(),
+        other => panic!("{text}: {other:?}"),
+    };
+    let difference = |text: &str, context: &Context<'_>| match evaluate(text, context) {
+        Ok(Value::Number(q)) if q.dimension() == Dimension::TEMPERATURE => q.value(),
+        other => panic!("{text}: {other:?}"),
+    };
+    assert!(close(absolute("20 °C", &none), 293.15));
+    assert!(close(absolute("-40 °C", &none), 233.15));
+    assert!(close(absolute("20 °C + 5 K", &none), 298.15));
+    assert!(close(absolute("5 K + 20 °C", &none), 298.15));
+    assert!(close(absolute("20 °C - 5 K", &none), 288.15));
+    assert!(close(difference("20 °C - 5 °C", &none), 15.0));
+    assert!(close(difference("68 °F - 20 °C", &none), 0.0));
+    // In a field on a scale with an offset, a bare number meeting a temperature in a sum is a
+    // difference, and a bare result is a reading.
+    assert!(close(absolute("20 °C + 10", &celsius), 303.15));
+    assert!(close(absolute("20 °C - 10", &celsius), 283.15));
+    assert!(close(absolute("20 + 10", &celsius), 303.15));
+    assert!(close(difference("5 K + 3", &celsius), 8.0));
+    let fahrenheit = Context::new().with_bare_unit(unit("°F"));
+    assert!(close(absolute("0 °C + 9", &fahrenheit), 278.15));
+    // Comparisons, `min` and `max` read a bare number as a reading.
+    assert!(truth("20 °C < 25", &celsius));
+    assert!(close(absolute("max(20 °C, 25)", &celsius), 298.15));
+    assert!(close(absolute("min(25, 20 °C)", &celsius), 293.15));
+    assert!(close(absolute("sum([20 °C, 5 K])", &none), 298.15));
+    assert_eq!(
+        evaluate("format(20 °C, \"°F\")", &none).unwrap(),
+        Value::text("68 °F")
+    );
+    for text in [
+        "20 °C + 5 °C",
+        "-(20 °C)",
+        "2 °C * 3 °C",
+        "20 °C / 10 °C",
+        "(20 °C)^2",
+        "sqrt(20 °C)",
+        "5 K - 20 °C",
+        "sum([20 °C, 5 °C])",
+        "round(21.3 °C, 0.5 K)",
+        "round(20 °C)",
+    ] {
+        assert_eq!(code(text), "solve.expr.offset_unit", "{text}");
+    }
+    let text = "1 + (20 °C + 5 °C)";
+    let span = span_of(&failure(text, &none)).unwrap();
+    assert_eq!(&text[span.start..span.end], "(20 °C + 5 °C)");
+    assert_eq!(
+        failure("25 - 20 °C", &celsius).code(),
+        "solve.expr.offset_unit"
+    );
+    // A reading times a plain number is a plain quantity in kelvin.
+    assert!(close(difference("2 * 20 °C", &none), 586.3));
+}
+
+#[test]
+fn bare_trigonometric_arguments_take_an_angle_context_unit() {
+    let degrees = Context::new().with_bare_unit(unit("°"));
+    check("sin(90)", &degrees, 1.0, Dimension::NONE);
+    check("cos(180)", &degrees, -1.0, Dimension::NONE);
+    check("sin(90 + 0°)", &degrees, 1.0, Dimension::NONE);
+    check("sin(0.5)", &mm(), 0.5_f64.sin(), Dimension::NONE);
+    check(
+        "sin(0.5)",
+        &Context::default(),
+        0.5_f64.sin(),
+        Dimension::NONE,
+    );
+    // The branches of `if` are independent: each is read on its own.
+    check(
+        "if(true, 5, 3 mm)",
+        &degrees,
+        5.0_f64.to_radians(),
+        Dimension::ANGLE,
+    );
+    check("if(false, 5, 3 mm)", &degrees, 0.003, Dimension::LENGTH);
+}
+
+#[test]
+fn prefix_plus_takes_numbers_only() {
+    let none = Context::default();
+    check("+3 m", &none, 3.0, Dimension::LENGTH);
+    check("+-+2", &none, -2.0, Dimension::NONE);
+    assert!(matches!(evaluate("+20 °C", &none), Ok(Value::Absolute(_))));
+    for text in ["+true", "+\"x\"", "+[1, 2]"] {
+        let error = failure(text, &none);
+        assert_eq!(error.code(), "solve.expr.type_mismatch", "{text}");
+        assert_eq!(
+            span_of(&error),
+            Some(Span {
+                start: 0,
+                end: text.len()
+            })
+        );
+    }
+}
+
+#[test]
+fn logic_and_condition_errors_point_at_the_operand() {
+    let none = Context::default();
+    let span = |text: &str| {
+        let error = failure(text, &none);
+        assert_eq!(error.code(), "solve.expr.type_mismatch", "{text}");
+        let span = span_of(&error).unwrap();
+        text[span.start..span.end].to_owned()
+    };
+    assert_eq!(span("true && 1"), "1");
+    assert_eq!(span("1 || true"), "1");
+    assert_eq!(span("true && true && 2 m"), "2 m");
+    assert_eq!(span("if(1, 2, 3)"), "1");
+    // Operators of a run carry the span from the first operand to their right operand.
+    let error = failure("1 m + 2 s + 3 m", &none);
+    assert_eq!(span_of(&error), Some(Span { start: 0, end: 9 }));
+    // `&&` and `||` runs stop at the operand that decides them.
+    assert!(!truth("false && x && y", &none));
+    assert!(truth("true || x || y", &none));
+}
+
+#[test]
+fn long_runs_of_operators_evaluate_within_the_step_limit() {
+    let none = Context::default();
+    let sum = format!("1{}", " + 1".repeat(10_000));
+    check(&sum, &none, 10_001.0, Dimension::NONE);
+    let mixed = format!("0 m{}", " + 1 mm - 2 mm".repeat(2_000));
+    check(&mixed, &none, -2.0, Dimension::LENGTH);
+    let product = format!("1{}", " * 1.001".repeat(1_000));
+    check(&product, &none, 1.001_f64.powi(1_000), Dimension::NONE);
+    let logic = format!("true{}", " && 1 < 2".repeat(3_000));
+    assert!(truth(&logic, &none));
+    let few = Context::new().with_limits(ExprLimits::DEFAULT.with_steps(10_000));
+    assert_eq!(
+        failure(&sum, &few).details().get("limit"),
+        Some(&"steps".into())
+    );
+}
+
+#[test]
+fn context_and_limits_are_built_without_struct_literals() {
+    let limits = ExprLimits::default()
+        .with_text_bytes(100)
+        .with_depth(10)
+        .with_list_length(5)
+        .with_steps(50)
+        .with_value_bytes(1_000);
+    assert_eq!(
+        (limits.text_bytes, limits.depth, limits.list_length),
+        (100, 10, 5)
+    );
+    assert_eq!((limits.steps, limits.value_bytes), (50, 1_000));
+    let context = Context::new()
+        .with_limits(limits)
+        .with_bare_unit(unit("mm"));
+    assert_eq!(context.bare_unit, Some(unit("mm")));
+    assert_eq!(context.limits, limits);
+}
+
+proptest::proptest! {
+    #[test]
+    fn multiples_and_ties_of_an_increment_round_exactly(
+        n in -100_000_i64..100_000,
+        k in 1_i64..=12,
+        symbol in proptest::sample::select(vec!["mm", "cm", "m", "in", "ft", "yd", "°", "gon", "lb", "min"]),
+    ) {
+        let none = Context::default();
+        let (value, increment) = (n * k, format!("{k} {symbol}"));
+        for function in ["floor", "ceil", "round"] {
+            let text = format!("{function}({value} {symbol}, {increment}) == {value} {symbol}");
+            proptest::prop_assert!(truth(&text, &none), "{}", text);
+        }
+        // A half increment above a multiple is a tie, rounded away from zero.
+        // Exactly representable, and printed without an exponent.
+        #[allow(clippy::cast_precision_loss, reason = "small integers")]
+        let tie = (2 * n * k + k) as f64 / 2.0;
+        let away = if n >= 0 { (n + 1) * k } else { n * k };
+        let text = format!("round({tie} {symbol}, {increment}) == {away} {symbol}");
+        proptest::prop_assert!(truth(&text, &none), "{}", text);
+    }
 }

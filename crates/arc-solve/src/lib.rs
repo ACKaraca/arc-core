@@ -15,7 +15,7 @@
 //! assert!((length.value() - 1.2762).abs() < 1e-12);
 //!
 //! // A bare number takes the context unit.
-//! let field = Context { bare_unit: Some(*Unit::by_symbol("mm").unwrap()), ..Context::default() };
+//! let field = Context::new().with_bare_unit(*Unit::by_symbol("mm").unwrap());
 //! let width = arc_solve::parse_quantity("1200 + 300", &field, '.', Dimension::LENGTH).unwrap();
 //! assert!((width.value() - 1.5).abs() < 1e-12);
 //! ```
@@ -23,7 +23,11 @@
 //! The grammar, the unit rules, the function library and the limits are specified in
 //! `docs/crates/arc-solve.md`. Evaluation is deterministic, bounded and free of side effects.
 //!
-//! No function in this crate panics.
+//! No function in this crate panics, and none recurses deeper than the depth limit
+//! ([`ExprLimits::MAX_DEPTH`]) allows. Values that names and host functions supply are checked
+//! and, when they fail the limits, dropped without recursion. Dropping a [`Value`] whose lists
+//! nest deeply is recursive in Rust itself, so a host must not build or keep such values on its
+//! own side.
 
 pub mod error;
 pub mod eval;
