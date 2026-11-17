@@ -14,6 +14,7 @@
 pub mod bbox;
 pub mod curve;
 pub mod error;
+pub mod index;
 pub mod polyline;
 pub mod predicates;
 pub mod primitives;
@@ -22,6 +23,7 @@ pub mod view;
 
 pub use bbox::{Aabb2, Aabb3};
 pub use curve::Curve2;
+pub use index::{SpatialIndex2, SpatialIndex3};
 pub use polyline::{Polyline2, PolylineSegment, PolylineVertex};
 pub use predicates::{Sign, incircle, orient2d};
 pub use primitives::{Arc2, Circle2, Ellipse2, EllipticalArc2, Line2, Ray2, Segment2};

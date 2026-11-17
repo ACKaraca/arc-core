@@ -21,6 +21,7 @@ third_party = [
   "nalgebra",
   "proptest",
   "robust",
+  "rstar",
   "serde",
   "serde_json",
   "thiserror",

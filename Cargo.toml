@@ -20,6 +20,8 @@ glam = "0.34"
 nalgebra = { version = "0.35", default-features = false, features = ["std", "serde-serialize"] }
 proptest = { version = "1.12", default-features = false, features = ["std"] }
 robust = "1.2"
+# Default features are empty; `serde`/`mint` stay off.
+rstar = { version = "0.14", default-features = false }
 serde = { version = "1", features = ["derive"] }
 # `float_roundtrip`: a number read back from JSON is the number that was written.
 serde_json = { version = "1", features = ["float_roundtrip"] }

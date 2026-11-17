@@ -242,3 +242,30 @@ The codes `arc-geom` owns. A code is never reused for a different meaning; messa
 | `geom.view.scale_not_positive` | `invalid_input` | An orthographic view height is zero or negative |
 | `geom.view.clip_invalid` | `invalid_input` | Near is not smaller than far, or near is not positive for a perspective frame |
 | `geom.view.aspect_invalid` | `invalid_input` | An aspect ratio is not a finite positive number |
+
+### Spatial index (CORE-GEOM-027)
+
+`SpatialIndex2<K>` (over `Aabb2`) and `SpatialIndex3<K>` (over `Aabb3`) are R*-trees keyed by a
+caller identifier `K: Copy + Eq + Hash + Ord`. The tree library is private; no type of it appears
+in a public signature. A key-to-box map beside the tree makes `remove`, `update` and `get` work by
+key.
+
+- `insert(key, box)` replaces the box of an existing key and returns the previous one. `update`
+  replaces only an existing key and returns `false` when the key is absent. `remove` returns the
+  removed box. `from_entries` bulk loads; the last pair of a repeated key wins.
+- Boxes are closed. `window` returns the keys of entries entirely inside the query box;
+  `crossing` returns the keys of entries that intersect it, touching included. Both are sorted by
+  key.
+- `nearest(point, k)` returns the `k` entries with the smallest Euclidean distance from the point
+  to their box (zero inside or on the box), sorted by distance then key; entries tied with the
+  k-th distance are resolved by key.
+- `ray(origin, direction, max_distance)` returns entries the ray meets at a distance in
+  `0..=max_distance` (the direction is normalized), with the entry distance, sorted by distance
+  then key. The slab test treats a zero direction component as a hit only when the origin lies in
+  that slab; an origin inside a box gives distance 0; a negative `max_distance` gives no hits.
+- An empty box is rejected with `geom.bbox.invalid`; a non-finite coordinate, point or
+  `max_distance` with `geom.input.not_finite`; a zero ray direction with `geom.direction.zero`.
+  A rejected call leaves the index unchanged.
+
+The property tests compare every query with a brute-force scan after random sequences of insert,
+remove and update, in 2D and 3D, on integer-grid boxes that force touching and exact ties.

@@ -75,6 +75,7 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `wasm-bindgen`, `web-sys`, `js-sys` | Generated browser glue in `arc-app` and `arc-gpu` (browser target only) | MIT or Apache-2.0 |
 | `proptest` | Property tests | MIT or Apache-2.0 |
 | `robust` | Adaptive exact orientation and in-circle predicates in `arc-geom` | MIT or Apache-2.0 |
+| `rstar` | R*-tree behind the spatial index of `arc-geom`; no `rstar` type appears in a public signature | MIT or Apache-2.0 |
 | `toml` | Reading the layer table and manifests in `xtask` | MIT or Apache-2.0 |
 
 ## Not built in the first two years

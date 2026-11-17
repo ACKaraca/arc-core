@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 arc-base = { workspace = true }
 robust = { workspace = true }
+rstar = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
