@@ -243,6 +243,62 @@ have a zero or negative near distance.
   use the minimal number of equal segments; ellipses are divided greedily, each segment as long
   as both tolerances allow and turning at most a quarter turn.
 
+### Curve intersections
+
+`intersect(a, b, tolerance)` returns every intersection of two curves of any kind (CORE-GEOM-005),
+sorted by the parameter on `a`, then on `b`. A result is either a point, with its parameter on
+each curve and a contact of `Crossing` or `Tangent`, or an overlap: an ascending parameter
+interval on each curve and an orientation, `Same` when the starts of the intervals meet and
+`Opposite` when the start on `a` meets the end on `b`. Intervals of rays and lines may be
+unbounded. Parameters follow the curve parameterization above.
+
+Each curve is split into pieces: a polyline into its straight and arc segments, every other kind
+into one piece. Pieces are linear (segment, ray, line) or conic (circle, arc, ellipse, elliptical
+arc). With `linear` and `angular` the tolerances:
+
+- Two linear pieces are parallel when the sine of their angle is at most `angular`, and collinear
+  when, in addition, each one's reference point lies within `linear` of the other's line. Collinear
+  pieces overlap where their ranges share more than `linear`, touch at one tangent point where
+  they meet within `linear`, and are otherwise disjoint. Pieces that are not parallel meet in at
+  most one crossing point.
+- A linear piece and a conic: with `h` the distance from the center to the line and `w` the
+  half-width of the conic across the line (the radius of a circle), the line is tangent when
+  `|h − w| ≤ linear`, crosses twice when `h < w − linear`, and misses otherwise.
+- Two circles with center distance `d` and radii `r1`, `r2`, in this order: the same circle when
+  `d + |r1 − r2| ≤ linear`; externally tangent when `|d − (r1 + r2)| ≤ linear`; internally
+  tangent when `d > 0` and `|d − |r1 − r2|| ≤ linear`; two crossings when
+  `|r1 − r2| < d < r1 + r2`; otherwise disjoint.
+- Two conics, at least one not a circle: the rounder one is written implicitly and the other's
+  eccentric-angle parameterization is substituted, which gives a trigonometric polynomial of
+  degree 2. Its critical points, found by subdivision with Taylor bounds on the derivatives,
+  split the period into monotone stretches. A critical point whose distance estimate (the
+  polynomial divided by the length of its gradient) is within `linear` is a tangent point, and
+  the sign changes next to it belong to that tangency; every other sign change is a crossing,
+  found by bisection. The conics coincide when the distance estimate is within `linear` at every
+  critical point.
+- Pieces on the same circle or ellipse overlap where their angular ranges share a stretch whose
+  chord exceeds `linear`, and touch at one tangent point where the shared stretch or the gap
+  between them has a chord within `linear`.
+- An end point of one piece within `linear` of the other piece is an intersection, tangent when
+  the directions there are parallel within `angular`, unless a found point is already within
+  `linear` of it.
+
+Every rule is symmetric in the two curves: the curves are put into a fixed canonical order (by
+kind, then by their defining numbers) before computing, and the other argument order returns the
+same results with the curves' parameters swapped. A point within `linear` of an end point of a
+piece is reported at the parameter of that end point, and a point at the seam of a closed curve
+at the start of its range. Points that adjacent polyline segments find at their shared vertex are
+merged into one, tangent when any of them is. A point inside an overlap is dropped, and overlaps
+of adjacent segments that continue each other are joined. Each reported point is the midpoint of
+the two curve points at its parameters.
+
+Constructions are carried out in `f64` with an explicit error bound: the rounding error of the
+inputs, relative to the size of the pieces, divided by the sine of the crossing angle for a
+crossing, plus the rounding of the point's coordinates. When a coordinate is so large that `f64`
+cannot resolve `linear` there, or the bound of a result exceeds `linear`, the operation fails
+with `geom.precision.insufficient`. A tolerance whose `linear` is not positive and finite, or
+whose `angular` is negative or not finite, fails with `geom.tolerance.invalid`.
+
 ### Error codes
 
 The codes `arc-geom` owns. A code is never reused for a different meaning; messages are in
