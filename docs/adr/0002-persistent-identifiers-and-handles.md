@@ -54,8 +54,11 @@ The first implementation of the stores makes the handle and the index precise:
 - Object types are registered at run time, so stores are per type key rather than per Rust type.
   A handle is therefore a 32-bit slot and a 32-bit generation together with the index of its
   store, not a Rust type parameter; the store index keeps a handle from resolving to an object of
-  another type. Freed slots are reused with the next generation, and a slot whose generation is
-  exhausted is retired.
+  another type. Freed slots are reused. Generations come from a counter per store that every
+  snapshot and working set of the document shares and that never goes back, not even on a
+  rollback or a discarded transaction, so no two branches of the document's history hand out
+  the same slot and generation; a per-slot generation could not guarantee that once working
+  sets branch. A store accepts 2³² − 1 creates in its lifetime; the counter never wraps.
 - Each of the 64 shards of the identifier index is a hash array mapped trie over a fixed
   bijective mix of the identifier bits, so a write copies only the nodes on one key's path and
   never a whole shard.

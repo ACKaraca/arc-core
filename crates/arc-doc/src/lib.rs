@@ -29,5 +29,5 @@ pub use schema::{
     TypeValidator, Value, ValueType,
 };
 pub use schema::{FieldPath, PathSegment};
-pub use snapshot::{Change, Flags, Header, Object, Snapshot, SnapshotCell, WorkingSet};
+pub use snapshot::{Change, Flags, Header, Object, Savepoint, Snapshot, SnapshotCell, WorkingSet};
 pub use store::Handle;

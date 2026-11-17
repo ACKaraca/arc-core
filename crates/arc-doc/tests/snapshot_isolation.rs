@@ -9,7 +9,7 @@
 )]
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
 use arc_base::ObjectId;
@@ -77,14 +77,19 @@ fn readers_see_whole_revisions_while_a_writer_publishes() {
     }
     let cell = Arc::new(SnapshotCell::new(set.current().clone()));
     let done = Arc::new(AtomicBool::new(false));
+    // The writer starts once every reader runs, so each reader observes publications.
+    let started = Arc::new(AtomicUsize::new(0));
 
     let readers: Vec<_> = (0..3)
         .map(|_| {
             let cell = Arc::clone(&cell);
             let done = Arc::clone(&done);
+            let started = Arc::clone(&started);
             thread::spawn(move || {
                 let held = cell.load();
-                let mut observed = 0_u32;
+                assert_consistent(&cell.load());
+                let mut observed = 1_u32;
+                started.fetch_add(1, Ordering::AcqRel);
                 while !done.load(Ordering::Acquire) {
                     assert_consistent(&cell.load());
                     observed += 1;
@@ -95,6 +100,9 @@ fn readers_see_whole_revisions_while_a_writer_publishes() {
         })
         .collect();
 
+    while started.load(Ordering::Acquire) < readers.len() {
+        thread::yield_now();
+    }
     for step in 1..=STEPS {
         let base = cell.load();
         let revision = base.revision() + 1;
@@ -104,7 +112,7 @@ fn readers_see_whole_revisions_while_a_writer_publishes() {
             .unwrap();
         set.create("test.a", object(u128::from(step), revision))
             .unwrap();
-        cell.publish(set.current().clone()).unwrap();
+        cell.publish(&set).unwrap();
     }
     done.store(true, Ordering::Release);
     for reader in readers {

@@ -78,9 +78,10 @@ Rules:
 - Tests and deterministic batch runs can seed the identifier generator; a seeded generator produces
   the same sequence for the same inputs.
 - Handles are resolved freshly from a snapshot. A handle obtained from one revision stays valid for
-  reading that revision; a stale handle (deleted slot, newer generation) resolves to
-  `doc.object.not_found`, never to another object. A freed slot is reused with the next
-  generation; a slot whose generation is exhausted is retired.
+  reading that revision; a stale handle (deleted, rolled back or never published object) resolves
+  to `doc.object.not_found`, never to another object. Generations are drawn from a per-store
+  counter shared by every branch of the document's history that never goes back, so no slot and
+  generation is handed out twice.
 - A **sub-object key** addresses parts that are not objects (a vertex of a polyline, a face role of
   a wall, a row of a table): `(ObjectId, u32 local key)`. Local keys are assigned by the owning type
   and remain stable across edits that do not delete the part.
@@ -288,6 +289,8 @@ store root, the identifier index root, the reverse reference index root, setting
 table, held together behind one reference-counted pointer. Taking a snapshot copies that pointer
 and costs constant time. A transaction copies only the chunks, index nodes and objects it touches
 and the trie nodes on the paths to them; every other part is shared with the previous revision.
+A transaction's changes are published only if the published snapshot is still the one they were
+made on.
 The storage layer is specified in [arc-doc](../crates/arc-doc.md#stores-identifier-index-and-snapshots-core-doc-002-core-doc-003-core-doc-017).
 
 Uses: the UI and viewport read the latest snapshot without locks; save serializes a snapshot while

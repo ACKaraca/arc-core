@@ -37,7 +37,7 @@ file extension.
 | `Value`, `ValueType` | Dynamically typed field value and its declared type |
 | `Payload` | Canonical binary encoding of an object's field values |
 | `Object`, `Header`, `Handle` | An object (identifier, schema version, header, field values) and its in-memory address (store, slot, generation) |
-| `WorkingSet`, `SnapshotCell` | Copy-on-write changes on a base snapshot; the atomically published latest snapshot |
+| `WorkingSet`, `Savepoint`, `SnapshotCell` | Copy-on-write changes on a base snapshot and the states to roll them back to; the atomically published latest snapshot |
 | `Txn` | Open transaction with operations and savepoints |
 | `TxnRecord` | Journal record (see the document model) |
 | `ChangeSet` | Base state plus records, for exchange |
@@ -340,50 +340,83 @@ object with CORE-DOC-005.
 
 - **Stores.** A snapshot has one store per registered type key, ordered by key. A store's slots
   live in chunks of 1,024 entries; an entry is a live object (generation and reference-counted
-  immutable object) or a free slot that keeps the generation of its last occupant. The chunks
-  are the leaves of a radix trie of 32-way branch nodes, at most five levels high, so reading by
-  handle is a bounded walk without locks.
-- **Handles.** A `Handle` is the store index, a 32-bit slot and a 32-bit generation. New slots
-  start at generation 0; a freed slot joins a persistent last-in, first-out free list and is
-  reused with the next generation; a slot whose generation reaches 2³² − 1 is retired when
-  freed and never reused. A handle whose slot is free or holds a newer generation resolves to
-  `doc.object.not_found`; the store index keeps a handle from ever reaching another type's
-  object.
+  immutable object) or a free slot. The chunks are the leaves of a radix trie of 32-way branch
+  nodes, at most five levels high, so reading by handle is a bounded walk without locks.
+- **Handles.** A `Handle` is the store index, a 32-bit slot and a 32-bit generation. A freed slot
+  joins a persistent last-in, first-out free list and is reused. Every create draws its
+  generation from a counter of its store that is shared by every snapshot and working set
+  derived from the same `Snapshot::empty` and never goes back, also not on a rollback or when a
+  working set is discarded. No two objects of a document's history, in any branch, therefore
+  share a slot and generation: a handle whose object was deleted, rolled back or never
+  published resolves to `doc.object.not_found`, never to another object, and the store index
+  keeps a handle from reaching another type's object. The counter never wraps: a store accepts
+  2³² − 1 creates in its lifetime, after which a create fails with
+  `doc.store.capacity_exceeded`. Generation values depend on discarded work too, so handles are
+  not deterministic; nothing that is persisted or compared depends on them.
 - **Identifier index.** A persistent map from `ObjectId` to handle. The identifier's 128 bits
   pass through a fixed bijective mix (xor-shifts and multiplications by odd constants); the top 6
   bits of the result select one of 64 shards, and each shard is a hash array mapped trie that
   consumes the next bits 5 at a time, with a 32-bit occupancy bitmap and one entry (leaf or child)
   per set bit. The mix is a bijection, so distinct identifiers never collide and a lookup visits
   at most 26 nodes. Removing a key collapses a node left with a single leaf into its parent.
-  Unknown and deleted identifiers resolve to `doc.object.not_found`.
+  Unknown and deleted identifiers resolve to `doc.object.not_found`. The mix spreads generated
+  identifiers but is no defense against chosen ones: identifiers chosen to share long prefixes
+  after the mix (from a hostile file, for example) make lookups and writes slower and the index
+  larger by a constant factor, within the same depth bound. The mix is fixed so that the crate
+  stays deterministic and makes no operating-system calls.
 - **Snapshots.** A `Snapshot` is one `Arc` of its roots: the registry, the type keys, the
-  revision number, the table of store roots and the shard table of the identifier index; the
-  root of the reverse reference index joins them with CORE-DOC-010. Cloning a snapshot copies
-  one pointer. `Snapshot::empty` has revision 0. Iteration yields live objects in handle order:
-  by type key, then by ascending slot; the order is a function of the sequence of operations
-  that built the snapshot.
+  revision number, the number of live objects, the table of store roots and the shard table of
+  the identifier index; the root of the reverse reference index joins them with CORE-DOC-010.
+  Cloning a snapshot copies one pointer, and `len` is constant time. `Snapshot::empty` has
+  revision 0; the revision is a label that saturates at 2⁶⁴ − 1. Iteration yields live objects in
+  handle order: by type key, then by ascending slot. Dropping the last holder of a snapshot
+  frees what only it holds on the dropping thread; for the last snapshot of a document of one
+  million objects that takes about half a second.
 - **Working sets.** A `WorkingSet` starts from a base snapshot and applies `create`,
-  `replace_values`, `replace_header` and `delete`; it records each touched identifier as
-  created, modified or deleted relative to the base (an object created and deleted in the same
-  set is not listed). Writes are copy-on-write: the first write copies the store table and the
-  shard table, then each write copies only the chunk (1,024 entries, objects shared by
-  reference) and branch nodes on its slot's path and the index nodes on its key's path; parts
-  already private to the working set change in place. `WorkingSet::current` is the candidate
-  snapshot, with revision base + 1; cloning it is a constant-time savepoint. A create fails with
-  `doc.object.duplicate_id` when the identifier is live or was deleted in the same working set;
-  that identifiers are never reused across revisions is guaranteed by the identifier generator.
-  The working set does not check values against schemas: that is commit validation.
+  `replace_values`, `replace_header` and `delete`. Writes are copy-on-write: the first write
+  copies the store table and the shard table, then each write copies only the chunk (1,024
+  entries, objects shared by reference) and branch nodes on its slot's path and the index nodes
+  on its key's path; parts already private to the working set change in place. Copying a chunk
+  increments the reference count of each of its objects, so the first write to a chunk costs
+  tens of microseconds at any document size. `WorkingSet::current` is the candidate snapshot,
+  with revision base + 1. A create fails with `doc.object.duplicate_id` exactly when the
+  identifier is live in the candidate; an identifier deleted earlier in the same working set may
+  be created again, in any store, which undoes a delete or changes an object's type. The
+  working set does not check values against schemas: that is commit validation.
+- **Touched identifiers.** `touched` maps each changed identifier to its net change relative to
+  the base: `Created` (not live in the base), `Modified` (same object, new header or values),
+  `Deleted` (live in the base, not in the candidate) or `Recreated` (live in the base, deleted
+  and created again, possibly of another type). An object created and deleted in the same
+  working set is not listed. The before state of every entry is read from the base and the after
+  state from the candidate.
+- **Savepoints.** `savepoint` returns an opaque `Savepoint` that marks the candidate and the
+  touched map; it costs one pointer copy and a copy of the touched map. `rollback_to` restores
+  that state and keeps the savepoint, invalidating savepoints taken after it;
+  `release_savepoint` drops the savepoint and every later one and keeps the changes. A savepoint
+  of another working set, or one released or invalidated, fails with `doc.savepoint.invalid`
+  and changes nothing. Handles obtained after a savepoint are stale after a rollback to it.
 - **Publication.** A `SnapshotCell` holds the latest published snapshot in an `arc-swap` cell.
-  `load` returns it in constant time without locks. `publish` replaces it atomically with a
-  candidate whose revision follows the published one directly, and otherwise fails with
-  `doc.snapshot.stale` and publishes nothing. Old snapshots are freed when their last holder drops
-  them.
+  `load` returns it in constant time without locks. `publish` takes a working set and replaces
+  the published snapshot with its candidate in one compare-and-swap that succeeds only when the
+  published snapshot is the working set's base itself; a working set built on another snapshot,
+  including an unpublished candidate with the expected revision number or a snapshot of another
+  document, fails with `doc.snapshot.stale` and publishes nothing. Old snapshots are freed when
+  their last holder drops them.
+- **Identifiers.** Identifiers are unique within a document at any revision. An identifier may be
+  live again after it was deleted, in the same working set or a later one, when undo, redo or a
+  type change re-creates the same object; a new object always gets a new identifier from the
+  identifier generator.
+- **Not in this layer.** Preserved objects of unregistered types and a bulk path for loading
+  documents with millions of objects belong to the loading and migration unit; this layer
+  stores objects of registered types created one at a time.
 
 The `store_scale` test (ignored by default; run it in a release build) fills one store with one
-million objects. On a shared four-core development machine it measured 32 ns per snapshot,
-about 60 µs per single-object replacement including its working set and publication (worst of
-1,000 rounds 8 ms), and about 13 µs per single-object creation with publication, against the
-budgets of 50 µs and 2 ms in [testing.md](../testing.md).
+million objects. On a shared four-core development machine single-object operations measured
+about 55 ns per snapshot, 40 µs per replacement, 9 µs per creation and 13 µs per deletion, each
+including its working set and publication, with 99.9 % of 10,000 rounds under 0.3 ms, against
+the budgets of 50 µs and 2 ms in [testing.md](../testing.md); the rare rounds above 2 ms
+coincided with equally long stalls of the constant-time snapshot load, that is, with the thread
+being descheduled. Memory overhead is about 77 bytes per object beyond the object itself.
 
 ### Error codes
 
@@ -410,6 +443,7 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.object.not_found` | `not_found` | An identifier or handle names no live object in the snapshot |
 | `doc.reference.dangling` | `conflict` | A transaction would leave a reference to a missing object or to an object of a type the reference does not allow |
 | `doc.type.unknown` | `not_found` | A type key is not registered in the document's type registry |
-| `doc.object.duplicate_id` | `conflict` | An object is created with the identifier of a live object, or of an object deleted in the same working set |
-| `doc.store.capacity_exceeded` | `limit_exceeded` | A typed store has no slot left for another object |
-| `doc.snapshot.stale` | `conflict` | A snapshot candidate is published on a snapshot other than the one it was built on |
+| `doc.object.duplicate_id` | `conflict` | An object is created with the identifier of an object live in the candidate |
+| `doc.store.capacity_exceeded` | `limit_exceeded` | A typed store has no slot or generation left for another object |
+| `doc.snapshot.stale` | `conflict` | A working set is published, but its base is no longer the published snapshot |
+| `doc.savepoint.invalid` | `invalid_input` | A savepoint belongs to another working set, or was released or invalidated |

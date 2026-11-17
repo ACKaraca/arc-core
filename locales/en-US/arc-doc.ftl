@@ -22,3 +22,4 @@ doc-type-unknown = The object type { $type } is not registered.
 doc-object-duplicate-id = An object with the identifier { $id } already exists.
 doc-store-capacity-exceeded = The document cannot hold more objects of the type { $type }.
 doc-snapshot-stale = The changes were made on an outdated state of the document.
+doc-savepoint-invalid = The savepoint does not belong to these changes or is no longer available.

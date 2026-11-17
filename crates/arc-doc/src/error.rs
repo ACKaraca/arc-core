@@ -117,24 +117,29 @@ pub mod codes {
         category: Category::NotFound,
         message_id: "doc-type-unknown",
     };
-    /// An object is created with the identifier of a live object, or of an object deleted in the
-    /// same working set.
+    /// An object is created with the identifier of an object live in the candidate.
     pub const OBJECT_DUPLICATE_ID: ErrorCode = ErrorCode {
         code: "doc.object.duplicate_id",
         category: Category::Conflict,
         message_id: "doc-object-duplicate-id",
     };
-    /// A typed store has no slot left for another object.
+    /// A typed store has no slot or generation left for another object.
     pub const STORE_CAPACITY_EXCEEDED: ErrorCode = ErrorCode {
         code: "doc.store.capacity_exceeded",
         category: Category::LimitExceeded,
         message_id: "doc-store-capacity-exceeded",
     };
-    /// A snapshot candidate was not built on the latest published snapshot.
+    /// A working set is published, but its base is no longer the published snapshot.
     pub const SNAPSHOT_STALE: ErrorCode = ErrorCode {
         code: "doc.snapshot.stale",
         category: Category::Conflict,
         message_id: "doc-snapshot-stale",
+    };
+    /// A savepoint belongs to another working set, or was released or invalidated.
+    pub const SAVEPOINT_INVALID: ErrorCode = ErrorCode {
+        code: "doc.savepoint.invalid",
+        category: Category::InvalidInput,
+        message_id: "doc-savepoint-invalid",
     };
 
     /// Every code of this crate, for the registry check.
@@ -160,6 +165,7 @@ pub mod codes {
         OBJECT_DUPLICATE_ID,
         STORE_CAPACITY_EXCEEDED,
         SNAPSHOT_STALE,
+        SAVEPOINT_INVALID,
     ];
 }
 

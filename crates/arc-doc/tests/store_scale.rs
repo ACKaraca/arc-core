@@ -66,7 +66,7 @@ fn snapshot_and_single_write_stay_within_bounds_at_one_million_objects() {
         let handle = base.resolve(id).unwrap();
         set.replace_values(handle, vec![Some(Value::I64(round.into()))])
             .unwrap();
-        cell.publish(set.current().clone()).unwrap();
+        cell.publish(&set).unwrap();
         worst = worst.max(begin.elapsed());
     }
     let write = start.elapsed() / ROUNDS;
@@ -76,7 +76,7 @@ fn snapshot_and_single_write_stay_within_bounds_at_one_million_objects() {
         let mut set = WorkingSet::new(&cell.load());
         set.create("test.a", object(OBJECTS + u128::from(round)))
             .unwrap();
-        cell.publish(set.current().clone()).unwrap();
+        cell.publish(&set).unwrap();
     }
     let create = start.elapsed() / ROUNDS;
 

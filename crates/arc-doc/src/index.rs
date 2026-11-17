@@ -8,6 +8,11 @@
 //! needs no collision lists; its depth is at most 25 levels. A write copies the shard table (64
 //! pointers, once per working set) and the nodes on the path to the key; every other node is
 //! shared.
+//!
+//! The mix spreads generated identifiers; it is fixed and invertible, so it is no defense against
+//! identifiers chosen to share long prefixes after the mix (for example in a hostile file). Such
+//! identifiers make lookups and inserts slower and the index larger by a constant factor, never
+//! deeper than the bound above.
 
 use std::sync::Arc;
 

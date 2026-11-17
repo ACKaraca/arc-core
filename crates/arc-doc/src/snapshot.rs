@@ -5,8 +5,9 @@
 //! store per registered type key, the identifier index, the revision number and the type
 //! registry, behind one `Arc`. Cloning it is the constant-time way to take a snapshot. A
 //! [`WorkingSet`] starts from a snapshot, applies creates, replacements and deletes with
-//! structural sharing, and yields a candidate snapshot; a [`SnapshotCell`] publishes candidates
-//! atomically and hands the latest one to readers without locks.
+//! structural sharing, and yields a candidate snapshot; a [`SnapshotCell`] publishes a working
+//! set's candidate atomically when its base is still the published snapshot, and hands the latest
+//! snapshot to readers without locks.
 //!
 //! This layer stores what it is given. Field schema checks, relationship rules, the journal and
 //! events belong to the transaction that wraps a working set.
@@ -92,6 +93,10 @@ pub enum Change {
     Modified,
     /// The object was deleted.
     Deleted,
+    /// The object was deleted and an object with the same identifier was created, possibly of
+    /// another type and in another slot. The base snapshot holds the state before, the candidate
+    /// the state after.
+    Recreated,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +105,8 @@ struct Roots {
     /// The registered type keys in ascending order; store `i` holds objects of key `i`.
     keys: Arc<[TypeKey]>,
     revision: u64,
+    /// The number of live objects in all stores.
+    live: usize,
     stores: Arc<Vec<Store>>,
     index: IdIndex,
     // The reverse reference index root (CORE-DOC-010) joins these roots here.
@@ -111,6 +118,11 @@ struct Roots {
 /// by handle walks at most five trie levels and takes no lock; resolving an identifier walks at
 /// most 26 levels of the identifier index. Iteration is in handle order: by type key, then by
 /// slot.
+///
+/// Dropping the last holder of a snapshot frees everything only it holds, on the dropping
+/// thread: for the last snapshot of a document of one million objects that takes about half a
+/// second, so a reader that may hold the last reference should drop it off latency-sensitive
+/// threads.
 #[derive(Clone)]
 pub struct Snapshot(Arc<Roots>);
 
@@ -128,20 +140,25 @@ fn not_found() -> Error {
 }
 
 impl Snapshot {
-    /// The empty snapshot of revision 0 with one store per type of `registry`.
+    /// The empty snapshot of revision 0 with one store per type of `registry`: a new document.
+    /// Every snapshot and working set derived from it shares its stores' generation counters.
     #[must_use]
     pub fn empty(registry: Arc<TypeRegistry>) -> Self {
         let keys: Arc<[TypeKey]> = registry.iter().map(|decl| decl.key.clone()).collect();
         Self(Arc::new(Roots {
-            stores: Arc::new(vec![Store::default(); keys.len()]),
+            // One store each: a cloned store would share its generation counter.
+            stores: Arc::new(keys.iter().map(|_| Store::default()).collect()),
             keys,
             registry,
             revision: 0,
+            live: 0,
             index: IdIndex::default(),
         }))
     }
 
-    /// The revision number: 0 for an empty snapshot, one more than its base for a candidate.
+    /// The revision number: 0 for an empty snapshot, one more than its base for a candidate. It
+    /// is a label: publication checks the base itself, not this number, and the number saturates
+    /// at `u64::MAX`.
     #[must_use]
     pub fn revision(&self) -> u64 {
         self.0.revision
@@ -177,10 +194,10 @@ impl Snapshot {
         self.0.keys.get(usize_of(handle.store))
     }
 
-    /// The number of live objects.
+    /// The number of live objects, in constant time.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.stores.iter().map(Store::len).sum()
+        self.0.live
     }
 
     /// True when the snapshot holds no object.
@@ -247,16 +264,38 @@ fn objects_of(store: &Store, index: u32) -> impl Iterator<Item = (Handle, &Arc<O
     })
 }
 
-/// A set of changes on top of a base snapshot, not visible to anyone else until its candidate
-/// snapshot is published.
+/// A set of changes on top of a base snapshot, not visible to anyone else until it is published
+/// with [`SnapshotCell::publish`].
 ///
 /// Writes copy only what they touch: the store table and the shard table once, then the chunk,
 /// branch nodes and index nodes on the path to each written object. [`WorkingSet::current`] is
-/// the candidate; cloning it is a constant-time savepoint, and the next write copies around it.
+/// the candidate. [`WorkingSet::savepoint`] marks a state that [`WorkingSet::rollback_to`]
+/// restores.
 pub struct WorkingSet {
     base: Snapshot,
     current: Snapshot,
     touched: BTreeMap<ObjectId, Change>,
+    /// Identifies this working set to its savepoints.
+    token: Arc<()>,
+    /// The live savepoints, oldest first.
+    savepoints: Vec<Saved>,
+    next_savepoint: u64,
+}
+
+struct Saved {
+    sequence: u64,
+    current: Snapshot,
+    touched: BTreeMap<ObjectId, Change>,
+}
+
+/// A state of one [`WorkingSet`] to roll back to, from [`WorkingSet::savepoint`].
+///
+/// It is valid for the working set that made it until it is released, or until a rollback to an
+/// earlier savepoint or the release of an earlier savepoint invalidates it.
+#[derive(Debug, Clone)]
+pub struct Savepoint {
+    set: Arc<()>,
+    sequence: u64,
 }
 
 impl fmt::Debug for WorkingSet {
@@ -264,6 +303,7 @@ impl fmt::Debug for WorkingSet {
         f.debug_struct("WorkingSet")
             .field("base", &self.base.revision())
             .field("touched", &self.touched.len())
+            .field("savepoints", &self.savepoints.len())
             .finish_non_exhaustive()
     }
 }
@@ -278,6 +318,9 @@ impl WorkingSet {
             base: base.clone(),
             current: Snapshot(Arc::new(roots)),
             touched: BTreeMap::new(),
+            token: Arc::new(()),
+            savepoints: Vec::new(),
+            next_savepoint: 0,
         }
     }
 
@@ -294,8 +337,11 @@ impl WorkingSet {
         &self.current
     }
 
-    /// The objects changed relative to the base, by identifier. An object created and then
-    /// deleted in the same working set is not listed.
+    /// The net change of each identifier relative to the base. An object created and then
+    /// deleted in the same working set is not listed; an object of the base deleted and then
+    /// created again with the same identifier is [`Change::Recreated`], and deleting it again
+    /// makes it [`Change::Deleted`]. Before states are read from [`WorkingSet::base`], after
+    /// states from [`WorkingSet::current`].
     #[must_use]
     pub fn touched(&self) -> &BTreeMap<ObjectId, Change> {
         &self.touched
@@ -304,13 +350,13 @@ impl WorkingSet {
     /// Adds `object` to the store of `type_key` and returns its handle.
     ///
     /// Fails with `doc.type.unknown` for an unregistered key, `doc.object.duplicate_id` when the
-    /// identifier is live or was deleted in this working set, and `doc.store.capacity_exceeded`
-    /// when the store has no slot left. The values are not checked against the schema here.
+    /// identifier is live in the candidate, and `doc.store.capacity_exceeded` when the store has
+    /// no slot or generation left. An identifier deleted earlier in this working set may be
+    /// created again, in any store. The values are not checked against the schema here.
     pub fn create(&mut self, type_key: &str, object: Object) -> Result<Handle> {
         let store = self.current.store_index(type_key)?;
         let id = object.id;
-        if self.current.0.index.get(id).is_some() || self.touched.get(&id) == Some(&Change::Deleted)
-        {
+        if self.current.0.index.get(id).is_some() {
             return Err(Error::new(codes::OBJECT_DUPLICATE_ID).with_arg("id", id.to_string()));
         }
         let roots = Arc::make_mut(&mut self.current.0);
@@ -324,7 +370,14 @@ impl WorkingSet {
             generation,
         };
         roots.index.insert(id, handle);
-        self.touched.insert(id, Change::Created);
+        roots.live += 1;
+        // Only an object of the base is listed as deleted.
+        let change = if self.touched.get(&id) == Some(&Change::Deleted) {
+            Change::Recreated
+        } else {
+            Change::Created
+        };
+        self.touched.insert(id, change);
         Ok(handle)
     }
 
@@ -362,7 +415,10 @@ impl WorkingSet {
             .store_mut(handle)?
             .replace(handle.slot, handle.generation, Arc::new(object))
             .ok_or_else(not_found)?;
-        if self.touched.get(&id) != Some(&Change::Created) {
+        if !matches!(
+            self.touched.get(&id),
+            Some(Change::Created | Change::Recreated)
+        ) {
             self.touched.insert(id, Change::Modified);
         }
         Ok(old)
@@ -375,11 +431,61 @@ impl WorkingSet {
             .store_mut(handle)?
             .remove(handle.slot, handle.generation)
             .ok_or_else(not_found)?;
-        Arc::make_mut(&mut self.current.0).index.remove(old.id);
+        let roots = Arc::make_mut(&mut self.current.0);
+        roots.index.remove(old.id);
+        roots.live = roots.live.saturating_sub(1);
         if self.touched.remove(&old.id) != Some(Change::Created) {
             self.touched.insert(old.id, Change::Deleted);
         }
         Ok(old)
+    }
+
+    /// Marks the current state (candidate and touched identifiers) so that
+    /// [`WorkingSet::rollback_to`] can restore it. Taking a savepoint shares the candidate in
+    /// constant time and copies the touched map.
+    pub fn savepoint(&mut self) -> Savepoint {
+        let sequence = self.next_savepoint;
+        self.next_savepoint = sequence.saturating_add(1);
+        self.savepoints.push(Saved {
+            sequence,
+            current: self.current.clone(),
+            touched: self.touched.clone(),
+        });
+        Savepoint {
+            set: Arc::clone(&self.token),
+            sequence,
+        }
+    }
+
+    /// Restores the state marked by `savepoint`, which stays valid; every savepoint taken after
+    /// it becomes invalid. Handles obtained after the savepoint become stale and are never handed
+    /// out again. A savepoint of another working set, or one released or invalidated, fails with
+    /// `doc.savepoint.invalid` and changes nothing.
+    pub fn rollback_to(&mut self, savepoint: &Savepoint) -> Result<()> {
+        let at = self.position(savepoint)?;
+        let saved = self.savepoints.get(at).ok_or_else(invalid_savepoint)?;
+        self.current = saved.current.clone();
+        self.touched = saved.touched.clone();
+        self.savepoints.truncate(at + 1);
+        Ok(())
+    }
+
+    /// Releases `savepoint` and every savepoint taken after it, keeping the changes made since.
+    /// A savepoint of another working set, or one released or invalidated, fails with
+    /// `doc.savepoint.invalid`.
+    pub fn release_savepoint(&mut self, savepoint: &Savepoint) -> Result<()> {
+        let at = self.position(savepoint)?;
+        self.savepoints.truncate(at);
+        Ok(())
+    }
+
+    fn position(&self, savepoint: &Savepoint) -> Result<usize> {
+        if !Arc::ptr_eq(&savepoint.set, &self.token) {
+            return Err(invalid_savepoint());
+        }
+        self.savepoints
+            .binary_search_by_key(&savepoint.sequence, |saved| saved.sequence)
+            .map_err(|_| invalid_savepoint())
     }
 
     fn store_mut(&mut self, handle: Handle) -> Result<&mut Store> {
@@ -390,6 +496,10 @@ impl WorkingSet {
             .get_mut(usize_of(handle.store))
             .ok_or_else(not_found)
     }
+}
+
+fn invalid_savepoint() -> Error {
+    Error::new(codes::SAVEPOINT_INVALID)
 }
 
 /// The latest published snapshot of a document.
@@ -424,26 +534,20 @@ impl SnapshotCell {
         Snapshot(self.current.load_full())
     }
 
-    /// Publishes `candidate` atomically. Fails with `doc.snapshot.stale`, publishing nothing,
-    /// unless the candidate's revision follows the published one directly, that is, unless it
-    /// was built on the latest published snapshot.
-    pub fn publish(&self, candidate: Snapshot) -> Result<()> {
-        let published = self.current.load_full();
-        let stale = || {
-            Error::new(codes::SNAPSHOT_STALE)
-                .with_detail("published_revision", revision_detail(published.revision))
-                .with_detail("candidate_revision", revision_detail(candidate.revision()))
-        };
-        if published.revision.checked_add(1) != Some(candidate.revision()) {
-            return Err(stale());
-        }
+    /// Publishes the candidate of `set` atomically when the published snapshot is still the
+    /// base of `set`, the very snapshot it was built on, not merely one with the same revision
+    /// number. Otherwise fails with `doc.snapshot.stale` and publishes nothing; the changes must
+    /// then be made again on the latest snapshot.
+    pub fn publish(&self, set: &WorkingSet) -> Result<()> {
         let previous = self
             .current
-            .compare_and_swap(&published, Arc::clone(&candidate.0));
-        if Arc::ptr_eq(&previous, &published) {
+            .compare_and_swap(&set.base.0, Arc::clone(&set.current.0));
+        if Arc::ptr_eq(&previous, &set.base.0) {
             Ok(())
         } else {
-            Err(stale())
+            Err(Error::new(codes::SNAPSHOT_STALE)
+                .with_detail("published_revision", revision_detail(previous.revision))
+                .with_detail("base_revision", revision_detail(set.base.revision())))
         }
     }
 }
@@ -537,18 +641,76 @@ mod tests {
     }
 
     #[test]
-    fn a_deleted_identifier_cannot_be_created_again_in_the_same_set() {
+    fn a_deleted_identifier_can_be_created_again_in_the_same_set() {
         let mut base = WorkingSet::new(&Snapshot::empty(registry()));
-        base.create("test.a", object(1, 0)).unwrap();
+        let old = base.create("test.a", object(1, 0)).unwrap();
         let base = base.current().clone();
+        let id = ObjectId::from_u128(1);
         let mut set = WorkingSet::new(&base);
-        set.delete(base.resolve(ObjectId::from_u128(1)).unwrap())
-            .unwrap();
+        set.delete(old).unwrap();
+        // Recreated as another type: the base has the before state, the candidate the after.
+        let new = set.create("test.b", object(1, 5)).unwrap();
+        assert_eq!(set.touched().get(&id), Some(&Change::Recreated));
+        assert_eq!(set.current().resolve(id).unwrap(), new);
+        assert_eq!(base.resolve(id).unwrap(), old);
+        assert!(set.current().get(old).is_err());
+        assert_eq!(set.current().len(), 1);
+        set.replace_values(new, vec![Some(Value::I64(6))]).unwrap();
+        assert_eq!(set.touched().get(&id), Some(&Change::Recreated));
         let error = set.create("test.a", object(1, 0)).unwrap_err();
         assert_eq!(error.code(), "doc.object.duplicate_id");
+        set.delete(new).unwrap();
+        assert_eq!(set.touched().get(&id), Some(&Change::Deleted));
+        assert!(set.current().is_empty());
+        // An object new in this set: create, delete and create again is a creation.
+        let a = set.create("test.a", object(2, 0)).unwrap();
+        set.delete(a).unwrap();
+        set.create("test.b", object(2, 0)).unwrap();
         assert_eq!(
-            set.touched().get(&ObjectId::from_u128(1)),
-            Some(&Change::Deleted)
+            set.touched().get(&ObjectId::from_u128(2)),
+            Some(&Change::Created)
+        );
+    }
+
+    #[test]
+    fn rollback_restores_the_savepoint_and_never_reissues_handles() {
+        let mut set = WorkingSet::new(&Snapshot::empty(registry()));
+        let a = set.create("test.a", object(1, 1)).unwrap();
+        let first = set.savepoint();
+        set.replace_values(a, vec![Some(Value::I64(2))]).unwrap();
+        let b = set.create("test.a", object(2, 2)).unwrap();
+        let second = set.savepoint();
+        set.delete(a).unwrap();
+        set.rollback_to(&first).unwrap();
+        assert_eq!(value(set.current(), a), Some(1));
+        assert!(set.current().get(b).is_err());
+        assert_eq!(set.current().len(), 1);
+        assert_eq!(set.touched().len(), 1);
+        assert_eq!(
+            set.rollback_to(&second).unwrap_err().code(),
+            "doc.savepoint.invalid"
+        );
+        // The slot of `b` is taken again with a new generation.
+        let c = set.create("test.a", object(3, 3)).unwrap();
+        assert_ne!(b, c);
+        assert!(set.current().get(b).is_err());
+        // A savepoint stays valid after a rollback to it, until it is released.
+        set.rollback_to(&first).unwrap();
+        assert!(set.current().get(c).is_err());
+        set.release_savepoint(&first).unwrap();
+        assert_eq!(
+            set.rollback_to(&first).unwrap_err().code(),
+            "doc.savepoint.invalid"
+        );
+        let mut other = WorkingSet::new(&Snapshot::empty(registry()));
+        let foreign = other.savepoint();
+        assert_eq!(
+            set.rollback_to(&foreign).unwrap_err().code(),
+            "doc.savepoint.invalid"
+        );
+        assert_eq!(
+            set.release_savepoint(&foreign).unwrap_err().code(),
+            "doc.savepoint.invalid"
         );
     }
 
@@ -658,8 +820,13 @@ mod tests {
         first.create("test.a", object(1, 1)).unwrap();
         let mut second = WorkingSet::new(&base);
         second.create("test.a", object(2, 2)).unwrap();
-        cell.publish(first.current().clone()).unwrap();
-        let error = cell.publish(second.current().clone()).unwrap_err();
+        cell.publish(&first).unwrap();
+        assert_eq!(
+            cell.publish(&first).unwrap_err().code(),
+            "doc.snapshot.stale",
+            "a set is published once"
+        );
+        let error = cell.publish(&second).unwrap_err();
         assert_eq!(error.code(), "doc.snapshot.stale");
         assert_eq!(cell.load().revision(), 1);
         assert!(cell.load().resolve(ObjectId::from_u128(1)).is_ok());

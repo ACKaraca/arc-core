@@ -140,7 +140,7 @@ proptest! {
                     stale.push(handles[&id]);
                 }
                 Op::Publish => {
-                    cell.publish(set.current().clone()).unwrap();
+                    cell.publish(&set).unwrap();
                     retained.push((cell.load(), model.clone(), stale.clone()));
                     set = WorkingSet::new(&cell.load());
                 }
