@@ -111,6 +111,32 @@ pub mod codes {
         message_id: "doc-reference-dangling",
     };
 
+    /// A type key is not registered in the document's type registry.
+    pub const TYPE_UNKNOWN: ErrorCode = ErrorCode {
+        code: "doc.type.unknown",
+        category: Category::NotFound,
+        message_id: "doc-type-unknown",
+    };
+    /// An object is created with the identifier of a live object, or of an object deleted in the
+    /// same working set.
+    pub const OBJECT_DUPLICATE_ID: ErrorCode = ErrorCode {
+        code: "doc.object.duplicate_id",
+        category: Category::Conflict,
+        message_id: "doc-object-duplicate-id",
+    };
+    /// A typed store has no slot left for another object.
+    pub const STORE_CAPACITY_EXCEEDED: ErrorCode = ErrorCode {
+        code: "doc.store.capacity_exceeded",
+        category: Category::LimitExceeded,
+        message_id: "doc-store-capacity-exceeded",
+    };
+    /// A snapshot candidate was not built on the latest published snapshot.
+    pub const SNAPSHOT_STALE: ErrorCode = ErrorCode {
+        code: "doc.snapshot.stale",
+        category: Category::Conflict,
+        message_id: "doc-snapshot-stale",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         TYPE_DUPLICATE_KEY,
@@ -130,6 +156,10 @@ pub mod codes {
         PAYLOAD_ENCODING_UNSUPPORTED,
         OBJECT_NOT_FOUND,
         REFERENCE_DANGLING,
+        TYPE_UNKNOWN,
+        OBJECT_DUPLICATE_ID,
+        STORE_CAPACITY_EXCEEDED,
+        SNAPSHOT_STALE,
     ];
 }
 

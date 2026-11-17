@@ -17,6 +17,7 @@ ui_deny = [
 # Third-party crates a workspace crate may depend on directly. Mirrors the crates of
 # docs/architecture/technology-baseline.md that are in use.
 third_party = [
+  "arc-swap",
   "glam",
   "insta",
   "nalgebra",

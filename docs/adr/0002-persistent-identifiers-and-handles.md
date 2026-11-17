@@ -46,3 +46,16 @@ written, because they appear in every file and protocol message.
 
 A measured workload shows identifier lookups above 10 % of regeneration time that handle caching
 cannot remove, or a standard the suite must follow requires a different identifier form.
+
+## Amendment
+
+The first implementation of the stores makes the handle and the index precise:
+
+- Object types are registered at run time, so stores are per type key rather than per Rust type.
+  A handle is therefore a 32-bit slot and a 32-bit generation together with the index of its
+  store, not a Rust type parameter; the store index keeps a handle from resolving to an object of
+  another type. Freed slots are reused with the next generation, and a slot whose generation is
+  exhausted is retired.
+- Each of the 64 shards of the identifier index is a hash array mapped trie over a fixed
+  bijective mix of the identifier bits, so a write copies only the nodes on one key's path and
+  never a whole shard.

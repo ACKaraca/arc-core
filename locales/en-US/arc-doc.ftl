@@ -18,3 +18,7 @@ doc-payload-limit-exceeded = The stored object data exceeds a size limit.
 doc-payload-encoding-unsupported = The stored object data uses an encoding this version cannot read.
 doc-object-not-found = The object does not exist.
 doc-reference-dangling = A reference points to an object that does not exist or has the wrong type.
+doc-type-unknown = The object type { $type } is not registered.
+doc-object-duplicate-id = An object with the identifier { $id } already exists.
+doc-store-capacity-exceeded = The document cannot hold more objects of the type { $type }.
+doc-snapshot-stale = The changes were made on an outdated state of the document.

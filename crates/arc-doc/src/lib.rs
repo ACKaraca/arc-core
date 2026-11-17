@@ -9,9 +9,12 @@
 
 pub mod descriptor;
 pub mod error;
+mod index;
 pub mod payload;
 pub mod registry;
 pub mod schema;
+pub mod snapshot;
+mod store;
 
 #[cfg(test)]
 mod testing;
@@ -25,3 +28,5 @@ pub use schema::{
     ReferenceSpec, RelationshipRule, Schema, SchemaVersion, Severity, Strength, TypeDecl, TypeKey,
     TypeValidator, Value, ValueType,
 };
+pub use snapshot::{Change, Flags, Header, Object, Snapshot, SnapshotCell, WorkingSet};
+pub use store::Handle;

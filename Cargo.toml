@@ -19,6 +19,8 @@ arc-base = { path = "crates/arc-base" }
 arc-geom = { path = "crates/arc-geom" }
 arc-doc = { path = "crates/arc-doc" }
 
+# Lock-free publication of document snapshots in `arc-doc`; the optional `serde` feature stays off.
+arc-swap = { version = "1.9.5", default-features = false }
 glam = "0.34"
 # Snapshot tests only; default features (terminal colors) stay off.
 insta = { version = "1.49", default-features = false }

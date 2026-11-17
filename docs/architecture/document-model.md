@@ -44,18 +44,21 @@ may hold several registries in one process. Type keys are prefixed by their owne
 the repository name for product types (`solidbuilder.feature.extrude`). A type key never changes
 meaning; a type that is redesigned gets a new major schema version, not a new key.
 
-Objects of one type live in a **typed store**. A store holds immutable object values in chunks of
-1,024 slots; a slot holds a reference-counted pointer to an object value. Writing an object
-replaces the pointer in a copy of its chunk, so unchanged chunks are shared between revisions. The
-store is not an entity-component system: an object's fields belong to its type, and cross-cutting
+Objects of one type key live in a **typed store**. Objects are dynamically typed: an object is
+its header and one optional field value per field of its registered schema, and a store is the
+store of one type key, so types registered at run time need no compiled code. A store holds
+immutable object values in chunks of 1,024 slots; a slot holds a reference-counted pointer to an
+object value. The chunks are the leaves of a persistent radix trie, so writing an object replaces
+the pointer in a copy of its chunk and copies only the trie nodes above it; unchanged chunks are
+shared between revisions. The store is not an entity-component system: an object's fields belong to its type, and cross-cutting
 data is attached through property sets or relationship objects, never by adding components at run
 time.
 
 ## Persistent identifiers and in-memory handles
 
-| | `ObjectId` | `Handle<T>` |
+| | `ObjectId` | `Handle` |
 |---|---|---|
-| Size | 128 bits | 64 bits (32-bit slot index, 32-bit generation) |
+| Size | 128 bits | 32-bit slot index and 32-bit generation, plus the index of its typed store |
 | Form | UUID version 7 | Generational index into one typed store |
 | Scope | Global and permanent | One document, one process, one session |
 | Persisted | Yes: package, journal, change sets, protocol, references | Never |
@@ -75,7 +78,8 @@ Rules:
   the same sequence for the same inputs.
 - Handles are resolved freshly from a snapshot. A handle obtained from one revision stays valid for
   reading that revision; a stale handle (deleted slot, newer generation) resolves to
-  `doc.object.not_found`, never to another object.
+  `doc.object.not_found`, never to another object. A freed slot is reused with the next
+  generation; a slot whose generation is exhausted is retired.
 - A **sub-object key** addresses parts that are not objects (a vertex of a polyline, a face role of
   a wall, a row of a table): `(ObjectId, u32 local key)`. Local keys are assigned by the owning type
   and remain stable across edits that do not delete the part.
@@ -279,9 +283,10 @@ written earlier remain usable.
 
 A **snapshot** is an immutable view of the whole document at one revision: one pointer per typed
 store root, the identifier index root, the reverse reference index root, settings and the link
-table. Taking a snapshot copies those roots and costs constant time. A transaction copies only the
-chunks, index shards and objects it touches; every other part is shared with the previous
-revision.
+table, held together behind one reference-counted pointer. Taking a snapshot copies that pointer
+and costs constant time. A transaction copies only the chunks, index nodes and objects it touches
+and the trie nodes on the paths to them; every other part is shared with the previous revision.
+The storage layer is specified in [arc-doc](../crates/arc-doc.md#stores-identifier-index-and-snapshots-core-doc-002-core-doc-003-core-doc-017).
 
 Uses: the UI and viewport read the latest snapshot without locks; save serializes a snapshot while
 editing continues; regeneration jobs read the snapshot of the revision they compute for; automation

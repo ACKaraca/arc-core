@@ -36,7 +36,8 @@ file extension.
 | `TypeDecl`, `Schema`, `FieldDecl` | Declaration of a type: key, current schema, older major schemas with migrations, validators; ordered field declarations |
 | `Value`, `ValueType` | Dynamically typed field value and its declared type |
 | `Payload` | Canonical binary encoding of an object's field values |
-| `Store<T>` | Chunked copy-on-write store of immutable values addressed by `Handle<T>` |
+| `Object`, `Header`, `Handle` | An object (identifier, schema version, header, field values) and its in-memory address (store, slot, generation) |
+| `WorkingSet`, `SnapshotCell` | Copy-on-write changes on a base snapshot; the atomically published latest snapshot |
 | `Txn` | Open transaction with operations and savepoints |
 | `TxnRecord` | Journal record (see the document model) |
 | `ChangeSet` | Base state plus records, for exchange |
@@ -290,6 +291,62 @@ it, the stored encoding and the hostile-input `Limits`:
 - Encoding code 1 (`postcard` with `zstd`) is reserved: this version writes code 0 only and
   rejects code 1 with `doc.payload.encoding_unsupported`.
 
+### Stores, identifier index and snapshots (CORE-DOC-002, CORE-DOC-003, CORE-DOC-017)
+
+An **object** (`Object`) is its `ObjectId`, the schema version of its values, a `Header` (owner,
+name, partition key and the flags `hidden_from_ui`, `system` and `read_only`) and one optional
+`Value` per field of its schema in declared order. Its type key is the key of the store that holds
+it. Objects are dynamically typed: a store is the store of one registered type key, not a Rust
+type, so products and plug-ins add types at run time through the registry. Property sets join the
+object with CORE-DOC-005.
+
+- **Stores.** A snapshot has one store per registered type key, ordered by key. A store's slots
+  live in chunks of 1,024 entries; an entry is a live object (generation and reference-counted
+  immutable object) or a free slot that keeps the generation of its last occupant. The chunks
+  are the leaves of a radix trie of 32-way branch nodes, at most five levels high, so reading by
+  handle is a bounded walk without locks.
+- **Handles.** A `Handle` is the store index, a 32-bit slot and a 32-bit generation. New slots
+  start at generation 0; a freed slot joins a persistent last-in, first-out free list and is
+  reused with the next generation; a slot whose generation reaches 2³² − 1 is retired when
+  freed and never reused. A handle whose slot is free or holds a newer generation resolves to
+  `doc.object.not_found`; the store index keeps a handle from ever reaching another type's
+  object.
+- **Identifier index.** A persistent map from `ObjectId` to handle. The identifier's 128 bits
+  pass through a fixed bijective mix (xor-shifts and multiplications by odd constants); the top 6
+  bits of the result select one of 64 shards, and each shard is a hash array mapped trie that
+  consumes the next bits 5 at a time, with a 32-bit occupancy bitmap and one entry (leaf or child)
+  per set bit. The mix is a bijection, so distinct identifiers never collide and a lookup visits
+  at most 26 nodes. Removing a key collapses a node left with a single leaf into its parent.
+  Unknown and deleted identifiers resolve to `doc.object.not_found`.
+- **Snapshots.** A `Snapshot` is one `Arc` of its roots: the registry, the type keys, the
+  revision number, the table of store roots and the shard table of the identifier index; the
+  root of the reverse reference index joins them with CORE-DOC-010. Cloning a snapshot copies
+  one pointer. `Snapshot::empty` has revision 0. Iteration yields live objects in handle order:
+  by type key, then by ascending slot; the order is a function of the sequence of operations
+  that built the snapshot.
+- **Working sets.** A `WorkingSet` starts from a base snapshot and applies `create`,
+  `replace_values`, `replace_header` and `delete`; it records each touched identifier as
+  created, modified or deleted relative to the base (an object created and deleted in the same
+  set is not listed). Writes are copy-on-write: the first write copies the store table and the
+  shard table, then each write copies only the chunk (1,024 entries, objects shared by
+  reference) and branch nodes on its slot's path and the index nodes on its key's path; parts
+  already private to the working set change in place. `WorkingSet::current` is the candidate
+  snapshot, with revision base + 1; cloning it is a constant-time savepoint. A create fails with
+  `doc.object.duplicate_id` when the identifier is live or was deleted in the same working set;
+  that identifiers are never reused across revisions is guaranteed by the identifier generator.
+  The working set does not check values against schemas: that is commit validation.
+- **Publication.** A `SnapshotCell` holds the latest published snapshot in an `arc-swap` cell.
+  `load` returns it in constant time without locks. `publish` replaces it atomically with a
+  candidate whose revision follows the published one directly, and otherwise fails with
+  `doc.snapshot.stale` and publishes nothing. Old snapshots are freed when their last holder drops
+  them.
+
+The `store_scale` test (ignored by default; run it in a release build) fills one store with one
+million objects. On a shared four-core development machine it measured 32 ns per snapshot,
+about 60 µs per single-object replacement including its working set and publication (worst of
+1,000 rounds 8 ms), and about 13 µs per single-object creation with publication, against the
+budgets of 50 µs and 2 ms in [testing.md](../testing.md).
+
 ### Error codes
 
 The codes `arc-doc` owns. A code is never reused for a different meaning; messages are in
@@ -314,3 +371,7 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.payload.encoding_unsupported` | `unsupported` | A payload uses an encoding this version cannot decode |
 | `doc.object.not_found` | `not_found` | An identifier or handle names no live object in the snapshot |
 | `doc.reference.dangling` | `conflict` | A transaction would leave a reference to a missing object or to an object of a type the reference does not allow |
+| `doc.type.unknown` | `not_found` | A type key is not registered in the document's type registry |
+| `doc.object.duplicate_id` | `conflict` | An object is created with the identifier of a live object, or of an object deleted in the same working set |
+| `doc.store.capacity_exceeded` | `limit_exceeded` | A typed store has no slot left for another object |
+| `doc.snapshot.stale` | `conflict` | A snapshot candidate is published on a snapshot other than the one it was built on |
