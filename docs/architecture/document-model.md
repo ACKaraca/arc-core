@@ -315,7 +315,7 @@ toolpaths, corridor sections, node-graph outputs) is computed by the dependency 
   evaluator that needs to change objects (for example to update a cached field that users see)
   returns a request that the scheduler turns into a follow-up command transaction, tagged
   `regeneration`.
-- Results are memoized with a hash of the input values they read.
+- Results are memoized with the inputs they read and a hash of the result.
 
 ### Dirty propagation
 
@@ -338,8 +338,8 @@ removes its nodes and marks their dependents dirty.
   commit makes a running job's inputs dirty, its token is cancelled and the node is rescheduled.
   Evaluators must reach a yield point at least every 50 ms of computation.
 - **Revision tagging.** Every result carries the revision of the snapshot it was computed from and
-  the hashes of its inputs. A result is applied only if none of its recorded inputs changed after
-  that revision; otherwise it is discarded. A stale result is never applied.
+  the version of each node result it read. A result is applied only if none of its recorded
+  inputs changed after that revision; otherwise it is discarded. A stale result is never applied.
 - A command may call `ensure(nodes)` to block until the listed nodes are clean for the current
   revision inside its transaction. `ensure` evaluates against the transaction's uncommitted state
   and its results are discarded if the transaction rolls back.

@@ -183,6 +183,48 @@ pub mod codes {
         category: Category::Conflict,
         message_id: "doc-reference-owner-conflict",
     };
+    /// A derived key does not follow the key grammar.
+    pub const GRAPH_MALFORMED_KEY: ErrorCode = ErrorCode {
+        code: "doc.graph.malformed_key",
+        category: Category::InvalidInput,
+        message_id: "doc-graph-malformed-key",
+    };
+    /// An evaluator is already registered for a derived key and type.
+    pub const GRAPH_DUPLICATE_KEY: ErrorCode = ErrorCode {
+        code: "doc.graph.duplicate_key",
+        category: Category::Conflict,
+        message_id: "doc-graph-duplicate-key",
+    };
+    /// No evaluator is registered for a derived key and the type of its object.
+    pub const GRAPH_UNKNOWN_KEY: ErrorCode = ErrorCode {
+        code: "doc.graph.unknown_key",
+        category: Category::NotFound,
+        message_id: "doc-graph-unknown-key",
+    };
+    /// A node takes part in a dependency cycle.
+    pub const GRAPH_CYCLE: ErrorCode = ErrorCode {
+        code: "doc.graph.cycle",
+        category: Category::FailedOperation,
+        message_id: "doc-graph-cycle",
+    };
+    /// A node read another node that failed, is blocked or is cyclic.
+    pub const GRAPH_BLOCKED: ErrorCode = ErrorCode {
+        code: "doc.graph.blocked",
+        category: Category::FailedOperation,
+        message_id: "doc-graph-blocked",
+    };
+    /// Nested demands of nodes exceed the depth limit of the graph.
+    pub const GRAPH_DEPTH_EXCEEDED: ErrorCode = ErrorCode {
+        code: "doc.graph.depth_exceeded",
+        category: Category::LimitExceeded,
+        message_id: "doc-graph-depth-exceeded",
+    };
+    /// A result was computed from a revision whose inputs changed since.
+    pub const GRAPH_STALE: ErrorCode = ErrorCode {
+        code: "doc.graph.stale",
+        category: Category::Conflict,
+        message_id: "doc-graph-stale",
+    };
 
     /// A document contains a type of a newer major schema version than the registry knows.
     pub const LOAD_NEWER_MAJOR: ErrorCode = ErrorCode {
@@ -265,6 +307,13 @@ pub mod codes {
         MIGRATION_FAILED,
         OBJECT_NOT_MODIFIABLE,
         DOCUMENT_READ_ONLY,
+        GRAPH_MALFORMED_KEY,
+        GRAPH_DUPLICATE_KEY,
+        GRAPH_UNKNOWN_KEY,
+        GRAPH_CYCLE,
+        GRAPH_BLOCKED,
+        GRAPH_DEPTH_EXCEEDED,
+        GRAPH_STALE,
     ];
 }
 

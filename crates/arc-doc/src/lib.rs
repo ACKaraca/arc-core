@@ -9,6 +9,7 @@
 
 pub mod descriptor;
 pub mod error;
+pub mod graph;
 mod index;
 pub mod integrity;
 pub mod load;
@@ -29,6 +30,10 @@ pub mod version;
 mod testing;
 
 pub use descriptor::descriptor;
+pub use graph::{
+    ChangeSet, Derived, DerivedKey, DerivedValue, EvalContext, Evaluators, Graph, NodeKey,
+    NodeState, NodeView, StateKind,
+};
 pub use integrity::{DeleteReport, apply_delete_rules, check_references};
 pub use load::{
     DiagnosticKind, LoadCounts, LoadDiagnostic, LoadOptions, Loaded, LoadedRow, LoadedRows,

@@ -647,6 +647,76 @@ of one integer field. On a shared four-core development machine it took about 1.
 and validation included; building the same snapshot from decoded objects took about 1.4 s through
 the bulk path against 1.6 to 1.7 s through working-set creates. Insertion into the identifier index
 takes about half of that time.
+### Dependency graph (CORE-DOC-029, CORE-DOC-030, CORE-DOC-034)
+
+The graph core lives in `arc_doc::graph`; the worker pool, priorities, cancellation of running
+jobs (CORE-DOC-031, CORE-DOC-032), `ensure` (CORE-DOC-033) and the diagnostics list
+(CORE-DOC-035) build on it.
+
+- **Nodes and evaluators.** A `NodeKey` is a `Subject` (an `ObjectId`, or a graph-local `u64`
+  chosen by the product) and a `DerivedKey` in the key grammar (`core.geometry.solid`), failing
+  with `doc.graph.malformed_key` otherwise. `Evaluators` is an explicit value like the type
+  registry: one evaluator per derived key and object type key, and one per derived key for
+  graph-local nodes; a second one fails with `doc.graph.duplicate_key`. An evaluator is a pure
+  function from an `EvalContext` to a `DerivedValue`, an `Arc` of a type implementing `Derived`:
+  a 128-bit content hash and downcast access. `content_hash` hashes any `Hash` value with two
+  fixed-key SipHash-1-3 passes; it is stable within one process run, which suffices because
+  results are never stored, journaled or part of a snapshot. Distinct results are assumed not to
+  collide in 128 bits; contents chosen to collide can at worst leave a dependent showing a result
+  of the previous content.
+- **Recorded reads.** The context reads the snapshot of the job's revision and records each
+  read: `exists` and `type_key` depend on the object's existence, `header` on its header, `field`
+  on the aspect of the object field (the aspect declared on the field of the object, also for
+  values inside its nested records), `referrers` on the set of references to the target, and
+  `node` on another node. A read of an object that is not live, or of a field its type lacks,
+  depends on the object's existence, so the node reruns when the object appears. Dependencies are
+  replaced by the reads of each applied evaluation.
+- **Change sets.** `ChangeSet::from_commit(set, ops)` derives the changed inputs of a commit
+  from the working set's touched map and the operation list, which must include the operations
+  the deletion rules added: created, deleted and recreated objects change as a whole; a modified
+  object changes the aspect of the object field each `modify` path starts with, and its header
+  for each property or relink operation (a modified object without operations changes as a
+  whole); the referrers of a target change when a touched object gains or loses a reference to
+  it, owner included. The commit calls `Graph::apply(changes, snapshot)` with the published
+  snapshot.
+- **Dirty propagation and early cutoff.** `apply` marks the readers of the changed inputs dirty
+  and, with an explicit work list, every dependent of a node that becomes dirty: every dependent
+  of a dirty node is dirty, so a node is clean exactly when its result is valid for the current
+  revision. The nodes of created, deleted and recreated objects are removed and their dependents
+  become dirty; nodes are otherwise kept, so memory is bounded by the nodes demanded for live
+  objects and graph-local identifiers. Recomputation is lazy. Each node keeps a stamp that
+  changes only when its settled outcome changes (another result hash, another error, another
+  list of blocking or cycle nodes) and records the stamp of every node it read. A dirty node
+  whose recorded object inputs did not change first brings the nodes it read up to date; when
+  their stamps are unchanged, it becomes clean without running its evaluator. Marking costs time
+  proportional to the readers of the changed inputs and the nodes that become dirty; bringing a
+  node up to date visits each node it depends on at most once per change.
+- **Jobs and the stale-result rule.** `Graph::begin(node)` captures the current snapshot and
+  marks the node running; `Job::evaluate` runs without any graph lock; `Graph::finish(job,
+  outcome)` applies the outcome under the graph's mutex, returning `Applied` or `Stale`. An
+  outcome is applied only when the node is still dirty, no object input the job read changed in a
+  change set applied after the job began (the graph keeps the change sets applied since the
+  oldest running job began), and every node it read is still clean with the stamp it read;
+  otherwise it is discarded and the node stays dirty. A cancelled evaluation (`base.cancelled`,
+  from `EvalContext::yield_point`) is discarded as well, and a job dropped unfinished leaves its
+  node dirty. The graph is `Send + Sync`. A node demanded from inside an evaluation is evaluated
+  inline on the same thread, on the demanding job's snapshot, through the same begin and finish;
+  no thread ever waits for another, so demands cannot deadlock, and two threads may evaluate one
+  node at once, the second result being discarded. `evaluate_now(node)` loops begin, evaluate
+  and finish until the node is settled, at most 16 times (`doc.graph.stale`); `evaluate_all_dirty`
+  does so for every node dirty when called.
+- **States.** A node is `clean`, `dirty`, `running` (dirty with a job), `failed` (the evaluator
+  returned an error, kept as an `arc_base::Error`), `blocked` (it read a failed, cyclic or
+  blocked node, whatever its evaluator returned; it lists the failed and cyclic nodes upstream)
+  or `cyclic`. Demanding a node that is being evaluated on the same thread closes a cycle: every
+  node from the demanded one to the demanding one becomes cyclic with the members listed, and
+  `node` returns `doc.graph.cycle`. Inline demands nest at most `DEFAULT_DEPTH_LIMIT` (256) deep
+  per thread, configurable per graph; the demand beyond it fails with `doc.graph.depth_exceeded`,
+  so a long chain evaluated from its far end fails where one evaluated from its near end does
+  not. The last good result and the revision it was computed from stay visible in every state; a
+  later successful evaluation clears a failure. `Graph::node` returns a node's view,
+  `non_clean` the views of all nodes that are not clean in time proportional to them, and
+  `drain_transitions` the state changes since the previous drain, one per node.
 
 ### Error codes
 
@@ -691,3 +761,10 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.migration.failed` | `failed_operation` | An object of an older major version cannot be migrated: trailing bytes, a failing migration or an invalid result |
 | `doc.object.not_modifiable` | `conflict` | A preserved or quarantined object would be changed |
 | `doc.document.read_only` | `conflict` | A read-only document would be changed |
+| `doc.graph.malformed_key` | `invalid_input` | A derived key does not follow the key grammar |
+| `doc.graph.duplicate_key` | `conflict` | An evaluator is already registered for a derived key and object type, or for a graph-local derived key |
+| `doc.graph.unknown_key` | `not_found` | No evaluator computes a derived key for the type of its object |
+| `doc.graph.cycle` | `failed_operation` | A node demands a node that is being evaluated on the same thread |
+| `doc.graph.blocked` | `failed_operation` | A node reads a node that is failed, blocked or cyclic |
+| `doc.graph.depth_exceeded` | `limit_exceeded` | Nested demands on one thread exceed the depth limit of the graph |
+| `doc.graph.stale` | `conflict` | A result was computed from a revision whose inputs changed since, or keeps being superseded |
