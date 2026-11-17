@@ -819,6 +819,76 @@ about 350 bytes for an object at the current version or migrated in a writable d
 1,050 bytes for a migrated object of a read-only document, and about 1,900 bytes for a held
 row.
 
+### Commit, executor and events (CORE-DOC-015, CORE-DOC-016, CORE-DOC-018, CORE-DOC-036)
+
+- **Commit.** `commit(txn, hooks)` validates a finished transaction in the order of the
+  [document model](../architecture/document-model.md#transactions): (1) the field schema check
+  (`check_values` with bounds and required fields) of every created, modified or recreated
+  object, the error gaining the details `object` and `type`; (2) `Txn::apply_delete_rules`, whose
+  cascades and clears become operations, then the read-only flag of objects, then
+  `check_references`; (3) the type validators of those objects, in identifier order; (4) the
+  document validators in registration order. A validator finding of severity error fails the
+  commit with the validator's own error (details `origin`: `type_validator` or
+  `document_validator`, and `object` for a type validator); warnings become `Diagnostic`s. Every
+  stage looks only at the touched identifiers and their referrers, so validation cost follows
+  the change, not the document. Then the candidate is published with `SnapshotCell::publish`,
+  and in this order the `JournalSink` records a `Committed` (metadata, final operation list,
+  snapshots before and after), the graph applies `ChangeSet::from_commit`, the
+  `DiagnosticSink` receives the warnings and the `committed` event is emitted. Any failure
+  before publication leaves the published snapshot untouched and drops the transaction. A step
+  after publication that unwinds does not undo the publication: it becomes a
+  `doc.executor.fault` diagnostic and the remaining steps run.
+- **Transactions without operations** publish nothing: no revision, record or event; the result
+  names the unchanged snapshot. A transaction with operations on a read-only document fails with
+  `doc.document.read_only`.
+- **Read-only objects.** An object whose header in the base has the `read_only` flag keeps its
+  values, owner and existence: modifying a field, relinking or deleting it, directly or through
+  a cascade or a cleared reference, fails with `doc.object.read_only`. Its name, partition and
+  flags may change, so a command clears the flag in a transaction of its own before editing it.
+- **Document validators** are functions of the base snapshot, the candidate snapshot and the
+  touched map, returning findings; they are added with `Document::add_validator` and run at every
+  later commit.
+- **Diagnostics.** A `Diagnostic` is a severity, an `arc_base::Error` (stable code, message
+  identifier, arguments, details), the objects involved and an origin: `Validator`, `Node`,
+  `Load` (with the load diagnostic kind) or `Executor` (faults). Load diagnostics convert with
+  severity error for quarantined and unaddressable rows and warning otherwise. A
+  `DiagnosticSink` receives each commit's warnings and faults; `CollectingSink` keeps a bounded
+  number. The maintained list is CORE-DOC-035.
+- **Executor.** Each `Document` runs one thread that executes submitted jobs strictly in
+  submission order. A job is a closure that receives a new `Txn` on the latest snapshot (with
+  the next transaction identifier of the document's generator and the previous published
+  transaction as parent) and returns a value; the executor commits the transaction and sends
+  the outcome to the `Pending` handle, which the caller waits on, polls or drops. Submission
+  never waits for a job (the queue is unbounded; `std::sync::mpsc`). A job that returns an
+  error, unwinds or fails its commit leaves the published snapshot identical (the same pointer,
+  `Snapshot::ptr_eq`) to the previous one; an unwind is caught on the executor thread and
+  reported as `doc.executor.fault` (category `internal`, detail `panic`) to the caller and as a
+  diagnostic to the sink, and the thread runs the next job. Read-only queries use
+  `Document::snapshot` on any thread and never go through the executor. Dropping the document or
+  `Document::close` stops the thread after the running job; queued and later jobs fail with
+  `doc.executor.stopped`. On `wasm32`, which has no threads, the executor runs each job inline in
+  `submit` with the same order and rollback; a job submitted from a running job runs after it.
+- **Events.** The `EventBus` delivers the six events of the document model: `Committed`
+  (revision, transaction, kind, changed identifiers by type key and change kind, the number of
+  commits covered and the published snapshot), `Regenerated` (revision, nodes that became clean
+  and that failed), `DiagnosticsChanged` (added and removed), `Saved` (path, format version,
+  revision), `LinkStateChanged` (new state per link) and `ConflictRecorded` (record identifiers).
+  Commit emits `Committed`; the other units call `emit`. Each subscription has a bounded queue
+  (64 events by default); when it is full, later events go to an overflow of one event per kind
+  that merges events of the same kind: the latest revision, transaction, snapshot, save and link
+  states, and the union of changed identifiers, nodes and records, which becomes "everything"
+  beyond 65,536 identifiers; diagnostics lists beyond 1,024 entries are dropped with an
+  `overflow` flag. Events arrive in emission order, the overflow after the queue. Emitting never
+  waits for a subscriber; a dropped subscription is removed at the next emission. Handlers
+  receive immutable snapshots and change the document only by submitting jobs.
+
+The `commit_scale` test (ignored by default; run it in a release build) fills one store with one
+million objects and measures submit-to-result of 10,000 single-field modifications through the
+executor, including validation, publication, the graph change set and the event. On a shared
+four-core development machine it measured a mean of about 76 µs and a 99th percentile of about
+0.17 ms against the 2 ms budget of [testing.md](../testing.md); single rounds of up to 10 ms
+occurred when the thread was descheduled.
+
 ### Error codes
 
 The codes `arc-doc` owns. A code is never reused for a different meaning; messages are in
@@ -870,3 +940,6 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.graph.depth_exceeded` | `limit_exceeded` | Nested demands on one thread exceed the depth limit of the graph |
 | `doc.graph.stale` | `conflict` | A result was computed from a revision whose inputs changed since, or keeps being superseded |
 | `doc.load.validator_panicked` | `internal` | A type validator panicked while a loaded object was validated |
+| `doc.object.read_only` | `conflict` | An object flagged read-only would have its values or owner changed, or be deleted |
+| `doc.executor.fault` | `internal` | A job, or a step of its commit, unwound on the document executor |
+| `doc.executor.stopped` | `cancelled` | The document executor stopped, or could not start, before the job ran |

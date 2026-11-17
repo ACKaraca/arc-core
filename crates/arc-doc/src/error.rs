@@ -275,6 +275,25 @@ pub mod codes {
         message_id: "doc-load-validator-panicked",
     };
 
+    /// An object flagged read-only would have its values or owner changed, or be deleted.
+    pub const OBJECT_READ_ONLY: ErrorCode = ErrorCode {
+        code: "doc.object.read_only",
+        category: Category::Conflict,
+        message_id: "doc-object-read-only",
+    };
+    /// A job or a step of its commit unwound on the document executor.
+    pub const EXECUTOR_FAULT: ErrorCode = ErrorCode {
+        code: "doc.executor.fault",
+        category: Category::Internal,
+        message_id: "doc-executor-fault",
+    };
+    /// The document executor stopped, or could not start, before the job ran.
+    pub const EXECUTOR_STOPPED: ErrorCode = ErrorCode {
+        code: "doc.executor.stopped",
+        category: Category::Cancelled,
+        message_id: "doc-executor-stopped",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         TYPE_DUPLICATE_KEY,
@@ -321,6 +340,9 @@ pub mod codes {
         GRAPH_DEPTH_EXCEEDED,
         GRAPH_STALE,
         LOAD_VALIDATOR_PANICKED,
+        OBJECT_READ_ONLY,
+        EXECUTOR_FAULT,
+        EXECUTOR_STOPPED,
     ];
 }
 

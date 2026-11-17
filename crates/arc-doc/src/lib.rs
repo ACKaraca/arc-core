@@ -16,8 +16,13 @@
 //! The journal, commit, the executor, migration, the dependency graph and the package build on
 //! these. No function in this crate panics.
 
+pub mod commit;
 pub mod descriptor;
+pub mod diagnostic;
+pub mod document;
 pub mod error;
+pub mod events;
+pub mod executor;
 pub mod graph;
 mod index;
 pub mod integrity;
@@ -33,12 +38,18 @@ pub mod schema;
 pub mod snapshot;
 mod store;
 pub mod txn;
+pub mod validate;
 pub mod version;
 
 #[cfg(test)]
 mod testing;
 
+pub use commit::{CommitHooks, CommitOutcome, Committed, JournalSink, commit};
 pub use descriptor::descriptor;
+pub use diagnostic::{CollectingSink, Diagnostic, DiagnosticSink, Origin};
+pub use document::{Document, DocumentConfig};
+pub use events::{Event, EventBus, EventKind, Subscription};
+pub use executor::{Completed, Pending};
 pub use graph::{
     ChangeSet, Derived, DerivedKey, DerivedValue, EvalContext, Evaluators, Graph, NodeKey,
     NodeState, NodeView, StateKind,
@@ -68,4 +79,5 @@ pub use store::Handle;
 pub use txn::{
     MAX_OPERATIONS, MAX_SAVEPOINTS, Txn, TxnKind, TxnLimits, TxnMeta, TxnParts, TxnSavepoint,
 };
+pub use validate::DocumentValidator;
 pub use version::{NewerMajor, ReadOnlyReason};

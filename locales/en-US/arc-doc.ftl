@@ -45,3 +45,6 @@ doc-graph-blocked = The derived data { $node } cannot be computed because an inp
 doc-graph-depth-exceeded = Computing the derived data needs more than { $limit } nested steps.
 doc-graph-stale = The derived data { $node } was computed from an outdated state of the document.
 doc-load-validator-panicked = A validator of { $type } failed unexpectedly; the object is kept read-only.
+doc-object-read-only = The object { $id } is read-only.
+doc-executor-fault = A command failed because of a defect; the document was left unchanged.
+doc-executor-stopped = The document was closed before the command could run.

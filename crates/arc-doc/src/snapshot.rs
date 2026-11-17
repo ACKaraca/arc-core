@@ -178,6 +178,12 @@ impl Snapshot {
         self.0.revision
     }
 
+    /// True when both are the same snapshot (one pointer), not merely equal in content.
+    #[must_use]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// The type registry of the document.
     #[must_use]
     pub fn registry(&self) -> &Arc<TypeRegistry> {
