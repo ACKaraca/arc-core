@@ -153,6 +153,61 @@ pub mod codes {
         message_id: "geom-flatten-too-many-vertices",
     };
 
+    /// A loop has no curves.
+    pub const REGION_LOOP_EMPTY: ErrorCode = ErrorCode {
+        code: "geom.region.loop_empty",
+        category: Category::InvalidInput,
+        message_id: "geom-region-loop-empty",
+    };
+    /// The end of a curve of a loop is farther than the linear tolerance from the start of the next.
+    pub const REGION_LOOP_OPEN: ErrorCode = ErrorCode {
+        code: "geom.region.loop_open",
+        category: Category::InvalidInput,
+        message_id: "geom-region-loop-open",
+    };
+    /// A loop encloses an area of exactly zero.
+    pub const REGION_LOOP_ZERO_AREA: ErrorCode = ErrorCode {
+        code: "geom.region.loop_zero_area",
+        category: Category::InvalidInput,
+        message_id: "geom-region-loop-zero-area",
+    };
+    /// A region has no parts.
+    pub const REGION_EMPTY: ErrorCode = ErrorCode {
+        code: "geom.region.empty",
+        category: Category::InvalidInput,
+        message_id: "geom-region-empty",
+    };
+    /// The bounding box of a hole is not inside that of its outer loop.
+    pub const REGION_HOLE_OUTSIDE: ErrorCode = ErrorCode {
+        code: "geom.region.hole_outside",
+        category: Category::InvalidInput,
+        message_id: "geom-region-hole-outside",
+    };
+    /// Edges of the flattened loops of a region cross, touch or overlap.
+    pub const TRIANGULATE_EDGES_CROSS: ErrorCode = ErrorCode {
+        code: "geom.triangulate.edges_cross",
+        category: Category::InvalidInput,
+        message_id: "geom-triangulate-edges-cross",
+    };
+    /// A flattened loop has fewer than three vertices, no area, or the opposite orientation.
+    pub const TRIANGULATE_LOOP_COLLAPSED: ErrorCode = ErrorCode {
+        code: "geom.triangulate.loop_collapsed",
+        category: Category::InvalidInput,
+        message_id: "geom-triangulate-loop-collapsed",
+    };
+    /// The flattened loops of a region are not nested as its parts say.
+    pub const TRIANGULATE_NESTING_INVALID: ErrorCode = ErrorCode {
+        code: "geom.triangulate.nesting_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-triangulate-nesting-invalid",
+    };
+    /// A triangle mesh has a non-finite vertex or a triangle index outside its vertex list.
+    pub const MESH_INVALID: ErrorCode = ErrorCode {
+        code: "geom.mesh.invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-mesh-invalid",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         INPUT_NOT_FINITE,
@@ -179,6 +234,15 @@ pub mod codes {
         LENGTH_OUT_OF_RANGE,
         CURVE_UNBOUNDED,
         FLATTEN_TOO_MANY_VERTICES,
+        REGION_LOOP_EMPTY,
+        REGION_LOOP_OPEN,
+        REGION_LOOP_ZERO_AREA,
+        REGION_EMPTY,
+        REGION_HOLE_OUTSIDE,
+        TRIANGULATE_EDGES_CROSS,
+        TRIANGULATE_LOOP_COLLAPSED,
+        TRIANGULATE_NESTING_INVALID,
+        MESH_INVALID,
     ];
 }
 

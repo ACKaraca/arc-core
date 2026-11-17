@@ -13,6 +13,7 @@ arc-base = { workspace = true }
 robust = { workspace = true }
 rstar = { workspace = true }
 serde = { workspace = true }
+spade = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

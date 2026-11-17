@@ -24,6 +24,7 @@ third_party = [
   "rstar",
   "serde",
   "serde_json",
+  "spade",
   "thiserror",
   "toml",
   "uuid",

@@ -299,6 +299,70 @@ cannot resolve `linear` there, or the bound of a result exceeds `linear`, the op
 with `geom.precision.insufficient`. A tolerance whose `linear` is not positive and finite, or
 whose `angular` is negative or not finite, fails with `geom.tolerance.invalid`.
 
+### Regions and point containment
+
+`Loop2` is a closed chain of bounded curves (segments, arcs, elliptical arcs, polylines, or a
+single full circle, full ellipse or closed polyline); `Region` is one or more `RegionPart`s, each
+an outer loop with holes (CORE-GEOM-021).
+
+- `Loop2::new(curves, tolerance)` accepts consecutive end and start points that differ by at most
+  `linear` (the last curve joins the first) and closes each nonzero gap with a straight segment
+  stored in the chain. Reversing or transforming a loop can leave gaps of a few units in the last
+  place between recomputed arc ends; every algorithm treats a remaining gap as a straight joint,
+  so the boundary is watertight. Deserialization accepts gaps up to the default `linear` and keeps
+  the curves unchanged.
+- The signed area is computed in closed form: the chord triangle of each piece with a reference
+  point, plus `½·r²·(θ − sin θ)` for each circular arc of sweep `θ` (with the radius taken from
+  the exact chord below a half turn) and `½·a·b·(θ − sin θ)` for each elliptical arc of eccentric
+  sweep `θ`. A loop of exactly zero area is rejected; positive area is counterclockwise.
+- `Region::new(parts)` turns outer loops counterclockwise and holes clockwise, and checks that
+  there is a part and that each hole's bounding box lies inside its outer loop's. That loops
+  neither cross nor touch and that holes lie inside their outer loops is the caller's
+  precondition; building regions from arbitrary curves is CORE-GEOM-016.
+- `classify(point, tolerance)` on a loop or a region returns `Inside`, `Outside` or
+  `OnBoundary`. A point within `linear` of a curve, by the closest-point query, is on the
+  boundary. Otherwise the crossings of the boundary with the ray from the point toward
+  increasing x are counted, an end point at the ray's height counting as below it: straight
+  pieces are decided exactly with `orient2d`; arcs and elliptical arcs are split at their
+  extrema in y into monotone stretches, decided by their ends and located by bisection.
+  Consecutive pieces share exact end points, so vertices and tangencies count once. A point in a
+  hole is outside; a part inside another part's hole is a separate island.
+
+The property tests compare the classification with a densely flattened reference for points
+more than 0.01 from the boundary, classify points sampled on every curve as on the boundary, and
+check invariance under rigid transforms of region and point together.
+
+### Polygon triangulation
+
+`triangulate(region, chord, angle, max_vertices)` and `triangulate_with(region, tolerance,
+limits)` return a `TriangleMesh2`: the flattened vertices, loop by loop in region order, and
+counterclockwise triangles of `u32` indices (CORE-GEOM-022).
+
+- Every curve is flattened with `CurveFlatten` at `chord` and `angle`; each curve after the first
+  continues from the previous curve's end, segments no longer than `chord` (such as gap joints)
+  are skipped, and exactly equal consecutive vertices are merged. A flattened loop with fewer
+  than three vertices or whose shoelace area is zero or of the opposite sign fails with
+  `geom.triangulate.loop_collapsed`; more than `max_vertices` vertices in all fail with
+  `geom.flatten.too_many_vertices`.
+- Every pair of flattened edges with overlapping bounding boxes is tested exactly with `orient2d`
+  (candidates from the R*-tree index); edges that cross, touch away from a shared vertex or fold
+  back fail with `geom.triangulate.edges_cross`, which also catches loops whose chords cross only
+  after coarse flattening.
+- The vertices and loop edges form a constrained Delaunay triangulation (`spade`, behind the API).
+  Among the triangulations of the flattened vertices that contain the loop edges it maximizes the
+  smallest angle; no vertices are added, so a thin triangle remains only where the flattened
+  boundary forces it. This is the meaning of "where the input allows".
+- Triangles are kept by parity, flooding from the outside and toggling at every loop edge. Each
+  loop edge must then have a kept triangle on its region side and none on the other; otherwise
+  the call fails with `geom.triangulate.nesting_invalid`. Coordinates must be zero or of
+  magnitude between about 1.8e-43 and 3.2e60, the range of the triangulation's exact arithmetic;
+  others fail with `geom.precision.insufficient`.
+
+The property tests check that the triangle areas sum to the flattened region's area, that every
+centroid is inside the flattened loops, that triangles are counterclockwise and non-degenerate,
+that every loop edge borders exactly one triangle, the constrained Delaunay condition on interior
+edges with `incircle`, and determinism.
+
 ### Error codes
 
 The codes `arc-geom` owns. A code is never reused for a different meaning; messages are in
@@ -327,6 +391,15 @@ The codes `arc-geom` owns. A code is never reused for a different meaning; messa
 | `geom.view.scale_not_positive` | `invalid_input` | An orthographic view height is zero or negative |
 | `geom.view.clip_invalid` | `invalid_input` | Near is not smaller than far, or near is not positive for a perspective frame |
 | `geom.view.aspect_invalid` | `invalid_input` | An aspect ratio is not a finite positive number |
+| `geom.region.loop_empty` | `invalid_input` | A loop has no curves |
+| `geom.region.loop_open` | `invalid_input` | The end of a curve of a loop is farther than the linear tolerance from the start of the next |
+| `geom.region.loop_zero_area` | `invalid_input` | A loop encloses an area of exactly zero |
+| `geom.region.empty` | `invalid_input` | A region has no parts |
+| `geom.region.hole_outside` | `invalid_input` | The bounding box of a hole is not inside that of its outer loop |
+| `geom.triangulate.edges_cross` | `invalid_input` | Edges of the flattened loops of a region cross, touch away from a shared vertex, or fold back |
+| `geom.triangulate.loop_collapsed` | `invalid_input` | A flattened loop has fewer than three vertices, no area, or the opposite orientation |
+| `geom.triangulate.nesting_invalid` | `invalid_input` | The flattened loops are not nested as the parts of the region say: a hole lies outside its outer loop or parts overlap |
+| `geom.mesh.invalid` | `invalid_input` | A triangle mesh has a non-finite vertex or a triangle index outside its vertex list |
 
 ### Spatial index (CORE-GEOM-027)
 

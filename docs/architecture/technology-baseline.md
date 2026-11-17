@@ -76,6 +76,7 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `proptest` | Property tests | MIT or Apache-2.0 |
 | `robust` | Adaptive exact orientation and in-circle predicates in `arc-geom` | MIT or Apache-2.0 |
 | `rstar` | R*-tree behind the spatial index of `arc-geom`; no `rstar` type appears in a public signature | MIT or Apache-2.0 |
+| `spade` | Constrained Delaunay triangulation behind the polygon triangulation of `arc-geom`; no `spade` type appears in a public signature | MIT or Apache-2.0 |
 | `toml` | Reading the layer table and manifests in `xtask` | MIT or Apache-2.0 |
 
 ## Not built in the first two years
