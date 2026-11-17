@@ -51,3 +51,22 @@ CRDT); the record granularity and the sharing structure are decided here.
 Measured undo memory or commit latency on the reference large-model fixtures exceeds the budgets in
 the testing document, or multi-user editing shows field granularity is insufficient for a common
 workflow.
+
+## Amendment
+
+The first implementation fixes the byte layout of a record, which the decision left open; it is
+specified in [journal-record.md](../architecture/journal-record.md):
+
+- The layout is hand-written and versioned (format 1), with LEB128 varints, identifiers in UUID
+  byte order and length-prefixed texts and values, and it is canonical: the decoder re-encodes
+  what it read and refuses any other bytes. Object values of creates and deletes are the
+  object's payload; field-level before and after values are single values in their payload
+  form, as decided above. Field paths are stored as tagged segments rather than their text form,
+  so that decoding needs no parsing.
+- Every operation names the type key of its object through a table of the record's type keys.
+  The document model lists no type key for `modify`, `modify_properties` and `relink`, but a
+  field-level value cannot be decoded without its type, and a record must be readable from the
+  type registry alone (recovery, change sets, history), not only against the document state it
+  was made on.
+- Coalesce keys and gesture identifiers are not part of the record: they decide how records
+  form undo steps in one session and are given by the command layer when it reports a commit.

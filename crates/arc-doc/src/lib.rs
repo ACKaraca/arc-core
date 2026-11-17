@@ -26,11 +26,13 @@ pub mod executor;
 pub mod graph;
 mod index;
 pub mod integrity;
+pub mod journal;
 pub mod load;
 pub mod migrate;
 pub mod op;
 pub mod payload;
 pub mod preserved;
+pub mod record;
 pub mod registry;
 pub mod relationship;
 pub mod reverse_index;
@@ -38,6 +40,7 @@ pub mod schema;
 pub mod snapshot;
 mod store;
 pub mod txn;
+pub mod undo;
 pub mod validate;
 pub mod version;
 
@@ -57,6 +60,7 @@ pub use graph::{
 pub use integrity::{
     CascadeDelete, ClearedFields, DeleteReport, apply_delete_rules, check_references,
 };
+pub use journal::{Journal, JournalEntry};
 pub use load::{
     DiagnosticKind, LoadCounts, LoadDiagnostic, LoadOptions, Loaded, LoadedRow, LoadedRows,
     StoredObject, StoredType, load,
@@ -64,6 +68,7 @@ pub use load::{
 pub use op::{Op, Properties};
 pub use payload::{Decoded, Encoding, Payload};
 pub use preserved::{HeldKind, HeldObject};
+pub use record::{RECORD_FORMAT, TxnRecord};
 pub use registry::TypeRegistry;
 pub use relationship::{Reference, ReferenceField};
 pub use reverse_index::{Referrer, Referrers};
@@ -79,5 +84,6 @@ pub use store::Handle;
 pub use txn::{
     MAX_OPERATIONS, MAX_SAVEPOINTS, Txn, TxnKind, TxnLimits, TxnMeta, TxnParts, TxnSavepoint,
 };
+pub use undo::{Step, UndoLimits, UndoManager};
 pub use validate::DocumentValidator;
 pub use version::{NewerMajor, ReadOnlyReason};

@@ -14,6 +14,7 @@ the document for the area you work on and the specification of the crate you cha
 | [geometry.md](architecture/geometry.md) | Geometry tiers, tolerances, curves and regions, meshes, the B-rep API and naming, kernel isolation, constraint solver, expressions |
 | [geometry-encoding.md](architecture/geometry-encoding.md) | The versioned canonical byte layout of stored `arc-geom` values, its limits and versioning rule |
 | [mesh-encoding.md](architecture/mesh-encoding.md) | The versioned byte layout of stored `arc-mesh` triangle meshes, its quantization, limits and versioning rule |
+| [journal-record.md](architecture/journal-record.md) | The versioned canonical byte layout of operation journal records and its decoding rules |
 | [drafting-and-views.md](architecture/drafting-and-views.md) | The 2D drafting model, plotting and derived views of 3D models |
 | [rendering.md](architecture/rendering.md) | The viewport renderer and the Arc Scene contract |
 | [ui-kit.md](architecture/ui-kit.md) | Widgets, workspace, localization, accessibility, settings, shared interaction standards, browser and tablet or phone targets |

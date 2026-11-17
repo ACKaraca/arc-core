@@ -294,6 +294,44 @@ pub mod codes {
         message_id: "doc-executor-stopped",
     };
 
+    /// A journal record is malformed, not canonical, or does not fit the type registry.
+    pub const JOURNAL_RECORD_INVALID: ErrorCode = ErrorCode {
+        code: "doc.journal.record_invalid",
+        category: Category::CorruptData,
+        message_id: "doc-journal-record-invalid",
+    };
+    /// A journal record exceeds a hostile-input limit.
+    pub const JOURNAL_RECORD_LIMIT_EXCEEDED: ErrorCode = ErrorCode {
+        code: "doc.journal.record_limit_exceeded",
+        category: Category::LimitExceeded,
+        message_id: "doc-journal-record-limit-exceeded",
+    };
+    /// A transaction is appended to a journal that already holds its identifier.
+    pub const JOURNAL_DUPLICATE_TXN: ErrorCode = ErrorCode {
+        code: "doc.journal.duplicate_txn",
+        category: Category::Conflict,
+        message_id: "doc-journal-duplicate-txn",
+    };
+    /// A transaction is appended whose parent is not the last transaction of the journal.
+    pub const JOURNAL_PARENT_MISMATCH: ErrorCode = ErrorCode {
+        code: "doc.journal.parent_mismatch",
+        category: Category::Conflict,
+        message_id: "doc-journal-parent-mismatch",
+    };
+    /// An undo, redo or group rollback does not fit the current state of the document.
+    pub const UNDO_STATE_MISMATCH: ErrorCode = ErrorCode {
+        code: "doc.undo.state_mismatch",
+        category: Category::Internal,
+        message_id: "doc-undo-state-mismatch",
+    };
+    /// The undo history is used out of order: a commit it did not prepare, a group or gesture
+    /// that is not open, or an undo or redo inside an open group.
+    pub const UNDO_SEQUENCE_INVALID: ErrorCode = ErrorCode {
+        code: "doc.undo.sequence_invalid",
+        category: Category::InvalidInput,
+        message_id: "doc-undo-sequence-invalid",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         TYPE_DUPLICATE_KEY,
@@ -343,6 +381,12 @@ pub mod codes {
         OBJECT_READ_ONLY,
         EXECUTOR_FAULT,
         EXECUTOR_STOPPED,
+        JOURNAL_RECORD_INVALID,
+        JOURNAL_RECORD_LIMIT_EXCEEDED,
+        JOURNAL_DUPLICATE_TXN,
+        JOURNAL_PARENT_MISMATCH,
+        UNDO_STATE_MISMATCH,
+        UNDO_SEQUENCE_INVALID,
     ];
 }
 

@@ -1,0 +1,26 @@
+# The fuzz targets of arc-doc, built with `cargo +nightly fuzz` from crates/arc-doc. This crate
+# is not a member of the workspace, so the workspace gate never builds it.
+[package]
+name = "arc-doc-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arc-base = { path = "../../arc-base" }
+arc-doc = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "record"
+path = "fuzz_targets/record.rs"
+test = false
+doc = false
+bench = false
+
+# Its own workspace root, separate from the repository workspace.
+[workspace]

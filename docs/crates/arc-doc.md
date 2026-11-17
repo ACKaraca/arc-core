@@ -889,6 +889,87 @@ four-core development machine it measured a mean of about 76 µs and a 99th perc
 0.17 ms against the 2 ms budget of [testing.md](../testing.md); single rounds of up to 10 ms
 occurred when the thread was descheduled.
 
+### Journal, undo and redo (CORE-DOC-019 to CORE-DOC-023)
+
+- **Records.** A `TxnRecord` (`arc_doc::record`) holds the fields of the
+  [record shape](../architecture/document-model.md#record-shape) and the final operation list of
+  a committed transaction, including the operations the deletion rules added, together with the
+  type key of each operation's object: that of its create or delete, of an earlier create of the
+  same identifier in the list, or of the object in the snapshot the transaction was applied on.
+  `from_commit(meta, ops, before)` builds it; an operation on an object none of them knows fails
+  with `doc.journal.record_invalid`. `encode(registry, limits)` writes the canonical, versioned
+  layout of [journal-record.md](../architecture/journal-record.md), with values in the payload
+  encoding at the schema version each operation names, which must be the registered schema of
+  that major version. `decode(bytes, registry, limits)` treats the bytes as hostile and decodes
+  the structure and then the values against the registry in one pass, since every value is
+  length-prefixed; it re-encodes the result and refuses any other bytes. Limits fail with
+  `doc.journal.record_limit_exceeded`, everything else with `doc.journal.record_invalid`, with
+  the payload codec's error as the source. The decoder has a `cargo-fuzz` target,
+  `crates/arc-doc/fuzz` (`record`).
+- **Journal.** A `Journal` is the append-only list of the records of one session.
+  `append(meta, ops, before, after)` is the commit hook: it builds the record, encodes it and
+  appends it in constant time besides encoding, failing with `doc.journal.duplicate_txn` for an
+  identifier it holds and `doc.journal.parent_mismatch` when the journal is not empty and the
+  parent is not its last transaction; a failure appends nothing. Entries keep the decoded record,
+  its encoding (for the package) and the revision it published; `get` finds an entry by
+  transaction identifier in constant time, `iter` lists them in commit order and `ancestors`
+  follows the parent chain while the parents are in the journal. Persisting and retaining
+  records across saves belongs to the package.
+- **Undo and redo.** An `UndoManager` holds the undo and redo stacks as steps, each the
+  identifiers of the transactions it contains. It does not commit: `undo`, `redo` and
+  `fail_group` return an ordinary `Txn` on the given current snapshot, which the caller commits
+  like any transaction (deletion rules, validation, publication, journal) and reports with
+  `committed(journal, txn, coalesce_key)`; the stacks change only then, so a refused commit
+  changes nothing, and the manager does not depend on the commit path. Undo applies the inverses
+  of the top step's operations in reverse order, kind `undo_of(last transaction of the step)`,
+  and moves the step to the redo stack. Redo applies the step's original operations again
+  (source identifiers of copies included), kind `redo_of(last transaction of the step)`; the
+  redo transaction forms a new undo step, whose undo inverts it again, so the undo of an undo is
+  a redo. A reported `normal` or `link_reload` transaction clears the redo stack; `merge` and
+  `migration` transactions leave both stacks unchanged. The operations are checked strictly
+  against the current state first (`Op::apply` on a scratch working set): a state that does not
+  hold the step's after values fails with `doc.undo.state_mismatch`, an internal error in
+  phase 0, where nothing but the session's commands writes the document; refusing such an undo
+  as a conflict is CORE-DOC-024. Reporting a transaction that is not in the journal, or an undo
+  or redo that is not of the step on top of its stack, fails with `doc.undo.sequence_invalid`.
+- **Groups.** `begin_group(id)` opens a group, nested in the open ones; `group()` is the
+  identifier of the outermost, which every transaction committed while it is open must carry in
+  its metadata (`doc.undo.sequence_invalid` otherwise). The transactions of the outermost group
+  form one step when `end_group` closes it; an empty group forms none. `fail_group` closes the
+  innermost group because its owner failed: it returns one transaction that applies the inverses
+  of the operations of every transaction committed since that group began, in reverse order, of
+  kind `undo_of(last member)`, the kind of the model that restores an earlier state. The members
+  leave the open step and the rollback joins no step, so a failed outermost group leaves the
+  stacks as they were before it began, except for the redo stack its members cleared. Undo and
+  redo inside an open group fail with `doc.undo.sequence_invalid`; a step back within the open
+  group belongs to the command's prompt machine.
+- **Coalescing.** The record shape holds no coalesce key or gesture, so they are the command
+  layer's: `begin_gesture` and `end_gesture` bracket a gesture (a drag of a grip, a slider
+  scrub), and `committed` takes the transaction's coalesce key. A transaction joins the top
+  undo step when a gesture is open, it has a key, and the top step was formed in the same
+  gesture with the same key; after an undo, no transaction joins an older step. The journal
+  keeps every record; a step's inverse is the composition of its members' inverses in reverse
+  order.
+- **Limits.** `UndoLimits` bounds the undo stack by step count (`DEFAULT_UNDO_STEPS`, 1,000)
+  and by the estimated memory of the steps' records (`DEFAULT_UNDO_MEMORY_BYTES`, 1 GiB). A
+  record's estimate is the length of its encoding plus the size of one in-memory operation per
+  operation; objects of creates and deletes are often shared with snapshots, so their encoded
+  size stands in for them. After every change of the undo stack, and when the limits change,
+  the oldest steps are dropped while the stack exceeds either limit, a single step larger than
+  the budget included; their records stay in the journal. The redo stack holds only steps that
+  were on the undo stack.
+- **Comparison.** `undo::differences(a, b)` lists the identifiers of the objects that differ
+  between two snapshots (live in one only, or with another type key, schema version, header or
+  values, compared bit for bit), walking both and skipping objects shared by pointer; an empty
+  list is the empty comparison the undo tests check. The comparison API with changed paths and
+  both values is CORE-DOC-026 (phase 1).
+
+The `undo_steps` test `undo_of_a_thousand_modifications_stays_within_budget` (ignored by
+default; run it in a release build) undoes a step of 1,000 single-field modifications of 1,000
+objects, including the deletion rules, the reference check, publication, the journal record and
+the report to the manager; the worst of 20 rounds measured 3.3 ms on a shared four-core
+development machine, against the budget of 50 ms in [testing.md](../testing.md).
+
 ### Error codes
 
 The codes `arc-doc` owns. A code is never reused for a different meaning; messages are in
@@ -943,3 +1024,9 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.object.read_only` | `conflict` | An object flagged read-only would have its values or owner changed, or be deleted |
 | `doc.executor.fault` | `internal` | A job, or a step of its commit, unwound on the document executor |
 | `doc.executor.stopped` | `cancelled` | The document executor stopped, or could not start, before the job ran |
+| `doc.journal.record_invalid` | `corrupt_data` | A journal record is truncated, malformed, not canonical or of another format version, names an unregistered type or schema version, holds values its types reject, or an operation's object has no known type |
+| `doc.journal.record_limit_exceeded` | `limit_exceeded` | A journal record exceeds a hostile-input limit |
+| `doc.journal.duplicate_txn` | `conflict` | A transaction is appended to a journal that holds its identifier |
+| `doc.journal.parent_mismatch` | `conflict` | A transaction is appended whose parent is not the journal's last transaction |
+| `doc.undo.state_mismatch` | `internal` | An undo, redo or group rollback does not fit the current state of the document |
+| `doc.undo.sequence_invalid` | `invalid_input` | The undo history is used out of order: a commit it did not prepare, a group that is not open, a group member without the group's identifier, or an undo or redo inside an open group |
