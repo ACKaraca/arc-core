@@ -189,7 +189,8 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "geom-region-hole-outside",
     };
-    /// Edges of the flattened loops of a region cross, touch or overlap.
+    /// Edges of the flattened loops of a region cross, touch away from a shared vertex, or fold
+    /// back.
     pub const TRIANGULATE_EDGES_CROSS: ErrorCode = ErrorCode {
         code: "geom.triangulate.edges_cross",
         category: Category::InvalidInput,
@@ -207,7 +208,8 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "geom-triangulate-nesting-invalid",
     };
-    /// A triangle mesh has a non-finite vertex or a triangle index outside its vertex list.
+    /// A triangle mesh has a non-finite vertex, a triangle index outside its vertex list, or a
+    /// triangle that is not strictly counterclockwise.
     pub const MESH_INVALID: ErrorCode = ErrorCode {
         code: "geom.mesh.invalid",
         category: Category::InvalidInput,

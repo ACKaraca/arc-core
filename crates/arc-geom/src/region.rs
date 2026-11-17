@@ -16,7 +16,8 @@
 //!   contributes the triangle of its chord with a reference point, and each circular or
 //!   elliptical arc adds its signed segment area `½·r²·(θ − sin θ)` (for an elliptical arc,
 //!   `r²` is the product of the semi-axes and `θ` the eccentric sweep). A loop with an area of
-//!   exactly zero is rejected. Positive area is counterclockwise.
+//!   exactly zero is rejected, with `geom.precision.insufficient` instead when the loop is so
+//!   small that the square of its size underflows. Positive area is counterclockwise.
 //! - **Regions.** [`Region::new`] takes loops already grouped into parts and normalizes their
 //!   orientation: outer loops counterclockwise, holes clockwise. It checks only what is cheap:
 //!   at least one part, and the bounding box of each hole inside that of its outer loop. That
@@ -26,7 +27,9 @@
 //!   capability.
 //! - **Containment.** A point is [`Containment::OnBoundary`] when its distance to some curve of
 //!   some loop is at most `tolerance.linear`, measured with
-//!   [`CurveProject::closest_point`]. Otherwise a horizontal ray from the point toward
+//!   [`CurveProject::closest_point`]; a circular arc whose sagitta is at most `tolerance.linear`
+//!   is measured to its chord instead, which differs from it by at most the sagitta, so a nearly
+//!   straight arc of huge radius needs no projection onto its far-away circle. Otherwise a horizontal ray from the point toward
 //!   increasing x is intersected with every piece of the boundary and the crossings are
 //!   counted, with the half-open rule that an end point at the ray's height counts as below
 //!   it. Straight pieces cross when their ends lie on different sides; the side of the point
@@ -111,7 +114,8 @@ impl Loop2 {
     /// negative; `geom.region.loop_empty` for no curves; `geom.curve.unbounded` for a ray or
     /// line; `geom.region.loop_open` when the end of a curve is farther than `tolerance.linear`
     /// from the start of the next; `geom.region.loop_zero_area` when the enclosed signed area is
-    /// exactly zero; `geom.precision.insufficient` when the area is not finite in `f64`.
+    /// exactly zero; `geom.precision.insufficient` when the area is not finite in `f64`, or is zero
+    /// because the loop is so small that the square of its size underflows.
     pub fn new(curves: Vec<Curve2>, tolerance: &Tolerance) -> Result<Self> {
         crate::ensure_tolerance(tolerance)?;
         Self::build(curves, tolerance, true)
@@ -149,6 +153,13 @@ impl Loop2 {
             return Err(Error::new(codes::PRECISION_INSUFFICIENT).with_detail("area", area));
         }
         if area == 0.0 {
+            // An area of the square of the loop's size below the smallest normal number has
+            // underflowed, and its zero says nothing.
+            let boxed = built.bounding_box();
+            let size = crate::length(&(boxed.max() - boxed.min()));
+            if size * size < f64::MIN_POSITIVE {
+                return Err(Error::new(codes::PRECISION_INSUFFICIENT).with_detail("size", size));
+            }
             return Err(Error::new(codes::REGION_LOOP_ZERO_AREA));
         }
         Ok(built)
@@ -340,10 +351,22 @@ fn sweep_minus_sine(theta: f64) -> f64 {
 }
 
 /// The distance from `point` to an element when it can be within `tolerance.linear`, and
-/// infinity otherwise.
+/// infinity otherwise. A circular arc whose sagitta is at most `tolerance.linear` is measured to
+/// its chord, which differs from the arc by at most the sagitta.
 fn distance(element: &Element, point: Point2, tolerance: &Tolerance) -> Result<f64> {
     let near = |boxed: Aabb2| boxed.expanded(tolerance.linear).contains_point(&point);
+    let flat = |arc: &crate::primitives::Arc2| {
+        let chord = crate::length(&(element.end - element.start));
+        // sagitta = ½·chord·tan(|θ|/4), at most the chord below half a turn.
+        arc.sweep().abs() < PI && 0.5 * chord * (0.25 * arc.sweep().abs()).tan() <= tolerance.linear
+    };
     let found = match &element.piece {
+        Piece::Arc(c) if near(c.bounding_box()) && flat(c) => {
+            match Segment2::new(element.start, element.end) {
+                Ok(chord) => chord.closest_point(point, tolerance)?,
+                Err(_) => c.closest_point(point, tolerance)?,
+            }
+        }
         Piece::Segment(c) if near(c.bounding_box()) => c.closest_point(point, tolerance)?,
         Piece::Arc(c) if near(c.bounding_box()) => c.closest_point(point, tolerance)?,
         Piece::Elliptical(c) if near(c.bounding_box()) => c.closest_point(point, tolerance)?,
@@ -712,8 +735,8 @@ pub(crate) mod tests {
             .prop_map(|(a, b)| Region::new(std::iter::once(a).chain(b).collect()).unwrap())
     }
 
-    /// Every loop of the region flattened densely.
-    pub(crate) fn dense(region: &Region) -> Vec<Vec<Point2>> {
+    /// Every loop of the region flattened within `chord`.
+    pub(crate) fn dense(region: &Region, chord: f64) -> Vec<Vec<Point2>> {
         region
             .parts()
             .iter()
@@ -721,10 +744,45 @@ pub(crate) mod tests {
             .map(|lp| {
                 lp.curves()
                     .iter()
-                    .flat_map(|c| c.flatten(2e-4, 0.1, 1_000_000).unwrap())
+                    .flat_map(|c| c.flatten(chord, 0.1, 1_000_000).unwrap())
                     .collect()
             })
             .collect()
+    }
+
+    /// The heights at which a horizontal ray meets the boundary in a special way: curve and
+    /// polyline vertices, and the extrema in y of every piece.
+    fn special_heights(region: &Region) -> Vec<f64> {
+        let mut heights = Vec::new();
+        for lp in region
+            .parts()
+            .iter()
+            .flat_map(|p| std::iter::once(p.outer()).chain(p.holes()))
+        {
+            for element in lp.elements() {
+                let boxed = match &element.piece {
+                    Piece::Segment(c) => c.bounding_box(),
+                    Piece::Arc(c) => c.bounding_box(),
+                    Piece::Elliptical(c) => c.bounding_box(),
+                    Piece::Ray(_) | Piece::Line(_) => Aabb2::EMPTY,
+                };
+                heights.extend([element.start.y, element.end.y, boxed.min().y, boxed.max().y]);
+            }
+        }
+        heights
+    }
+
+    /// The default number of cases of the properties that flatten a reference densely: fewer
+    /// than the usual 256 regions, each queried at many points; `PROPTEST_CASES` overrides it.
+    fn dense_cases() -> u32 {
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(48)
+    }
+
+    fn translation(x: f64, y: f64) -> Transform2 {
+        Transform2::from_matrix_unchecked(Matrix3::new(1.0, 0.0, x, 0.0, 1.0, y, 0.0, 0.0, 1.0))
     }
 
     /// Even-odd containment in polygons, and the distance to their edges.
@@ -770,14 +828,76 @@ pub(crate) mod tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(dense_cases()))]
+
         #[test]
-        fn classification_matches_a_dense_reference(r in region(), p in query()) {
-            let (inside, distance) = reference(&dense(&r), p);
-            prop_assume!(distance > 1e-2);
-            let expected = if inside { Containment::Inside } else { Containment::Outside };
-            prop_assert_eq!(r.classify(p, &TOL).unwrap(), expected);
+        fn classification_matches_a_dense_reference(
+            r in region(),
+            queries in prop::collection::vec((query(), any::<prop::sample::Index>()), 16),
+            offset in prop_oneof![Just(0.0), Just(1e6)],
+        ) {
+            // Each query once at a random point, and once at the same x but snapped to the
+            // height of a vertex or an extremum of the boundary; the region is also moved far
+            // from the origin, with millimeter-scale differences between the heights.
+            let polygons = dense(&r, 1e-3);
+            let moved = r.transformed(&translation(offset, offset), &TOL).unwrap();
+            let heights = special_heights(&moved);
+            for (p, pick) in queries {
+                let snapped = Point2::new(p.x, pick.get(&heights) - offset);
+                for q in [p, snapped] {
+                    let (inside, distance) = reference(&polygons, q);
+                    if distance > 1e-2 {
+                        let expected =
+                            if inside { Containment::Inside } else { Containment::Outside };
+                        let at = Point2::new(q.x + offset, q.y + offset);
+                        prop_assert_eq!(moved.classify(at, &TOL).unwrap(), expected, "{:?}", at);
+                        if offset == 0.0 {
+                            prop_assert_eq!(r.classify(q, &TOL).unwrap(), expected);
+                        }
+                    }
+                }
+            }
         }
 
+        #[test]
+        fn classification_is_invariant_under_rigid_transforms(
+            r in region(),
+            queries in prop::collection::vec(query(), 16),
+            t in rigid(),
+        ) {
+            let moved = r.transformed(&t, &TOL).unwrap();
+            let polygons = dense(&r, 1e-3);
+            for p in queries {
+                let (_, distance) = reference(&polygons, p);
+                let before = r.classify(p, &TOL).unwrap();
+                let after = moved.classify(t * p, &TOL).unwrap();
+                if distance > 1e-2 || before == Containment::OnBoundary && distance < 1e-7 {
+                    prop_assert_eq!(before, after);
+                }
+            }
+        }
+
+        #[test]
+        fn signed_area_matches_the_dense_polygon(r in region()) {
+            let polygons = dense(&r, 2e-4);
+            let loops = r
+                .parts()
+                .iter()
+                .flat_map(|p| std::iter::once(p.outer()).chain(p.holes()));
+            for (lp, polygon) in loops.zip(&polygons) {
+                let shoelace: f64 = polygon
+                    .iter()
+                    .zip(polygon.iter().cycle().skip(1))
+                    .map(|(a, b)| a.x * b.y - a.y * b.x)
+                    .sum::<f64>()
+                    * 0.5;
+                // The dense polygon is within 2e-4 of the boundary, which is at most ~100 long.
+                prop_assert!((lp.signed_area() - shoelace).abs() < 2e-2);
+            }
+        }
+    }
+
+    proptest! {
         #[test]
         fn boundary_points_are_on_the_boundary(
             r in region(),
@@ -797,21 +917,6 @@ pub(crate) mod tests {
         }
 
         #[test]
-        fn classification_is_invariant_under_rigid_transforms(
-            r in region(),
-            p in query(),
-            t in rigid(),
-        ) {
-            let moved = r.transformed(&t, &TOL).unwrap();
-            let (_, distance) = reference(&dense(&r), p);
-            let before = r.classify(p, &TOL).unwrap();
-            let after = moved.classify(t * p, &TOL).unwrap();
-            if distance > 1e-2 || before == Containment::OnBoundary && distance < 1e-7 {
-                prop_assert_eq!(before, after);
-            }
-        }
-
-        #[test]
         fn regions_are_oriented_and_round_trip_through_serde(r in region()) {
             for p in r.parts() {
                 prop_assert!(p.outer().is_counterclockwise());
@@ -819,25 +924,6 @@ pub(crate) mod tests {
             }
             let json = serde_json::to_string(&r).unwrap();
             prop_assert_eq!(serde_json::from_str::<Region>(&json).unwrap(), r);
-        }
-
-        #[test]
-        fn signed_area_matches_the_dense_polygon(r in region()) {
-            let polygons = dense(&r);
-            let loops = r
-                .parts()
-                .iter()
-                .flat_map(|p| std::iter::once(p.outer()).chain(p.holes()));
-            for (lp, polygon) in loops.zip(&polygons) {
-                let shoelace: f64 = polygon
-                    .iter()
-                    .zip(polygon.iter().cycle().skip(1))
-                    .map(|(a, b)| a.x * b.y - a.y * b.x)
-                    .sum::<f64>()
-                    * 0.5;
-                // The dense polygon is within 2e-4 of the boundary, which is at most ~100 long.
-                prop_assert!((lp.signed_area() - shoelace).abs() < 2e-2);
-            }
         }
     }
 
@@ -979,5 +1065,153 @@ pub(crate) mod tests {
         assert_eq!(at(3.0), Containment::Outside);
         assert_eq!(at(7.0), Containment::Inside);
         assert_eq!(at(11.0), Containment::Outside);
+    }
+
+    #[test]
+    fn nearly_straight_arcs_classify_without_projection() {
+        // One side bulged by 1e-10: the arc's radius is about 1.25e9.
+        let vertices = [
+            (0.0, 0.0, 1e-10),
+            (1.0, 0.0, 0.0),
+            (1.0, 1.0, 0.0),
+            (0.0, 1.0, 0.0),
+        ]
+        .iter()
+        .map(|&(x, y, b)| PolylineVertex::new(Point2::new(x, y), b))
+        .collect();
+        let lp = Loop2::new(
+            vec![Curve2::Polyline(Polyline2::new(vertices, true).unwrap())],
+            &TOL,
+        )
+        .unwrap();
+        let at = |x: f64, y: f64| lp.classify(Point2::new(x, y), &TOL).unwrap();
+        assert_eq!(at(0.5, 0.0), Containment::OnBoundary);
+        assert_eq!(at(0.5, 5e-7), Containment::OnBoundary);
+        assert_eq!(at(0.5, -5e-7), Containment::OnBoundary);
+        assert_eq!(at(0.5, 2e-6), Containment::Inside);
+        assert_eq!(at(0.5, -2e-6), Containment::Outside);
+        // An arc of radius 1e10 whose sagitta is 5e-11.
+        let r = 1e10;
+        let arc = Arc2::new(Point2::new(0.0, -r), r, FRAC_PI_2 - 1.0 / r, 2.0 / r).unwrap();
+        let (start, end) = (
+            Curve2::Arc(arc).start_point().unwrap(),
+            Curve2::Arc(arc).end_point().unwrap(),
+        );
+        let p = |x: f64, y: f64| Point2::new(x, y);
+        let lp = Loop2::new(
+            vec![
+                Curve2::Arc(arc),
+                Curve2::Segment(Segment2::new(end, p(end.x, -1.0)).unwrap()),
+                Curve2::Segment(Segment2::new(p(end.x, -1.0), p(start.x, -1.0)).unwrap()),
+                Curve2::Segment(Segment2::new(p(start.x, -1.0), start).unwrap()),
+            ],
+            &TOL,
+        )
+        .unwrap();
+        assert_eq!(
+            lp.classify(p(0.0, 0.0), &TOL).unwrap(),
+            Containment::OnBoundary
+        );
+        assert_eq!(
+            lp.classify(p(0.0, 2e-6), &TOL).unwrap(),
+            Containment::Outside
+        );
+        assert_eq!(
+            lp.classify(p(0.0, -2e-6), &TOL).unwrap(),
+            Containment::Inside
+        );
+    }
+
+    #[test]
+    fn tolerance_band_and_extreme_magnitudes() {
+        let c = circle(0.0, 0.0, 1.0);
+        let e = ellipse(Point2::origin(), Vector2::new(1.0, 0.0), 0.5);
+        for (lp, top) in [(&c, 1.0), (&e, 0.5)] {
+            let at = |y: f64| lp.classify(Point2::new(0.0, y), &TOL).unwrap();
+            assert_eq!(at(top - 0.999e-6), Containment::OnBoundary);
+            assert_eq!(at(top + 0.999e-6), Containment::OnBoundary);
+            assert_eq!(at(top - 1.001e-6), Containment::Inside);
+            assert_eq!(at(top + 1.001e-6), Containment::Outside);
+        }
+        for scale in [1e-150, 1e150] {
+            let tol = Tolerance {
+                linear: scale * 1e-10,
+                ..TOL
+            };
+            let lp = Loop2::new(
+                vec![Curve2::Circle(
+                    Circle2::new(Point2::origin(), scale).unwrap(),
+                )],
+                &tol,
+            )
+            .unwrap();
+            assert!((lp.signed_area() / (PI * scale * scale) - 1.0).abs() < 1e-14);
+            let at = |x: f64, y: f64| {
+                lp.classify(Point2::new(x * scale, y * scale), &tol)
+                    .unwrap()
+            };
+            assert_eq!(at(0.0, 1.0), Containment::OnBoundary);
+            assert_eq!(at(0.0, 0.9999), Containment::Inside);
+            assert_eq!(at(-2.0, 1.0), Containment::Outside);
+            assert_eq!(at(0.0, 1.5), Containment::Outside);
+        }
+        // An area that underflows is not a zero area.
+        let tiny = Loop2::new(
+            vec![Curve2::Circle(
+                Circle2::new(Point2::origin(), 1e-300).unwrap(),
+            )],
+            &TOL,
+        );
+        assert_eq!(code(tiny), "geom.precision.insufficient");
+        let huge = Loop2::new(
+            vec![Curve2::Circle(
+                Circle2::new(Point2::origin(), 1e300).unwrap(),
+            )],
+            &TOL,
+        );
+        assert_eq!(code(huge), "geom.precision.insufficient");
+    }
+
+    #[test]
+    fn gap_joints_count_once_at_vertex_heights() {
+        // Gaps of 0.05 closed by joints, built with a linear tolerance of 0.1.
+        let p = |x: f64, y: f64| Point2::new(x, y);
+        let seg = |a: Point2, b: Point2| Curve2::Segment(Segment2::new(a, b).unwrap());
+        let tol = Tolerance { linear: 0.1, ..TOL };
+        let lp = Loop2::new(
+            vec![
+                seg(p(0.0, 0.0), p(2.0, 0.0)),
+                Curve2::Arc(Arc2::new(p(2.0, 1.0), 1.0, -FRAC_PI_2, PI).unwrap()),
+                seg(p(2.0, 2.05), p(0.0, 2.0)),
+                seg(p(0.0, 2.0), p(0.0, 0.05)),
+            ],
+            &tol,
+        )
+        .unwrap();
+        let polygon: Vec<Point2> = lp
+            .curves()
+            .iter()
+            .flat_map(|c| c.flatten(1e-5, 0.01, 10_000_000).unwrap())
+            .collect();
+        let fine = Tolerance {
+            linear: 1e-9,
+            ..TOL
+        };
+        for lp in [lp.clone(), lp.reversed()] {
+            for y in [0.0, 0.05, 1.0, 2.0, 2.025, 2.05, -1e-8, 2.05 + 1e-8] {
+                for k in -10..40 {
+                    let q = p(f64::from(k) * 0.1 + 0.0123, y);
+                    let (inside, distance) = reference(std::slice::from_ref(&polygon), q);
+                    if distance > 1e-4 {
+                        let expected = if inside {
+                            Containment::Inside
+                        } else {
+                            Containment::Outside
+                        };
+                        assert_eq!(lp.classify(q, &fine).unwrap(), expected, "{q:?}");
+                    }
+                }
+            }
+        }
     }
 }

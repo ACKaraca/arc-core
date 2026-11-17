@@ -33,5 +33,5 @@ geom-region-hole-outside = A hole lies outside its outer loop.
 geom-triangulate-edges-cross = The flattened boundary of the region crosses or touches itself.
 geom-triangulate-loop-collapsed = A loop of the region collapses when flattened at this tolerance.
 geom-triangulate-nesting-invalid = A hole lies outside its outer loop, or a part overlaps another.
-geom-mesh-invalid = The triangle mesh has an invalid vertex or a triangle index outside its vertices.
+geom-mesh-invalid = The triangle mesh has an invalid vertex, a triangle index outside its vertices, or a triangle that is not counterclockwise.
 geom-intersect-too-many-results = The curves have more intersections than the limit allows.

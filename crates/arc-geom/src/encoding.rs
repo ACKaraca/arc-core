@@ -1020,8 +1020,21 @@ mod tests {
     fn mesh() -> impl Strategy<Value = TriangleMesh2> {
         prop::collection::vec(point(), 1..8).prop_flat_map(|vertices| {
             let n = u32::try_from(vertices.len()).unwrap();
-            prop::collection::vec([0..n, 0..n, 0..n], 0..6)
-                .prop_map(move |triangles| TriangleMesh2::new(vertices.clone(), triangles).unwrap())
+            prop::collection::vec([0..n, 0..n, 0..n], 0..6).prop_map(move |triangles| {
+                // Only strictly counterclockwise triangles are valid: flip or drop the rest.
+                let at = |i: u32| vertices[i as usize];
+                let triangles = triangles
+                    .into_iter()
+                    .filter_map(
+                        |[a, b, c]| match crate::orient2d(&at(a), &at(b), &at(c)).ok()? {
+                            crate::Sign::Positive => Some([a, b, c]),
+                            crate::Sign::Negative => Some([a, c, b]),
+                            crate::Sign::Zero => None,
+                        },
+                    )
+                    .collect();
+                TriangleMesh2::new(vertices.clone(), triangles).unwrap()
+            })
         })
     }
 
