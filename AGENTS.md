@@ -10,7 +10,8 @@ Arc product depends on one tagged release of it; it contains no product function
 
 ## Status and where to start reading
 
-Design phase: no code and no builds exist yet. Read, in order: [README.md](README.md),
+Design phase with implementation started: the workspace, `xtask` and `arc-base` exist; every other crate is still a
+specification. Read, in order: [README.md](README.md),
 [docs/architecture/overview.md](docs/architecture/overview.md), the architecture document for your
 area, and the crate specification you are changing under [docs/crates](docs/crates/README.md).
 Capability identifiers (`CORE-<AREA>-NNN`) are defined in the crate specifications.
@@ -31,13 +32,16 @@ docs/            architecture, crates, testing, roadmap, adr, glossary
 
 ## Commands
 
-No build exists yet. Once code lands, these apply:
+The toolchain is pinned in `rust-toolchain.toml`; the gate also needs `cargo-nextest` and
+`cargo-deny`.
 
-- `cargo fmt --check`
+- `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo nextest run --workspace`
+- `cargo nextest run --workspace` (`cargo test --workspace --doc` for documentation tests)
 - `cargo xtask layers`
-- `cargo xtask ci` runs all gates, including the above.
+- `cargo xtask wasm`
+- `cargo xtask ci` runs all gates, including the above and `cargo deny check`. CI runs it on
+  Linux, Windows and macOS on every push to `main`.
 
 ## Suite rules
 

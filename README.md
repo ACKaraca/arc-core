@@ -4,7 +4,17 @@ The shared Rust foundation of the Arc suite: geometry, the document store and pa
 automation, drafting, rendering, the UI kit and interchange, written once and used by every Arc
 product.
 
-> **Status: design phase.** No builds are available yet. This repository contains the product definition, architecture and roadmap that implementation follows.
+> **Status: design phase.** Implementation has started: the workspace, the CI gate and the first crate (`arc-base`) exist. No release is available yet; the documents in this repository describe the target that implementation follows.
+
+## Building
+
+The toolchain is pinned in `rust-toolchain.toml`. The gate also needs `cargo-nextest` and
+`cargo-deny` (`cargo install --locked cargo-nextest cargo-deny`).
+
+```sh
+cargo xtask ci      # every gate: format, clippy, layers, wasm, tests, deny
+cargo xtask layers  # the layering check alone
+```
 
 ## What arc-core is
 
