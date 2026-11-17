@@ -44,3 +44,13 @@ without Arc as promised by the suite's open-format principle.
 
 Decoding becomes a measured bottleneck in loading reference models, or a third-party consumer cannot
 decode packages with the published descriptors.
+
+## Amendment
+
+The field descriptor carries, for each field, everything the field declaration states: besides the
+names, value types, dimensions, optionality, enum codes and geometry encodings listed above, also
+the default, the valid range or length bound, indexing, the aspect and, for reference fields, the
+relationship rule. The list is maintained in
+[document-model.md](../architecture/document-model.md#fields-properties-and-schemas) and
+[document-package.md](../architecture/document-package.md#payload-encoding). The payload encoding
+is unchanged.

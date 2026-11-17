@@ -18,7 +18,9 @@ ui_deny = [
 # docs/architecture/technology-baseline.md that are in use.
 third_party = [
   "glam",
+  "insta",
   "nalgebra",
+  "postcard",
   "proptest",
   "robust",
   "rstar",
@@ -31,7 +33,7 @@ third_party = [
 ]
 
 # Crates built for wasm32-unknown-unknown by `cargo xtask wasm`.
-wasm = ["arc-base", "arc-geom"]
+wasm = ["arc-base", "arc-geom", "arc-doc"]
 
 # Class of every workspace crate: layer(n), ffi(n), app, testkit or tool.
 [crates]

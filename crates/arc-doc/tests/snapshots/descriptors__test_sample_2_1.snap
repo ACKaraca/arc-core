@@ -1,0 +1,397 @@
+---
+source: crates/arc-doc/tests/descriptors.rs
+expression: text
+---
+{
+  "descriptor_format": 1,
+  "type_key": "test.sample",
+  "major": 2,
+  "minor": 1,
+  "fields": [
+    {
+      "name": "visible",
+      "type": {
+        "kind": "bool"
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "appearance",
+      "default": true,
+      "bound": null
+    },
+    {
+      "name": "count",
+      "type": {
+        "kind": "i64"
+      },
+      "optional": false,
+      "indexed": true,
+      "aspect": "data",
+      "default": -3,
+      "bound": {
+        "kind": "int",
+        "min": -3,
+        "max": 1000
+      }
+    },
+    {
+      "name": "ratio",
+      "type": {
+        "kind": "f64"
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "data",
+      "default": 0.1,
+      "bound": {
+        "kind": "real",
+        "min": 0.0,
+        "max": 1.0
+      }
+    },
+    {
+      "name": "label",
+      "type": {
+        "kind": "string"
+      },
+      "optional": false,
+      "indexed": true,
+      "aspect": "identity",
+      "default": "wall \"A\"",
+      "bound": {
+        "kind": "length",
+        "max": 64
+      }
+    },
+    {
+      "name": "height",
+      "type": {
+        "kind": "quantity",
+        "dimension": [
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "geometry",
+      "default": 2.7,
+      "bound": null
+    },
+    {
+      "name": "color",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "red",
+            "code": 1
+          },
+          {
+            "name": "blue",
+            "code": 7
+          }
+        ]
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "data",
+      "default": 7,
+      "bound": null
+    },
+    {
+      "name": "origin",
+      "type": {
+        "kind": "point2"
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "data",
+      "default": [
+        -0.0,
+        1e+300
+      ],
+      "bound": null
+    },
+    {
+      "name": "position",
+      "type": {
+        "kind": "point3"
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "data",
+      "default": [
+        1.0,
+        2.5,
+        -3.0
+      ],
+      "bound": null
+    },
+    {
+      "name": "normal",
+      "type": {
+        "kind": "vector3"
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "data",
+      "default": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "bound": null
+    },
+    {
+      "name": "placement",
+      "type": {
+        "kind": "transform"
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "geometry",
+      "default": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bound": null
+    },
+    {
+      "name": "tint",
+      "type": {
+        "kind": "color"
+      },
+      "optional": true,
+      "indexed": false,
+      "aspect": "data",
+      "default": {
+        "rgba": [
+          1.0,
+          0.5,
+          0.25,
+          1.0
+        ],
+        "source": {
+          "indexed": 7
+        }
+      },
+      "bound": null
+    },
+    {
+      "name": "host",
+      "type": {
+        "kind": "reference",
+        "targets": [
+          "test.target"
+        ],
+        "rule": {
+          "strength": "owning",
+          "on_delete": "cascade",
+          "on_copy": "copy_target",
+          "cardinality": "one"
+        }
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "data",
+      "default": null,
+      "bound": null
+    },
+    {
+      "name": "style",
+      "type": {
+        "kind": "reference",
+        "targets": [
+          "test.target"
+        ],
+        "rule": {
+          "strength": "owning",
+          "on_delete": "clear",
+          "on_copy": "copy_target",
+          "cardinality": "optional"
+        }
+      },
+      "optional": true,
+      "indexed": false,
+      "aspect": "data",
+      "default": null,
+      "bound": null
+    },
+    {
+      "name": "openings",
+      "type": {
+        "kind": "list",
+        "element": {
+          "kind": "reference",
+          "targets": [
+            "test.target"
+          ],
+          "rule": {
+            "strength": "owning",
+            "on_delete": "clear",
+            "on_copy": "copy_target",
+            "cardinality": "many",
+            "max": 16
+          }
+        }
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "data",
+      "default": null,
+      "bound": null
+    },
+    {
+      "name": "linked",
+      "type": {
+        "kind": "external_reference"
+      },
+      "optional": true,
+      "indexed": false,
+      "aspect": "data",
+      "default": {
+        "link": "00000000-0000-0000-0000-000000000001",
+        "target": "01900000-0000-7000-8000-000000000002"
+      },
+      "bound": null
+    },
+    {
+      "name": "texture",
+      "type": {
+        "kind": "asset"
+      },
+      "optional": true,
+      "indexed": false,
+      "aspect": "data",
+      "default": "abababababababababababababababababababababababababababababababab",
+      "bound": null
+    },
+    {
+      "name": "outline",
+      "type": {
+        "kind": "geometry",
+        "encoding": "geom.curve2",
+        "encoding_version": 1
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "geometry",
+      "default": "0001ff",
+      "bound": null
+    },
+    {
+      "name": "tags",
+      "type": {
+        "kind": "list",
+        "element": {
+          "kind": "string"
+        }
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "data",
+      "default": [
+        "x"
+      ],
+      "bound": {
+        "kind": "length",
+        "max": 8
+      }
+    },
+    {
+      "name": "costs",
+      "type": {
+        "kind": "map",
+        "value": {
+          "kind": "f64"
+        }
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "data",
+      "default": {
+        "a": 1.5,
+        "b": 2.0
+      },
+      "bound": null
+    },
+    {
+      "name": "layer",
+      "type": {
+        "kind": "record",
+        "fields": [
+          {
+            "name": "index",
+            "type": {
+              "kind": "i64"
+            },
+            "optional": false,
+            "indexed": false,
+            "aspect": "data",
+            "default": null,
+            "bound": null
+          },
+          {
+            "name": "note",
+            "type": {
+              "kind": "string"
+            },
+            "optional": true,
+            "indexed": false,
+            "aspect": "data",
+            "default": null,
+            "bound": null
+          }
+        ]
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "data",
+      "default": [
+        0,
+        null
+      ],
+      "bound": null
+    },
+    {
+      "name": "extra",
+      "type": {
+        "kind": "opaque"
+      },
+      "optional": true,
+      "indexed": false,
+      "aspect": "data",
+      "default": "dead",
+      "bound": null
+    },
+    {
+      "name": "revision",
+      "type": {
+        "kind": "i64"
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "data",
+      "default": 0,
+      "bound": null
+    }
+  ]
+}

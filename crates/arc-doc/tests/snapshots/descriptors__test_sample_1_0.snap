@@ -1,0 +1,23 @@
+---
+source: crates/arc-doc/tests/descriptors.rs
+expression: text
+---
+{
+  "descriptor_format": 1,
+  "type_key": "test.sample",
+  "major": 1,
+  "minor": 0,
+  "fields": [
+    {
+      "name": "count",
+      "type": {
+        "kind": "i64"
+      },
+      "optional": false,
+      "indexed": false,
+      "aspect": "data",
+      "default": null,
+      "bound": null
+    }
+  ]
+}

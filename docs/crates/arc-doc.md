@@ -33,6 +33,9 @@ file extension.
 | `Document` | Handle to an open document: executor, latest snapshot, journal, graph, storage |
 | `Snapshot` | Immutable view at one revision |
 | `TypeRegistry` | Type keys with schema versions, field descriptors, validators, migrations and relationship rules |
+| `TypeDecl`, `Schema`, `FieldDecl` | Declaration of a type: key, current schema, older major schemas with migrations, validators; ordered field declarations |
+| `Value`, `ValueType` | Dynamically typed field value and its declared type |
+| `Payload` | Canonical binary encoding of an object's field values |
 | `Store<T>` | Chunked copy-on-write store of immutable values addressed by `Handle<T>` |
 | `Txn` | Open transaction with operations and savepoints |
 | `TxnRecord` | Journal record (see the document model) |
@@ -49,7 +52,7 @@ file extension.
 | Kind | Crates |
 |---|---|
 | Arc | `arc-base`, `arc-geom`, `arc-mesh` (geometry field encodings) |
-| Third-party | `rusqlite` (bundled, feature `package`), `postcard`, `zstd`, `fastcdc`, `blake3`, `serde`, `rayon`, `crossbeam-channel`, `arc-swap` |
+| Third-party | `rusqlite` (bundled, feature `package`), `postcard`, `zstd`, `fastcdc`, `blake3`, `serde`, `serde_json` (descriptors), `rayon`, `crossbeam-channel`, `arc-swap` |
 
 `arc-doc` does not depend on `arc-brep`; B-rep values are stored as assets with an encoding name
 registered by `arc-brep`.
@@ -151,3 +154,163 @@ reference large models.
 | CORE-DOC-050 | Inspection and check | Dumps metadata, statistics and decoded objects as JSON using embedded descriptors, and verifies integrity, hashes, references and indexes without writing. | T1 | 0 |
 | CORE-DOC-051 | Previews | Stores thumbnail and preview images supplied by the application at save, and saves without them when none are available. | T1 | 0 |
 | CORE-DOC-052 | Source map | Records source identifiers of imported objects and resolves re-imports to existing objects. | T1 | 1 |
+
+### Type registry (CORE-DOC-001)
+
+A `TypeRegistry` is an explicit value, not process-global state. The application builds one at
+start, registers the core types and its own, and then shares it immutably (in an `Arc`) with every
+document it opens; tests and tools may hold several registries in one process. Iteration is in
+type-key order, independent of registration order.
+
+- **Type key.** Two or more segments separated by single dots, each a lowercase ASCII letter
+  followed by lowercase letters, digits and underscores; at most 128 bytes. The first segment
+  names the owner (`core`, or the repository name of a product). A `TypeKey` can only be built
+  from a valid key; a malformed one fails with `doc.type.malformed_key`.
+- **Names.** Field names, enum variant names and aspects follow the segment grammar, at most 64
+  bytes. Field names are unique within their field list.
+- **Versions.** A schema version is `major.minor` with major at least 1. Each field records the
+  minor version that appended it (`since_minor`); fields appear in nondecreasing `since_minor`
+  order, none later than the current minor, and an appended field is optional or has a default.
+  Fields of nested records are never appended (`since_minor` 0).
+- **Migrations.** A type of major version N declares exactly one migration from each major
+  version 1 to N − 1. A migration carries the schema of its source major version (at that major's
+  last minor version), which decodes payloads of that version, and a pure function from those
+  values to the values of the next major version.
+- **Validators.** A type validator is a function from the field values of one object to a list
+  of findings, each an error or a warning with a code and message.
+- **Value types.** A record has at least one field; lists, maps and records nest at most 16
+  levels. Enum variants are non-empty with unique names and codes. A geometry field names its
+  encoding in the type-key grammar and an encoding version.
+- **Bounds.** An integer range applies to `i64`, a real range (finite ends, in SI base units) to
+  `f64` and `quantity`, and a length bound to `string` (bytes), `list` and `map` (entries) and
+  `opaque` (bytes). The minimum is not above the maximum.
+- **Relationship rules.** Cardinality `one` belongs to a required reference field, `optional` to
+  an optional reference field, and `many` (with a bound of at least 1) to a field whose type is a
+  list of references; a reference anywhere else is inconsistent. A field of a nested record is a
+  field for this purpose. On-delete `clear` and on-copy `clear` need cardinality `optional` or
+  `many`. The target type keys need not be registered yet; an empty list allows any type.
+- **Defaults.** A default has the field's type and satisfies its bound and enum codes.
+
+Registration checks the whole declaration and leaves the registry unchanged on failure. A repeated
+key fails with `doc.type.duplicate_key`; otherwise the first defect found fails with its own code
+from the table below, with the `type` argument naming the type and the `field` argument the field
+as a dotted path through nested records.
+
+### Field values
+
+The values of one object are one optional `Value` per field in declared order; an optional field
+may be absent. Floating-point values are finite everywhere. The field schema check
+(`schema::check_values`) verifies the count, required presence, types, bounds, enum codes,
+finiteness and the `many` bound of reference lists.
+
+| Value type | Value | Payload form (`postcard`) | JSON form |
+|---|---|---|---|
+| `bool` | truth value | one byte, 0 or 1 | `true` or `false` |
+| `i64` | integer | zigzag varint | number |
+| `f64` | finite number | 8 bytes, IEEE 754 little-endian | number |
+| `string` | UTF-8 text | varint byte length, bytes | string |
+| `quantity` | `Quantity` of the declared dimension | the SI value as `f64` | number (SI) |
+| `enum` | variant code | varint `u32` | number (code) |
+| `point2`, `point3`, `vector3` | coordinates | 2 or 3 `f64` | array of numbers |
+| `transform` | affine transform | 12 `f64`: the top three rows of the 4×4 matrix, column by column | array of 12 numbers, same order |
+| `color` | linear RGBA and optional source | 4 `f32` little-endian, then an option of the source (varint variant 0 `indexed` with one byte, 1 `named` with a string) | `{"rgba": [...], "source": null \| {"indexed": n} \| {"named": "..."}}` |
+| `reference` | `ObjectId` | 16 bytes, UUID byte order | hyphenated UUID |
+| `external_reference` | link id and target id | 32 bytes | `{"link": ..., "target": ...}` |
+| `asset` | `AssetHash` (BLAKE3, 32 bytes) | 32 bytes | lowercase hexadecimal |
+| `geometry` | `GeometryBytes`, the owning crate's canonical bytes | varint length, bytes | lowercase hexadecimal |
+| `list<T>` | elements | varint count, elements | array |
+| `map<string, T>` | entries | varint count, then key and value per entry in ascending byte order of keys | object |
+| `record` | nested field values | the fields like an object's fields | array, `null` for absent fields |
+| `opaque` | bytes | varint length, bytes | lowercase hexadecimal |
+
+`AssetHash` and `GeometryBytes` hold bytes only in this part: computing asset hashes belongs to the
+package, and decoding geometry bytes to the crate that owns the encoding named by the field.
+
+### Field descriptors (CORE-DOC-004)
+
+`descriptor(decl, version)` returns the JSON descriptor of any version a declaration describes:
+each minor version of the current major version and of every migration source. A minor version's
+descriptor lists the fields present at that minor version. The output is pretty-printed with
+two-space indentation and no trailing newline; keys appear in the fixed order below, numbers in
+their shortest round-trip form, map defaults in key order. It depends only on the declaration, so
+it is byte-identical across runs, platforms and registration orders.
+
+```json
+{
+  "descriptor_format": 1,
+  "type_key": "core.doc.example",
+  "major": 1,
+  "minor": 0,
+  "fields": [
+    {
+      "name": "height",
+      "type": { "kind": "quantity", "dimension": [1, 0, 0, 0, 0, 0, 0, 0, 0] },
+      "optional": false,
+      "indexed": true,
+      "aspect": "geometry",
+      "default": 2.7,
+      "bound": { "kind": "real", "min": 0.0, "max": 100.0 }
+    }
+  ]
+}
+```
+
+- `type.kind` is the value type name of the table above. A `quantity` adds `dimension` (the nine
+  exponents of length, mass, time, electric current, temperature, amount of substance, luminous
+  intensity, angle and solid angle); an `enum` adds `variants` (`name`, `code`); a `geometry`
+  adds `encoding` and `encoding_version`; a `list` adds `element`, a `map` adds `value` (each a
+  type object); a `record` adds `fields` (field objects); a `reference` adds `targets` (type keys)
+  and `rule` (`strength`, `on_delete`, `on_copy`, `cardinality`, and `max` for `many`).
+- `default` is the JSON form of the default value or `null`; `bound` is `null` or an object of
+  kind `int` or `real` (`min`, `max`) or `length` (`max`).
+
+### Payload codec
+
+`payload::encode` checks the values and writes the fields in declared order as a `postcard`
+tuple: an optional field as an option (one byte 0 for absent, or 1 followed by the value), a
+required field as its value, each value in the payload form of the table above. Encoding is
+canonical: equal values give equal bytes.
+
+`payload::decode` takes the schema of the payload's major version, the minor version that wrote
+it, the stored encoding and the hostile-input `Limits`:
+
+- A payload of an older minor version holds the fields present at that version; appended fields
+  get their default or stay absent.
+- A payload of a newer minor version holds the known fields followed by bytes this schema does not
+  know; decoding returns them unchanged beside the values. Any other bytes after the known fields
+  fail with `doc.payload.invalid`.
+- Decoded values pass the field schema check, and re-encoding them reproduces the consumed bytes;
+  overlong varints, unsorted or repeated map keys and other non-canonical forms fail with
+  `doc.payload.invalid`.
+- `input_bytes` bounds the payload, `string_bytes` every string, map key and color name,
+  `array_length` the entries of every list and map and the bytes of every geometry and opaque
+  value, and `nesting_depth` the nesting of lists, maps and records; exceeding one fails with
+  `doc.payload.limit_exceeded` before memory is reserved for the excess. Every value encodes to at
+  least one byte, so a payload never decodes to more elements than it has bytes.
+- Encoding code 1 (`postcard` with `zstd`) is reserved: this version writes code 0 only and
+  rejects code 1 with `doc.payload.encoding_unsupported`.
+
+### Error codes
+
+The codes `arc-doc` owns. A code is never reused for a different meaning; messages are in
+`locales/en-US/arc-doc.ftl`.
+
+| Code | Category | Raised when |
+|---|---|---|
+| `doc.type.duplicate_key` | `conflict` | A type key is already registered |
+| `doc.type.malformed_key` | `invalid_input` | A type key, reference target key or geometry encoding name does not follow the key grammar |
+| `doc.type.version_invalid` | `invalid_input` | A schema major version is 0, or a field is appended after the schema's minor version |
+| `doc.type.duplicate_field` | `invalid_input` | Two fields of one field list have the same name |
+| `doc.type.field_invalid` | `invalid_input` | A field name or aspect is malformed, a bound does not fit its type or is empty, enum variants are empty or repeat a name or code, a record has no field, types nest too deeply, or an appended field breaks the appending rules |
+| `doc.type.relationship_inconsistent` | `invalid_input` | A relationship rule contradicts the field that declares it |
+| `doc.type.default_invalid` | `invalid_input` | A default value does not have the field's type or violates its bound or enum codes |
+| `doc.type.migration_chain_invalid` | `invalid_input` | The migrations are not exactly one from each major version below the current one |
+| `doc.value.missing` | `invalid_input` | A required field has no value |
+| `doc.value.type_mismatch` | `invalid_input` | A value does not have its field's type, or the number of values differs from the number of fields |
+| `doc.value.out_of_range` | `invalid_input` | A value violates its field's range or length bound, its reference list bound, or is not a declared enum code |
+| `doc.value.not_finite` | `invalid_input` | A floating-point value is NaN or infinite |
+| `doc.payload.invalid` | `corrupt_data` | A payload is malformed, not canonical, followed by unexpected bytes, or decodes to values its declaration rejects |
+| `doc.payload.limit_exceeded` | `limit_exceeded` | A payload exceeds a hostile-input limit |
+| `doc.payload.encoding_unsupported` | `unsupported` | A payload uses an encoding this version cannot decode |
+| `doc.object.not_found` | `not_found` | An identifier or handle names no live object in the snapshot |
+| `doc.reference.dangling` | `conflict` | A transaction would leave a reference to a missing object or to an object of a type the reference does not allow |

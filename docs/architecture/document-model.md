@@ -36,9 +36,11 @@ An **object** is the unit of identity, change, reference and history. Every obje
 | Fields | The typed data defined by the type's schema |
 | Property sets | Zero or more dynamic, user-defined property sets (see below) |
 
-Each object type is registered once per process in the **type registry** with its type key,
-current schema version, field descriptors, validators, migrations and the relationship rules of its
-reference fields. Type keys are prefixed by their owner: `core.` for types defined in `arc-core`,
+Each object type is registered in a **type registry** with its type key, current schema version,
+field descriptors, validators, migrations and the relationship rules of its reference fields. The
+registry is an explicit value, not global state: the application builds one at start, registers
+each type once, and hands it, shared and immutable, to every document it opens; tests and tools
+may hold several registries in one process. Type keys are prefixed by their owner: `core.` for types defined in `arc-core`,
 the repository name for product types (`solidbuilder.feature.extrude`). A type key never changes
 meaning; a type that is redesigned gets a new major schema version, not a new key.
 
@@ -99,9 +101,11 @@ The decision and its alternatives are recorded in
 | `list<T>`, `map<string, T>`, `record` | Bounded collections and nested records |
 | `opaque` | Bytes preserved for a foreign or newer schema, never interpreted |
 
-Each field descriptor states: name, value type, unit dimension (for quantities), default, valid
-range or length bound, whether it is optional, whether it is **indexed** (copied to the package
-property index for queries) and which **aspect** it belongs to. An aspect is a named group of fields
+Each field descriptor states: name, value type, unit dimension (for quantities), the variant
+names and codes (for enums), the encoding name and version (for geometry), the relationship rule
+(for references), default, valid range or length bound, whether it is optional, whether it is
+**indexed** (copied to the package property index for queries) and which **aspect** it belongs
+to. An aspect is a named group of fields
 (`geometry`, `appearance`, `identity`, `data`) used as the unit of dependency tracking.
 
 **Property sets** carry user-defined and standard data (IFC property sets, classification codes,

@@ -70,9 +70,12 @@ CREATE TABLE arc_object (
 - Object payloads, journal operations and preserved foreign records are encoded with `postcard`
   (compact, deterministic binary serialization) from the type's field list in declared order.
 - Payloads larger than 4 KiB are compressed with `zstd` (level 3) and flagged in `encoding`.
-- `arc_type.descriptor` holds, for each type and version present, a JSON **field descriptor**:
-  ordered field names, value types, unit dimensions, optionality and enum codes. The descriptor is
-  sufficient for a generic decoder to turn any payload into JSON without Arc code. The descriptor
+- `arc_type.descriptor` holds, for each type and version present, a JSON **field descriptor**
+  listing the fields in order, each with name, value type, unit dimension (for quantities), the
+  variant names and codes (for enums), the encoding name and version (for geometry), the
+  relationship rule (for references), default, valid range or length bound, optionality, indexing
+  and aspect. The descriptor is sufficient for a generic decoder to turn any payload into JSON
+  without Arc code. The descriptor
   grammar is published as a JSON Schema in `schemas/package-descriptor.schema.json`.
 - Geometry values use encodings owned and documented by their crate (`arc-geom`, `arc-mesh`,
   `arc-brep`); the descriptor names the encoding and its version.

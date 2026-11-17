@@ -15,9 +15,14 @@ publish = false
 [workspace.dependencies]
 arc-base = { path = "crates/arc-base" }
 arc-geom = { path = "crates/arc-geom" }
+arc-doc = { path = "crates/arc-doc" }
 
 glam = "0.34"
+# Snapshot tests only; default features (terminal colors) stay off.
+insta = { version = "1.49", default-features = false }
 nalgebra = { version = "0.35", default-features = false, features = ["std", "serde-serialize"] }
+# `alloc` only: payloads are written to vectors; the embedded defaults stay off.
+postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }
 proptest = { version = "1.12", default-features = false, features = ["std"] }
 robust = "1.2"
 # Default features are empty; `serde`/`mint` stay off.
