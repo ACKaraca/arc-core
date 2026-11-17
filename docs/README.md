@@ -12,6 +12,7 @@ the document for the area you work on and the specification of the crate you cha
 | [document-package.md](architecture/document-package.md) | The single-file SQLite package: schema, encoding, assets, recovery, saving, locking, compatibility |
 | [commands-and-automation.md](architecture/commands-and-automation.md) | Command specification, registry, command line, macros, Arc Automation Protocol, Model Context Protocol, headless CLI, confined file access, Python |
 | [geometry.md](architecture/geometry.md) | Geometry tiers, tolerances, curves and regions, meshes, the B-rep API and naming, kernel isolation, constraint solver, expressions |
+| [geometry-encoding.md](architecture/geometry-encoding.md) | The versioned canonical byte layout of stored `arc-geom` values, its limits and versioning rule |
 | [drafting-and-views.md](architecture/drafting-and-views.md) | The 2D drafting model, plotting and derived views of 3D models |
 | [rendering.md](architecture/rendering.md) | The viewport renderer and the Arc Scene contract |
 | [ui-kit.md](architecture/ui-kit.md) | Widgets, workspace, localization, accessibility, settings, shared interaction standards, browser and tablet or phone targets |
@@ -66,6 +67,7 @@ the document for the area you work on and the specification of the crate you cha
 | [adr/0010-automation-protocol-transport.md](adr/0010-automation-protocol-transport.md) | Automation protocol transport |
 | [adr/0011-exchange-package-container.md](adr/0011-exchange-package-container.md) | Exchange package container: ZIP with JSON Lines and binary buffers |
 | [adr/0012-opennurbs-ffi-crate.md](adr/0012-opennurbs-ffi-crate.md) | Rhino 3DM reading through an openNURBS FFI crate in the worker |
+| [adr/0013-geometry-encoding.md](adr/0013-geometry-encoding.md) | Hand-written versioned geometry encoding |
 
 ## Repository root
 

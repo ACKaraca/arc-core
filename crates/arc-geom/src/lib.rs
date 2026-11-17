@@ -14,6 +14,7 @@
 pub mod bbox;
 pub mod closest;
 pub mod curve;
+pub mod encoding;
 pub mod error;
 pub mod eval;
 pub mod flatten;
@@ -30,6 +31,7 @@ pub mod view;
 pub use bbox::{Aabb2, Aabb3};
 pub use closest::{CurvePoint, CurveProject, FootPoint};
 pub use curve::Curve2;
+pub use encoding::{GeomCodec, GeomEncoding};
 pub use eval::CurveEval;
 pub use flatten::CurveFlatten;
 pub use index::{SpatialIndex2, SpatialIndex3};

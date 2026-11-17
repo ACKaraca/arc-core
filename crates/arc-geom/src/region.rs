@@ -85,6 +85,13 @@ impl TryFrom<Loop2Raw> for Loop2 {
     }
 }
 
+impl Loop2 {
+    /// A loop from stored curves, validated as deserialization validates them.
+    pub(crate) fn from_stored(curves: Vec<Curve2>) -> Result<Self> {
+        Self::build(curves, &Tolerance::DEFAULT, false)
+    }
+}
+
 /// One smooth piece of a loop boundary with the end points the chain shares with its
 /// neighbors.
 #[derive(Debug, Clone, Copy)]

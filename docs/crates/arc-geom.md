@@ -431,6 +431,24 @@ centroid is inside the flattened loops, that triangles are counterclockwise and 
 that every loop edge borders exactly one triangle, the constrained Delaunay condition on interior
 edges with `incircle`, and determinism.
 
+### Geometry encoding
+
+`GeomCodec` encodes and decodes every stored value (`Segment2`, `Ray2`, `Line2`, `Circle2`,
+`Arc2`, `Ellipse2`, `EllipticalArc2`, `Polyline2`, `Curve2`, `Loop2`, `Region`, `Aabb2`, `Aabb3`,
+`ViewFrame`, `TriangleMesh2`) in the byte form `GeomEncoding::CURRENT` (`arc.geom`, version 1)
+specified in [geometry-encoding.md](../architecture/geometry-encoding.md) (CORE-GEOM-032).
+
+- `encode` returns the canonical bytes and `encoded_len` their length; equal values give equal
+  bytes, and −0.0 is written as +0.0.
+- `decode(bytes, limits)` reads a value that fills the input; `decode_prefix` returns the bytes
+  after it. A `Curve2` has the bytes of the curve kind it holds, so `Curve2::decode` reads any
+  curve and `Segment2::decode` only a segment.
+- Values are built through their validating constructors, and input that is not the canonical
+  encoding of the value it decodes to is rejected, so the byte form of a value is unique. Counts
+  are checked against `Limits::array_length` and the remaining input before allocating, the input
+  length against `input_bytes`, and the nesting of values against `nesting_depth`. Every failure
+  is `geom.decode.invalid` with the details `offset` and `reason`.
+
 ### Error codes
 
 The codes `arc-geom` owns. A code is never reused for a different meaning; messages are in

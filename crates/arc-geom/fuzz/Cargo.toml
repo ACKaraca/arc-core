@@ -1,0 +1,26 @@
+# The fuzz targets of arc-geom, built with `cargo +nightly fuzz` from crates/arc-geom. This crate
+# is not a member of the workspace, so the workspace gate never builds it.
+[package]
+name = "arc-geom-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arc-base = { path = "../../arc-base" }
+arc-geom = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+# Its own workspace root, separate from the repository workspace.
+[workspace]

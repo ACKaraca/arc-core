@@ -21,6 +21,7 @@ collaboration, extensibility, licensing, assistance, robustness, localization, e
 | [0010](0010-automation-protocol-transport.md) | Automation protocol transport: newline-delimited JSON-RPC over stdio and user-scoped local sockets | Accepted |
 | [0011](0011-exchange-package-container.md) | Exchange package container: ZIP with JSON Lines and binary buffers | Accepted |
 | [0012](0012-opennurbs-ffi-crate.md) | Rhino 3DM reading through an openNURBS FFI crate in the worker | Accepted |
+| [0013](0013-geometry-encoding.md) | Hand-written versioned geometry encoding | Accepted |
 
 ## Process
 

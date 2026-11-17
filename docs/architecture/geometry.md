@@ -71,6 +71,8 @@ the kernel.
 - **Transforms and views:** rigid and affine transforms, coordinate frames, and the view frame
   (eye, target, up, perspective or orthographic projection, clip planes) shared by `arc-view`,
   `arc-scene` and `arc-gpu`.
+- **Encoding:** the documented, versioned canonical byte form of every stored geometry value,
+  specified in [geometry-encoding.md](geometry-encoding.md).
 
 ## Meshes and subdivision
 
