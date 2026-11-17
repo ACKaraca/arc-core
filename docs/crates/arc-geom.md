@@ -249,7 +249,7 @@ form that cannot overflow when the plain one does, and stays exactly 0 at near a
   of the range (from parameter 0 for a line, negative lengths backwards); a length outside
   [0, length] by more than the linear tolerance fails with `geom.length.out_of_range`.
 - Elliptical arc lengths are integrated with an adaptive 8-point Gauss–Legendre rule split at
-  the quadrant angles, with an estimated error below a quarter of the linear tolerance (or 64
+  the quadrant angles, with an estimated error below 1/64 of the linear tolerance (or 64
   units in the last place of the length scale, when larger) and a bounded number of intervals;
   the parameter at a length is found by safeguarded Newton iteration, so its point is within
   the linear tolerance of the true point where `f64` resolves that.

@@ -20,7 +20,7 @@
 //! - Lengths of circles, arcs, segments and polylines are closed forms. The length of an
 //!   elliptical arc has no closed form; it is integrated with an adaptive 8-point
 //!   Gauss–Legendre rule. Each interval is accepted when the rule on the interval and the sum of
-//!   the rule on its two halves differ by at most the interval's share of a quarter of
+//!   the rule on its two halves differ by at most the interval's share of 1/64 of
 //!   `tolerance.linear` (or of 64 units in the last place of the length scale when that is
 //!   larger); the finer sum is kept. At most [`MAX_QUADRATURE_INTERVALS`] intervals are split;
 //!   beyond that the computation fails with `geom.precision.insufficient`.
@@ -53,6 +53,11 @@ const GAUSS_WEIGHTS: [f64; 4] = [
     0.222_381_034_453_374_43,
     0.101_228_536_290_377_06,
 ];
+/// The share of the linear tolerance the length quadrature of an elliptical arc aims at. The
+/// accepted difference between a rule and its halves is an estimate, not a bound, and it is
+/// optimistic near the tips of flat ellipses, so the target leaves a wide margin: the sum of the
+/// lengths of two parts then agrees with the length of the whole within the linear tolerance.
+const QUADRATURE_SHARE: f64 = 1.0 / 64.0;
 /// The most intervals the length quadrature of an elliptical arc splits before it fails.
 pub const MAX_QUADRATURE_INTERVALS: usize = 4096;
 /// The floor of the quadrature error target in units in the last place of the length scale, so
@@ -172,7 +177,8 @@ impl Conic {
                 .sum::<f64>()
         };
         let scale = norm(self.a).max(norm(self.b));
-        let target = (0.25 * tolerance.linear).max(QUADRATURE_ULPS * f64::EPSILON * scale * width);
+        let target = (QUADRATURE_SHARE * tolerance.linear)
+            .max(QUADRATURE_ULPS * f64::EPSILON * scale * width);
         // Split at the quadrant angles, where the speed has its extrema, so each piece is monotone.
         let quarter = FRAC_PI_2;
         let (from, to) = (
