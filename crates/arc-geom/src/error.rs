@@ -152,6 +152,12 @@ pub mod codes {
         category: Category::LimitExceeded,
         message_id: "geom-flatten-too-many-vertices",
     };
+    /// Two curves have more intersections than the limit allows.
+    pub const INTERSECT_TOO_MANY_RESULTS: ErrorCode = ErrorCode {
+        code: "geom.intersect.too_many_results",
+        category: Category::LimitExceeded,
+        message_id: "geom-intersect-too-many-results",
+    };
 
     /// A loop has no curves.
     pub const REGION_LOOP_EMPTY: ErrorCode = ErrorCode {
@@ -243,6 +249,7 @@ pub mod codes {
         TRIANGULATE_LOOP_COLLAPSED,
         TRIANGULATE_NESTING_INVALID,
         MESH_INVALID,
+        INTERSECT_TOO_MANY_RESULTS,
     ];
 }
 

@@ -258,15 +258,24 @@ form that cannot overflow when the plain one does, and stays exactly 0 at near a
 ### Curve intersections
 
 `intersect(a, b, tolerance)` returns every intersection of two curves of any kind (CORE-GEOM-005),
-sorted by the parameter on `a`, then on `b`. A result is either a point, with its parameter on
-each curve and a contact of `Crossing` or `Tangent`, or an overlap: an ascending parameter
-interval on each curve and an orientation, `Same` when the starts of the intervals meet and
-`Opposite` when the start on `a` meets the end on `b`. Intervals of rays and lines may be
-unbounded. Parameters follow the curve parameterization above.
+sorted by the parameter on `a`, then on `b`; `intersect_with_limits(a, b, tolerance, limits)` is
+the same with a caller's `Limits`, and `intersect` uses `Limits::DEFAULT`. A result is either a
+point, with its parameter on each curve and a contact of `Crossing` or `Tangent`, or an overlap: an
+ascending parameter interval on each curve and an orientation, `Same` when the starts of the
+intervals meet and `Opposite` when the start on `a` meets the end on `b`. Intervals of rays and
+lines may be unbounded. Parameters follow the curve parameterization above.
 
 Each curve is split into pieces: a polyline into its straight and arc segments, every other kind
 into one piece. Pieces are linear (segment, ray, line) or conic (circle, arc, ellipse, elliptical
-arc). With `linear` and `angular` the tolerances:
+arc). A bulged polyline segment whose sagitta (half the chord times the absolute bulge) is at most
+half the linear tolerance is intersected as its chord, at the parameter of the chord fraction,
+which differs from the angle fraction by a relative O(bulge²); its points are then within the
+sagitta of the segment. A bulged segment whose center-radius form would round by more than a
+sixteenth of the linear tolerance (a center or radius far beyond its vertices) is intersected as
+the fewest chords, between points of the arc at equal angle fractions, whose sagittas are at most
+half the linear tolerance, up to 64 of them; such chords follow the linear rules, so a line that
+touches the segment is reported where it meets the chords. Every other bulged segment is a conic.
+With `linear` and `angular` the tolerances:
 
 - Two linear pieces are parallel when the sine of their angle is at most `angular`, and collinear
   when, in addition, each one's reference point lies within `linear` of the other's line. Collinear
@@ -298,18 +307,44 @@ arc). With `linear` and `angular` the tolerances:
 Every rule is symmetric in the two curves: the curves are put into a fixed canonical order (by
 kind, then by their defining numbers) before computing, and the other argument order returns the
 same results with the curves' parameters swapped. A point within `linear` of an end point of a
-piece is reported at the parameter of that end point, and a point at the seam of a closed curve
-at the start of its range. Points that adjacent polyline segments find at their shared vertex are
-merged into one, tangent when any of them is. A point inside an overlap is dropped, and overlaps
-of adjacent segments that continue each other are joined. Each reported point is the midpoint of
-the two curve points at its parameters.
+piece, or of the seam of a full circle or ellipse, is reported at the parameter of that end point
+or seam, and a point at the seam of a closed curve at the start of its range. Two parameters name
+the same place of a curve when they are equal or lie on one piece with at most `linear` of curve
+between them, also across the seam of a closed curve; a curve that passes one location twice
+visits two places. Points that several pieces find at the same place of both curves within
+`linear` of each other, such as at a shared polyline vertex or at the seam, are merged into one,
+which keeps the parameters of one of them and is tangent when any of them is. A point inside an
+overlap, or at the same place as one of its ends, on both curves is dropped. Overlaps that
+continue each other at the same place of both curves are joined, whichever other results lie
+between them; an overlap that runs across the seam of a closed curve is reported as two overlaps,
+one ending at the end of the range and one starting at its start. Each reported point is the
+midpoint of the two curve points at its parameters. `intersect(a, a)` returns the overlap of the
+curve with itself, so points where a curve crosses itself are not reported.
 
 Constructions are carried out in `f64` with an explicit error bound: the rounding error of the
-inputs, relative to the size of the pieces, divided by the sine of the crossing angle for a
-crossing, plus the rounding of the point's coordinates. When a coordinate is so large that `f64`
-cannot resolve `linear` there, or the bound of a result exceeds `linear`, the operation fails
-with `geom.precision.insufficient`. A tolerance whose `linear` is not positive and finite, or
-whose `angular` is negative or not finite, fails with `geom.tolerance.invalid`.
+inputs, relative to the size of the pieces, divided by the sine of the crossing angle (taken at
+the computed point, before it is moved to an end or seam) for a crossing, plus the rounding of
+the point's coordinates and half the sagittas of chords standing for bulged segments. When a
+coordinate is so large that `f64` cannot resolve `linear` there, or the bound of a result exceeds
+`linear`, the operation fails with `geom.precision.insufficient`. Only pieces whose bounding
+boxes, one grown by `linear`, meet are computed, so a curve far from the other never causes this
+error. Consequences of the bound, with the default tolerance:
+
+- Pieces whose coordinates reach about 5.6e8 (`linear` divided by eight units of rounding) fail;
+  georeferenced coordinates must be brought to a local origin first.
+- Crossings at a very small angle fail when the bound divided by the sine of the angle exceeds
+  `linear`: for example a circle of radius 1e6 cut 1 m inside its edge, or two ellipses with a
+  minor-to-major ratio of 1e-6 lying along each other.
+- Two conics that are not both circles carry the major-to-minor ratio of the rounder one in their
+  bound, so ellipses with a ratio near 1e-9 fail against any conic but a circle.
+- A bulged segment that needs more than 64 chords and whose center-radius form rounds by more than
+  `linear` fails.
+
+A tolerance whose `linear` is not positive and finite, or whose `angular` is negative, not finite
+or above a quarter turn, fails with `geom.tolerance.invalid`. Pairs of pieces are found with a
+spatial index when the curves have many pieces. More than `limits.array_length` results fail
+with `geom.intersect.too_many_results`; the work before that check is bounded by four found
+points or overlaps per allowed result.
 
 ### Regions and point containment
 
@@ -394,7 +429,7 @@ The codes `arc-geom` owns. A code is never reused for a different meaning; messa
 | `geom.bbox.invalid` | `invalid_input` | A stored bounding box has a minimum above its maximum |
 | `geom.transform.singular` | `invalid_input` | A transform is not invertible |
 | `geom.transform.not_similarity` | `unsupported` | A polyline with arcs or widths is given a transform that is not a similarity within tolerance |
-| `geom.precision.insufficient` | `failed_operation` | A computation exceeds the range or precision of `f64`: a transform image that is not representable, a bulge whose arc is not representable, predicate coordinates that span too many binary exponents |
+| `geom.precision.insufficient` | `failed_operation` | A computation exceeds the range or precision of `f64`: a transform image that is not representable, a bulge whose arc is not representable, predicate coordinates that span too many binary exponents, an intersection whose error bound exceeds the linear tolerance |
 | `geom.decode.invalid` | `corrupt_data` | Encoded geometry is malformed or oversized |
 | `geom.tolerance.invalid` | `invalid_input` | A tolerance is NaN, infinite or negative, or zero where the operation needs a positive value |
 | `geom.view.eye_at_target` | `invalid_input` | The eye and target of a view frame are the same point |
@@ -450,3 +485,4 @@ no code with the index, on the grid scaled by powers of two from 2^-1000 to 2^10
 | `geom.length.out_of_range` | `invalid_input` | A requested arc length is negative or exceeds the curve's length by more than the linear tolerance |
 | `geom.curve.unbounded` | `unsupported` | A ray or line is given to an operation that needs a bounded curve, such as flattening |
 | `geom.flatten.too_many_vertices` | `limit_exceeded` | Flattening a curve needs more vertices than the caller's limit |
+| `geom.intersect.too_many_results` | `limit_exceeded` | Two curves have more intersections than the caller's limit |

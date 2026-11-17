@@ -15,14 +15,21 @@ use super::trig::{Trig, bisect, roots};
 use crate::bbox::Aabb2;
 use crate::curve::Curve2;
 use crate::error::codes;
-use crate::polyline::PolylineSegment;
-use crate::primitives::{Arc2, Ellipse2, Segment2, perp};
+use crate::polyline::{Polyline2, PolylineSegment};
+use crate::primitives::{Arc2, Ellipse2, perp};
 
 /// A conservative bound on the relative rounding error of the few floating-point steps of one
 /// construction, as a multiple of machine epsilon.
 pub(super) const ROUNDING: f64 = 8.0 * f64::EPSILON;
 /// Newton steps that move the eccentric angle of a point near an ellipse to its foot point.
 const REFINE_STEPS: u32 = 4;
+/// A bulged polyline segment is intersected in center-radius form only while the rounding of
+/// that form, `ROUNDING · (|center| + radius)`, stays below this fraction of the linear
+/// tolerance; flatter segments are intersected as chords.
+const CENTER_FORM_SHARE: f64 = 1.0 / 16.0;
+/// The most chords a bulged polyline segment is split into; a segment that needs more is
+/// intersected in center-radius form.
+const MAX_CHORDS: u32 = 64;
 
 fn cross(a: &Vector2, b: &Vector2) -> f64 {
     a.x * b.y - a.y * b.x
@@ -221,31 +228,32 @@ impl Shape {
         }
     }
 
-    /// The parameter of a candidate intersection point `p`, or `None` when it lies outside the
-    /// piece. `hint` is the parameter computed with `p`: the distance along a linear piece, the
-    /// eccentric angle on a conic. A point within `linear` of an end point is reported at that
-    /// end.
-    fn locate(&self, hint: Option<f64>, p: &Point2, linear: f64) -> Option<f64> {
+    /// The parameter of a candidate intersection point `p`, unsnapped and snapped, or `None`
+    /// when it lies outside the piece. `hint` is the parameter computed with `p`: the distance
+    /// along a linear piece, the eccentric angle on a conic. The snapped parameter moves a point
+    /// within `linear` of an end point (or of the seam of a full conic) to that end; the
+    /// unsnapped one is the parameter of the computed point itself.
+    fn locate(&self, hint: Option<f64>, p: &Point2, linear: f64) -> Option<(f64, f64)> {
         match self {
             Self::Linear(l) => {
                 let s = hint.unwrap_or_else(|| (p - l.origin).dot(&l.dir));
                 if l.lo.is_finite() && (s - l.lo).abs() <= linear {
-                    Some(l.lo)
+                    Some((s, l.lo))
                 } else if l.hi.is_finite() && (s - l.hi).abs() <= linear {
-                    Some(l.hi)
+                    Some((s, l.hi))
                 } else {
-                    (s >= l.lo && s <= l.hi).then_some(s)
+                    (s >= l.lo && s <= l.hi).then_some((s, s))
                 }
             }
             Self::Conic(c) => {
+                let tau = c.tau_of(hint.unwrap_or_else(|| c.angle_of(p)));
                 if (p - self.point(0.0)).norm() <= linear {
-                    return Some(0.0);
+                    return Some((tau, 0.0));
                 }
                 if !c.is_full() && (p - self.point(c.sweep)).norm() <= linear {
-                    return Some(c.sweep);
+                    return Some((tau, c.sweep));
                 }
-                let tau = c.tau_of(hint.unwrap_or_else(|| c.angle_of(p)));
-                (tau <= c.sweep).then_some(tau)
+                (tau <= c.sweep).then_some((tau, tau))
             }
         }
     }
@@ -284,17 +292,6 @@ impl Shape {
             }))
     }
 
-    fn bounding_box(&self) -> Option<Aabb2> {
-        match self {
-            Self::Linear(l) => (l.lo.is_finite() && l.hi.is_finite())
-                .then(|| Aabb2::from_corners(self.point(l.lo), self.point(l.hi))),
-            Self::Conic(c) => {
-                let half = Vector2::new(c.major.x.hypot(c.minor.x), c.major.y.hypot(c.minor.y));
-                Some(Aabb2::from_corners(c.center - half, c.center + half))
-            }
-        }
-    }
-
     /// The largest coordinate magnitude the computations with this piece involve.
     fn magnitude(&self) -> f64 {
         match self {
@@ -310,96 +307,240 @@ pub(super) struct Piece {
     shape: Shape,
     offset: f64,
     divisor: f64,
+    /// The curve parameters of the start and the end of the piece.
+    range: [f64; 2],
+    /// The tight bounding box; `None` for a ray or line.
+    bbox: Option<Aabb2>,
+    /// A bound on the distance between the piece and the part of the curve it stands for: the
+    /// sagitta of a bulged segment intersected as a chord, otherwise 0.
+    deviation: f64,
 }
 
 impl Piece {
-    fn segment(segment: &Segment2, offset: f64) -> Self {
-        let chord = segment.end() - segment.start();
-        let length = chord.norm();
-        Self {
+    /// The straight piece from `start` to `end` standing for the curve parameters `range`,
+    /// linear in between; `None` when the points coincide.
+    fn chord(start: Point2, end: Point2, range: [f64; 2], deviation: f64) -> Option<Self> {
+        let chord = end - start;
+        let length = crate::length(&chord);
+        // A length that overflows leaves a piece whose magnitude check fails, not a missing one.
+        (length > 0.0).then(|| Self {
             shape: Shape::Linear(Linear {
-                origin: segment.start(),
+                origin: start,
                 dir: chord / length,
                 lo: 0.0,
                 hi: length,
             }),
-            offset,
-            divisor: length,
-        }
+            offset: range[0],
+            divisor: length / (range[1] - range[0]),
+            range,
+            bbox: Some(Aabb2::from_corners(start, end)),
+            deviation,
+        })
     }
 
-    fn whole(shape: Shape) -> Self {
+    fn whole(shape: Shape, range: [f64; 2], bbox: Option<Aabb2>) -> Self {
         Self {
             shape,
             offset: 0.0,
             divisor: 1.0,
+            range,
+            bbox,
+            deviation: 0.0,
         }
     }
 
-    /// The curve parameter of the piece parameter `tau`.
+    /// The curve parameter of the piece parameter `tau`; the ends of the piece map exactly to
+    /// the ends of its range, so pieces that meet share their boundary parameter.
     pub(super) fn param(&self, tau: f64) -> f64 {
-        self.offset + tau / self.divisor
+        let (lo, hi) = match &self.shape {
+            Shape::Linear(l) => (l.lo, l.hi),
+            Shape::Conic(c) => (0.0, c.sweep),
+        };
+        if tau <= lo {
+            self.range[0]
+        } else if tau >= hi {
+            self.range[1]
+        } else {
+            (self.offset + tau / self.divisor).clamp(self.range[0], self.range[1])
+        }
     }
 
-    /// A lower bound on the distance traveled per unit of curve parameter.
-    pub(super) fn speed(&self) -> f64 {
+    /// The curve parameters of the start and the end of the piece.
+    pub(super) fn range(&self) -> [f64; 2] {
+        self.range
+    }
+
+    /// An upper bound on the distance traveled per unit of curve parameter.
+    pub(super) fn max_speed(&self) -> f64 {
         match self.shape {
             Shape::Linear(_) => self.divisor,
-            Shape::Conic(c) => self.divisor * c.minor.norm(),
+            Shape::Conic(c) => self.divisor * c.major.norm(),
         }
     }
 
-    /// Whether the bounding boxes, grown by `linear`, meet; unbounded pieces always may.
-    pub(super) fn may_meet(&self, other: &Self, linear: f64) -> bool {
-        match (self.shape.bounding_box(), other.shape.bounding_box()) {
-            (Some(a), Some(b)) => a.expanded(linear).intersects(&b),
-            _ => true,
-        }
+    /// The tight bounding box; `None` for a ray or line.
+    pub(super) fn bbox(&self) -> Option<Aabb2> {
+        self.bbox
     }
 }
 
-/// The pieces of a curve, in parameter order.
-pub(super) fn pieces(curve: &Curve2) -> Vec<Piece> {
+/// The pieces of a curve, in parameter order. A bulged polyline segment whose sagitta is at
+/// most half the linear tolerance becomes its chord. A flatter-than-representable bulged
+/// segment, whose center-radius form would round by more than a share of the linear tolerance,
+/// becomes the fewest chords between points of the arc whose sagittas are each at most half the
+/// linear tolerance (up to [`MAX_CHORDS`]). Every other piece keeps its exact form.
+pub(super) fn pieces(curve: &Curve2, linear: f64) -> Vec<Piece> {
+    let conic_box = |c: &Conic| {
+        let half = Vector2::new(c.major.x.hypot(c.minor.x), c.major.y.hypot(c.minor.y));
+        Some(Aabb2::from_corners(c.center - half, c.center + half))
+    };
     match curve {
-        Curve2::Segment(s) => vec![Piece::segment(s, 0.0)],
-        Curve2::Ray(r) => vec![Piece::whole(Shape::Linear(Linear {
-            origin: r.origin(),
-            dir: r.unit_direction(),
-            lo: 0.0,
-            hi: f64::INFINITY,
-        }))],
-        Curve2::Line(l) => vec![Piece::whole(Shape::Linear(Linear {
-            origin: l.point(),
-            dir: l.unit_direction(),
-            lo: f64::NEG_INFINITY,
-            hi: f64::INFINITY,
-        }))],
-        Curve2::Circle(c) => vec![Piece::whole(Shape::Conic(Conic::circle(
-            c.center(),
-            c.radius(),
-            0.0,
-            TAU,
-        )))],
-        Curve2::Arc(a) => vec![Piece::whole(Shape::Conic(Conic::arc(a)))],
-        Curve2::Ellipse(e) => vec![Piece::whole(Shape::Conic(Conic::ellipse(e, 0.0, TAU)))],
-        Curve2::EllipticalArc(e) => vec![Piece::whole(Shape::Conic(Conic::ellipse(
-            e.ellipse(),
-            e.start_parameter(),
-            e.sweep(),
-        )))],
-        Curve2::Polyline(p) => p
-            .segments()
-            .enumerate()
-            .map(|(k, segment)| match segment {
-                PolylineSegment::Line(s) => Piece::segment(&s, k as f64),
-                PolylineSegment::Arc(a) => Piece {
-                    shape: Shape::Conic(Conic::arc(&a)),
-                    offset: k as f64,
-                    divisor: a.sweep().abs(),
-                },
-            })
+        Curve2::Segment(s) => Piece::chord(s.start(), s.end(), [0.0, 1.0], 0.0)
+            .into_iter()
             .collect(),
+        Curve2::Ray(r) => vec![Piece::whole(
+            Shape::Linear(Linear {
+                origin: r.origin(),
+                dir: r.unit_direction(),
+                lo: 0.0,
+                hi: f64::INFINITY,
+            }),
+            [0.0, f64::INFINITY],
+            None,
+        )],
+        Curve2::Line(l) => vec![Piece::whole(
+            Shape::Linear(Linear {
+                origin: l.point(),
+                dir: l.unit_direction(),
+                lo: f64::NEG_INFINITY,
+                hi: f64::INFINITY,
+            }),
+            [f64::NEG_INFINITY, f64::INFINITY],
+            None,
+        )],
+        Curve2::Circle(c) => {
+            let conic = Conic::circle(c.center(), c.radius(), 0.0, TAU);
+            vec![Piece::whole(
+                Shape::Conic(conic),
+                [0.0, TAU],
+                conic_box(&conic),
+            )]
+        }
+        Curve2::Arc(a) => vec![Piece::whole(
+            Shape::Conic(Conic::arc(a)),
+            [0.0, a.sweep().abs()],
+            Some(a.bounding_box()),
+        )],
+        Curve2::Ellipse(e) => {
+            let conic = Conic::ellipse(e, 0.0, TAU);
+            vec![Piece::whole(
+                Shape::Conic(conic),
+                [0.0, TAU],
+                conic_box(&conic),
+            )]
+        }
+        Curve2::EllipticalArc(e) => vec![Piece::whole(
+            Shape::Conic(Conic::ellipse(e.ellipse(), e.start_parameter(), e.sweep())),
+            [0.0, e.sweep().abs()],
+            Some(e.bounding_box()),
+        )],
+        Curve2::Polyline(p) => polyline_pieces(p, linear),
     }
+}
+
+fn polyline_pieces(polyline: &Polyline2, linear: f64) -> Vec<Piece> {
+    let vertices = polyline.vertices();
+    let mut out = Vec::new();
+    for k in 0..polyline.segment_count() {
+        let (Some(segment), Some(first), Some(second)) = (
+            polyline.segment(k),
+            vertices.get(k),
+            vertices.get((k + 1) % vertices.len()),
+        ) else {
+            continue;
+        };
+        let start = k as f64;
+        let range = [start, start + 1.0];
+        let arc = match segment {
+            PolylineSegment::Line(s) => {
+                out.extend(Piece::chord(s.start(), s.end(), range, 0.0));
+                continue;
+            }
+            PolylineSegment::Arc(arc) => arc,
+        };
+        // The sagitta of a bulged segment is half the chord times the absolute bulge.
+        let chord = crate::length(&(second.point - first.point));
+        let sagitta = 0.5 * chord * first.bulge.abs();
+        if sagitta <= 0.5 * linear {
+            out.extend(Piece::chord(first.point, second.point, range, sagitta));
+            continue;
+        }
+        let rounding = ROUNDING * (arc.center().coords.amax() + arc.radius());
+        if rounding > CENTER_FORM_SHARE * linear
+            && let Some(chords) = split_into_chords(&segment, first.bulge, start, linear)
+        {
+            out.extend(chords);
+            continue;
+        }
+        out.push(Piece {
+            shape: Shape::Conic(Conic::arc(&arc)),
+            offset: start,
+            divisor: arc.sweep().abs(),
+            range,
+            bbox: Some(arc.bounding_box()),
+            deviation: 0.0,
+        });
+    }
+    out
+}
+
+/// The fewest chords, between points of the bulged segment at equal angle fractions, whose
+/// sagittas are each at most half the linear tolerance; `None` when more than [`MAX_CHORDS`]
+/// would be needed. Each chord stands for its stretch of the segment, its parameter linear in
+/// the fraction, which differs from the angle fraction by a relative O(bulge²).
+fn split_into_chords(
+    segment: &PolylineSegment,
+    bulge: f64,
+    start: f64,
+    linear: f64,
+) -> Option<Vec<Piece>> {
+    // The sub-arc over 1/m of the angle has bulge tan(atan(b)/m).
+    let quarter = bulge.atan();
+    let sagitta_of =
+        |a: &Point2, b: &Point2, m: f64| 0.5 * crate::length(&(b - a)) * (quarter / m).tan().abs();
+    let points = |m: u32| -> Vec<Point2> {
+        (0..=m)
+            .map(|j| segment.point_at_fraction(f64::from(j) / f64::from(m)))
+            .collect()
+    };
+    for m in 2..=MAX_CHORDS {
+        let fm = f64::from(m);
+        let pts = points(m);
+        let sagittas: Vec<f64> = pts
+            .windows(2)
+            .map(|w| sagitta_of(&w[0], &w[1], fm))
+            .collect();
+        if sagittas.iter().any(|s| *s > 0.5 * linear) {
+            continue;
+        }
+        let chords: Vec<Piece> = pts
+            .windows(2)
+            .zip(&sagittas)
+            .enumerate()
+            .filter_map(|(j, (w, sagitta))| {
+                let j = j as f64;
+                let lo = start + j / fm;
+                let hi = if j + 1.0 >= fm {
+                    start + 1.0
+                } else {
+                    start + (j + 1.0) / fm
+                };
+                Piece::chord(w[0], w[1], [lo, hi], *sagitta)
+            })
+            .collect();
+        return Some(chords);
+    }
+    None
 }
 
 /// An intersection of two pieces in their own parameters.
@@ -494,9 +635,12 @@ pub(super) fn intersect_pieces(p: &Piece, q: &Piece, tolerance: &Tolerance) -> R
         Outcome::Coincident(raws) => return Ok(raws),
         Outcome::Candidates(candidates) => candidates,
     };
+    // The reported point is the midpoint of the two curve points, each within its piece's
+    // deviation of the constructed point.
+    let deviation = 0.5 * (p.deviation + q.deviation);
     let mut out = Vec::new();
     for candidate in &candidates {
-        accept(&p.shape, &q.shape, candidate, linear, &mut out)?;
+        accept(&p.shape, &q.shape, candidate, linear, deviation, &mut out)?;
     }
     end_contacts(&p.shape, &q.shape, tolerance, &mut out)?;
     Ok(out)
@@ -505,9 +649,19 @@ pub(super) fn intersect_pieces(p: &Piece, q: &Piece, tolerance: &Tolerance) -> R
 /// Locates a candidate on both pieces and checks its error bound: the input error divided by
 /// the sine of the crossing angle for a crossing (the displacement of the crossing when one
 /// curve moves by that much), the input error itself for a tangency, plus the rounding of the
-/// point's own coordinates.
-fn accept(p: &Shape, q: &Shape, c: &Candidate, linear: f64, out: &mut Vec<Raw>) -> Result<()> {
-    let (Some(s), Some(t)) = (
+/// point's own coordinates and the `deviation` of chords standing for bulged segments. The
+/// crossing angle is taken at the computed point, before it is snapped to an end or seam. A
+/// point whose bound exceeds the linear tolerance but which was moved to an end of one piece
+/// lying within the linear tolerance of the other is left to [`end_contacts`].
+fn accept(
+    p: &Shape,
+    q: &Shape,
+    c: &Candidate,
+    linear: f64,
+    deviation: f64,
+    out: &mut Vec<Raw>,
+) -> Result<()> {
+    let (Some((s_raw, s)), Some((t_raw, t))) = (
         p.locate(c.hint_p, &c.point, linear),
         q.locate(c.hint_q, &c.point, linear),
     ) else {
@@ -515,10 +669,18 @@ fn accept(p: &Shape, q: &Shape, c: &Candidate, linear: f64, out: &mut Vec<Raw>) 
     };
     let mut bound = c.delta;
     if !c.tangent {
-        bound /= sine(&p.tangent(s), &q.tangent(t)).max(f64::EPSILON);
+        bound /= sine(&p.tangent(s_raw), &q.tangent(t_raw)).max(f64::EPSILON);
     }
-    bound += ROUNDING * c.point.coords.amax();
+    bound += ROUNDING * c.point.coords.amax() + deviation;
     if bound > linear || bound.is_nan() {
+        // A point moved to an end that lies within `linear` of the other piece is found
+        // without construction by `end_contacts`; only an unresolved point is an error.
+        let end_touches = |x: &Shape, tau: f64, y: &Shape| -> Result<bool> {
+            Ok(x.ends().contains(&tau) && y.closest(&x.point(tau))?.1 <= linear)
+        };
+        if end_touches(p, s, q)? || end_touches(q, t, p)? {
+            return Ok(());
+        }
         return Err(Error::new(codes::PRECISION_INSUFFICIENT).with_detail("error_bound", bound));
     }
     out.push(Raw::Point {
@@ -710,9 +872,17 @@ fn circle_circle(a: &Conic, b: &Conic, linear: f64) -> Outcome {
             true,
         )]
     } else if d < r1 + r2 && d > (r1 - r2).abs() {
-        let x = 0.5 * (d + (r1 - r2) * (r1 + r2) / d);
-        let h = ((r1 - x) * (r1 + x)).max(0.0).sqrt();
-        let base = a.center + u * x;
+        // Measured from the center of the smaller circle, with the difference of squares
+        // factored: the distance `x` to the common chord and the half chord `h` then have
+        // errors relative to the inputs, also when the other circle is far larger.
+        let (small, rs, rl, u) = if r1 <= r2 {
+            (a.center, r1, r2, u)
+        } else {
+            (b.center, r2, r1, -u)
+        };
+        let x = 0.5 * ((d - rl) * (d + rl) / d + rs * (rs / d));
+        let h = ((rs - x) * (rs + x)).max(0.0).sqrt();
+        let base = small + u * x;
         let n = perp(&u) * h;
         vec![candidate(base + n, false), candidate(base - n, false)]
     } else {

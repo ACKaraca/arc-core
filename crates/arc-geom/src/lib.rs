@@ -33,7 +33,7 @@ pub use curve::Curve2;
 pub use eval::CurveEval;
 pub use flatten::CurveFlatten;
 pub use index::{SpatialIndex2, SpatialIndex3};
-pub use intersect::{Contact, Intersection, Orientation, intersect};
+pub use intersect::{Contact, Intersection, Orientation, intersect, intersect_with_limits};
 pub use polyline::{Polyline2, PolylineSegment, PolylineVertex};
 pub use predicates::{Sign, incircle, orient2d};
 pub use primitives::{Arc2, Circle2, Ellipse2, EllipticalArc2, Line2, Ray2, Segment2};

@@ -783,6 +783,171 @@ fn corpus() -> Vec<Case> {
             ),
             vec![at(cross(2.0, 1.0), 1.5, 0.5), at(cross(1.0, 2.0), 2.5, 3.5)],
         ),
+        // Nearly straight bulges: a sagitta of at most half the linear tolerance is intersected
+        // as the chord, a flat bulge with a huge radius as chords, and neither fails.
+        case(
+            "polyline_bulge_1e-6_crossing",
+            poly(&[(0.0, 0.0, 1e-6), (1.0, 0.0, 0.0)], false),
+            seg(0.5, -1.0, 0.5, 1.0),
+            vec![at(cross(0.5, -5e-7), 0.5, 0.5)],
+        ),
+        case(
+            "polyline_bulge_1e-12_crossing",
+            poly(&[(0.0, 0.0, 1e-12), (1.0, 0.0, 0.0)], false),
+            seg(0.5, -1.0, 0.5, 1.0),
+            vec![at(cross(0.5, 0.0), 0.5, 0.5)],
+        ),
+        case(
+            "polyline_bulge_1e-12_far_segment",
+            poly(&[(0.0, 0.0, 1e-12), (1.0, 0.0, 0.0)], false),
+            seg(50.0, 50.0, 51.0, 51.0),
+            vec![],
+        ),
+        case(
+            "long_flat_bulge_as_chords",
+            poly(&[(0.0, 0.0, 1e-8), (1000.0, 0.0, 0.0)], false),
+            seg(500.0, -1.0, 500.0, 1.0),
+            vec![at(cross(500.0, -5e-6), 0.5, 0.499_997_5)],
+        ),
+        // Thin ellipses and tiny polyline segments.
+        case(
+            "thin_ellipse_crossings_stay_apart",
+            ell(0.0, 0.0, 2.0, 0.0, 1e-7),
+            seg(1.0, -1.0, 1.0, 1.0),
+            vec![cross(1.0, 1.732_050_8e-7), cross(1.0, -1.732_050_8e-7)],
+        ),
+        case(
+            "self_crossing_polyline_with_tiny_tail",
+            poly(
+                &[
+                    (-1.0, -1.0, 0.0),
+                    (1.0, 1.0, 0.0),
+                    (1.0, -1.0, 0.0),
+                    (-1.0, 1.0, 0.0),
+                    (-1.0, 1.0 + 4e-7, 0.0),
+                ],
+                false,
+            ),
+            seg(0.0, -2.0, 0.0, 2.0),
+            vec![at(cross(0.0, 0.0), 0.5, 0.5), at(cross(0.0, 0.0), 2.5, 0.5)],
+        ),
+        case(
+            "crossing_next_to_overlap",
+            poly(
+                &[(0.0, 0.0, 0.0), (1000.0, 0.0, 0.0), (1000.0, 5e-7, 0.0)],
+                false,
+            ),
+            poly(
+                &[
+                    (-1.0, 0.0, 0.0),
+                    (500.0, 0.0, 0.0),
+                    (500.4, 1.0, 0.0),
+                    (500.8, -1.0, 0.0),
+                    (500.8, -1.0 + 5e-7, 0.0),
+                ],
+                false,
+            ),
+            vec![
+                overlap([0.0, 0.5], [1.0 / 501.0, 1.0], Same),
+                at(cross(500.6, 0.0), 0.5006, 2.5),
+            ],
+        ),
+        case(
+            "collinear_stretches_with_gap",
+            poly(
+                &[(0.0, 0.0, 0.0), (1000.0, 0.0, 0.0), (1000.0, 2e-7, 0.0)],
+                false,
+            ),
+            poly(
+                &[
+                    (100.0, 0.0, 0.0),
+                    (200.0, 0.0, 0.0),
+                    (200.25, 0.5, 0.0),
+                    (200.5, 0.0, 0.0),
+                    (300.0, 0.0, 0.0),
+                    (300.0, 2e-7, 0.0),
+                ],
+                false,
+            ),
+            vec![
+                overlap([0.1, 0.2], [0.0, 1.0], Same),
+                overlap([0.2005, 0.3], [3.0, 4.0], Same),
+            ],
+        ),
+        // Seams, rays, lines and self-intersection.
+        case(
+            "ellipses_nearly_coincident_at_seam",
+            e21(),
+            ell(0.0, 1.1e-6, 2.0, 0.0, 0.5),
+            vec![cross(2.0, 5.5e-7), cross(-2.0, 5.5e-7)],
+        ),
+        case(
+            "closed_polyline_overlap_across_seam",
+            poly(
+                &[
+                    (1.0, 0.0, 0.0),
+                    (2.0, 0.0, 0.0),
+                    (2.0, 2.0, 0.0),
+                    (0.0, 2.0, 0.0),
+                    (0.0, 0.0, 0.0),
+                ],
+                true,
+            ),
+            seg(1.5, 0.0, 0.5, 0.0),
+            vec![
+                overlap([0.0, 0.5], [0.0, 0.5], Opposite),
+                overlap([4.5, 5.0], [0.5, 1.0], Opposite),
+            ],
+        ),
+        case(
+            "rays_same_direction_overlap",
+            ray(0.0, 0.0, 1.0, 0.0),
+            ray(3.0, 0.0, 2.0, 0.0),
+            vec![overlap([3.0, inf], [0.0, inf], Same)],
+        ),
+        case(
+            "lines_collinear_same",
+            line(0.0, 0.0, 1.0, 0.0),
+            line(3.0, 0.0, 5.0, 0.0),
+            vec![overlap([-inf, inf], [-inf, inf], Same)],
+        ),
+        case(
+            "ray_along_polyline",
+            ray(-1.0, 0.0, 1.0, 0.0),
+            poly(&[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0)], false),
+            vec![overlap([1.0, 3.0], [0.0, 2.0], Same)],
+        ),
+        case(
+            "self_crossing_polyline_with_itself",
+            poly(
+                &[
+                    (0.0, 0.0, 0.0),
+                    (2.0, 2.0, 0.0),
+                    (2.0, 0.0, 0.0),
+                    (0.0, 2.0, 0.0),
+                ],
+                false,
+            ),
+            poly(
+                &[
+                    (0.0, 0.0, 0.0),
+                    (2.0, 2.0, 0.0),
+                    (2.0, 0.0, 0.0),
+                    (0.0, 2.0, 0.0),
+                ],
+                false,
+            ),
+            vec![overlap([0.0, 3.0], [0.0, 3.0], Same)],
+        ),
+        case(
+            "retracing_polyline_with_itself",
+            poly(&[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 0.0)], false),
+            poly(&[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 0.0)], false),
+            vec![
+                overlap([0.0, 2.0], [0.0, 2.0], Same),
+                overlap([0.0, 2.0], [0.0, 2.0], Opposite),
+            ],
+        ),
         Case {
             name: "extreme_coordinates_circles",
             a: circ(1e12, 0.0, 1.0),
