@@ -29,6 +29,8 @@
 //! - hatches with islands, associativity, pattern line generation and the Arc hatch-pattern
 //!   file format and library (CORE-DRAFT-003 and 020, [`hatch`], [`hatch_pattern`]);
 //! - spline entities (CORE-DRAFT-002, [`spline`]);
+//! - fields in text (CORE-DRAFT-007, [`fields`]), tables with merged cells and formulas
+//!   (CORE-DRAFT-008, [`table`]) and reference arrays (CORE-DRAFT-024, [`array`]);
 //! - plot style tables (CORE-DRAFT-030, [`plot_style`]), plot streams (CORE-DRAFT-031, [`plot`])
 //!   and, with the feature `raster`, raster output (CORE-DRAFT-032, `raster`);
 //! - the `core.draft.*` commands ([`register_commands`]).
@@ -39,11 +41,13 @@ pub mod annotation;
 mod annotation_commands;
 mod annotation_display;
 pub mod appearance;
+pub mod array;
 pub mod clip;
 pub mod commands;
 pub mod dimension;
 pub mod display;
 pub mod error;
+pub mod fields;
 pub mod fonts;
 pub mod format;
 pub mod hatch;
@@ -63,6 +67,8 @@ pub mod raster;
 pub mod spline;
 pub mod stroke_font;
 pub mod style;
+pub mod table;
+mod table_commands;
 pub mod text;
 pub mod text_layout;
 pub mod types;

@@ -491,8 +491,15 @@ impl<'a> Stroke<'a> {
     /// Breaks one paragraph into lines.
     #[expect(clippy::too_many_lines, reason = "one greedy pass over the words")]
     fn lines(&self, paragraph: &Paragraph, items: &[Vec<Item>], heights: &[f64]) -> Vec<Line> {
-        let tol = self.options.tolerance.linear;
         let width = self.input.width;
+        // The tolerance only absorbs rounding of the sums of advances, so it scales with the
+        // measure: the absolute linear tolerance would let a line of tiny text overflow by a
+        // large share of a word.
+        let tol = self
+            .options
+            .tolerance
+            .linear
+            .min(1e-10 * width.max(self.input.height));
         // Tokens: (is_space, run, item) in order.
         let flat: Vec<(usize, usize, Item)> = items
             .iter()

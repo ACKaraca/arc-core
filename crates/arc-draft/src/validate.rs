@@ -35,6 +35,10 @@
 //! **Disassociated hatches.** Every commit reports a warning `draft.hatch.disassociated`
 //! (detail `id`) for each hatch that lost a boundary object.
 //!
+//! **Fields and tables.** Every commit reports a warning for each field that shows the marker
+//! (`draft.field.source_missing`, `draft.field.expression_invalid`) and for each table formula
+//! that fails or lies in a cycle (`draft.table.formula_invalid`, `draft.table.formula_cycle`).
+//!
 //! **Dimension style parents.** A dimension style with a parent has a kind other than `all`,
 //! and its parent has the kind `all` and no parent (`draft.style.parent_invalid`).
 
@@ -374,7 +378,20 @@ pub fn validators(max_nesting: u32) -> Vec<DocumentValidator> {
         Arc::new(|_, candidate, _| crate::dimension::disassociated(candidate));
     let hatches: DocumentValidator =
         Arc::new(|_, candidate, _| crate::hatch::disassociated(candidate));
-    vec![nesting, names, layouts, parents, disassociated, hatches]
+    let fields: DocumentValidator =
+        Arc::new(|_, candidate, _| crate::fields::diagnostics(candidate));
+    let tables: DocumentValidator =
+        Arc::new(|_, candidate, _| crate::table::diagnostics(candidate));
+    vec![
+        nesting,
+        names,
+        layouts,
+        parents,
+        disassociated,
+        hatches,
+        fields,
+        tables,
+    ]
 }
 
 /// Adds [`validators`] with [`DEFAULT_MAX_NESTING`] to `document`.

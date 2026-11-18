@@ -227,6 +227,16 @@ pub(crate) trait Reader {
     fn resolved(&self, id: ObjectId) -> Result<Resolution>;
     /// The resolved boundary of the hatch `id`.
     fn hatch(&self, id: ObjectId) -> Result<crate::hatch::Resolution>;
+    /// The texts of the text or rich text `id` with their fields evaluated.
+    fn evaluated(&self, id: ObjectId) -> Result<crate::fields::Evaluated>;
+    /// The evaluated cells of the table `id`.
+    fn table(&self, id: ObjectId) -> Result<crate::table::Resolution>;
+}
+
+/// Whether `error` says that no evaluator is registered for a node: the reader then evaluates
+/// the value directly, with the same rules.
+fn unregistered(error: &Error) -> bool {
+    error.code() == arc_doc::error::codes::GRAPH_UNKNOWN_KEY.code
 }
 
 pub(crate) struct GraphReader<'a, 'b> {
@@ -287,6 +297,26 @@ impl Reader for GraphReader<'_, '_> {
             .cloned()
             .ok_or_else(|| Error::new(codes::OBJECT_WRONG_TYPE))
     }
+    fn evaluated(&self, id: ObjectId) -> Result<crate::fields::Evaluated> {
+        match self.ctx.node(&crate::fields::node(id)?) {
+            Ok(value) => value
+                .downcast_ref::<crate::fields::Evaluated>()
+                .cloned()
+                .ok_or_else(|| Error::new(codes::OBJECT_WRONG_TYPE)),
+            Err(e) if unregistered(&e) => crate::fields::evaluate(self, id, &Tolerance::DEFAULT),
+            Err(e) => Err(e),
+        }
+    }
+    fn table(&self, id: ObjectId) -> Result<crate::table::Resolution> {
+        match self.ctx.node(&crate::table::resolved_node(id)?) {
+            Ok(value) => value
+                .downcast_ref::<crate::table::Resolution>()
+                .cloned()
+                .ok_or_else(|| Error::new(codes::OBJECT_WRONG_TYPE)),
+            Err(e) if unregistered(&e) => crate::table::resolve_with(self, id, &Tolerance::DEFAULT),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 struct SnapshotReader<'a> {
@@ -343,6 +373,12 @@ impl Reader for SnapshotReader<'_> {
     }
     fn hatch(&self, id: ObjectId) -> Result<crate::hatch::Resolution> {
         crate::hatch::resolve_with(self, id, &self.options.tolerance)
+    }
+    fn evaluated(&self, id: ObjectId) -> Result<crate::fields::Evaluated> {
+        crate::fields::evaluate(self, id, &self.options.tolerance)
+    }
+    fn table(&self, id: ObjectId) -> Result<crate::table::Resolution> {
+        crate::table::resolve_with(self, id, &self.options.tolerance)
     }
 }
 
@@ -648,6 +684,12 @@ fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<
         crate::hatch::HATCH => {
             list.primitives = crate::hatch::primitives(reader, id, &base, options)?;
         }
+        crate::table::TABLE => {
+            list.primitives = crate::table::primitives(reader, id, &base, &look, options)?;
+        }
+        crate::array::ARRAY => {
+            return crate::array::list(reader, base, &look, top, options);
+        }
         DIMENSION | LEADER | MULTILEADER => {
             list.primitives =
                 crate::annotation_display::primitives(reader, id, &key, &base, &look, options)?;
@@ -752,7 +794,7 @@ fn text_layout_of(
     options: &DisplayOptions,
 ) -> Result<TextLayout> {
     let (style, height, _, _) = text_style(reader, id)?;
-    let paragraphs;
+    let paragraphs = reader.evaluated(id)?.paragraphs;
     let mut input = TextInput {
         paragraphs: &[],
         height,
@@ -763,17 +805,6 @@ fn text_layout_of(
         style: &style,
     };
     if key == TEXT {
-        let content = match reader.field(id, "content")? {
-            Some(Value::String(s)) => s,
-            _ => String::new(),
-        };
-        paragraphs = vec![crate::text::Paragraph {
-            runs: vec![crate::text::Run {
-                text: content,
-                ..crate::text::Run::default()
-            }],
-            ..crate::text::Paragraph::default()
-        }];
         input.halign = match read_enum(reader, id, "halign")? {
             1 => HAlign::Center,
             2 => HAlign::Right,
@@ -786,14 +817,6 @@ fn text_layout_of(
             _ => VAlign::Baseline,
         };
     } else {
-        let stored = reader.field(id, "paragraphs")?;
-        paragraphs = match &stored {
-            Some(Value::List(items)) => items
-                .iter()
-                .filter_map(crate::text::Paragraph::from_value)
-                .collect(),
-            _ => Vec::new(),
-        };
         input.width = read_number(reader, id, "width")?.unwrap_or(0.0);
         let attachment = read_enum(reader, id, "attachment")?;
         input.halign = match attachment % 3 {
@@ -1155,6 +1178,8 @@ pub fn register_evaluators(evaluators: &mut Evaluators, options: DisplayOptions)
         )?;
     }
     crate::dimension::register_evaluators(evaluators, &options)?;
+    crate::fields::register_evaluators(evaluators, &options)?;
+    crate::table::register_evaluators(evaluators, &options)?;
     crate::hatch::register_evaluators(evaluators, &options)
 }
 

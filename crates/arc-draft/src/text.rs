@@ -16,6 +16,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::codes;
+use crate::fields::{self, Field};
 use crate::style::{TEXT_STYLE, style_reference};
 use crate::types::{TEXT_BYTES, f64_at, finding, flag, real, variants};
 
@@ -50,6 +51,8 @@ pub mod field {
     pub const WIDTH: usize = KIND + 5;
     /// `valign` of a single-line text; `attachment` of a rich text.
     pub const VALIGN: usize = KIND + 6;
+    /// `fields` of a single-line text (CORE-DRAFT-007).
+    pub const FIELDS: usize = KIND + 7;
     /// `attachment` of a rich text.
     pub const ATTACHMENT: usize = KIND + 6;
     /// `columns` of a rich text.
@@ -148,6 +151,9 @@ pub struct Run {
     /// The denominator of a stacked fraction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub denominator: Option<String>,
+    /// Fields inserted into `text` (CORE-DRAFT-007); the layout reads the evaluated text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<Field>,
 }
 
 /// One paragraph of a rich text.
@@ -219,6 +225,7 @@ impl Run {
             Some(Value::Bool(self.strike)),
             Some(Value::Enum(self.stack as u32)),
             opt_string(&self.denominator),
+            Some(fields::list_value(&self.fields)),
         ])
     }
 
@@ -250,6 +257,7 @@ impl Run {
                 _ => Stack::None,
             },
             denominator: string(10),
+            fields: fields::fields_of(f.get(11).and_then(Option::as_ref)),
         })
     }
 }
@@ -406,6 +414,7 @@ pub fn validate(paragraphs: &[Paragraph], limits: &Limits) -> Result<()> {
             if (run.stack == Stack::None) == run.denominator.is_some() {
                 return Err(Error::new(codes::TEXT_STACK_INVALID));
             }
+            fields::validate(&run.text, &run.fields, limits)?;
         }
     }
     if bytes > limits.string_bytes {
@@ -442,6 +451,7 @@ pub(crate) fn text_fields() -> Vec<FieldDecl> {
         FieldDecl::new("valign", variants(&["baseline", "bottom", "middle", "top"]))
             .with_default(Value::Enum(0)),
     );
+    fields.push(fields::list_decl());
     fields
 }
 
@@ -465,6 +475,7 @@ fn run_type() -> ValueType {
         FieldDecl::new("stack", variants(&["none", "horizontal", "diagonal"]))
             .with_default(Value::Enum(0)),
         text("denominator"),
+        fields::list_decl(),
     ])
 }
 
@@ -536,6 +547,15 @@ pub(crate) fn text_findings(values: &[Option<Value>]) -> Vec<Finding> {
         && !content_ok(s)
     {
         findings.push(finding(Error::new(codes::TEXT_CONTENT_INVALID)));
+    }
+    if let Some(Some(Value::String(s))) = values.get(field::CONTENT)
+        && let Err(error) = fields::validate(
+            s,
+            &fields::fields_of(values.get(field::FIELDS).and_then(Option::as_ref)),
+            &Limits::DEFAULT,
+        )
+    {
+        findings.push(finding(error));
     }
     findings
 }

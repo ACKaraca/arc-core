@@ -394,6 +394,75 @@ pub mod codes {
         message_id: "draft-pattern-unknown",
     };
 
+    /// A field placeholder lies outside its text, out of order, or its source is malformed.
+    pub const FIELD_PLACEHOLDER_INVALID: ErrorCode = ErrorCode {
+        code: "draft.field.placeholder_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-field-placeholder-invalid",
+    };
+    /// The source of a field is missing: its object or property does not exist (a warning).
+    pub const FIELD_SOURCE_MISSING: ErrorCode = ErrorCode {
+        code: "draft.field.source_missing",
+        category: Category::NotFound,
+        message_id: "draft-field-source-missing",
+    };
+    /// The expression of a field does not evaluate (a warning).
+    pub const FIELD_EXPRESSION_INVALID: ErrorCode = ErrorCode {
+        code: "draft.field.expression_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-field-expression-invalid",
+    };
+    /// A table has no rows or columns, or a size is not a finite positive number.
+    pub const TABLE_GRID_INVALID: ErrorCode = ErrorCode {
+        code: "draft.table.grid_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-table-grid-invalid",
+    };
+    /// A table has more rows, columns, cells or merged ranges than the bounds allow.
+    pub const TABLE_TOO_LARGE: ErrorCode = ErrorCode {
+        code: "draft.table.too_large",
+        category: Category::LimitExceeded,
+        message_id: "draft-table-too-large",
+    };
+    /// A cell lies outside the grid, is stored twice, holds content inside a merged range that
+    /// is not its first cell, or has content that is not valid.
+    pub const TABLE_CELL_INVALID: ErrorCode = ErrorCode {
+        code: "draft.table.cell_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-table-cell-invalid",
+    };
+    /// A merged range is not a rectangle of at least two cells inside the grid, or overlaps
+    /// another.
+    pub const TABLE_MERGE_INVALID: ErrorCode = ErrorCode {
+        code: "draft.table.merge_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-table-merge-invalid",
+    };
+    /// A cell formula does not parse, or does not evaluate (a warning for stored formulas).
+    pub const TABLE_FORMULA_INVALID: ErrorCode = ErrorCode {
+        code: "draft.table.formula_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-table-formula-invalid",
+    };
+    /// Cell formulas refer to each other in a cycle (a warning).
+    pub const TABLE_FORMULA_CYCLE: ErrorCode = ErrorCode {
+        code: "draft.table.formula_cycle",
+        category: Category::InvalidInput,
+        message_id: "draft-table-formula-cycle",
+    };
+    /// An array parameter is out of range, or its path is missing or has no length.
+    pub const ARRAY_INVALID: ErrorCode = ErrorCode {
+        code: "draft.array.invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-array-invalid",
+    };
+    /// An array would have more items than the bound allows.
+    pub const ARRAY_TOO_MANY_ITEMS: ErrorCode = ErrorCode {
+        code: "draft.array.too_many_items",
+        category: Category::LimitExceeded,
+        message_id: "draft-array-too-many-items",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         GEOMETRY_INVALID,
@@ -459,6 +528,17 @@ pub mod codes {
         PATTERN_EMPTY,
         PATTERN_LIMIT_EXCEEDED,
         PATTERN_UNKNOWN,
+        FIELD_PLACEHOLDER_INVALID,
+        FIELD_SOURCE_MISSING,
+        FIELD_EXPRESSION_INVALID,
+        TABLE_GRID_INVALID,
+        TABLE_TOO_LARGE,
+        TABLE_CELL_INVALID,
+        TABLE_MERGE_INVALID,
+        TABLE_FORMULA_INVALID,
+        TABLE_FORMULA_CYCLE,
+        ARRAY_INVALID,
+        ARRAY_TOO_MANY_ITEMS,
     ];
 }
 

@@ -13,6 +13,7 @@ arc-base = { workspace = true }
 arc-command = { workspace = true }
 arc-doc = { workspace = true }
 arc-geom = { workspace = true }
+arc-solve = { workspace = true }
 image = { workspace = true, optional = true }
 parley = { workspace = true, optional = true }
 schemars = { workspace = true }

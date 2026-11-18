@@ -260,6 +260,64 @@ fn width_of(font: &StrokeFont, word: &str, s: f64) -> f64 {
         .sum()
 }
 
+/// The breaking and justification rules on one input: no line exceeds the width unless one word
+/// does, and a justified line that is not the last and holds more than one word ends at the margin.
+fn check_breaking(words: &[String], height: f64, width: f64) -> Result<(), TestCaseError> {
+    let font = builtin().unwrap();
+    let p = vec![Paragraph {
+        alignment: Alignment::Justify,
+        runs: vec![run(&words.join(" "))],
+        ..Paragraph::default()
+    }];
+    let out = lay(&p, height, width);
+    let s = height / font.cap_height;
+    let widths: Vec<f64> = words.iter().map(|w| width_of(&font, w, s)).collect();
+    let tol = 1e-9 * width.max(1.0);
+    let last = out.lines.len() - 1;
+    for (i, line) in out.lines.iter().enumerate() {
+        let extent = line.right - line.left;
+        if line.right > width + tol {
+            prop_assert!(widths.iter().any(|w| (w - extent).abs() <= tol), "{line:?}");
+        }
+        let one_word = widths.iter().any(|w| (w - extent).abs() <= tol);
+        if i < last && extent < width && !one_word {
+            prop_assert!((line.right - width).abs() <= tol, "{line:?} {width}");
+        }
+    }
+    prop_assert_eq!(out.clone(), lay(&p, height, width));
+    Ok(())
+}
+
+/// Issue 76: at a text height of 0.001 the absolute linear tolerance (1e-6) was a tenth of a
+/// percent of the height, so a line took a word that ended up to 1e-6 beyond the width.
+#[test]
+fn regression_76_small_text_does_not_overflow_by_the_absolute_tolerance() {
+    let font = builtin().unwrap();
+    let height = 1e-3;
+    let s = height / font.cap_height;
+    let words = vec!["ğŞı".to_string(), "Ж".to_string()];
+    let w: Vec<f64> = words.iter().map(|x| width_of(&font, x, s)).collect();
+    let space = font.glyph(' ').unwrap().advance * s;
+    for base in [w[0], w[1], w[0] + w[1] + space] {
+        for d in [-2e-6, -1e-6, -1e-7, -1e-9, 0.0, 1e-9, 1e-7, 1e-6, 2e-6] {
+            if base + d >= 1.0 * height {
+                check_breaking(&words, height, base + d).unwrap();
+            }
+        }
+    }
+    // The width that failed: just below the two words and the space.
+    let below = w[0] + w[1] + space - 1e-6;
+    let out = lay(
+        &[Paragraph {
+            runs: vec![run("ğŞı Ж")],
+            ..Paragraph::default()
+        }],
+        height,
+        below,
+    );
+    assert_eq!(out.lines.len(), 2);
+}
+
 proptest! {
     #[test]
     fn no_line_exceeds_the_width_unless_one_word_does_and_justified_lines_end_at_the_margin(
@@ -267,29 +325,7 @@ proptest! {
         width in 1.0f64..200.0,
         height in prop_oneof![Just(1e-3), 0.5f64..5.0, Just(1e3)],
     ) {
-        let font = builtin().unwrap();
-        let p = vec![Paragraph {
-            alignment: Alignment::Justify,
-            runs: vec![run(&words.join(" "))],
-            ..Paragraph::default()
-        }];
-        let width = width * height;
-        let out = lay(&p, height, width);
-        let s = height / font.cap_height;
-        let widths: Vec<f64> = words.iter().map(|w| width_of(&font, w, s)).collect();
-        let tol = 1e-9 * width.max(1.0);
-        let last = out.lines.len() - 1;
-        for (i, line) in out.lines.iter().enumerate() {
-            let extent = line.right - line.left;
-            if line.right > width + tol {
-                prop_assert!(widths.iter().any(|w| (w - extent).abs() <= tol), "{line:?}");
-            }
-            let one_word = widths.iter().any(|w| (w - extent).abs() <= tol);
-            if i < last && extent < width && !one_word {
-                prop_assert!((line.right - width).abs() <= tol, "{line:?} {width}");
-            }
-        }
-        prop_assert_eq!(out.clone(), lay(&p, height, width));
+        check_breaking(&words, height, width * height)?;
     }
 
     #[test]

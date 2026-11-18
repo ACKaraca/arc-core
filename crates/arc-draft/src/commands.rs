@@ -330,6 +330,83 @@ const NAMES: &[Names] = &[
         },
     },
     Names {
+        id: "core.draft.table.create",
+        message_id: "draft-command-table-create",
+        description: Description {
+            message_id: "draft-command-table-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.table.modify",
+        message_id: "draft-command-table-modify",
+        description: Description {
+            message_id: "draft-command-table-modify-description",
+        },
+    },
+    Names {
+        id: "core.draft.table.cell.set",
+        message_id: "draft-command-table-cell-set",
+        description: Description {
+            message_id: "draft-command-table-cell-set-description",
+        },
+    },
+    Names {
+        id: "core.draft.table.row.insert",
+        message_id: "draft-command-table-row-insert",
+        description: Description {
+            message_id: "draft-command-table-row-insert-description",
+        },
+    },
+    Names {
+        id: "core.draft.table.row.delete",
+        message_id: "draft-command-table-row-delete",
+        description: Description {
+            message_id: "draft-command-table-row-delete-description",
+        },
+    },
+    Names {
+        id: "core.draft.table.column.insert",
+        message_id: "draft-command-table-column-insert",
+        description: Description {
+            message_id: "draft-command-table-column-insert-description",
+        },
+    },
+    Names {
+        id: "core.draft.table.column.delete",
+        message_id: "draft-command-table-column-delete",
+        description: Description {
+            message_id: "draft-command-table-column-delete-description",
+        },
+    },
+    Names {
+        id: "core.draft.table.merge",
+        message_id: "draft-command-table-merge",
+        description: Description {
+            message_id: "draft-command-table-merge-description",
+        },
+    },
+    Names {
+        id: "core.draft.table.unmerge",
+        message_id: "draft-command-table-unmerge",
+        description: Description {
+            message_id: "draft-command-table-unmerge-description",
+        },
+    },
+    Names {
+        id: "core.draft.array.create",
+        message_id: "draft-command-array-create",
+        description: Description {
+            message_id: "draft-command-array-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.array.modify",
+        message_id: "draft-command-array-modify",
+        description: Description {
+            message_id: "draft-command-array-modify-description",
+        },
+    },
+    Names {
         id: "core.draft.purge",
         message_id: "draft-command-purge",
         description: Description {
@@ -810,6 +887,9 @@ pub struct CreateText {
     /// The vertical alignment.
     #[serde(default)]
     pub valign: VAlignParam,
+    /// Fields inserted into `content` (CORE-DRAFT-007).
+    #[serde(default)]
+    pub fields: Vec<crate::fields::Field>,
     /// The layer, if any.
     #[serde(default)]
     pub layer: Option<IdParam>,
@@ -1545,7 +1625,9 @@ fn paragraphs(
 }
 
 fn create_text(ctx: &mut Context<'_>, p: CreateText) -> Result<Created> {
+    crate::fields::validate(&p.content, &p.fields, ctx.limits())?;
     let mut kind = vec![
+        (text_field::FIELDS, crate::fields::list_value(&p.fields)),
         (text_field::CONTENT, Value::String(p.content)),
         (text_field::POSITION, point2(p.position)),
         (text_field::ROTATION, Value::F64(p.rotation)),
@@ -1718,6 +1800,8 @@ pub fn register_commands(registry: &mut Registry) -> Result<()> {
         .chain(crate::spline::specs())
         .chain(crate::plot_style::specs())
         .chain(crate::hatch_commands::specs())
+        .chain(crate::table_commands::specs())
+        .chain(crate::array::specs())
     {
         registry.register(spec)?;
     }

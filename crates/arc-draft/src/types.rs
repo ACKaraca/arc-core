@@ -75,6 +75,8 @@ pub const ENTITIES: &[&str] = &[
     crate::leader::LEADER,
     crate::leader::MULTILEADER,
     crate::hatch::HATCH,
+    crate::table::TABLE,
+    crate::array::ARRAY,
 ];
 
 /// The types that contain entities: spaces and block definitions.
@@ -684,6 +686,8 @@ fn declarations() -> arc_base::Result<Vec<TypeDecl>> {
         .chain(crate::text::declarations())
         .chain(crate::dimension::declarations())
         .chain(crate::hatch::declarations())
+        .chain(crate::table::declarations())
+        .chain(crate::array::declarations())
         .chain(crate::leader::declarations())
         .chain(crate::plot_style::declarations())
         .map(|(key, fields, validators)| {
@@ -765,7 +769,7 @@ mod tests {
     fn every_type_registers_and_field_indices_match_names() {
         let mut registry = TypeRegistry::new();
         register_types(&mut registry).unwrap();
-        assert_eq!(registry.len(), 32);
+        assert_eq!(registry.len(), 34);
         let name = |key: &str, i: usize| registry.get(key).unwrap().schema.fields[i].name.clone();
         assert_eq!(name(LINE, entity::EXTRUSION), "extrusion");
         assert_eq!(name(LINE, entity::KIND), "geometry");

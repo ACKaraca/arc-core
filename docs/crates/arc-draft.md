@@ -434,7 +434,7 @@ is specified in [stroke-font-format.md](../architecture/stroke-font-format.md)
 
 | Type key | Fields |
 |---|---|
-| `core.draft.text` | common fields; `content` (one line, at most 4096 bytes); `position`; `rotation` in radians; `style` (a text style); `height` (0: the style's); `halign` (`left`, `center`, `right`); `valign` (`baseline`, `bottom`, `middle`, `top`) |
+| `core.draft.text` | common fields; `content` (one line, at most 4096 bytes); `position`; `rotation` in radians; `style` (a text style); `height` (0: the style's); `halign` (`left`, `center`, `right`); `valign` (`baseline`, `bottom`, `middle`, `top`); `fields`: up to 64 fields, see "Fields, tables and arrays as implemented" |
 | `core.draft.rich_text` | common fields; `paragraphs`; `position`; `rotation`; `style`; `height`; `width` (0: no wrapping); `attachment` (`top_left` … `bottom_right`, nine points); `columns` (1 to 64); `column_gutter`; `column_height` (0: one column) |
 | `core.draft.font_table` | `entries`: up to 4096 records of `requested`, `substitute` |
 
@@ -442,7 +442,7 @@ A paragraph is a record of `alignment` (`left`, `center`, `right`, `justify`), `
 `indent`, `space_before`, `space_after` (not negative), `line_spacing` (a positive factor),
 `tabs` (positions from the left edge) and `runs`. A run is a record of `text`, `font`, `height`,
 `color`, `bold`, `italic`, `underline`, `overline`, `strike`, `stack` (`none`, `horizontal`,
-`diagonal`) and `denominator`. The stored structure is the only form of rich text; there is no
+`diagonal`), `denominator` and `fields`. The stored structure is the only form of rich text; there is no
 inline formatting-code language.
 
 Rules (`text::validate`, applied by the type validators under the default limits and by the
@@ -513,8 +513,10 @@ evaluates it for an entity from a snapshot.
   position, past the stops to the next multiple of four text heights.
 - **Line breaking.** Lines break only at spaces. Words are placed greedily: a word that would end
   beyond the width (plus the linear tolerance) starts a new line, unless it is the first word of
-  its line; so no line exceeds the width unless a single word does. Spaces at a break are
-  dropped. The first line of a paragraph starts at `indent_first`, the others at `indent`. A
+  its line; so no line exceeds the width unless a single word does. The tolerance only absorbs the
+  rounding of the sums of advances: it is the linear tolerance, but at most 1e-10 times the larger
+  of the width and the text height, so a line of small text overflows by no more than rounding.
+  Spaces at a break are dropped. The first line of a paragraph starts at `indent_first`, the others at `indent`. A
   width of 0 does not wrap.
 - **Alignment.** The alignment region is the width, or without one the widest line of the text.
   `center` and `right` shift a line by half or all of the region's free space. `justify` spreads
@@ -1047,6 +1049,162 @@ copy no other product's patterns or names. A fuzz target for the reader is in `f
 | `core.draft.hatch.modify` | Sets a field of hatches |
 | `core.draft.hatch_pattern.load` | Creates pattern objects from the `text` of a pattern file, or from the shipped library, all or the listed `names`; returns `ids` |
 
+## Fields, tables and arrays as implemented
+
+The seventh part of the crate implements CORE-DRAFT-007, 008 and 024: fields in text
+(`fields`), tables with formulas (`table`) and reference arrays (`array`). The `arc-solve` expression engine evaluates field expressions and cell
+formulas.
+
+### Fields (CORE-DRAFT-007)
+
+A field is a record stored next to the text it is inserted into: in the `fields` list of a
+single-line text and in the `fields` list of a run of a rich text. It holds a byte `offset` into
+that text (the entity's `content`, the run's `text`), a `source` and a `precision`. The text holds
+no placeholder syntax, so it needs no escaping. Offsets are ascending, at most the text length and
+at a character boundary; there are at most 64 fields per text or run (`draft.field.placeholder_invalid`,
+argument `reason`). The evaluated value is inserted at the offset; a field with the same offset as
+another comes after it. A field in a run of a stacked fraction belongs to the numerator.
+
+| Source | Fields | Value |
+|---|---|---|
+| `document` | `property`: `layer_name` or `space_name` | The name of the layer of the entity that holds the field; the name of the space that contains it (missing in a block definition, or without a layer) |
+| `object` | `object` (a reference cleared when the object is deleted), `path` | A property of the object, see below |
+| `expression` | `expression`, `bindings`: up to 16 records of `name`, `object`, `path` | An `arc-solve` expression whose names are the binding names, each standing for an object property |
+
+The model has no document title, so the document properties are the layer name and the space
+name. Property paths:
+
+- `length`: the length of a curve entity in the drawing units of its container, by `arc-geom`;
+- `area`: the area a closed curve entity (a circle, an ellipse or a closed polyline) encloses;
+- `field.<name>`: the stored field `<name>` of any object: a number, an integer (as a number), a
+  text, or a flag (as `true` or `false`).
+
+A number property is a bare number in an expression and is written with `precision` decimals
+(0 to 8, default 2) by the formatting of dimensions (`format::format_length`, decimal style). The
+result of an expression is written the same way when it is a number, as its value in SI base units;
+a text or truth value is written as is, and a list is an error. Expressions run under the default
+limits with 100,000 evaluation steps.
+
+A field whose source is missing (the object was deleted, has no such property, the entity has no
+layer) or whose expression does not evaluate shows the marker `#?` and raises a warning:
+`draft.field.source_missing`, or `draft.field.expression_invalid` when the expression fails and
+every binding resolved. Warnings carry the details `id` and `field` (the position of the field among
+those of the entity, in reading order) and are reported on every commit by the drafting document
+validators.
+
+The evaluated paragraphs of a text are the derived node `core.draft.fields`, registered for single-line
+and rich text by `register_evaluators` (`fields::evaluator` is the evaluator, `fields::resolve`
+evaluates from a snapshot). It reads the text, the fields it names and the objects they refer to, so
+changing a source evaluates it again and an unrelated change does not. The display list and
+`display::text_layout` lay out the evaluated text. A graph without the evaluator evaluates the same
+rules inside the display node.
+
+### Tables (CORE-DRAFT-008)
+
+`core.draft.table` is an entity. After the common fields: `position` (the top-left corner),
+`rotation`, `style` (a table style), `column_widths` (1 to 64), `rows` (1 to 1024 records of `kind`:
+`title`, `header` or `data`, and `height`), `cells` (a sparse list of up to 16,384 records of `row`,
+`column`, `kind`: `text`, `number`, `formula` or `block`, and the content: `text` with `fields`,
+`number`, `formula`, `block` with `scale`), `merges` (up to 1024 records of `row`, `column`,
+`row_span`, `column_span`), `max_height` and `break_gap`. Table space has x to the right and y up,
+with the origin at the top-left corner and rows running down (negative y).
+
+- **Cell names.** Column letters and a row number from 1: `A1`, `Z5`, `AA1`; one to three capital
+  letters. These are the names a formula uses.
+- **Merged ranges.** A merged range is a rectangle of at least two cells inside the grid, not
+  overlapping another (`draft.table.merge_invalid`). Only its first cell holds content; content in
+  another cell of the range is invalid (`draft.table.cell_invalid`) and merging drops it. A cell
+  outside the grid or stored twice is invalid too. A formula that does not parse is
+  `draft.table.formula_invalid`. A grid without rows or columns, or with a size that is not finite
+  and positive, is `draft.table.grid_invalid`; more than the bounds is `draft.table.too_large`.
+- **Formulas.** A formula is an `arc-solve` expression whose names are cell names. A number cell is
+  a bare number, a text cell its text with the fields inserted, and an empty cell or a block cell a bare 0. There are no ranges: write `sum([A1, A2, A3])`. The result is a number (the SI value of a
+  quantity), a text or a truth value (written `true` or `false`). Formulas are evaluated in
+  dependency order by repeatedly taking the cells that read no pending formula, so evaluation does
+  not recurse through cell references and each formula runs under 100,000 steps.
+- **Errors.** A formula that fails to evaluate (a division by zero, an unknown name, a cell outside the
+  grid, a dimension mismatch, a list result) shows `#ERR` and raises the warning
+  `draft.table.formula_invalid` (details `id`, argument `cell`). Cells that are left after the
+  evaluable ones, the cells in a cycle and the cells that read them, show `#ERR` and raise one
+  warning `draft.table.formula_cycle` (argument `cells`). A formula that reads a cell showing `#ERR`
+  shows it too. Fields in text cells follow the rules of fields.
+- **Number format.** A number or formula result is written by `format::format_length` (decimal): the
+  `format` text of the row format of the cell's row type, when it is a count of decimals from 0
+  to 8, gives that many decimals; any other text gives the shortest form with up to 8 decimals.
+- **Row types and style.** A row of type `title`, `header` or `data` takes the `title`, `header` or
+  `data` row format of the table style: `text_style`, `text_height` (a positive value; else the text
+  style's height; else 2.5), `alignment` (`left`, `center`, `right`; without a style `left`),
+  `borders` (default true) and `format`. The style's `cell_margin` (default 1) is the distance of left
+  and right aligned text from the cell edge. Text is centered vertically in its (merged) cell.
+- **Breaking.** `place_rows` places the rows. Rows run down from y = 0 in the first column block. When
+  `max_height` is positive, a data row whose bottom would be below it, in a block that already holds a
+  data row, starts a new block at x = table width + `break_gap`; the block starts with the repeated rows,
+  the header rows before the first data row (with the rest of any vertical merge group they belong to),
+  and the title rows are not repeated. The rows of a vertically merged range stay in one block. A table
+  without data rows does not break.
+- **Display list.** One stroke for every cell edge that is not inside a merged range (part 0): the edge
+  between two rows is drawn when either row has borders, an outer edge when its row has. The text of
+  every text, number and formula cell (part 1), laid out by `text_layout` with the row format's text style
+  and height, in every block including repeated header rows. A block cell draws its definition with the
+  cell's scale at the alignment point (part 2). A table with more primitives than the bound fails with
+  `draft.display.too_large`.
+- **Derived node.** `core.draft.table.resolved` holds the shown text of every cell, the cells with errors
+  and the warnings; it reads the table, its style and everything its fields and formulas read.
+  `table::resolve` evaluates it from a snapshot.
+- **Edits.** Inserting a row or column moves the cells and merged ranges after it, and a merged range it
+  falls inside of grows; deleting one removes its cells and shrinks the ranges across it, removing a
+  range left with one cell. Formula text is not rewritten: after an edit a formula keeps the names it
+  had.
+
+### Reference arrays (CORE-DRAFT-024)
+
+`core.draft.array` is an entity. After the common fields: `block`, `position`, `scale` and
+`rotation` (the first item, as for a block reference), `kind` (`rectangular`, `polar`, `path`), and the
+parameters of the kinds: `rows`, `columns`, `row_spacing`, `column_spacing`, `angle`; `center`, `count`,
+`total_angle` (default a full turn), `rotate_items`; `path` (a curve entity; a reference cleared when
+the entity is deleted), `curve` (a stored curve), `spacing`, `align`. The parameters of the other kinds
+are ignored.
+
+`array::items` gives one placement (insertion point and rotation) per item; item *k* of the display
+list is the list of a block reference at that placement with the array's scale, so the array is
+regenerated as one unit when a parameter, the definition or an entity of the definition changes, and
+editing one array regenerates no other. Items share the sub-object keys of the definition's entities.
+
+- **Rectangular.** Item (row, column), row by row, is at the position plus the vector (column ·
+  `column_spacing`, row · `row_spacing`) turned by `angle`; items keep the array's rotation. Spacings
+  may be negative or zero.
+- **Polar.** Item *i* is the position turned about `center` by *i* · *step*. *step* is `total_angle` /
+  `count` for a full turn (`total_angle` of at least 2π in magnitude within the angular tolerance) and
+  `total_angle` / (`count` − 1) otherwise (0 for one item). With `rotate_items` the item is also
+  rotated by that angle.
+- **Path.** The curve is the geometry of `path`, or `curve` when there is no `path`. Item *i* is at the
+  position plus the vector from the start of the curve to its point at the arc length *sᵢ*. With a
+  positive `spacing`, *sᵢ* = *i* · `spacing` for every *i* with *sᵢ* up to the curve length plus the
+  linear tolerance; otherwise `count` items are spread with the first at the start and the last at the
+  end, or evenly around a closed curve. With `align` the item is rotated by the angle of the tangent at
+  the point minus the angle at the start. A ray, a line, a missing curve and a curve of no finite length
+  are `draft.array.invalid`.
+- **Bound.** An array has at most 10,000 items (`draft.array.too_many_items`, argument `limit`), checked
+  by the type validator and, for path arrays with a spacing, when the list is built. Parameters that are
+  not finite, counts below 1, a polar total angle of 0 and a negative spacing are `draft.array.invalid`
+  (argument `reason`). The display list is also bounded by the most primitives of one list.
+
+### Commands
+
+| Command | Effect |
+|---|---|
+| `core.draft.table.create` | Creates a table in `owner` from `columns` (widths), `rows` (`kind`, `height`) and optional `cells` (`cell` name and `content`), `position`, `rotation`, `style`, `max_height`, `break_gap`, `layer` |
+| `core.draft.table.modify` | Sets a field of tables |
+| `core.draft.table.cell.set` | Sets the `content` of `cell`: `text` (with `fields`), `number`, `formula`, `block` or `empty` |
+| `core.draft.table.row.insert`, `core.draft.table.row.delete` | Inserts a row (`at`, `kind`, `height`) or deletes one (`at`) |
+| `core.draft.table.column.insert`, `core.draft.table.column.delete` | Inserts a column (`at`, `width`) or deletes one (`at`) |
+| `core.draft.table.merge`, `core.draft.table.unmerge` | Merges the `range` (`A1:C2`, corners in any order), or removes the merged range that holds a cell |
+| `core.draft.array.create` | Creates an array of `block` in `owner` at `position` with `scale`, `rotation` and `array`: a `rectangular`, `polar` or `path` record of its parameters |
+| `core.draft.array.modify` | Sets a field of arrays |
+
+`core.draft.text.create` takes `fields`; rich text takes them in the runs of its paragraphs. Every table
+command checks the whole table and leaves it unchanged on an error.
+
 ## Error codes
 
 The codes of every part of the crate:
@@ -1116,3 +1274,14 @@ The codes of every part of the crate:
 | `draft.pattern.empty` | `invalid_input` | A pattern, or a pattern hatch, has no line family |
 | `draft.pattern.limit_exceeded` | `limit_exceeded` | A hatch-pattern file exceeds a bound |
 | `draft.pattern.unknown` | `not_found` | A pattern name is not in the pattern file |
+| `draft.field.placeholder_invalid` | `invalid_input` | A field lies outside its text or out of order, or its source is malformed |
+| `draft.field.source_missing` | `not_found` | The object or property a field reads does not exist (a warning) |
+| `draft.field.expression_invalid` | `invalid_input` | The expression of a field does not evaluate (a warning) |
+| `draft.table.grid_invalid` | `invalid_input` | A table has no rows or columns, or a size is not a finite positive number |
+| `draft.table.too_large` | `limit_exceeded` | A table has more rows, columns, cells or merged ranges than the bounds allow |
+| `draft.table.cell_invalid` | `invalid_input` | A cell lies outside the grid, is stored twice, is covered by a merged range, or has invalid content |
+| `draft.table.merge_invalid` | `invalid_input` | A merged range is not a rectangle of at least two cells inside the grid, or overlaps another |
+| `draft.table.formula_invalid` | `invalid_input` | A cell formula does not parse, or does not evaluate (a warning) |
+| `draft.table.formula_cycle` | `invalid_input` | Cell formulas refer to each other in a cycle (a warning) |
+| `draft.array.invalid` | `invalid_input` | An array parameter is out of range, or its path is missing or has no length |
+| `draft.array.too_many_items` | `limit_exceeded` | An array would have more items than the bound allows |
