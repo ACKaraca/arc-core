@@ -1,6 +1,6 @@
 [package]
 name = "arc-draft"
-description = "The 2D drafting model of the Arc suite: spaces, curve entities, layers, linetypes, blocks, draw order, appearance resolution, layouts, viewports, styles and display lists."
+description = "The 2D drafting model of the Arc suite: spaces, curve entities, layers, linetypes, blocks, draw order, appearance resolution, layouts, viewports, styles, text, stroke fonts and display lists."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,9 +13,15 @@ arc-base = { workspace = true }
 arc-command = { workspace = true }
 arc-doc = { workspace = true }
 arc-geom = { workspace = true }
+parley = { workspace = true, optional = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[features]
+# Outline fonts shaped and laid out with `parley`. Off by default, so the WebAssembly build of the
+# crate carries stroke text only; the feature also builds for wasm32-unknown-unknown.
+outline-text = ["dep:parley"]
 
 [dev-dependencies]
 arc-doc = { workspace = true, features = ["package"] }

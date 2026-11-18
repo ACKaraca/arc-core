@@ -31,8 +31,14 @@ use crate::appearance::{
 };
 use crate::clip::{Piece, cut, keeps, piece};
 use crate::error::codes;
+use crate::fonts::{Fonts, Substitutions, font_table_id};
 use crate::layout::{Overrides, view};
 use crate::linetype::{DEFAULT_MAX_DASHES, DashOptions, Dashes, Pattern, dashes};
+use crate::text::{RICH_TEXT, TEXT};
+use crate::text_layout::{
+    Columns, HAlign, LayoutOptions, PositionedGlyph, RunKind, TextInput, TextLayout, TextStyle,
+    VAlign,
+};
 use crate::types::{
     BLOCK, BLOCK_REF, ENTITIES, POINT, POLYLINE, SPACE, SpaceUnit, WIPEOUT, entity, layer,
 };
@@ -66,7 +72,7 @@ const COMMON: [&str; 16] = [
 const LAYER_FIELDS: [&str; 5] = ["name", "color", "linetype", "lineweight", "transparency"];
 
 /// The parameters of display-list building.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DisplayOptions {
     /// The tolerance of dash generation, transforms and cuts.
     pub tolerance: Tolerance,
@@ -77,6 +83,9 @@ pub struct DisplayOptions {
     pub max_primitives: usize,
     /// The bound of [`DashOptions::max_dashes`] per curve.
     pub max_dashes: usize,
+    /// The fonts of text entities: the provider, the user's substitution table and the default
+    /// stroke font.
+    pub fonts: Fonts,
 }
 
 impl Default for DisplayOptions {
@@ -86,6 +95,7 @@ impl Default for DisplayOptions {
             max_nesting: DEFAULT_MAX_NESTING,
             max_primitives: usize::try_from(Limits::DEFAULT.array_length).unwrap_or(usize::MAX),
             max_dashes: DEFAULT_MAX_DASHES,
+            fonts: Fonts::default(),
         }
     }
 }
@@ -109,6 +119,20 @@ pub enum Shape {
     /// A wipeout mask: the region inside the closed polyline is painted in the background
     /// color.
     Mask(Polyline2),
+    /// Outline text glyphs for the renderer and plot stream: glyph positions in text space,
+    /// mapped to the list's coordinates by `placement`.
+    Glyphs {
+        /// The family name the font provider registered the font under.
+        family: String,
+        /// The face index.
+        index: u32,
+        /// The em size in text space.
+        size: f64,
+        /// The glyphs.
+        glyphs: Vec<PositionedGlyph>,
+        /// Text space to the list's coordinates.
+        placement: Transform2,
+    },
 }
 
 /// One primitive with its resolved appearance and its source.
@@ -457,6 +481,19 @@ fn transform_shape(shape: &Shape, t: &Transform2, tol: &Tolerance) -> Result<Sha
         },
         Shape::Fill(p) => Shape::Fill(transform_polyline(p, t, tol)?),
         Shape::Mask(p) => Shape::Mask(transform_polyline(p, t, tol)?),
+        Shape::Glyphs {
+            family,
+            index,
+            size,
+            glyphs,
+            placement,
+        } => Shape::Glyphs {
+            family: family.clone(),
+            index: *index,
+            size: *size,
+            glyphs: glyphs.clone(),
+            placement: t * placement,
+        },
     })
 }
 
@@ -520,6 +557,10 @@ fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<
                 });
             }
         }
+        TEXT | RICH_TEXT => {
+            let layout = text_layout_of(reader, id, &key, options)?;
+            list.primitives = text_primitives(reader, id, &layout, &base, &options.tolerance)?;
+        }
         WIPEOUT => {
             let Curve2::Polyline(boundary) = decode_curve(Some(&reader.field(id, "geometry")?))?
             else {
@@ -559,6 +600,258 @@ fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<
         list.primitives.iter_mut().for_each(close);
     }
     Ok(list)
+}
+
+fn read_number(reader: &dyn Reader, id: ObjectId, name: &str) -> Result<Option<f64>> {
+    Ok(number(reader.field(id, name)?))
+}
+
+fn read_enum(reader: &dyn Reader, id: ObjectId, name: &str) -> Result<u32> {
+    Ok(match reader.field(id, name)? {
+        Some(Value::Enum(code)) => code,
+        _ => 0,
+    })
+}
+
+fn read_flag(reader: &dyn Reader, id: ObjectId, name: &str) -> Result<bool> {
+    Ok(matches!(reader.field(id, name)?, Some(Value::Bool(true))))
+}
+
+/// The style values of a text and its placement flags: (style, height, backwards, upside down).
+fn text_style(reader: &dyn Reader, id: ObjectId) -> Result<(TextStyle, f64, bool, bool)> {
+    let own = read_number(reader, id, "height")?.unwrap_or(0.0);
+    let Some(Value::Reference(style)) = reader.field(id, "style")? else {
+        let height = if own > 0.0 {
+            own
+        } else {
+            crate::text::DEFAULT_HEIGHT
+        };
+        return Ok((TextStyle::default(), height, false, false));
+    };
+    let font = match reader.field(style, "font")? {
+        Some(Value::String(s)) => Some(s),
+        _ => None,
+    };
+    let style_height = read_number(reader, style, "height")?.unwrap_or(0.0);
+    let height = if own > 0.0 {
+        own
+    } else if style_height > 0.0 {
+        style_height
+    } else {
+        crate::text::DEFAULT_HEIGHT
+    };
+    Ok((
+        TextStyle {
+            font,
+            width_factor: read_number(reader, style, "width_factor")?.unwrap_or(1.0),
+            oblique: read_number(reader, style, "oblique")?.unwrap_or(0.0),
+        },
+        height,
+        read_flag(reader, style, "backwards")?,
+        read_flag(reader, style, "upside_down")?,
+    ))
+}
+
+/// The layout of the text entity `id` of type `key`, reading the entity, its style and the
+/// document's substitution table through `reader`.
+fn text_layout_of(
+    reader: &dyn Reader,
+    id: ObjectId,
+    key: &str,
+    options: &DisplayOptions,
+) -> Result<TextLayout> {
+    let (style, height, _, _) = text_style(reader, id)?;
+    // A document without a table depends on its creation through the failed read.
+    let table = match reader.field(font_table_id(), "entries") {
+        Ok(entries) => Substitutions::from_value(entries.as_ref()),
+        Err(_) => Substitutions::default(),
+    };
+    let paragraphs;
+    let mut input = TextInput {
+        paragraphs: &[],
+        height,
+        width: 0.0,
+        halign: HAlign::Left,
+        valign: VAlign::Baseline,
+        columns: Columns::default(),
+        style: &style,
+    };
+    if key == TEXT {
+        let content = match reader.field(id, "content")? {
+            Some(Value::String(s)) => s,
+            _ => String::new(),
+        };
+        paragraphs = vec![crate::text::Paragraph {
+            runs: vec![crate::text::Run {
+                text: content,
+                ..crate::text::Run::default()
+            }],
+            ..crate::text::Paragraph::default()
+        }];
+        input.halign = match read_enum(reader, id, "halign")? {
+            1 => HAlign::Center,
+            2 => HAlign::Right,
+            _ => HAlign::Left,
+        };
+        input.valign = match read_enum(reader, id, "valign")? {
+            1 => VAlign::Bottom,
+            2 => VAlign::Middle,
+            3 => VAlign::Top,
+            _ => VAlign::Baseline,
+        };
+    } else {
+        let stored = reader.field(id, "paragraphs")?;
+        paragraphs = match &stored {
+            Some(Value::List(items)) => items
+                .iter()
+                .filter_map(crate::text::Paragraph::from_value)
+                .collect(),
+            _ => Vec::new(),
+        };
+        input.width = read_number(reader, id, "width")?.unwrap_or(0.0);
+        let attachment = read_enum(reader, id, "attachment")?;
+        input.halign = match attachment % 3 {
+            1 => HAlign::Center,
+            2 => HAlign::Right,
+            _ => HAlign::Left,
+        };
+        input.valign = match attachment / 3 {
+            1 => VAlign::Middle,
+            2 => VAlign::Bottom,
+            _ => VAlign::Top,
+        };
+        let count = match reader.field(id, "columns")? {
+            Some(Value::I64(n)) => u32::try_from(n.clamp(1, crate::text::MAX_COLUMNS)).unwrap_or(1),
+            _ => 1,
+        };
+        input.columns = Columns {
+            count,
+            gutter: read_number(reader, id, "column_gutter")?.unwrap_or(0.0),
+            height: read_number(reader, id, "column_height")?.unwrap_or(0.0),
+        };
+    }
+    input.paragraphs = &paragraphs;
+    crate::text_layout::layout(
+        &input,
+        &table,
+        &options.fonts,
+        &LayoutOptions {
+            tolerance: options.tolerance,
+            max_items: options.max_primitives,
+        },
+    )
+}
+
+/// The map of a text from text space to its container: translation to `position`, rotation,
+/// and the mirror flags of its style.
+fn text_placement(reader: &dyn Reader, id: ObjectId) -> Result<Transform2> {
+    let (_, _, backwards, upside_down) = text_style(reader, id)?;
+    let position = match reader.field(id, "position")? {
+        Some(Value::Point2(p)) => p,
+        _ => Point2::origin(),
+    };
+    let rotation = read_number(reader, id, "rotation")?.unwrap_or(0.0);
+    let (sin, cos) = rotation.sin_cos();
+    let fx = if backwards { -1.0 } else { 1.0 };
+    let fy = if upside_down { -1.0 } else { 1.0 };
+    Ok(Transform2::from_matrix_unchecked(Matrix3::new(
+        cos * fx,
+        -sin * fy,
+        position.x,
+        sin * fx,
+        cos * fy,
+        position.y,
+        0.0,
+        0.0,
+        1.0,
+    )))
+}
+
+/// The primitives of a laid-out text: one stroke per curve of a stroke run, one glyph
+/// primitive per outline run. Text strokes are continuous whatever the linetype; a run with
+/// its own color takes it with the source `Object`.
+fn text_primitives(
+    reader: &dyn Reader,
+    id: ObjectId,
+    layout: &TextLayout,
+    base: &Primitive,
+    tolerance: &Tolerance,
+) -> Result<Vec<Primitive>> {
+    let placement = text_placement(reader, id)?;
+    let continuous = Some(Sourced {
+        value: None,
+        source: Source::Object,
+    });
+    let mut out = Vec::new();
+    for run in &layout.runs {
+        let color = match run.color {
+            Some(rgba) => Some(Sourced {
+                value: ColorValue { rgba, source: None },
+                source: Source::Object,
+            }),
+            None => base.color.clone(),
+        };
+        let template = Primitive {
+            color,
+            linetype: continuous.clone(),
+            ..base.clone()
+        };
+        match &run.kind {
+            RunKind::Stroke(curves) => {
+                for curve in curves {
+                    out.push(Primitive {
+                        shape: Shape::Stroke {
+                            curve: transform_curve(curve, &placement, tolerance)?,
+                            drawn: None,
+                        },
+                        ..template.clone()
+                    });
+                }
+            }
+            RunKind::Outline {
+                family,
+                index,
+                size,
+                glyphs,
+            } => out.push(Primitive {
+                shape: Shape::Glyphs {
+                    family: family.clone(),
+                    index: *index,
+                    size: *size,
+                    glyphs: glyphs.clone(),
+                    placement,
+                },
+                ..template
+            }),
+        }
+    }
+    Ok(out)
+}
+
+/// The layout of the text entity `entity` in `snapshot` with the fonts of `options`: the
+/// layout its display list draws, for plot and export.
+///
+/// # Errors
+///
+/// `doc.object.not_found`; `draft.object.wrong_type` for an object that is not a text; the
+/// errors of [`crate::text_layout::layout`].
+pub fn text_layout(
+    snapshot: &Snapshot,
+    entity: ObjectId,
+    options: &DisplayOptions,
+) -> Result<TextLayout> {
+    let reader = SnapshotReader {
+        snapshot,
+        options,
+        depth: 0,
+    };
+    let key = reader
+        .type_key(entity)
+        .ok_or_else(|| Error::new(arc_doc::error::codes::OBJECT_NOT_FOUND))?;
+    if key != TEXT && key != RICH_TEXT {
+        return Err(Error::new(codes::OBJECT_WRONG_TYPE).with_detail("id", entity.to_string()));
+    }
+    text_layout_of(&reader, entity, &key, options)
 }
 
 /// The map of a block reference: position · rotation · scale (with the unit factor of the
@@ -723,7 +1016,7 @@ pub fn register_evaluators(evaluators: &mut Evaluators, options: DisplayOptions)
         evaluators.register_object(
             TypeKey::new(*key)?,
             DerivedKey::new(DISPLAY)?,
-            evaluator(options),
+            evaluator(options.clone()),
         )?;
     }
     Ok(())
@@ -860,6 +1153,8 @@ fn cut_primitive(
             }
             Ok(!matches!(drawn, Some(v) if v.is_empty()))
         }
+        // Glyphs are kept whole; the consumer clips them like fills.
+        Shape::Glyphs { .. } => Ok(true),
         Shape::Fill(region) | Shape::Mask(region) => {
             let keep = !inside
                 || region

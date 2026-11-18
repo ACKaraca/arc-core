@@ -89,6 +89,7 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `spade` | Constrained Delaunay triangulation behind the polygon triangulation of `arc-geom`; no `spade` type appears in a public signature | MIT or Apache-2.0 |
 | `toml` | Reading the layer table and manifests in `xtask` | MIT or Apache-2.0 |
 | `wgpu` | The renderer of `arc-gpu`, pinned to one version and re-exported; features: Vulkan, Metal, DirectX 12, OpenGL and WGSL only | MIT or Apache-2.0 |
+| `parley` | Shaping, bidirectional reordering, line breaking and alignment of outline text in `arc-draft` (feature `outline-text`, off by default; feature `std` only: no system font discovery); brings `fontique`, `harfrust`, `skrifa`, `read-fonts` and the `icu` segmentation and property crates | Apache-2.0 or MIT; `icu` crates Unicode-3.0 |
 
 ## Not built in the first two years
 

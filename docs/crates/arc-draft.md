@@ -46,7 +46,7 @@ annotation objects (tags bound to BIM elements, station labels).
 | Kind | Crates |
 |---|---|
 | Arc | `arc-base`, `arc-geom`, `arc-doc`, `arc-command`, `arc-solve` (field expressions) |
-| Third-party | `parley`, `swash`, `tiny-skia` (raster output), `lyon` (fill tessellation for raster output) |
+| Third-party | `parley` (outline text, feature `outline-text`), `tiny-skia` (raster output), `lyon` (fill tessellation for raster output) |
 
 ## Test strategy
 
@@ -398,6 +398,170 @@ and the dash bound.
 | `core.draft.style.defaults` | Creates a style named `default` of each kind that has none; returns `created` |
 | `core.draft.purge` | Deletes unused layers, linetypes, block definitions and styles in one transaction |
 
+## Text and fonts as implemented
+
+The third part of the crate implements CORE-DRAFT-006, 034, 035 and 036. The stroke-font format
+is specified in [stroke-font-format.md](../architecture/stroke-font-format.md)
+([ADR-0015](../adr/0015-stroke-font-format.md)).
+
+### Object types
+
+`register_types` also adds these types, each at schema version 1.0.
+
+| Type key | Fields |
+|---|---|
+| `core.draft.text` | common fields; `content` (one line, at most 4096 bytes); `position`; `rotation` in radians; `style` (a text style); `height` (0: the style's); `halign` (`left`, `center`, `right`); `valign` (`baseline`, `bottom`, `middle`, `top`) |
+| `core.draft.rich_text` | common fields; `paragraphs`; `position`; `rotation`; `style`; `height`; `width` (0: no wrapping); `attachment` (`top_left` … `bottom_right`, nine points); `columns` (1 to 64); `column_gutter`; `column_height` (0: one column) |
+| `core.draft.font_table` | `entries`: up to 4096 records of `requested`, `substitute` |
+
+A paragraph is a record of `alignment` (`left`, `center`, `right`, `justify`), `indent_first`,
+`indent`, `space_before`, `space_after` (not negative), `line_spacing` (a positive factor),
+`tabs` (positions from the left edge) and `runs`. A run is a record of `text`, `font`, `height`,
+`color`, `bold`, `italic`, `underline`, `overline`, `strike`, `stack` (`none`, `horizontal`,
+`diagonal`) and `denominator`. The stored structure is the only form of rich text; there is no
+inline formatting-code language.
+
+Rules (`text::validate`, applied by the type validators under the default limits and by the
+commands under the invocation's limits):
+
+- The paragraphs of a text, the runs of a paragraph and the tabs of a paragraph number at most
+  `array_length`, and the bytes of all run texts and denominators at most `string_bytes`
+  (`draft.text.too_large`, argument `limit`).
+- Text holds no control character other than tab (`draft.text.content_invalid`); sizes are finite
+  and not negative, line spacing and run heights positive.
+- A run with a `stack` other than `none` has a `denominator`, and only such a run has one
+  (`draft.text.stack_invalid`).
+- Tab stops are finite, positive and strictly ascending (`draft.text.tabs_invalid`).
+- `text::paragraphs_from_plain` makes one paragraph per line of plain text (`\n`, `\r\n` and `\r`
+  end a line), with one run, or none for an empty line.
+
+The text height is the text's `height` when positive, else its style's when positive, else 2.5.
+The `style` field is a style reference (`style::style_reference`), so a text style in use cannot
+be deleted. A text style's `vertical` flag is stored and not applied.
+
+### Fonts and substitution (CORE-DRAFT-036)
+
+- A `FontProvider` gives stroke fonts by name and outline font bytes (with a face index) by
+  family name. `FontRegistry` is the provider of this crate; `FontRegistry::with_builtin` holds
+  the shipped font *Arc Stroke*. Products register further fonts in it or implement the trait.
+  Layout reads fonts only from the provider, never from the system.
+- `Fonts` bundles the provider, the per-user substitution table (data the product supplies) and
+  the name of the default stroke font (*Arc Stroke*). `DisplayOptions::fonts` carries it.
+- The per-document table is the `core.draft.font_table` object with the fixed identifier
+  `fonts::font_table_id()` (`00000000-0000-7000-8000-000000000f01`), created and changed by
+  `core.draft.font.substitute`. A fixed identifier lets every text's display list depend on the
+  table, and on its creation, without a reference from each text. Objects of the type with
+  another identifier are ignored.
+- `fonts::resolve` maps a requested name: absent or blank gives the default stroke font with no
+  substitution; a name the provider has is used as is (a stroke font first, then outline bytes
+  when the feature `outline-text` is enabled; without it outline bytes count as unavailable);
+  otherwise the document table's substitute, if the provider has it; otherwise the user table's,
+  if the provider has it; otherwise the default stroke font. Each step after the first is a
+  `Substitution` (requested, used, and `Document`, `User` or `Default`). Names compare after
+  trimming and Unicode lowercasing. A provider without the default stroke font fails with
+  `draft.font.default_missing` when it is needed.
+- `fonts::substitutions` lists the substitutions a document needs: one per distinct font name of
+  its text styles and rich text runs. `fonts::validator(fonts)` is a document validator that
+  reports each as a warning `draft.font.substituted` (arguments `requested`, `used`) on every
+  commit, so the document's diagnostics list holds those of the current revision; it never
+  rejects a commit.
+
+### Layout (CORE-DRAFT-034)
+
+`text_layout::layout` takes the paragraphs, the text height, the wrapping width, the anchor, the
+columns, the resolved style (base font, width factor, slant) and the fonts, and returns a
+`TextLayout` in text space (x along the baseline, y up, drawing units, origin at the anchor): glyph
+runs, line boxes, the bounds (the union of the line boxes) and every substitution made, in order
+of first use. The display lists, plot and export use this one function; `display::text_layout`
+evaluates it for an entity from a snapshot.
+
+- **Engine.** The base font decides the engine: a stroke font uses the stroke engine below; an
+  outline font (feature `outline-text`) uses `parley`. A run naming a font of the other kind uses
+  the base font, listed with `SubstitutedBy::Base`.
+- **Scale.** A stroke run of height h draws font units at h / `cap-height` vertically and that
+  times the width factor horizontally. The slant is the tangent of the style's oblique angle
+  plus 0.2126 for italic runs; x grows by the slant times the height above the baseline. Bold
+  stroke runs draw every glyph a second time 0.05 h to the right.
+- **Advances.** A character advances by its glyph's advance plus the kerning with the next
+  character of the same run. A character the font lacks draws the font's missing glyph (counted
+  in `missing`) or, without one, advances half an em.
+- **Tabs.** A tab moves to the first tab stop more than the linear tolerance beyond the current
+  position, past the stops to the next multiple of four text heights.
+- **Line breaking.** Lines break only at spaces. Words are placed greedily: a word that would end
+  beyond the width (plus the linear tolerance) starts a new line, unless it is the first word of
+  its line; so no line exceeds the width unless a single word does. Spaces at a break are
+  dropped. The first line of a paragraph starts at `indent_first`, the others at `indent`. A
+  width of 0 does not wrap.
+- **Alignment.** The alignment region is the width, or without one the widest line of the text.
+  `center` and `right` shift a line by half or all of the region's free space. `justify` spreads
+  the free space evenly over the gaps between words after the line's last tab, on every line
+  but the last of the paragraph, so those lines end at the right margin; a line without such a
+  gap stays left-aligned.
+- **Lines.** A line's height is the largest run height on it (an empty line: the first run's or
+  the text's). The first baseline is one line height below the top; each line advances by its
+  height times `line-spacing` / `cap-height` of the base font times the paragraph's
+  `line_spacing`. `space_before` and `space_after` add to the advance. A line box reaches the
+  line height above its baseline and the height times −`descender` / `cap-height` below.
+- **Columns.** With more than one column, a positive `column_height` and a width, a line whose
+  box would reach below `column_height` moves to the top of the next column, unless it is the
+  first line of its column or the last column is reached; column k starts at k (width + gutter).
+- **Stacked fractions.** A stacked run is one unbreakable box whose parts are drawn at 0.6 of
+  the run height. `horizontal`: as wide as the wider part plus 0.2 h, a bar at 0.5 h, the
+  numerator centered above it with its baseline at 0.65 h, the denominator centered below with
+  its baseline at −0.25 h. `diagonal`: the numerator with its baseline at 0.4 h, a slash 0.4 h
+  wide from −0.1 h to 1.1 h, then the denominator on the baseline.
+- **Decorations.** Underline, overline and strike-through are segments over the run's extent on
+  the line at −0.15 h, 1.2 h and 0.5 h above the baseline.
+- **Anchor.** The block spans from x = 0 to the alignment region (or the columns used) and from
+  y = 0 to the lowest line box. `left`, `center`, `right` and `top`, `middle`, `bottom` take its
+  edges or middle; `baseline` takes the first baseline.
+- **Output.** A stroke run gives exact curves: polylines, circular arcs, and elliptical arcs
+  under a width factor; slanted arcs are mapped by the `arc-geom` transform. An outline run gives
+  the provider family name, face index, size and glyph identifiers with pen positions.
+- **Determinism.** Fonts come only from the provider and the stroke engine uses no hash order or
+  system state. Upright text with a width factor of 1 uses only the four arithmetic operations,
+  so its output is identical on every platform; slanted arcs depend on the platform's
+  trigonometric functions through `arc-geom`.
+- **Bounds.** A height, width, width factor, slant or column value that is not finite or out of
+  range fails with `draft.text.content_invalid` (detail `field`); more curves or glyphs than the
+  bound with `draft.display.too_large`.
+
+The outline engine (feature `outline-text`, off by default) builds for each layout a `parley`
+font collection holding only the provider's fonts the text names, registered under their family
+names, and lays out each paragraph with `parley`: shaping, bidirectional reordering, line
+breaking at the width and the paragraph alignment. A run's height is its em size. Bold runs ask
+for weight 700 and italic runs for the italic style of the family. Decorations are stroke
+segments. Stacked fractions are shaped as `numerator/denominator`, and columns and the
+paragraph's tab stops are not applied. Bytes the collection cannot read fail with
+`draft.font.outline_invalid`.
+
+Stroke fonts have no right-to-left glyphs; the stroke engine lays out in logical order from left
+to right and does not reorder bidirectional text.
+
+### Display lists
+
+Text entities contribute to their `core.draft.display` node. A stroke run gives one `Stroke`
+primitive per curve, mapped from text space by translation to `position`, rotation and the mirror
+flags of the style (`backwards` mirrors x, `upside_down` mirrors y); an outline run gives one
+`Glyphs` primitive with the family, face index, size, glyph positions and that map as
+`placement`. Text strokes are continuous whatever the linetype (linetype source `Object`, value
+none). A run with its own color takes it with the source `Object`; the other values resolve as
+for every entity. Glyph primitives are not cut by clips or wipeouts; the consumer clips them like
+fills. The node reads the entity, its text style's fields and the font table, so a change of the
+text, its style or the document's substitution table regenerates exactly the lists of the texts
+concerned. A change of the provider or the user table takes new `DisplayOptions` and evaluators.
+
+### Commands
+
+| Command | Effect |
+|---|---|
+| `core.draft.text.create` | Creates a single-line text in `owner` with `content`, `position` and optional `rotation`, `style`, `height`, `halign`, `valign`, `layer` |
+| `core.draft.rich_text.create` | Creates a rich text from `paragraphs` or plain `text` (not both) at `position`, with optional `rotation`, `style`, `height`, `width`, `attachment`, `columns`, `column_gutter`, `column_height`, `layer` |
+| `core.draft.rich_text.set` | Replaces the paragraphs of rich texts with `paragraphs` or plain `text` |
+| `core.draft.font.substitute` | Sets the document's substitute for `requested` to `substitute`, or removes the entry without `substitute`; creates the table on first use |
+
+Text fields also change through `core.draft.entity.modify`.
+
 ## Error codes
 
 The codes of every part of the crate:
@@ -428,3 +592,17 @@ The codes of every part of the crate:
 | `draft.style.parent_invalid` | `invalid_input` | A dimension style's parent rule is broken |
 | `draft.purge.in_use` | `conflict` | An object selected for purging is in use |
 | `draft.display.too_large` | `limit_exceeded` | A display list would hold more primitives than the bound |
+| `draft.font.syntax` | `invalid_input` | A line of a stroke-font file is malformed |
+| `draft.font.version_unsupported` | `unsupported` | A stroke-font file has a version this reader does not read |
+| `draft.font.header_invalid` | `invalid_input` | A stroke-font header value is missing, repeated or out of range |
+| `draft.font.glyph_duplicate` | `invalid_input` | A stroke font defines a glyph twice |
+| `draft.font.glyph_unknown` | `invalid_input` | A stroke font refers to a glyph it does not define |
+| `draft.font.glyph_out_of_bounds` | `invalid_input` | A stroke-font glyph leaves its box or the coordinate range |
+| `draft.font.limit_exceeded` | `limit_exceeded` | A stroke-font file exceeds a bound of the reader |
+| `draft.font.default_missing` | `not_found` | The font provider lacks the default stroke font |
+| `draft.font.substituted` | `not_found` | A requested font is not available and another is used (a warning) |
+| `draft.font.outline_invalid` | `corrupt_data` | Outline font bytes cannot be read or laid out |
+| `draft.text.content_invalid` | `invalid_input` | Text holds a control character other than tab, or a size or factor out of range |
+| `draft.text.too_large` | `limit_exceeded` | A text has more paragraphs, runs, tab stops or bytes than the limits allow |
+| `draft.text.stack_invalid` | `invalid_input` | A stacked run lacks a denominator, or an ordinary run has one |
+| `draft.text.tabs_invalid` | `invalid_input` | Tab stops are not finite, positive and ascending |

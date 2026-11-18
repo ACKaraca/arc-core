@@ -613,7 +613,7 @@ fn lists_beyond_the_nesting_and_size_bounds_fail_and_are_left_out() {
         ..DisplayOptions::default()
     };
     let mut evaluators = Evaluators::new();
-    display::register_evaluators(&mut evaluators, options).unwrap();
+    display::register_evaluators(&mut evaluators, options.clone()).unwrap();
     let mut f = Fixture::with_evaluators(evaluators);
     let space = f.space("model");
     let b1 = block(&mut f, "b1");

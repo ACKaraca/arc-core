@@ -14,6 +14,7 @@ the document for the area you work on and the specification of the crate you cha
 | [geometry.md](architecture/geometry.md) | Geometry tiers, tolerances, curves and regions, meshes, the B-rep API and naming, kernel isolation, constraint solver, expressions |
 | [geometry-encoding.md](architecture/geometry-encoding.md) | The versioned canonical byte layout of stored `arc-geom` values, its limits and versioning rule |
 | [mesh-encoding.md](architecture/mesh-encoding.md) | The versioned byte layout of stored `arc-mesh` triangle meshes, its quantization, limits and versioning rule |
+| [stroke-font-format.md](architecture/stroke-font-format.md) | The versioned text format of Arc stroke fonts, its limits and the shipped font's coverage |
 | [journal-record.md](architecture/journal-record.md) | The versioned canonical byte layout of operation journal records and its decoding rules |
 | [drafting-and-views.md](architecture/drafting-and-views.md) | The 2D drafting model, plotting and derived views of 3D models |
 | [rendering.md](architecture/rendering.md) | The viewport renderer and the Arc Scene contract |
@@ -70,6 +71,7 @@ the document for the area you work on and the specification of the crate you cha
 | [adr/0011-exchange-package-container.md](adr/0011-exchange-package-container.md) | Exchange package container: ZIP with JSON Lines and binary buffers |
 | [adr/0012-opennurbs-ffi-crate.md](adr/0012-opennurbs-ffi-crate.md) | Rhino 3DM reading through an openNURBS FFI crate in the worker |
 | [adr/0013-geometry-encoding.md](adr/0013-geometry-encoding.md) | Hand-written versioned geometry encoding |
+| [adr/0015-stroke-font-format.md](adr/0015-stroke-font-format.md) | Versioned text format for Arc stroke fonts |
 
 ## Repository root
 

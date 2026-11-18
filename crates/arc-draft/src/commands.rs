@@ -21,9 +21,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::codes;
+use crate::fonts::{FONT_TABLE, document_table, font_table_id};
 use crate::layout::{LAYOUT, Orientation, VIEWPORT, viewport};
 use crate::order::{Place, reorder};
 use crate::style::{DEFAULT_NAME, DIM_STYLE, LEADER_STYLE, STYLES, TABLE_STYLE, TEXT_STYLE};
+use crate::text::{
+    Paragraph, RICH_TEXT, TEXT, field as text_field, paragraphs_from_plain, paragraphs_value,
+    validate as validate_paragraphs,
+};
 use crate::types::{
     self, BLOCK, BLOCK_REF, CONTAINERS, ENTITIES, ElementKind, LAYER, LINETYPE, SPACE, SpaceKind,
     SpaceUnit, entity, layer, table,
@@ -230,6 +235,34 @@ const NAMES: &[Names] = &[
         message_id: "draft-command-style-defaults",
         description: Description {
             message_id: "draft-command-style-defaults-description",
+        },
+    },
+    Names {
+        id: "core.draft.text.create",
+        message_id: "draft-command-text-create",
+        description: Description {
+            message_id: "draft-command-text-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.rich_text.create",
+        message_id: "draft-command-rich-text-create",
+        description: Description {
+            message_id: "draft-command-rich-text-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.rich_text.set",
+        message_id: "draft-command-rich-text-set",
+        description: Description {
+            message_id: "draft-command-rich-text-set-description",
+        },
+    },
+    Names {
+        id: "core.draft.font.substitute",
+        message_id: "draft-command-font-substitute",
+        description: Description {
+            message_id: "draft-command-font-substitute-description",
         },
     },
     Names {
@@ -576,6 +609,161 @@ pub struct Defaults {}
 pub struct CreatedStyles {
     /// The new styles, in the order text, dimension, leader, table.
     pub created: Vec<IdParam>,
+}
+
+/// The horizontal alignment of a single-line text.
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HAlignParam {
+    /// The position is the left end.
+    #[default]
+    Left,
+    /// The position is the middle.
+    Center,
+    /// The position is the right end.
+    Right,
+}
+
+/// The vertical alignment of a single-line text.
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VAlignParam {
+    /// The position is on the baseline.
+    #[default]
+    Baseline,
+    /// The position is at the bottom of the line box.
+    Bottom,
+    /// The position is halfway up.
+    Middle,
+    /// The position is at the cap height.
+    Top,
+}
+
+/// The attachment point of a rich text.
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentParam {
+    /// Top left.
+    #[default]
+    TopLeft,
+    /// Top center.
+    TopCenter,
+    /// Top right.
+    TopRight,
+    /// Middle left.
+    MiddleLeft,
+    /// Middle center.
+    MiddleCenter,
+    /// Middle right.
+    MiddleRight,
+    /// Bottom left.
+    BottomLeft,
+    /// Bottom center.
+    BottomCenter,
+    /// Bottom right.
+    BottomRight,
+}
+
+/// Parameters of `core.draft.text.create`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateText {
+    /// The space or block definition the text belongs to.
+    pub owner: IdParam,
+    /// The text: one line, no control characters except tab.
+    #[schemars(length(max = 4096))]
+    pub content: String,
+    /// The position.
+    pub position: [f64; 2],
+    /// The rotation in radians.
+    #[serde(default)]
+    pub rotation: f64,
+    /// The text style.
+    #[serde(default)]
+    pub style: Option<IdParam>,
+    /// The height; absent or 0 takes the style's.
+    #[serde(default)]
+    pub height: Option<f64>,
+    /// The horizontal alignment.
+    #[serde(default)]
+    pub halign: HAlignParam,
+    /// The vertical alignment.
+    #[serde(default)]
+    pub valign: VAlignParam,
+    /// The layer, if any.
+    #[serde(default)]
+    pub layer: Option<IdParam>,
+}
+
+/// Parameters of `core.draft.rich_text.create`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateRichText {
+    /// The space or block definition the text belongs to.
+    pub owner: IdParam,
+    /// The paragraphs; give these or `text`.
+    #[serde(default)]
+    pub paragraphs: Option<Vec<Paragraph>>,
+    /// Plain text: each line becomes a paragraph.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// The attachment point.
+    pub position: [f64; 2],
+    /// The rotation in radians.
+    #[serde(default)]
+    pub rotation: f64,
+    /// The text style.
+    #[serde(default)]
+    pub style: Option<IdParam>,
+    /// The height; absent or 0 takes the style's.
+    #[serde(default)]
+    pub height: Option<f64>,
+    /// The wrapping width; absent or 0 does not wrap.
+    #[serde(default)]
+    pub width: Option<f64>,
+    /// Which point of the text block `position` is.
+    #[serde(default)]
+    pub attachment: AttachmentParam,
+    /// The number of columns, 1 to 64.
+    #[serde(default)]
+    pub columns: Option<i64>,
+    /// The space between columns.
+    #[serde(default)]
+    pub column_gutter: Option<f64>,
+    /// The height of a column; 0 keeps one column.
+    #[serde(default)]
+    pub column_height: Option<f64>,
+    /// The layer, if any.
+    #[serde(default)]
+    pub layer: Option<IdParam>,
+}
+
+/// Parameters of `core.draft.rich_text.set`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetRichText {
+    /// The rich texts to change.
+    #[schemars(length(min = 1, max = 10000))]
+    pub objects: Vec<IdParam>,
+    /// The new paragraphs; give these or `text`.
+    #[serde(default)]
+    pub paragraphs: Option<Vec<Paragraph>>,
+    /// Plain text: each line becomes a paragraph.
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+/// Parameters of `core.draft.font.substitute`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Substitute {
+    /// The font name to substitute.
+    #[schemars(length(max = 255))]
+    pub requested: String,
+    /// The font used in its place; absent removes the entry.
+    #[serde(default)]
+    #[schemars(length(max = 255))]
+    pub substitute: Option<String>,
 }
 
 fn wrong_type(id: ObjectId) -> Error {
@@ -1169,6 +1357,99 @@ fn order(ctx: &mut Context<'_>, objects: Vec<IdParam>, place: Place) -> Result<(
     set_order(ctx, changes)
 }
 
+/// The paragraphs of `paragraphs` or `text` (exactly one), checked against `limits`.
+fn paragraphs(
+    paragraphs: Option<Vec<Paragraph>>,
+    text: Option<String>,
+    limits: &arc_base::Limits,
+) -> Result<Vec<Paragraph>> {
+    match (paragraphs, text) {
+        (Some(p), None) => {
+            validate_paragraphs(&p, limits)?;
+            Ok(p)
+        }
+        (None, Some(t)) => paragraphs_from_plain(&t, limits),
+        (None, None) => Ok(Vec::new()),
+        (Some(_), Some(_)) => Err(field_invalid("text")),
+    }
+}
+
+fn create_text(ctx: &mut Context<'_>, p: CreateText) -> Result<Created> {
+    let mut kind = vec![
+        (text_field::CONTENT, Value::String(p.content)),
+        (text_field::POSITION, point2(p.position)),
+        (text_field::ROTATION, Value::F64(p.rotation)),
+        (text_field::HEIGHT, Value::F64(p.height.unwrap_or(0.0))),
+        (text_field::HALIGN, Value::Enum(p.halign as u32)),
+        (text_field::VALIGN, Value::Enum(p.valign as u32)),
+    ];
+    kind.extend(
+        p.style
+            .map(|IdParam(s)| (text_field::STYLE, Value::Reference(s))),
+    );
+    create_entity(ctx, TEXT, p.owner.0, p.layer, kind)
+}
+
+fn create_rich_text(ctx: &mut Context<'_>, p: CreateRichText) -> Result<Created> {
+    let limits = *ctx.limits();
+    let list = paragraphs(p.paragraphs, p.text, &limits)?;
+    let mut kind = vec![
+        (text_field::CONTENT, paragraphs_value(&list)),
+        (text_field::POSITION, point2(p.position)),
+        (text_field::ROTATION, Value::F64(p.rotation)),
+        (text_field::HEIGHT, Value::F64(p.height.unwrap_or(0.0))),
+        (text_field::WIDTH, Value::F64(p.width.unwrap_or(0.0))),
+        (text_field::ATTACHMENT, Value::Enum(p.attachment as u32)),
+        (text_field::COLUMNS, Value::I64(p.columns.unwrap_or(1))),
+        (
+            text_field::COLUMN_GUTTER,
+            Value::F64(p.column_gutter.unwrap_or(0.0)),
+        ),
+        (
+            text_field::COLUMN_HEIGHT,
+            Value::F64(p.column_height.unwrap_or(0.0)),
+        ),
+    ];
+    kind.extend(
+        p.style
+            .map(|IdParam(s)| (text_field::STYLE, Value::Reference(s))),
+    );
+    create_entity(ctx, RICH_TEXT, p.owner.0, p.layer, kind)
+}
+
+fn set_rich_text(ctx: &mut Context<'_>, p: SetRichText) -> Result<()> {
+    let limits = *ctx.limits();
+    let value = paragraphs_value(&paragraphs(p.paragraphs, p.text, &limits)?);
+    let txn = ctx.txn()?;
+    for IdParam(id) in p.objects {
+        expect(txn.snapshot(), id, &[RICH_TEXT])?;
+        txn.modify(id, FieldPath::new("paragraphs"), Some(value.clone()))?;
+    }
+    Ok(())
+}
+
+/// Sets or removes one entry of the document's substitution table, creating the table on
+/// first use.
+fn substitute(ctx: &mut Context<'_>, p: Substitute) -> Result<()> {
+    if p.requested.trim().is_empty() || p.substitute.as_deref().is_some_and(|s| s.trim().is_empty())
+    {
+        return Err(field_invalid("requested"));
+    }
+    let snapshot = ctx.txn()?.snapshot().clone();
+    let mut table = document_table(&snapshot);
+    table.set(&p.requested, p.substitute.as_deref());
+    let value = table.to_value();
+    let id = font_table_id();
+    let txn = ctx.txn()?;
+    if snapshot.resolve(id).is_ok() {
+        expect(&snapshot, id, &[FONT_TABLE])?;
+        txn.modify(id, FieldPath::new("entries"), Some(value))?;
+    } else {
+        txn.create(FONT_TABLE, id, Header::default(), vec![Some(value)])?;
+    }
+    Ok(())
+}
+
 fn spec<P, R>(
     id: &'static str,
     run: impl Fn(&mut Context<'_>, P) -> Result<R> + Send + Sync + 'static,
@@ -1254,6 +1535,12 @@ pub fn register_commands(registry: &mut Registry) -> Result<()> {
         }),
         spec("core.draft.style.defaults", create_defaults).with_example(serde_json::json!({})),
         spec("core.draft.purge", purge),
+        spec("core.draft.text.create", create_text),
+        spec("core.draft.rich_text.create", create_rich_text),
+        spec("core.draft.rich_text.set", set_rich_text),
+        spec("core.draft.font.substitute", substitute).with_example(
+            serde_json::json!({"requested": "Old Drafting", "substitute": "Arc Stroke"}),
+        ),
     ];
     for spec in specs {
         registry.register(spec)?;

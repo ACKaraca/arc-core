@@ -160,3 +160,61 @@ pub fn every_curve() -> Vec<Curve2> {
         Curve2::Polyline(Polyline2::new(vertices, false).unwrap()),
     ]
 }
+
+/// Saves the document of `f` to a package, opens it again and asserts that every object
+/// (identifier, type key, header, values) is unchanged.
+pub fn round_trip(f: &Fixture) {
+    use arc_base::Limits;
+    use arc_doc::package::{LockOwner, Metadata, Mode, Package};
+    use arc_doc::{LoadOptions, Snapshot};
+
+    fn dump(snapshot: &Snapshot) -> Vec<String> {
+        let mut rows: Vec<String> = snapshot
+            .iter()
+            .map(|(handle, object)| {
+                format!(
+                    "{} {} {:?} {:?}",
+                    object.id,
+                    snapshot.type_key(handle).unwrap().as_str(),
+                    object.header,
+                    object.values
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+    let before = f.document.snapshot();
+    let dir = std::env::temp_dir().join(format!(
+        "arc-draft-text-{}-{}",
+        std::process::id(),
+        before.len()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("drawing.arc");
+    let owner = LockOwner {
+        user: "u".into(),
+        host: "h".into(),
+        application: "arc-draft tests".into(),
+        time_unix_ms: 0,
+    };
+    let mut package = Package::create(&path, &Metadata::default(), &owner).unwrap();
+    package
+        .save_document(&f.document, &[], None, &mut |_| Ok(()))
+        .unwrap();
+    drop(package);
+    let package = Package::open(&path, Mode::ReadOnly, &Limits::DEFAULT).unwrap();
+    let reopened = package
+        .open_document(
+            types(),
+            Arc::new(Evaluators::new()),
+            &LoadOptions::default(),
+            DocumentConfig::default(),
+        )
+        .unwrap();
+    assert!(reopened.load_diagnostics().is_empty());
+    assert_eq!(dump(&reopened.snapshot()), dump(&before));
+    drop(package);
+    let _ = std::fs::remove_dir_all(&dir);
+}

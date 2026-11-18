@@ -65,6 +65,8 @@ pub const ENTITIES: &[&str] = &[
     POLYLINE,
     BLOCK_REF,
     WIPEOUT,
+    crate::text::TEXT,
+    crate::text::RICH_TEXT,
 ];
 
 /// The types that contain entities: spaces and block definitions.
@@ -456,7 +458,7 @@ pub(crate) fn finding(error: Error) -> Finding {
 }
 
 /// The findings of the common fields: a zero extrusion direction.
-fn common_findings(values: &[Option<Value>]) -> Vec<Finding> {
+pub(crate) fn common_findings(values: &[Option<Value>]) -> Vec<Finding> {
     match values.get(entity::EXTRUSION) {
         Some(Some(Value::Vector3(v))) if v.x == 0.0 && v.y == 0.0 && v.z == 0.0 => {
             vec![finding(Error::new(codes::EXTRUSION_ZERO))]
@@ -599,7 +601,7 @@ fn space_fields() -> Vec<FieldDecl> {
     ]
 }
 
-fn with_kind(fields: Vec<FieldDecl>) -> Vec<FieldDecl> {
+pub(crate) fn with_kind(fields: Vec<FieldDecl>) -> Vec<FieldDecl> {
     let mut all = common();
     all.extend(fields);
     all
@@ -664,6 +666,7 @@ fn declarations() -> arc_base::Result<Vec<TypeDecl>> {
         .into_iter()
         .chain(crate::layout::declarations())
         .chain(crate::style::declarations())
+        .chain(crate::text::declarations())
         .map(|(key, fields, validators)| {
             let mut decl = TypeDecl::new(TypeKey::new(key)?, Schema::new(version, fields));
             decl.validators = validators;
@@ -743,7 +746,7 @@ mod tests {
     fn every_type_registers_and_field_indices_match_names() {
         let mut registry = TypeRegistry::new();
         register_types(&mut registry).unwrap();
-        assert_eq!(registry.len(), 21);
+        assert_eq!(registry.len(), 24);
         let name = |key: &str, i: usize| registry.get(key).unwrap().schema.fields[i].name.clone();
         assert_eq!(name(LINE, entity::EXTRUSION), "extrusion");
         assert_eq!(name(LINE, entity::KIND), "geometry");

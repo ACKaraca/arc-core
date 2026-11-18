@@ -62,7 +62,7 @@ pub const PAINT_PAPER: u32 = 2;
 pub const MARGIN_COLOR: Color = Color::new(0.5, 0.5, 0.5, 1.0);
 
 /// The options of drafting extraction.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DraftOptions {
     /// The display-list options; [`display_options`] turns their dash generation off.
     pub display: DisplayOptions,
@@ -91,7 +91,7 @@ impl Default for DraftOptions {
 pub fn display_options(options: &DraftOptions) -> DisplayOptions {
     DisplayOptions {
         max_dashes: 0,
-        ..options.display
+        ..options.display.clone()
     }
 }
 
@@ -584,6 +584,9 @@ impl Builder<'_> {
             part: p.part,
         };
         match &p.shape {
+            // Outline glyph runs are drawn by the text pipeline (CORE-GPU-012), which does not
+            // exist yet; stroke text arrives as strokes and is drawn.
+            Shape::Glyphs { .. } => Ok(()),
             Shape::Fill(boundary) | Shape::Mask(boundary) => {
                 let mut instance = MeshInstance::new(color_of(p));
                 if matches!(p.shape, Shape::Mask(_)) {
@@ -758,6 +761,7 @@ pub fn extract_entity(
 /// Registers [`extract_entity`] for every drafting entity type.
 pub fn register_extractors(registry: &mut ExtractorRegistry, options: DraftOptions) -> Result<()> {
     for key in ENTITIES {
+        let options = options.clone();
         registry.register(
             TypeKey::new(*key)?,
             move |snapshot: &Snapshot, object: &Object, _: &Cancel| {

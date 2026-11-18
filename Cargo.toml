@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["crates/*", "apps/*", "xtask"]
 # Fuzz crates build with cargo-fuzz on a nightly toolchain, outside the workspace gate.
-exclude = ["crates/arc-doc/fuzz", "crates/arc-geom/fuzz", "crates/arc-mesh/fuzz"]
+exclude = ["crates/arc-doc/fuzz", "crates/arc-geom/fuzz", "crates/arc-mesh/fuzz", "crates/arc-draft/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -56,6 +56,9 @@ insta = { version = "1.49", default-features = false }
 # the GTK backends stay off.
 muda = { version = "0.21.2", default-features = false }
 nalgebra = { version = "0.35", default-features = false, features = ["std", "serde-serialize"] }
+# Outline text shaping and layout in `arc-draft` (feature `outline-text`); `std` only: no system
+# font discovery, no `libm`.
+parley = { version = "0.12.0", default-features = false, features = ["std"] }
 # `alloc` only: payloads are written to vectors; the embedded defaults stay off.
 postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }
 proptest = { version = "1.12", default-features = false, features = ["std"] }

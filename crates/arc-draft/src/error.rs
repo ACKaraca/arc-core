@@ -152,6 +152,90 @@ pub mod codes {
         category: Category::LimitExceeded,
         message_id: "draft-display-too-large",
     };
+    /// A line of a stroke-font file is malformed; the argument `line` names it.
+    pub const FONT_SYNTAX: ErrorCode = ErrorCode {
+        code: "draft.font.syntax",
+        category: Category::InvalidInput,
+        message_id: "draft-font-syntax",
+    };
+    /// A stroke-font file declares a format version this reader does not read.
+    pub const FONT_VERSION_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "draft.font.version_unsupported",
+        category: Category::Unsupported,
+        message_id: "draft-font-version-unsupported",
+    };
+    /// A stroke-font header value is missing, repeated or inconsistent; the argument `key` names it.
+    pub const FONT_HEADER_INVALID: ErrorCode = ErrorCode {
+        code: "draft.font.header_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-font-header-invalid",
+    };
+    /// A stroke font defines a glyph twice.
+    pub const FONT_GLYPH_DUPLICATE: ErrorCode = ErrorCode {
+        code: "draft.font.glyph_duplicate",
+        category: Category::InvalidInput,
+        message_id: "draft-font-glyph-duplicate",
+    };
+    /// A stroke font refers to a glyph it does not define.
+    pub const FONT_GLYPH_UNKNOWN: ErrorCode = ErrorCode {
+        code: "draft.font.glyph_unknown",
+        category: Category::InvalidInput,
+        message_id: "draft-font-glyph-unknown",
+    };
+    /// A stroke-font glyph leaves its box or the coordinate range.
+    pub const FONT_GLYPH_OUT_OF_BOUNDS: ErrorCode = ErrorCode {
+        code: "draft.font.glyph_out_of_bounds",
+        category: Category::InvalidInput,
+        message_id: "draft-font-glyph-out-of-bounds",
+    };
+    /// A stroke-font file exceeds a bound of the reader; the argument `limit` names it.
+    pub const FONT_LIMIT_EXCEEDED: ErrorCode = ErrorCode {
+        code: "draft.font.limit_exceeded",
+        category: Category::LimitExceeded,
+        message_id: "draft-font-limit-exceeded",
+    };
+    /// The font provider lacks the default stroke font.
+    pub const FONT_DEFAULT_MISSING: ErrorCode = ErrorCode {
+        code: "draft.font.default_missing",
+        category: Category::NotFound,
+        message_id: "draft-font-default-missing",
+    };
+    /// A requested font is not available and another font is used in its place.
+    pub const FONT_SUBSTITUTED: ErrorCode = ErrorCode {
+        code: "draft.font.substituted",
+        category: Category::NotFound,
+        message_id: "draft-font-substituted",
+    };
+    /// Outline font bytes cannot be read, or outline text cannot be laid out.
+    pub const FONT_OUTLINE_INVALID: ErrorCode = ErrorCode {
+        code: "draft.font.outline_invalid",
+        category: Category::CorruptData,
+        message_id: "draft-font-outline-invalid",
+    };
+    /// Text holds a control character other than tab, or a size or factor out of range.
+    pub const TEXT_CONTENT_INVALID: ErrorCode = ErrorCode {
+        code: "draft.text.content_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-text-content-invalid",
+    };
+    /// A text has more paragraphs, runs, tab stops or bytes than the limits allow.
+    pub const TEXT_TOO_LARGE: ErrorCode = ErrorCode {
+        code: "draft.text.too_large",
+        category: Category::LimitExceeded,
+        message_id: "draft-text-too-large",
+    };
+    /// A stacked run lacks a denominator, or an ordinary run has one.
+    pub const TEXT_STACK_INVALID: ErrorCode = ErrorCode {
+        code: "draft.text.stack_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-text-stack-invalid",
+    };
+    /// Tab stops are not finite, positive and ascending.
+    pub const TEXT_TABS_INVALID: ErrorCode = ErrorCode {
+        code: "draft.text.tabs_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-text-tabs-invalid",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -179,6 +263,20 @@ pub mod codes {
         STYLE_PARENT_INVALID,
         PURGE_IN_USE,
         DISPLAY_TOO_LARGE,
+        FONT_SYNTAX,
+        FONT_VERSION_UNSUPPORTED,
+        FONT_HEADER_INVALID,
+        FONT_GLYPH_DUPLICATE,
+        FONT_GLYPH_UNKNOWN,
+        FONT_GLYPH_OUT_OF_BOUNDS,
+        FONT_LIMIT_EXCEEDED,
+        FONT_DEFAULT_MISSING,
+        FONT_SUBSTITUTED,
+        FONT_OUTLINE_INVALID,
+        TEXT_CONTENT_INVALID,
+        TEXT_TOO_LARGE,
+        TEXT_STACK_INVALID,
+        TEXT_TABS_INVALID,
     ];
 }
 

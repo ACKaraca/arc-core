@@ -18,6 +18,10 @@
 //!   (CORE-DRAFT-019, [`style`]) and the purge of unused objects (CORE-DRAFT-021, [`purge`]);
 //! - display lists of exact primitives built per entity in the dependency graph and assembled
 //!   for a space or viewport (CORE-DRAFT-029, [`display`], [`register_evaluators`]);
+//! - single-line and rich text (CORE-DRAFT-006, [`text`]), their layout for viewport, plot and
+//!   export (CORE-DRAFT-034, [`text_layout`]), the Arc stroke-font format and the shipped font
+//!   (CORE-DRAFT-035, [`stroke_font`]), and font providers with substitution (CORE-DRAFT-036,
+//!   [`fonts`]); outline fonts lay out with `parley` under the feature `outline-text`;
 //! - the `core.draft.*` commands ([`register_commands`]).
 //!
 //! Splines wait for the NURBS curves of `arc-geom`. No function in this crate panics.
@@ -27,11 +31,17 @@ pub mod clip;
 pub mod commands;
 pub mod display;
 pub mod error;
+pub mod fonts;
 pub mod layout;
 pub mod linetype;
 pub mod order;
+#[cfg(feature = "outline-text")]
+mod outline;
 pub mod purge;
+pub mod stroke_font;
 pub mod style;
+pub mod text;
+pub mod text_layout;
 pub mod types;
 pub mod validate;
 
