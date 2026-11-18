@@ -7,6 +7,11 @@
 //! (CORE-GPU-007), exact-width lines with round and square caps and round, miter and bevel
 //! joins (CORE-GPU-008), and headless rendering to images (CORE-GPU-031).
 //!
+//! The second part adds shading modes with feature edges extracted once per geometry
+//! (CORE-GPU-014), the identifier pass for picking a pixel or a rectangle (CORE-GPU-022),
+//! pre-selection and selection highlights with outline and tint (CORE-GPU-023), overlays drawn
+//! above the scene (CORE-GPU-025) and `f64` navigation functions (CORE-GPU-027).
+//!
 //! Typical use: create a [`Gpu`] from [`GpuSettings`], a [`Scene`] on it, upload geometry with
 //! [`Scene::add_geometry`], set items with [`Scene::update`], and render with
 //! [`Renderer::render_to_image`].
@@ -20,16 +25,21 @@ mod block;
 pub mod adapter;
 pub mod camera;
 pub mod error;
+pub mod navigation;
+pub mod overlay;
 pub mod pool;
 pub mod render;
 pub mod scene;
 
 pub use adapter::{AdapterKind, AdapterReport, BackendKind, Gpu, GpuSettings, ReducedFeature};
+pub use overlay::{Anchor, Grid, MarkerShape, Overlay, OverlayPrimitive};
 pub use pool::PoolUsage;
-pub use render::{Image, Pass, RenderSettings, Renderer};
+pub use render::{
+    FrameExtras, Image, Pass, PickHit, PickRegion, RenderSettings, Renderer, ShadingMode,
+};
 pub use scene::{
-    GeometryId, ItemKey, LineCap, LineItem, LineJoin, LinePath, LineStyle, LineWidth, MemoryReport,
-    MeshInstance, MeshItem, RenderItem, Scene, SceneLimits, WriteCounters,
+    FEATURE_EDGE_ANGLE, GeometryId, ItemKey, LineCap, LineItem, LineJoin, LinePath, LineStyle,
+    LineWidth, MemoryReport, MeshInstance, MeshItem, RenderItem, Scene, SceneLimits, WriteCounters,
 };
 /// The pinned `wgpu` version, re-exported for products that add their own passes.
 pub use wgpu;

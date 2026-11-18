@@ -162,7 +162,8 @@ fn memory_is_reported_and_compaction_keeps_the_picture() {
     assert_eq!(full.line_segment.used_bytes, 10_000 * 80);
     assert_eq!(full.translation.used_bytes, 15_000 * 12);
     assert_eq!(full.vertex.used_bytes, 4 * 24);
-    assert_eq!(full.index.used_bytes, 6 * 4);
+    // Two triangles and the square's four boundary edges.
+    assert_eq!(full.index.used_bytes, (6 + 4 * 2) * 4);
     assert!(full.total().capacity_bytes >= full.total().used_bytes);
     // Remove three of every four objects, leaving holes.
     let removed = objects
@@ -262,5 +263,51 @@ fn limits_bound_counts_and_pools() {
         .unwrap_err()
         .code(),
         "gpu.settings.invalid"
+    );
+}
+
+#[test]
+fn bounding_spheres_frame_the_extents_and_the_selection() {
+    let (_, mut scene, mut renderer) = setup();
+    assert_eq!(scene.bounding_sphere(None), None);
+    let geometry = scene.add_geometry(&square(), &Point3::origin()).unwrap();
+    let id = ids(2);
+    scene
+        .update(vec![
+            (id[0], vec![mesh(geometry, 100.0, 0.0, Color::WHITE)]),
+            (id[1], vec![mesh(geometry, -100.0, 50.0, Color::WHITE)]),
+        ])
+        .unwrap();
+    // The square's corners are √2 from its origin.
+    let (center, radius) = scene.bounding_sphere(Some(&id[..1])).unwrap();
+    assert!((center - Point3::new(100.0, 0.0, 0.0)).norm() < 1e-12);
+    assert!((radius - 2_f64.sqrt()).abs() < 1e-12);
+    let (_, all) = scene.bounding_sphere(None).unwrap();
+    assert!(all >= 100.0);
+    // Zoom to the selection: the selected square fills the middle of a perspective view.
+    let start = arc_geom::view::ViewFrame::new(
+        Point3::new(0.0, -300.0, 300.0),
+        Point3::origin(),
+        arc_base::math::Vector3::z(),
+        arc_geom::view::Projection::Perspective { vertical_fov: 0.8 },
+        0.1,
+        10.0,
+    )
+    .unwrap();
+    let fitted = arc_gpu::navigation::zoom_to_sphere(
+        &start,
+        &center,
+        radius,
+        1.0,
+        &arc_base::Tolerance::DEFAULT,
+    )
+    .unwrap();
+    let image = support::render(&mut renderer, &mut scene, &fitted, 32);
+    // Seen at 45 degrees, the face is lit at Lambert cos 45.
+    assert!(image.pixel(16, 16).unwrap()[0] > 200);
+    assert_eq!(
+        image.pixel(0, 0),
+        Some([0, 0, 0, 255]),
+        "the other square is out of view"
     );
 }

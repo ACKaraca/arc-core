@@ -1,4 +1,6 @@
-// Instanced meshes with camera-relative translations and reversed-Z depth (CORE-GPU-007).
+// Instanced meshes with camera-relative translations and reversed-Z depth (CORE-GPU-007), their
+// feature edges (CORE-GPU-014), highlight tint and mask (CORE-GPU-023) and identifiers
+// (CORE-GPU-022).
 
 struct View {
     // Reversed-Z projection times the view rotation; no translation.
@@ -7,11 +9,23 @@ struct View {
     light: vec4<f32>,
     // width, height, paper factor, line smoothing.
     viewport: vec4<f32>,
+    // x: 1 lit, 0 unlit; y: face opacity; z: 1 when edges use `edge_color`; w: pick tolerance.
+    shading: vec4<f32>,
+    edge_color: vec4<f32>,
+    // The tint color; alpha is the tint strength.
+    highlight: vec4<f32>,
+    // x: the highlight mask code.
+    codes: vec4<u32>,
 };
 
 @group(0) @binding(0) var<uniform> view: View;
 
+// Edges are moved toward the eye by this relative depth offset so they are not hidden by the
+// faces they bound.
+const EDGE_DEPTH_SCALE: f32 = 1.000244140625;
+
 struct VertexIn {
+    @builtin(instance_index) instance: u32,
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) row0: vec4<f32>,
@@ -24,15 +38,17 @@ struct VertexIn {
 };
 
 struct VertexOut {
-    @builtin(position) clip: vec4<f32>,
+    // Invariant so the tint pass reproduces the depth of the faces exactly.
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) relative: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
     @location(3) @interpolate(flat) misc: vec4<u32>,
+    // The instance's index in the instance pool.
+    @location(4) @interpolate(flat) instance: u32,
 };
 
-@vertex
-fn vs_main(in: VertexIn) -> VertexOut {
+fn transform(in: VertexIn) -> VertexOut {
     let local = vec4<f32>(in.position, 1.0);
     // Position relative to the eye: instance transform, then the item's translation.
     let relative = vec3<f32>(dot(in.row0, local), dot(in.row1, local), dot(in.row2, local)) + in.translation;
@@ -47,15 +63,30 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.normal = normal;
     out.color = in.color;
     out.misc = in.misc;
+    out.instance = in.instance;
     return out;
 }
 
-// The phase-0 lighting model: a headlight with two-sided Lambert shading plus an ambient term.
-// Shading modes replace this function without re-extraction.
+@vertex
+fn vs_main(in: VertexIn) -> VertexOut {
+    return transform(in);
+}
+
+@vertex
+fn vs_edge(in: VertexIn) -> VertexOut {
+    var out = transform(in);
+    // Reversed-Z: nearer is greater; never in front of the near plane.
+    out.clip.z = min(out.clip.z * EDGE_DEPTH_SCALE, out.clip.w);
+    return out;
+}
+
+// The headlight model with two-sided Lambert shading plus an ambient term; shading modes set
+// whether it is lit and the face opacity.
 fn shade(base: vec4<f32>, normal: vec3<f32>) -> vec4<f32> {
     let lambert = abs(dot(normal, view.light.xyz));
     let ambient = view.light.w;
-    return vec4<f32>(base.rgb * (ambient + (1.0 - ambient) * lambert), base.a);
+    let lit = base.rgb * (ambient + (1.0 - ambient) * lambert);
+    return vec4<f32>(mix(base.rgb, lit, view.shading.x), base.a * view.shading.y);
 }
 
 @fragment
@@ -68,4 +99,24 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         normal = in.normal / smooth_length;
     }
     return shade(in.color, normal);
+}
+
+@fragment
+fn fs_edge(in: VertexOut) -> @location(0) vec4<f32> {
+    return select(in.color, view.edge_color, view.shading.z > 0.5);
+}
+
+@fragment
+fn fs_tint(in: VertexOut) -> @location(0) vec4<f32> {
+    return view.highlight;
+}
+
+@fragment
+fn fs_mask(in: VertexOut) -> @location(0) u32 {
+    return view.codes.x;
+}
+
+@fragment
+fn fs_pick(in: VertexOut) -> @location(0) u32 {
+    return in.instance + 1u;
 }

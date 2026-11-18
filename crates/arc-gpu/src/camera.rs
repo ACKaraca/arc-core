@@ -130,9 +130,41 @@ pub(crate) struct CameraData {
     pub y_scale: f64,
 }
 
-pub(crate) fn camera_data(frame: &ViewFrame, aspect: f64, depth: (f64, f64)) -> Result<CameraData> {
+/// The clip-space remapping that shows only the pixel rectangle `(x, y, width, height)` of an
+/// `image_width × image_height` image in a target of the rectangle's size, at the same pixel
+/// scale: the identifier pass renders only its region of interest with it.
+#[must_use]
+pub fn region_window(image: (u32, u32), rect: (u32, u32, u32, u32)) -> Matrix4 {
+    let (w, h) = (f64::from(image.0), f64::from(image.1));
+    let (x, y, rw, rh) = (
+        f64::from(rect.0),
+        f64::from(rect.1),
+        f64::from(rect.2),
+        f64::from(rect.3),
+    );
+    let (sx, sy) = (w / rw, h / rh);
+    let cx = (2.0 * x + rw) / w - 1.0;
+    let cy = 1.0 - (2.0 * y + rh) / h;
+    #[rustfmt::skip]
+    let m = Matrix4::new(
+        sx, 0.0, 0.0, -sx * cx,
+        0.0, sy, 0.0, -sy * cy,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    );
+    m
+}
+
+/// The camera data of `frame`; `window` remaps clip space (the identity for a whole image,
+/// [`region_window`] for a region).
+pub(crate) fn camera_data(
+    frame: &ViewFrame,
+    aspect: f64,
+    depth: (f64, f64),
+    window: &Matrix4,
+) -> Result<CameraData> {
     let p = reversed_projection(frame, aspect, depth.0, depth.1);
-    let m = p * view_rotation(frame);
+    let m = window * p * view_rotation(frame);
     if !m.iter().all(|v| v.is_finite()) {
         return Err(Error::new(codes::PRECISION_INSUFFICIENT));
     }

@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use arc_base::math::Point3;
+use arc_base::math::{Point3, Vector3};
 use arc_base::{Color, Error, ObjectId, Result};
 use arc_mesh::TriMesh;
 
@@ -276,8 +276,96 @@ struct GeometryEntry {
     vertices: AllocId,
     indices: AllocId,
     index_count: u32,
+    /// The feature edges as index pairs in the index pool, when there are any.
+    edges: Option<(AllocId, u32)>,
     radius: f64,
     users: u32,
+}
+
+/// Faces meeting at an angle above this (radians) make their shared edge a feature edge.
+pub const FEATURE_EDGE_ANGLE: f64 = std::f64::consts::FRAC_PI_6;
+
+/// `v` scaled to unit length without overflow, or `None` for a zero or non-finite vector.
+pub(crate) fn unit(v: &Vector3) -> Option<Vector3> {
+    let largest = v.x.abs().max(v.y.abs()).max(v.z.abs());
+    if !(largest > 0.0 && largest.is_finite()) {
+        return None;
+    }
+    let scaled = v / largest;
+    Some(scaled / scaled.norm())
+}
+
+/// The length of `v` without overflow of intermediate squares.
+pub(crate) fn length(v: &Vector3) -> f64 {
+    let largest = v.x.abs().max(v.y.abs()).max(v.z.abs());
+    if largest > 0.0 && largest.is_finite() {
+        (v / largest).norm() * largest
+    } else {
+        largest
+    }
+}
+
+/// The feature edges of `mesh` as pairs of vertex indices: boundary edges (one face),
+/// non-manifold edges (more than two faces) and edges whose two faces meet at more than
+/// [`FEATURE_EDGE_ANGLE`]. Vertices at exactly equal positions are one vertex, so meshes with
+/// split normals give the same edges as welded ones. Faces whose normal is zero or not finite
+/// are skipped. The result is sorted, so it is deterministic.
+pub(crate) fn feature_edges(mesh: &TriMesh) -> Vec<[u32; 2]> {
+    struct Edge {
+        ends: [u32; 2],
+        faces: u32,
+        normal: Vector3,
+        crease: bool,
+    }
+    let positions = mesh.positions();
+    let mut welded: HashMap<[u64; 3], u32> = HashMap::new();
+    let canonical: Vec<u32> = positions
+        .iter()
+        .zip(0_u32..)
+        // Adding zero turns −0 into +0 so both weld.
+        .map(|(p, i)| {
+            *welded
+                .entry(p.coords.map(|c| (c + 0.0).to_bits()).into())
+                .or_insert(i)
+        })
+        .collect();
+    let cos_limit = FEATURE_EDGE_ANGLE.cos();
+    let mut edges: HashMap<(u32, u32), Edge> = HashMap::new();
+    for t in mesh.triangles() {
+        let corner = |k: usize| t.get(k).and_then(|i| positions.get(*i as usize));
+        let (Some(a), Some(b), Some(c)) = (corner(0), corner(1), corner(2)) else {
+            continue;
+        };
+        let Some(normal) = unit(&(b - a).cross(&(c - a))) else {
+            continue;
+        };
+        for (i, j) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            let (Some(&ci), Some(&cj)) = (canonical.get(i as usize), canonical.get(j as usize))
+            else {
+                continue;
+            };
+            if ci == cj {
+                continue;
+            }
+            let edge = edges.entry((ci.min(cj), ci.max(cj))).or_insert(Edge {
+                ends: [i, j],
+                faces: 0,
+                normal,
+                crease: false,
+            });
+            edge.faces += 1;
+            if edge.faces == 2 {
+                edge.crease = edge.normal.dot(&normal) < cos_limit;
+            }
+        }
+    }
+    let mut result: Vec<((u32, u32), [u32; 2])> = edges
+        .into_iter()
+        .filter(|(_, e)| e.faces != 2 || e.crease)
+        .map(|(key, e)| (key, e.ends))
+        .collect();
+    result.sort_unstable();
+    result.into_iter().map(|(_, ends)| ends).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -573,25 +661,47 @@ impl Scene {
             put_u32(&mut index_bytes, t);
         }
         let index_count = triangle_count * 3;
+        let mut edge_bytes = Vec::new();
+        for pair in feature_edges(mesh) {
+            put_u32(&mut edge_bytes, &pair);
+        }
+        // At most three edges per triangle, so this fits in u32.
+        let edge_index_count =
+            u32::try_from(edge_bytes.len() / 4).map_err(|_| limit("max_geometry_triangles"))?;
         let (device, queue) = (self.gpu.device().clone(), self.gpu.queue().clone());
         let gpu = self.gpu.clone();
-        let (vertices, indices) = gpu.scoped(|| {
+        let (vertices, indices, edges) = gpu.scoped(|| {
             let (vertices, _) =
                 self.vertices
                     .insert(&device, &queue, u64::from(vertex_count), &vertex_bytes)?;
+            let indices =
+                match self
+                    .indices
+                    .insert(&device, &queue, u64::from(index_count), &index_bytes)
+                {
+                    Ok((indices, _)) => indices,
+                    Err(e) => {
+                        self.vertices.free(vertices);
+                        return Err(e);
+                    }
+                };
+            if edge_index_count == 0 {
+                return Ok((vertices, indices, None));
+            }
             match self
                 .indices
-                .insert(&device, &queue, u64::from(index_count), &index_bytes)
+                .insert(&device, &queue, u64::from(edge_index_count), &edge_bytes)
             {
-                Ok((indices, _)) => Ok((vertices, indices)),
+                Ok((edges, _)) => Ok((vertices, indices, Some((edges, edge_index_count)))),
                 Err(e) => {
                     self.vertices.free(vertices);
+                    self.indices.free(indices);
                     Err(e)
                 }
             }
         })?;
         self.pending.vertex += vertex_bytes.len() as u64;
-        self.pending.index += index_bytes.len() as u64;
+        self.pending.index += (index_bytes.len() + edge_bytes.len()) as u64;
         let id = GeometryId(self.next_geometry);
         self.next_geometry += 1;
         self.geometries.insert(
@@ -600,6 +710,7 @@ impl Scene {
                 vertices,
                 indices,
                 index_count,
+                edges,
                 radius,
                 users: 0,
             },
@@ -620,6 +731,9 @@ impl Scene {
                 if let Some(g) = self.geometries.remove(&id) {
                     self.vertices.free(g.vertices);
                     self.indices.free(g.indices);
+                    if let Some((edges, _)) = g.edges {
+                        self.indices.free(edges);
+                    }
                 }
                 Ok(())
             }
@@ -934,6 +1048,71 @@ impl Scene {
         ))
     }
 
+    /// The feature edges of a geometry: `(first index, index count)`.
+    pub(crate) fn edge_range(&self, id: GeometryId) -> Option<(u64, u32)> {
+        let (edges, count) = self.geometries.get(&id)?.edges?;
+        Some((self.indices.range(edges)?.start, count))
+    }
+
+    /// The items of one object, if it has any.
+    pub(crate) fn object_items(&self, object: &ObjectId) -> &[ItemEntry] {
+        self.objects.get(object).map_or(&[], |o| o.items.as_slice())
+    }
+
+    /// Every item's instance range with its key and whether it is a line item, sorted by
+    /// kind and range start, for mapping identifier-pass values back to items.
+    pub(crate) fn instance_table(&self) -> Vec<(bool, std::ops::Range<u64>, ItemKey)> {
+        let mut table: Vec<_> = self
+            .objects
+            .iter()
+            .flat_map(|(object, entry)| {
+                entry.items.iter().zip(0_u32..).filter_map(|(item, sub)| {
+                    let line = matches!(item.gpu, ItemGpu::Lines { .. });
+                    let range = self.instance_range(item.gpu)?;
+                    Some((
+                        line,
+                        range,
+                        ItemKey {
+                            object: *object,
+                            sub,
+                        },
+                    ))
+                })
+            })
+            .collect();
+        table.sort_unstable_by_key(|(line, range, _)| (*line, range.start));
+        table
+    }
+
+    /// A sphere `(center, radius)` enclosing the items of `objects`, or of every item for
+    /// `None`; `None` when there is no such item. Each item is bounded by a sphere around its
+    /// origin; the result is centered on the box of those spheres.
+    #[must_use]
+    pub fn bounding_sphere(&self, objects: Option<&[ObjectId]>) -> Option<(Point3, f64)> {
+        let spheres: Vec<(Point3, f64)> = match objects {
+            None => self.items().map(|i| (i.origin, i.radius)).collect(),
+            Some(ids) => ids
+                .iter()
+                .flat_map(|id| self.object_items(id))
+                .map(|i| (i.origin, i.radius))
+                .collect(),
+        };
+        let (first, rest) = spheres.split_first()?;
+        let corner = |(c, r): &(Point3, f64), sign: f64| c.map(|v| v + sign * r);
+        let (mut low, mut high) = (corner(first, -1.0), corner(first, 1.0));
+        for s in rest {
+            low = low.inf(&corner(s, -1.0));
+            high = high.sup(&corner(s, 1.0));
+        }
+        // Halving first keeps the midpoint finite for any finite corners.
+        let center = Point3::from(low.coords * 0.5 + high.coords * 0.5);
+        let radius = spheres
+            .iter()
+            .map(|(c, r)| length(&(c - center)) + r)
+            .fold(0.0, f64::max);
+        Some((center, radius))
+    }
+
     pub(crate) fn instance_range(&self, gpu: ItemGpu) -> Option<std::ops::Range<u64>> {
         match gpu {
             ItemGpu::Mesh { instances, .. } => self.mesh_instances.range(instances),
@@ -1003,6 +1182,65 @@ mod tests {
         let (_, count, radius) = encode_lines(&item(vec![dot]), &SceneLimits::DEFAULT, 0).unwrap();
         assert_eq!(count, 1);
         assert!((radius - 12_f64.sqrt()).abs() < 1e-9);
+    }
+
+    fn mesh(positions: &[[f64; 3]], triangles: Vec<[u32; 3]>) -> TriMesh {
+        let positions = positions.iter().map(|p| Point3::from(*p)).collect();
+        TriMesh::new(positions, triangles, &arc_base::Limits::DEFAULT).unwrap()
+    }
+
+    /// Two triangles sharing the edge from (0,0,0) to (0,1,0), the second folded up by
+    /// `angle` radians.
+    fn folded(angle: f64) -> TriMesh {
+        let (s, c) = angle.sin_cos();
+        mesh(
+            &[[0.0; 3], [0.0, 1.0, 0.0], [-1.0, 0.5, 0.0], [c, 0.5, s]],
+            vec![[0, 1, 2], [1, 0, 3]],
+        )
+    }
+
+    #[test]
+    fn feature_edges_are_boundaries_creases_and_non_manifold_edges() {
+        let corners: Vec<[f64; 3]> = (0..8)
+            .map(|i| [f64::from(i & 1), f64::from((i >> 1) & 1), f64::from(i >> 2)])
+            .collect();
+        let faces: [[u32; 4]; 6] = [
+            [0, 2, 3, 1],
+            [4, 5, 7, 6],
+            [0, 1, 5, 4],
+            [2, 6, 7, 3],
+            [0, 4, 6, 2],
+            [1, 3, 7, 5],
+        ];
+        let quads = |q: [u32; 4]| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]];
+        let welded: Vec<[u32; 3]> = faces.iter().flat_map(|f| quads(*f)).collect();
+        assert_eq!(feature_edges(&mesh(&corners, welded)).len(), 12, "a cube");
+        // The same cube with every face on its own vertices, as with split normals.
+        let split_positions: Vec<[f64; 3]> = faces
+            .iter()
+            .flat_map(|f| f.map(|i| corners[i as usize]))
+            .collect();
+        let split: Vec<[u32; 3]> = (0..6_u32)
+            .flat_map(|f| quads([0, 1, 2, 3].map(|k| 4 * f + k)))
+            .collect();
+        assert_eq!(feature_edges(&mesh(&split_positions, split)).len(), 12);
+        // A flat fold keeps its shared edge smooth; a steep one makes it a crease.
+        assert_eq!(feature_edges(&folded(0.0)).len(), 4);
+        assert_eq!(feature_edges(&folded(FEATURE_EDGE_ANGLE * 0.9)).len(), 4);
+        assert_eq!(feature_edges(&folded(FEATURE_EDGE_ANGLE * 1.1)).len(), 5);
+        // A third face on the shared edge makes it non-manifold; a degenerate face is skipped.
+        let fan = mesh(
+            &[
+                [0.0; 3],
+                [0.0, 1.0, 0.0],
+                [-1.0, 0.5, 0.0],
+                [1.0, 0.5, 0.0],
+                [0.0, 0.5, 1.0],
+                [0.0, 2.0, 0.0],
+            ],
+            vec![[0, 1, 2], [1, 0, 3], [0, 1, 4], [0, 1, 5]],
+        );
+        assert_eq!(feature_edges(&fan).len(), 7);
     }
 
     #[test]

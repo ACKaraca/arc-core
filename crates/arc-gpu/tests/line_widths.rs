@@ -186,12 +186,8 @@ fn pixel_view() -> ViewFrame {
 }
 
 const HARD: RenderSettings = RenderSettings {
-    sample_count: 1,
-    cull_back_faces: false,
     line_smoothing: false,
-    background: Color::BLACK,
-    ambient: 0.25,
-    plot_scale: 1.0,
+    ..RenderSettings::DEFAULT
 };
 
 #[test]

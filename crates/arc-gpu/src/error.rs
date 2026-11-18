@@ -12,7 +12,7 @@ pub mod codes {
         category: Category::NotFound,
         message_id: "gpu-adapter-not-found",
     };
-    /// A settings value is out of range: a sample count other than 1 or 4, a negative or non-finite ambient term or plot scale, or a limit of zero.
+    /// A settings value is out of range: a sample count other than 1 or 4, a negative or non-finite ambient term or plot scale, an X-ray opacity or tint outside [0, 1], an outline wider than 8 pixels, a non-finite color, or a limit of zero.
     pub const SETTINGS_INVALID: ErrorCode = ErrorCode {
         code: "gpu.settings.invalid",
         category: Category::InvalidInput,
@@ -97,6 +97,19 @@ pub mod codes {
         message_id: "gpu-precision-insufficient",
     };
 
+    /// A pick region is empty or outside the image, or the pick tolerance is negative, not finite or above the line width limit.
+    pub const PICK_INVALID: ErrorCode = ErrorCode {
+        code: "gpu.pick.invalid",
+        category: Category::InvalidInput,
+        message_id: "gpu-pick-invalid",
+    };
+    /// A navigation parameter is out of range: a non-finite value, a zero or negative zoom factor or image size, a negative radius, or a pan anchor at or behind the eye.
+    pub const NAVIGATION_INVALID: ErrorCode = ErrorCode {
+        code: "gpu.navigation.invalid",
+        category: Category::InvalidInput,
+        message_id: "gpu-navigation-invalid",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         ADAPTER_NOT_FOUND,
@@ -114,6 +127,8 @@ pub mod codes {
         GEOMETRY_NOT_FOUND,
         GEOMETRY_IN_USE,
         PRECISION_INSUFFICIENT,
+        PICK_INVALID,
+        NAVIGATION_INVALID,
     ];
 }
 

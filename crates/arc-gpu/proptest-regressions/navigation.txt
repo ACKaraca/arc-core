@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0eb8c7b59b58ccdc972bd29286911f7b93b5d207ae6e3f77eca15e913b8e80bb # shrinks to eye = [0.0, 0.0, 5011825.4205462], offset = [0.0, 501.2735511552107, -577.7071357346919], projection = Perspective { vertical_fov: 0.05 }, pixel = [0.0, 0.0], depth = 0.1, factor = 308.56524703087285
+cc 00cd509ed0cc0ec69667542b3a5515a8f014a1f7068ee5efade52159fa4b2dea # shrinks to eye = [0.0, 0.0, 5676542.697374594], offset = [-488.309467469522, 0.0, 0.0], projection = Orthographic { height: 0.001 }, pixel = [0.0, -0.2890859889172362], depth = 0.1, factor = 596.6090783101777

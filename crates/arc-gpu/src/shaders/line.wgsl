@@ -6,6 +6,13 @@ struct View {
     light: vec4<f32>,
     // width, height, paper factor (pixels per paper millimetre at clip w = 1), line smoothing.
     viewport: vec4<f32>,
+    // w: pick tolerance in pixels, added to the half width in the identifier pass.
+    shading: vec4<f32>,
+    edge_color: vec4<f32>,
+    // The tint color; alpha is the tint strength.
+    highlight: vec4<f32>,
+    // x: the highlight mask code.
+    codes: vec4<u32>,
 };
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -20,6 +27,7 @@ const BEVEL_JOIN: u32 = 5u;
 
 struct SegmentIn {
     @builtin(vertex_index) corner: u32,
+    @builtin(instance_index) instance: u32,
     @location(0) a: vec3<f32>,
     @location(1) b: vec3<f32>,
     @location(2) prev: vec3<f32>,
@@ -42,7 +50,17 @@ struct SegmentOut {
     // end kinds at a and b.
     @location(3) @interpolate(flat) kinds: vec2<u32>,
     @location(4) @interpolate(flat) color: vec4<f32>,
+    // The segment's index in the segment pool.
+    @location(5) @interpolate(flat) instance: u32,
 };
+
+// Style bit 6: the points are pixel positions (overlays), not offsets from the item origin.
+fn place(p: vec3<f32>, t: vec3<f32>, screen: bool) -> vec4<f32> {
+    if (screen) {
+        return vec4<f32>(p.x / view.viewport.x * 2.0 - 1.0, 1.0 - p.y / view.viewport.y * 2.0, 0.5, 1.0);
+    }
+    return view.view_proj * vec4<f32>(p + t, 1.0);
+}
 
 fn to_screen(c: vec4<f32>) -> vec2<f32> {
     let n = c.xy / c.w;
@@ -71,8 +89,10 @@ fn end_kind(style: u32, joined: bool) -> u32 {
 fn vs_main(in: SegmentIn) -> SegmentOut {
     var out: SegmentOut;
     let style = in.bits.x;
-    var ca = view.view_proj * vec4<f32>(in.a + in.translation, 1.0);
-    var cb = view.view_proj * vec4<f32>(in.b + in.translation, 1.0);
+    let screen = (style & 64u) != 0u;
+    out.instance = in.instance;
+    var ca = place(in.a, in.translation, screen);
+    var cb = place(in.b, in.translation, screen);
     var kind_a = end_kind(style, (style & 8u) != 0u);
     var kind_b = end_kind(style, (style & 16u) != 0u);
     if (inside(ca) < 0.0 && inside(cb) < 0.0) {
@@ -93,14 +113,14 @@ fn vs_main(in: SegmentIn) -> SegmentOut {
     var sp = sa;
     var sn = sb;
     if (kind_a >= ROUND_JOIN) {
-        var cp = view.view_proj * vec4<f32>(in.prev + in.translation, 1.0);
+        var cp = place(in.prev, in.translation, screen);
         if (inside(cp) < 0.0) {
             cp = clip_to(cp, ca);
         }
         sp = to_screen(cp);
     }
     if (kind_b >= ROUND_JOIN) {
-        var cn = view.view_proj * vec4<f32>(in.next + in.translation, 1.0);
+        var cn = place(in.next, in.translation, screen);
         if (inside(cn) < 0.0) {
             cn = clip_to(cn, cb);
         }
@@ -111,7 +131,7 @@ fn vs_main(in: SegmentIn) -> SegmentOut {
         // Paper width: millimetres to pixels at the depth of the start point.
         width = width * view.viewport.z / ca.w;
     }
-    let hw = max(width, 1.0) * 0.5;
+    let hw = max(width, 1.0) * 0.5 + view.shading.w;
     let miter = max(in.params.y, 1.0);
 
     let delta = sb - sa;
@@ -174,8 +194,8 @@ fn end_distance(p: vec2<f32>, s: vec2<f32>, o: vec2<f32>, neighbor: vec2<f32>, k
     return vec2<f32>(dist, 0.0);
 }
 
-@fragment
-fn fs_main(in: SegmentOut) -> @location(0) vec4<f32> {
+// The signed distance in pixels from the fragment to the segment's region.
+fn signed_distance(in: SegmentOut) -> f32 {
     let p = in.clip.xy;
     let sa = in.ends.xy;
     let sb = in.ends.zw;
@@ -196,12 +216,47 @@ fn fs_main(in: SegmentOut) -> @location(0) vec4<f32> {
     if (end_b.y > 0.5) {
         dist = min(dist, length(p - sb) - hw);
     }
-    var coverage = select(0.0, 1.0, dist <= 0.0);
+    return dist;
+}
+
+fn coverage(dist: f32) -> f32 {
     if (view.viewport.w > 0.5) {
-        coverage = clamp(0.5 - dist, 0.0, 1.0);
+        return clamp(0.5 - dist, 0.0, 1.0);
     }
-    if (coverage <= 0.0) {
+    return select(0.0, 1.0, dist <= 0.0);
+}
+
+@fragment
+fn fs_main(in: SegmentOut) -> @location(0) vec4<f32> {
+    let c = coverage(signed_distance(in));
+    if (c <= 0.0) {
         discard;
     }
-    return vec4<f32>(in.color.rgb, in.color.a * coverage);
+    return vec4<f32>(in.color.rgb, in.color.a * c);
+}
+
+@fragment
+fn fs_tint(in: SegmentOut) -> @location(0) vec4<f32> {
+    let c = coverage(signed_distance(in));
+    if (c <= 0.0) {
+        discard;
+    }
+    return vec4<f32>(view.highlight.rgb, view.highlight.a * c);
+}
+
+// The mask and identifier passes cover a pixel when its center is inside.
+@fragment
+fn fs_mask(in: SegmentOut) -> @location(0) u32 {
+    if (signed_distance(in) > 0.0) {
+        discard;
+    }
+    return view.codes.x;
+}
+
+@fragment
+fn fs_pick(in: SegmentOut) -> @location(0) u32 {
+    if (signed_distance(in) > 0.0) {
+        discard;
+    }
+    return (in.instance + 1u) | 0x80000000u;
 }

@@ -16,3 +16,5 @@ gpu-geometry-invalid = The mesh has no triangles.
 gpu-geometry-not-found = The geometry does not exist in the scene.
 gpu-geometry-in-use = The geometry is still used by render items.
 gpu-precision-insufficient = The view cannot be represented precisely enough.
+gpu-pick-invalid = The pick region or tolerance is invalid.
+gpu-navigation-invalid = A navigation value is out of range.

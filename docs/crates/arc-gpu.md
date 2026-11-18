@@ -136,9 +136,9 @@ contract. The platform guarantees are in the
 
 ## Phase 0 rules
 
-The first part implements CORE-GPU-001, 002, 004, 006, 007, 008 and 031. It renders headless;
-viewport targets, the render thread, extraction, shading modes, picking and overlays are later
-parts and add passes to the frame without changing the scene.
+The first part implements CORE-GPU-001, 002, 004, 006, 007, 008 and 031; the second part adds
+CORE-GPU-014, 022, 023, 025 and 027 as passes and per-frame inputs that do not change the scene.
+Rendering is headless; viewport targets, the render thread and extraction are later parts.
 
 ### Adapter selection
 
@@ -178,6 +178,9 @@ error-scope results are awaited for at most 30 seconds, image readback for at mo
   uses it.
 - A **line item** has an `f64` origin, polylines of `f32` points relative to it (open or closed;
   consecutive equal points merge; a single point is a dot), a style and a color.
+- `add_geometry` also extracts the geometry's feature edges once (see
+  [Shading modes and edges](#shading-modes-and-edges)) and stores them as index pairs in the
+  index pool, counted as index writes.
 - Vertex, index, mesh-instance and line-segment data live in four pools: one buffer each, divided
   into units of a fixed stride (24, 4, 80 and 80 bytes). Allocation is first-fit from a sorted,
   coalesced free list. When no free block fits, the pool compacts if its total free space
@@ -227,7 +230,7 @@ normal. The phase-0 lighting model is a headlight: the color is the base color t
 `ambient + (1 − ambient) · |n · l|`, where `l` points toward the eye along the view direction and
 `ambient` is a render setting (0.25 by default). Lighting is two-sided; back faces (clockwise in
 the image) are culled when `cull_back_faces` is set. The fragment stage calls one shading function
-that shading modes replace.
+whose lit flag and face opacity the shading mode sets.
 
 ### Lines
 
@@ -256,12 +259,110 @@ shader computes the signed distance to the segment's region and its coverage.
 
 ### Headless rendering
 
-`Renderer::render_to_image(scene, frame, width, height, settings)` renders the default frame
-(meshes, then lines) into an offscreen `Rgba8UnormSrgb` target and returns an `Image` of rows top
+`Renderer::render_to_image(scene, frame, width, height, settings)` renders the passes of the
+settings' shading mode into an offscreen `Rgba8UnormSrgb` target and returns an `Image` of rows top
 to bottom, four bytes per pixel, sRGB-encoded with straight alpha. With `sample_count` 4 the
 target is multisampled and resolved; adapters without four-sample support render one sample.
 Readback strips the row padding of the copy. Sides are limited by `max_image_side` and the
 device's texture limit. Results are deterministic for a given adapter.
+
+### Shading modes and edges
+
+The shading mode is a render setting (`RenderSettings::mode`, default `Shaded`). Modes, highlights
+and overlays are uploaded per frame in a uniform buffer and buffers created for the frame, never in
+the scene's pools: switching mode writes no scene buffer and needs no re-extraction. A frame draws
+faces and edges as the mode says, then lines (the same in every mode), the highlight tint, the
+highlight outline and the overlay; a pass with nothing to draw is skipped.
+
+| Mode | Faces | Edges |
+|---|---|---|
+| `Wireframe` | none | instance color, no hidden-line removal |
+| `HiddenLine` | depth only (the background shows) | instance color, hidden behind faces |
+| `Shaded` | headlight-lit, depth-written | none |
+| `ShadedWithEdges` | headlight-lit, depth-written | `edge_color` (black by default) |
+| `ConsistentColors` | unlit base color, depth-written | none |
+| `XRay` | headlight-lit at `xray_opacity` (0.3 by default), blended in item order without depth test or writes | instance color |
+
+Edges are the feature edges of each geometry, extracted once when it is added: boundary edges
+(one face), non-manifold edges (more than two faces) and edges whose two faces meet at more than
+`FEATURE_EDGE_ANGLE` (30 degrees). Vertices at exactly equal positions are welded first, so meshes
+with split normals give the same edges; faces whose normal is zero or not finite are skipped.
+Edges are drawn for every instance from the mesh's own vertex and instance data, as one-pixel
+lines (wider and silhouette edges are CORE-GPU-017). Edge depth is moved toward the eye by a
+relative 2⁻¹² of its reversed-Z value, never past the near plane, so edges are not hidden by the
+faces they bound.
+
+### Identifier picking
+
+`Renderer::pick(scene, frame, width, height, settings, region)` renders only the region of
+interest of a `width × height` image: a clip-space remapping (`camera::region_window`) shows the
+region's pixels in an `R32Uint` target of the region's size at the same pixel scale, with its own
+depth target.
+
+- Mesh faces are drawn with depth writes and write `instance index + 1`; line segments are drawn
+  after them, depth-tested without depth writes, widened by `tolerance_px` on each side, covering
+  a pixel when its center is inside, and write `segment index + 1` with bit 31 set. Index values
+  are positions in the instance pools; a pool too large for 31 bits fails with
+  `gpu.limit.exceeded`.
+- Values map back through the items' instance ranges to a `PickHit`: the `ItemKey` and the
+  element, which is the instance index within a mesh item or the segment index (in path order)
+  within a line item. The result is the sorted, distinct hits visible in the region; a pixel pick
+  is a one-pixel region and returns at most one hit. Window and crossing selection rules are the
+  caller's.
+- A pixel shows the nearest face or, where no face is in front, the last drawn line, so a line
+  wins over the face it lies on. Faces are picked in every shading mode; back faces are skipped
+  when `cull_back_faces` is set.
+- A pick counts as a frame for write accounting (it writes translations when the eye moved).
+- On the pinned software adapter a pixel pick in a small scene takes about 1.5 ms and a 96 × 96
+  rectangle about 2.5 ms; the tests bound only gross regressions.
+
+### Highlights
+
+`Renderer::render_with(scene, frame, width, height, settings, extras)` takes `FrameExtras`: the
+hovered object, the selected objects and an overlay. Unknown objects are ignored.
+
+- **Tint.** The items of selected objects, then of the hovered object, are drawn again in the
+  selection or hover color at alpha `tint` (0.35 by default): faces depth-tested *greater or
+  equal* against the frame's depth with an invariant position, so only visible faces are tinted (in
+  `Wireframe` the edges instead), and lines with their coverage.
+- **Outline.** Before the frame, the items of selected objects (mask value 1) and then of the
+  hovered object (value 2) are drawn into an `R8Uint` mask of the image size without depth
+  testing. A full-image pass then gives every pixel outside the mask that has a masked pixel within
+  `outline_px` whole pixels (Euclidean; 0–8, 2 by default, 0 for none) the hover color when a
+  hovered pixel is within reach and the selection color otherwise. The outline therefore follows
+  whole objects, including occluded parts, in every mode.
+
+### Overlays
+
+An `Overlay` is a list of primitives passed in `FrameExtras`; it is not part of the scene. Every
+primitive is resolved on the CPU in `f64` to pixel positions (x right, y down) and drawn after the
+outline without depth testing, so it is above the scene regardless of depth and is not clipped by
+the far plane or (later) section planes.
+
+- Points are `Anchor::World` (projected through the view; perspective segments are clipped at the
+  near plane, and a marker or fill with a point behind it is skipped) or `Anchor::Screen` pixels.
+  Segments are clipped to a guard band one image side wide around the image.
+- Primitives: `Polyline` (constant pixel width, drawn as separate segments with round ends),
+  `Fill` (a simple polygon triangulated by ear clipping in pixels; a self-intersecting one draws the
+  ears found), `Marker` (square, circle, triangle or cross of constant pixel size, filled or
+  outlined), `Grid` (two families of lines in a plane with optional major lines) and `AxisTriad`
+  (the world axes from a pixel position, farthest first). These cover grips, snap markers, tracking
+  lines, rubber bands, previews and the grid. A view cube needs text labels and is left to the UI
+  kit.
+- Fills are drawn before lines; within each kind, primitives draw in list order.
+- Segments and fill vertices together are limited by `max_segments_per_item`; widths by
+  `max_line_width_px`.
+
+### Navigation
+
+`arc_gpu::navigation` provides pure `f64` functions from a `ViewFrame` to a new one, for
+orthographic and perspective frames: `orbit` about a pivot (yaw about the up hint, pitch about the
+right direction, the view direction kept at least `tolerance.angular` from the up hint), `pan` (an
+anchor point follows the pointer by a pixel offset), `zoom_at` (the point under the pointer keeps
+its image position), `zoom_to_sphere` (zoom extents and zoom to selection with
+`Scene::bounding_sphere`) and `interpolate` (eased transitions between named views with quaternion
+slerp that never pass through a degenerate frame). The module documentation states each rule;
+property tests check the invariants with coordinates up to 10⁷ from the origin.
 
 ### Reference images
 
@@ -283,7 +384,7 @@ The codes `arc-gpu` owns. A code is never reused for a different meaning; messag
 | Code | Category | Raised when |
 |---|---|---|
 | `gpu.adapter.not_found` | `not_found` | No adapter matches the settings, or none is available |
-| `gpu.settings.invalid` | `invalid_input` | A settings value is out of range: a sample count other than 1 or 4, a negative or non-finite ambient term or plot scale, or a limit of zero |
+| `gpu.settings.invalid` | `invalid_input` | A settings value is out of range: a sample count other than 1 or 4, a negative or non-finite ambient term or plot scale, an X-ray opacity or tint outside [0, 1], an outline wider than 8 pixels, a non-finite color, or a limit of zero |
 | `gpu.device.request_failed` | `failed_operation` | The adapter refused to create a device with the required features and limits |
 | `gpu.device.lost` | `failed_operation` | The device was lost or destroyed; the scene and renderer must be recreated on a new device |
 | `gpu.out_of_memory` | `limit_exceeded` | The device ran out of memory while creating a resource or executing work |
@@ -297,3 +398,5 @@ The codes `arc-gpu` owns. A code is never reused for a different meaning; messag
 | `gpu.geometry.not_found` | `not_found` | An item or call refers to a geometry handle the scene does not hold |
 | `gpu.geometry.in_use` | `conflict` | A geometry is removed while render items still refer to it |
 | `gpu.precision.insufficient` | `failed_operation` | A camera-relative translation or projection cannot be represented in `f32` |
+| `gpu.pick.invalid` | `invalid_input` | A pick region is empty or outside the image, or the pick tolerance is negative, not finite or above the line width limit |
+| `gpu.navigation.invalid` | `invalid_input` | A navigation parameter is out of range: a non-finite value, a zero or negative zoom factor or image size, a negative radius, or a pan anchor at or behind the eye |
