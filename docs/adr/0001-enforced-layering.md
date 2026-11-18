@@ -86,3 +86,10 @@ the precedent of `arc-io-pdf` to `arc-draft`, whose input is a drafting type.
 The rejected alternative is a feature or module of `arc-io-dxf` that depends on `arc-draft`: it
 would add the same same-layer edge, break the invariant, and put every future format crate's
 drafting mapping into the format crate.
+
+## Amendment: Test-only edge from the plot crate to the DXF mapping
+
+`arc-io-pdf` gains a same-layer edge to `arc-draft-dxf`. It is used only by a development
+dependency: the scenario test that imports a DXF file and plots it to PDF, SVG and PNG. The layer
+tool does not distinguish development dependencies on same-layer crates, so the edge is recorded in
+the table. No production code of `arc-io-pdf` may use `arc-draft-dxf`.

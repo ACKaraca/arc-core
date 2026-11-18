@@ -30,7 +30,7 @@ use crate::error::codes;
 use crate::layout::{LAYOUT, VIEWPORT, settings, sheet_size, view};
 use crate::linetype::{DashOptions, Dashes, Pattern, dashes};
 use crate::plot_style::{
-    Appearance, DEFAULT_LINEWEIGHT_MM, PLOT_STYLE_TABLE, Pen, PlotStyleTable, resolve_pen,
+    Appearance, DEFAULT_LINEWEIGHT_MM, PLOT_STYLE_TABLE, Pen, PlotStyleTable, resolve_pen_on_paper,
 };
 use crate::text_layout::PositionedGlyph;
 use crate::types::{SPACE, SpaceUnit, entity, f64_at, layer, table, text_at};
@@ -457,7 +457,8 @@ impl Context<'_> {
             transparency: p.transparency.as_ref().map_or(0.0, |t| t.value),
             style_name: name.as_deref(),
         };
-        let mut pen = resolve_pen(self.table.as_ref(), &appearance);
+        let mut pen =
+            resolve_pen_on_paper(self.table.as_ref(), &appearance, self.options.paper_color);
         if !self.options.lineweights {
             pen.width = DEFAULT_LINEWEIGHT_MM;
         }

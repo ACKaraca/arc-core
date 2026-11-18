@@ -6,7 +6,10 @@
 //! when nothing was lost. Both enforce the caller's [`arc_base::Limits`], check the
 //! [`arc_base::Cancel`] token before every item and report progress.
 //!
-//! The crate writes byte buffers, never paths, and makes no operating-system calls. No function
+//! [`register_commands`] adds the batch plotting command `core.draft.plot`, which writes files
+//! only through the command context.
+//!
+//! The writers produce byte buffers, never paths, and make no operating-system calls. No function
 //! in this crate panics. The rules are in `docs/crates/arc-io.md`, section "SVG and PDF output
 //! as implemented".
 //!
@@ -32,6 +35,7 @@
 //! # Ok::<(), arc_base::Error>(())
 //! ```
 
+mod command;
 mod common;
 pub mod error;
 pub mod loss;
@@ -39,6 +43,10 @@ mod path;
 mod pdf;
 mod svg;
 
+pub use command::{
+    AreaName, Format, MAX_LAYOUTS, Message, ModelSource, Overrides, PLOT_DESCRIPTION, PLOT_LABEL,
+    PlotParams, PlotResult, numbered_path, register_commands,
+};
 pub use common::{DEFAULT_CHORD_MM, HAIRLINE_MM, Output, Progress, WriteOptions};
 pub use error::{codes, reasons};
 pub use loss::{LossItem, LossReport, Outcome, Severity};

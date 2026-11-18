@@ -853,6 +853,13 @@ source, lineweight, linetype, transparency, plot style name) to a pen:
 - **Screening.** With ink `s` = percent / 100, each linear red, green and blue component `c`
   becomes `c·s + (1 − s)`: the screen mixes the color with white in linear light. The alpha of
   the chosen color is kept and multiplied by `1 − transparency`.
+- **Paper color.** The plot pipeline resolves pens with `plot_style::resolve_pen_on_paper`: a pen
+  whose final color (after screening) differs from the paper color by at most 0.005 in every
+  linear channel plots in the contrasting extreme, black on a paper whose relative luminance is
+  above one half and white otherwise, with its alpha kept. This makes the default entity color
+  (white) visible on white paper. The rule does not apply when the matching style of the plot
+  style table sets the color explicitly, and masks, which have no pen, are not affected.
+  `resolve_pen` itself does not apply the rule.
 
 ### Plot streams (CORE-DRAFT-031)
 

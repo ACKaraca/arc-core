@@ -277,6 +277,36 @@ pub struct Pen {
 ///    multiplied by `1 − transparency`.
 #[must_use]
 pub fn resolve_pen(table: Option<&PlotStyleTable>, appearance: &Appearance<'_>) -> Pen {
+    resolve(table, appearance).0
+}
+
+/// How far, per linear channel, a pen color may differ from the paper color and still count as
+/// the paper color for [`resolve_pen_on_paper`].
+pub const PAPER_TOLERANCE: f32 = 0.005;
+
+/// [`resolve_pen`] plus the paper rule: a pen whose final color equals `paper` within
+/// [`PAPER_TOLERANCE`] on every channel plots in the contrasting extreme (black on a paper of
+/// relative luminance above one half, white otherwise), keeping its alpha. The rule does not
+/// apply when the style table set the color explicitly. Masks have no pen and are never
+/// affected.
+#[must_use]
+pub fn resolve_pen_on_paper(
+    table: Option<&PlotStyleTable>,
+    appearance: &Appearance<'_>,
+    paper: Color,
+) -> Pen {
+    let (mut pen, explicit) = resolve(table, appearance);
+    let c = pen.color;
+    let same = |a: f32, b: f32| (a - b).abs() <= PAPER_TOLERANCE;
+    if !explicit && same(c.r, paper.r) && same(c.g, paper.g) && same(c.b, paper.b) {
+        let luminance = 0.2126 * paper.r + 0.7152 * paper.g + 0.0722 * paper.b;
+        let v = if luminance > 0.5 { 0.0 } else { 1.0 };
+        pen.color = Color::new(v, v, v, c.a);
+    }
+    pen
+}
+
+fn resolve(table: Option<&PlotStyleTable>, appearance: &Appearance<'_>) -> (Pen, bool) {
     let index = match &appearance.color.source {
         Some(ColorSource::Indexed(i)) => Some(*i),
         _ => None,
@@ -293,7 +323,7 @@ pub fn resolve_pen(table: Option<&PlotStyleTable>, appearance: &Appearance<'_>) 
     };
     #[expect(clippy::cast_possible_truncation, reason = "colors are stored as f32")]
     let opacity = (1.0 - appearance.transparency).clamp(0.0, 1.0) as f32;
-    Pen {
+    let pen = Pen {
         color: Color::new(mix(base.r), mix(base.g), mix(base.b), base.a * opacity),
         width: style_ref
             .lineweight
@@ -303,7 +333,8 @@ pub fn resolve_pen(table: Option<&PlotStyleTable>, appearance: &Appearance<'_>) 
         join: style_ref.join,
         linetype: style_ref.linetype.or(appearance.linetype),
         linetype_overridden: style_ref.linetype.is_some(),
-    }
+    };
+    (pen, style_ref.color.is_some())
 }
 
 fn style_record() -> ValueType {

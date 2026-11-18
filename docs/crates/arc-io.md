@@ -319,11 +319,13 @@ the family; they move to a shared registry when a second format crate needs them
 
 `arc-io-pdf` writes plot streams (`arc_draft::plot::PlotStream`, see [arc-draft.md](arc-draft.md),
 "Plotting as implemented") to SVG (CORE-IO-038) and PDF (CORE-IO-037). It depends on `arc-base`,
-`arc-geom` and `arc-draft` and on no third-party crate: both writers are Arc-owned, written from
-the published SVG 1.1 and PDF 1.7 file structures, so `krilla` and `lopdf` of the dependency table
-are not used by this part. It reads and writes byte buffers, never paths, and builds for
-`wasm32-unknown-unknown`. The stream's units are millimeters from the lower left corner of the
-page.
+`arc-geom`, `arc-draft` and `arc-command` and on no third-party crate beyond the ones those use
+(`serde`, `serde_json`, `schemars`): both writers are Arc-owned, written from the published SVG 1.1
+and PDF 1.7 file structures, so `krilla` and `lopdf` of the dependency table are not used by this
+part. The writers read and write byte buffers, never paths; the only code that touches files is the
+command `core.draft.plot` (see "The plot command"), which goes through the command context. The
+crate builds for `wasm32-unknown-unknown`, where the context denies every file access. The
+stream's units are millimeters from the lower left corner of the page.
 
 ### Entry points and options
 
@@ -430,6 +432,47 @@ page tree, information dictionary, optional content groups, then page and conten
   `creation_date` is set.
 - Not written: hyperlinks, embedded fonts, PDF/A-2b, compression, a file identifier.
 
+### The plot command
+
+`register_commands` adds `core.draft.plot` (CORE-DRAFT-033). Permission classes `read` and
+`file_write`, not undoable, on every surface; it needs no display and runs headless. Files are
+written only through `Context::create_write`, so the session's write roots decide where it may
+write, and every file is encoded before the first one is created: a failing page leaves no file.
+
+| Parameter | Meaning |
+|---|---|
+| `layouts` | Layout space identifiers, in page order, at most 256 |
+| `model` | Instead of `layouts`: `space`, `window` (`[min x, min y, max x, max y]`), `scale` (paper length per model length) and optional `paper` (`[width, height]` in millimeters, default 210 by 297); the window is centered on the paper without margins |
+| `format` | `pdf`, `svg` or `png` |
+| `path` | The output file, inside the write roots |
+| `dpi` | Pixels per inch of PNG output, 1 to 10000, default 300 |
+| `options` | Overrides of the plot settings: `area` (`layout`, `extents`, `window`), `window`, `scale`, `fit`, `center`, `origin`, `rotation`, `lineweights`, `styles`, `style_table`, `paper_color` (linear RGBA), `chord_mm`, `title` |
+
+Exactly one of `layouts` and `model` is given. Each layout is plotted with `PlotOptions::from_layout`
+(its sheet, window, scale, origin and plot style table) and the overrides applied on top; a
+`window` alone implies `area` `window`; `fit` excludes `scale` and `center` excludes `origin`.
+
+- **PDF.** All pages go into one file at `path`, in the order of `layouts`.
+- **SVG and PNG.** One file per page. With one page the file is `path`; with several, `-N` (N from
+  1, no padding) is inserted before the extension of the file name: `sheet.svg` gives
+  `sheet-1.svg`, `sheet-2.svg`; a name without an extension gets the suffix at its end. The
+  extension of `path` is not changed or checked.
+- **PNG** needs the cargo feature `raster` of `arc-io-pdf`, which enables the feature of
+  `arc-draft`. Without it the command fails with `io.pdf.raster_unavailable` before any work.
+- **Result.** `paths` (the files written, as given or numbered), `pages`, and `reports`, one loss
+  report per file in the order of `paths`, with `header.file_name` set. The PNG report has the
+  format `png`, version `1.2`; it counts the plot items drawn (`io.pdf.items_written`), those the
+  raster output skipped (`io.pdf.items_skipped`: outline glyph runs and curves that cannot be
+  flattened) and the entities the stream left out (`io.pdf.sources_failed`).
+- **Errors.** An inconsistent or out of range parameter is `io.pdf.plot_params_invalid` (argument
+  `what` names it: `layouts`, `model`, `model.window`, `model.scale`, `model.paper`, `dpi`,
+  `options.window`, `options.scale`, `options.origin`); a path outside the roots, a missing
+  permission class and an input/output failure are the codes of `arc-command`; the plot and
+  writer errors are passed through.
+- **Paper rule.** Pens equal to the paper color plot in the contrasting extreme (see the plot
+  style rules in [arc-draft.md](arc-draft.md)), so the default white entities show on white paper
+  in every format.
+
 ### Loss reports
 
 Every write returns a `LossReport` (header format `svg` or `pdf`, version `1.1` or `1.7`,
@@ -443,6 +486,7 @@ because the layer table does not allow one format crate to depend on another.
 |---|---|
 | `io.pdf.items_written` | `mapped` |
 | `io.pdf.glyphs_dropped` | `dropped` |
+| `io.pdf.items_skipped` | `dropped` |
 | `io.pdf.layers_dropped` | `dropped` |
 | `io.pdf.nurbs_flattened` | `approximated` |
 | `io.pdf.arcs_approximated` | `approximated` |
@@ -459,5 +503,8 @@ because the layer table does not allow one format crate to depend on another.
 | `io.limit_exceeded` | `limit_exceeded` | A limit of the profile was exceeded; the argument `limit` names it (the same code as in the DXF table; it moves to a shared registry) |
 | `io.pdf.option_invalid` | `invalid_input` | An option is out of range or malformed; the argument `option` names it |
 | `io.pdf.stream_invalid` | `invalid_input` | A page size, area, clip index or coordinate of the stream cannot be written; the argument `what` names it |
+
+| `io.pdf.raster_unavailable` | `unsupported` | PNG output was requested and the crate was built without the feature `raster` |
+| `io.pdf.plot_params_invalid` | `invalid_input` | A parameter of `core.draft.plot` is missing, inconsistent or out of range; the argument `what` names it |
 
 `base.cancelled` is returned when the token is cancelled.

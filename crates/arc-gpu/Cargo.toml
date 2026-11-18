@@ -24,6 +24,8 @@ draft = ["dep:arc-draft", "dep:skrifa"]
 
 [dev-dependencies]
 arc-command = { workspace = true }
+# The DXF import command of the drafting scenario test.
+arc-draft-dxf = { workspace = true }
 # Outline text layout for the text tests of the feature `draft`.
 arc-draft = { workspace = true, features = ["outline-text"] }
 image = { workspace = true }

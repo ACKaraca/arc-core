@@ -205,6 +205,7 @@ dependencies = [
  "arc-command",
  "arc-doc",
  "arc-draft",
+ "arc-draft-dxf",
  "arc-geom",
  "arc-mesh",
  "image",
@@ -229,10 +230,15 @@ name = "arc-io-pdf"
 version = "0.1.0"
 dependencies = [
  "arc-base",
+ "arc-command",
+ "arc-doc",
  "arc-draft",
+ "arc-draft-dxf",
  "arc-geom",
+ "image",
  "proptest",
  "resvg",
+ "schemars",
  "serde",
  "serde_json",
 ]

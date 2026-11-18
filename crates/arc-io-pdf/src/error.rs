@@ -44,8 +44,28 @@ pub mod codes {
         message_id: "io-pdf-stream-invalid",
     };
 
+    /// PNG output was requested but the crate was built without the feature `raster`.
+    pub const RASTER_UNAVAILABLE: ErrorCode = ErrorCode {
+        code: "io.pdf.raster_unavailable",
+        category: Category::Unsupported,
+        message_id: "io-pdf-raster-unavailable",
+    };
+    /// The parameters of `core.draft.plot` are inconsistent; the argument `what` names the
+    /// parameter.
+    pub const PLOT_PARAMS_INVALID: ErrorCode = ErrorCode {
+        code: "io.pdf.plot_params_invalid",
+        category: Category::InvalidInput,
+        message_id: "io-pdf-plot-params-invalid",
+    };
+
     /// Every code of this crate, for the registry check.
-    pub const ALL: &[ErrorCode] = &[LIMIT_EXCEEDED, OPTION_INVALID, STREAM_INVALID];
+    pub const ALL: &[ErrorCode] = &[
+        LIMIT_EXCEEDED,
+        OPTION_INVALID,
+        STREAM_INVALID,
+        RASTER_UNAVAILABLE,
+        PLOT_PARAMS_INVALID,
+    ];
 }
 
 /// The stable reason codes of loss-report items produced by `arc-io-pdf`.
@@ -112,8 +132,18 @@ pub mod reasons {
         message_id: "io-pdf-loss-layers-dropped",
     };
 
+    /// Plot items the raster output did not draw: outline glyph runs and curves that could not
+    /// be flattened.
+    pub const ITEMS_SKIPPED: Reason = Reason {
+        code: "io.pdf.items_skipped",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-pdf-loss-items-skipped",
+    };
+
     /// Every reason of this crate, for the registry check.
     pub const ALL: &[Reason] = &[
+        ITEMS_SKIPPED,
         ITEMS_WRITTEN,
         GLYPHS_DROPPED,
         NURBS_FLATTENED,

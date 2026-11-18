@@ -123,6 +123,10 @@ from = "arc-io-pdf"
 to = "arc-draft"
 
 [[same_layer]]
+from = "arc-io-pdf"
+to = "arc-draft-dxf"
+
+[[same_layer]]
 from = "arc-scene"
 to = "arc-io-usd"
 
