@@ -896,16 +896,21 @@ pub fn scan(root: &Path, limits: &Limits) -> Result<Vec<Orphan>> {
 /// commit is acknowledged, so such a file holds nothing to recover.
 fn uninitialized(path: &Path) -> bool {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    Connection::open_with_flags(path, flags)
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT (SELECT count(*) FROM sqlite_master) + application_id \
-                 FROM pragma_application_id",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-        })
-        .is_ok_and(|content| content == 0)
+    let content = Connection::open_with_flags(path, flags).and_then(|conn| {
+        conn.query_row(
+            "SELECT (SELECT count(*) FROM sqlite_master) + application_id \
+             FROM pragma_application_id",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+    });
+    match content {
+        Ok(content) => content == 0,
+        // SQLITE_READONLY_ROLLBACK: a hot rollback journal. The database leaves rollback-journal
+        // mode before its first transaction, so the process died while switching modes.
+        Err(rusqlite::Error::SqliteFailure(failure, _)) => failure.extended_code == 776,
+        Err(_) => false,
+    }
 }
 
 fn inspect(path: PathBuf, limits: &Limits) -> Orphan {
