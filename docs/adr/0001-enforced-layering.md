@@ -50,4 +50,7 @@ The layer table gains a list, `wasm_deny`: crates that cannot build for `wasm32-
 (native database, compression, C++ bridge, async runtime, network and crash-reporting crates). The
 rule function fails when a crate of the `wasm` set reaches one of them through normal dependencies
 and names the chain, so the violation is found by `cargo xtask layers` and not only by a failing
-`cargo xtask wasm` build. Dev-dependencies are not followed.
+`cargo xtask wasm` build. Dev-dependencies are not followed. Optional dependencies that a crate's default
+features leave off are not followed either: the dependency resolution covers the whole workspace,
+so a native application that turns such a feature on would otherwise fail the rule for the crates
+below it. `cargo xtask wasm` builds the set with default features and finds a real use.

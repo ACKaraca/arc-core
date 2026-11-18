@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The headless runner (CORE-CMD-031): the shared CLI subcommands, which open and save packages.
+# Off by default and in the WebAssembly build: the package is SQLite, native code.
+headless = ["arc-doc/package"]
+
 [dependencies]
 arc-base = { workspace = true }
 arc-doc = { workspace = true }

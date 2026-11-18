@@ -149,6 +149,24 @@ reports, Hub) are added in later parts behind settings that default to off.
   the bound is applied. Paths that are not UTF-8 are not persisted. Thumbnails are not part of
   this model.
 
+### Reference CLI (CORE-APP-026)
+
+`apps/arc-shell-cli` is one package with a library and a binary. The library holds the sample
+document type set the reference shell uses: `shell.layer` (`name`), `shell.point` (`position`)
+and `shell.line` (`start`, `end`), each version 1.0, where points and lines have an optional
+`layer` reference to a layer (associative, cleared when the layer is deleted). They are
+registered through `TypeRegistry::register`. The sample commands `shell.layer.create`,
+`shell.point.create`, `shell.line.create`, `shell.object.move` (adds an offset to the points of
+a point or line; other types are unchanged) and `shell.object.delete` (applies the deletion
+rules) are undoable, need the class `edit` and are registered through `Registry::register`;
+every change is a transaction of the invoker. `product(clock, owner)` bundles them for
+`arc_command::headless::run`, and the binary's `main` only passes the process arguments, the
+standard streams, the system clock and the edit-lock owner (user and host from the environment)
+and returns the runner's exit code. The subcommands, flags and exit codes are those of the
+[headless runner](arc-command.md#headless-runner-as-implemented). The layer table forbids a
+dependency on an application crate, so the windowed shell cannot depend on this package as it
+stands; reusing the sample set there needs a library crate with its own class.
+
 ### Error codes
 
 The codes `arc-app` owns; messages are in `locales/en-US/arc-app.ftl`.

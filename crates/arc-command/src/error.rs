@@ -316,6 +316,13 @@ pub mod codes {
         category: Category::Io,
         message_id: "cmd-path-io",
     };
+    /// The arguments of the headless runner do not follow its grammar; the detail `reason`
+    /// says what is wrong.
+    pub const CLI_USAGE: ErrorCode = ErrorCode {
+        code: "cmd.cli.usage",
+        category: Category::InvalidInput,
+        message_id: "cmd-cli-usage",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -370,6 +377,7 @@ pub mod codes {
         PATH_OUTSIDE_ROOTS,
         PATH_NOT_FOUND,
         PATH_IO,
+        CLI_USAGE,
     ];
 }
 

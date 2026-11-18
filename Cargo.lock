@@ -123,6 +123,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-shell-cli"
+version = "0.1.0"
+dependencies = [
+ "arc-base",
+ "arc-command",
+ "arc-doc",
+ "proptest",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "arc-solve"
 version = "0.1.0"
 dependencies = [

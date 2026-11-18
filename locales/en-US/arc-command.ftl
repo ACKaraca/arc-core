@@ -58,3 +58,4 @@ cmd-path-too-long = The path is too long.
 cmd-path-outside-roots = The path is outside the allowed folders.
 cmd-path-not-found = The file or folder does not exist.
 cmd-path-io = The file cannot be accessed.
+cmd-cli-usage = The command-line arguments are not valid.

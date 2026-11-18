@@ -70,6 +70,11 @@ impl Class {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepKind {
     Normal,
+    /// A normal dependency that is optional and that the crate's default features leave off.
+    /// The WebAssembly rule does not follow it: `cargo metadata` unifies features over the whole
+    /// workspace, so a native application that turns the feature on would otherwise fail the
+    /// rule for every crate below it. `cargo xtask wasm` builds the set and catches a real use.
+    Optional,
     Dev,
     Build,
 }
@@ -402,6 +407,12 @@ mod tests {
             "{}",
             wasm[0].detail
         );
+    }
+
+    #[test]
+    fn optional_wasm_deny_dependency_left_off_by_default_passes() {
+        let found = check(&table(), &wasm_facts(&[("tokio", DepKind::Optional)]));
+        assert!(found.iter().all(|v| v.rule != Rule::Wasm), "{found:?}");
     }
 
     #[test]

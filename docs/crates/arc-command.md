@@ -323,9 +323,8 @@ group      = "(" , { group | char - ( "(" | ")" ) } , ")" ;
 ## Automation protocol and file roots as implemented
 
 The modules are `protocol` (CORE-CMD-019, CORE-CMD-021, CORE-CMD-022, CORE-CMD-027) and
-`roots` (CORE-CMD-032, CORE-CMD-033). The process that owns stdin and stdout
-(`<product>-cli serve --stdio`) and the shared CLI conventions (CORE-CMD-031) are later units;
-this layer serves a session over any byte stream pair.
+`roots` (CORE-CMD-032, CORE-CMD-033). This layer serves a session over any byte stream pair;
+the process that owns stdin and stdout is the [headless runner](#headless-runner-as-implemented).
 
 ### Framing
 
@@ -508,6 +507,74 @@ validate every request they send and every message the server writes against the
   or a directory for a link while another opens it repeatedly), asserting that the canary is
   never read, written or joined by a new file.
 
+## Headless runner as implemented
+
+The module `headless` (feature `headless`, which enables the `arc-doc` package; off in the
+WebAssembly build) implements CORE-CMD-031 after the
+[headless CLI conventions](../architecture/commands-and-automation.md#headless-cli-conventions).
+`headless::run(args, product, stdin, stdout, stderr)` is the whole program: `args` without the
+program name, a `Product` (name, version, object types, evaluators, command registry, clock and
+the edit-lock owner) and the three streams; it returns an `Exit` and never panics (a contained
+fault is exit 70). A product's `main` passes the process arguments and streams and returns the
+code. Arguments are parsed by hand: no argument-parsing crate is in the technology baseline.
+
+- Standard output carries JSON only: one value and a newline, sorted keys, or the protocol
+  messages of `serve --stdio`. Errors go to standard error as one line
+  `{"error": <error object>}` with the protocol's error object
+  ([Errors](#errors)); protocol log records go there as `{"level", "event", "detail"}` lines.
+- The one-shot subcommands answer through `Server::call`, the synchronous form of a protocol
+  request in a session granted the whole ceiling, so their output equals the result of the
+  protocol method named below.
+- Flags are `--name value` or `--name=value`; `--` ends the flags. Single-value flags may not
+  repeat. Read and write roots and permission classes come only from flags and default to
+  none: the ceiling is `read`, the classes of the `--allow-*` flags, `file_read` with any root
+  and `file_write` with a write root. Package files named on the command line are opened by
+  the runner itself, not through the roots, which confine the commands.
+
+| Subcommand | Behavior | Output |
+|---|---|---|
+| `commands` | Lists the commands exposed on `automation` | `command.list` result |
+| `describe <command>` | Describes one command (identifier or alias) | `command.describe` result |
+| `validate-params <command> [--params P]` | Validates parameters without running; exit 3 when invalid | `command.validate` result |
+| `run <file> --command <id> [--params P] [--seed N] [--save]` | Opens the package, runs one command through the invoker; with `--save` opens it under the edit lock and saves the document in place after a successful run | `command.run` result |
+| `inspect <file> [--check]` | `arc_doc::package::inspect`; with `--check` adds `findings`, exit 3 when there are any | Inspection JSON |
+| `validate <file>` | `arc_doc::package::check`; exit 3 when there are findings | `{"findings": [...]}` |
+| `serve --stdio [<file>...] [--save]` | Serves the protocol on stdin and stdout; each package is a document named by its file stem (a stem twice, or one not UTF-8, is a usage error); with `--save` each is saved in place when the session ends | Protocol messages |
+| `help` (also `--help`) | Writes the usage text to standard error | Nothing |
+
+A finding is the protocol's error `data` (`code`, `category`, `messageId`, `arguments`,
+`details`).
+
+| Flag | Subcommands | Meaning |
+|---|---|---|
+| `--read-root <dir>`, `--write-root <dir>` | all | Repeatable; the session's roots (`cmd.roots.invalid` when one is not a directory) |
+| `--allow-edit`, `--allow-network`, `--allow-process` | all | Add `edit`, `network`, `process` to the ceiling |
+| `--json` | all | Accepted; output is always JSON |
+| `--command <id>` | `run` | The command; required |
+| `--params <P>` | `run`, `validate-params` | JSON text, or `@<file>` for a file's text (at most `input_bytes`); default `{}` |
+| `--seed <n>` | `run` | The invocation seed, a decimal `u64`; default 0 |
+| `--save` | `run`, `serve` | Save in place |
+| `--check` | `inspect` | Add the check's findings |
+| `--stdio` | `serve` | Required; the only transport |
+
+| Exit | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | The command or operation failed: categories `not_found`, `conflict`, `cancelled`, `io`, `failed_operation` |
+| 2 | Usage error (`cmd.cli.usage`, detail `reason`), or parameters missing a required member (`cmd.params.invalid` with a `required` violation): a CLI never prompts |
+| 3 | Input invalid or corrupt: categories `invalid_input`, `corrupt_data`; invalid parameters from `validate-params`; package findings from `inspect --check` and `validate` |
+| 4 | Unsupported: category `unsupported` |
+| 5 | Denied: category `permission_denied` (permission classes, `cmd.path.outside_roots`) |
+| 6 | Limit exceeded: category `limit_exceeded` |
+| 70 | Internal fault: category `internal`, or a fault contained by the runner |
+
+Exit 7 (`--fail-on-loss`) belongs to conversions, which the shared set does not have yet. The
+conventions' `info`, `convert`, `batch`, `render`, `upgrade` and `mcp` subcommands and the
+`--log-level`, `--log-format`, `--locale`, `--limits` and `--output` flags are not provided;
+they are usage errors. The architecture names parameter validation as a protocol method only and
+gives `validate <file>` the package check, so parameter validation is the separate subcommand
+`validate-params`.
+
 ### Error codes
 
 | Code | Category | Meaning |
@@ -563,6 +630,7 @@ validate every request they send and every message the server writes against the
 | `cmd.path.outside_roots` | `permission_denied` | The path lies outside the read or write roots |
 | `cmd.path.not_found` | `not_found` | The path names nothing |
 | `cmd.path.io` | `io` | The system refused the file operation; the detail `reason` says how |
+| `cmd.cli.usage` | `invalid_input` | The runner's arguments do not follow its grammar; the detail `reason` says what is wrong |
 
 ## Capabilities
 

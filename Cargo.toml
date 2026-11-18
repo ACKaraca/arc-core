@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "xtask"]
+members = ["crates/*", "apps/*", "xtask"]
 # Fuzz crates build with cargo-fuzz on a nightly toolchain, outside the workspace gate.
 exclude = ["crates/arc-doc/fuzz", "crates/arc-geom/fuzz", "crates/arc-mesh/fuzz"]
 

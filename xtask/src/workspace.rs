@@ -28,6 +28,48 @@ struct Package {
     manifest_path: PathBuf,
     #[serde(default)]
     features: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    dependencies: Vec<Declared>,
+}
+
+/// A dependency as the manifest declares it.
+#[derive(Deserialize)]
+struct Declared {
+    name: String,
+    #[serde(default)]
+    optional: bool,
+    kind: Option<String>,
+}
+
+impl Package {
+    /// The names of the optional normal dependencies that the default features leave off.
+    fn optional_off(&self) -> Vec<&str> {
+        let mut on = Vec::new();
+        let mut seen = Vec::new();
+        let mut pending = vec!["default"];
+        while let Some(feature) = pending.pop() {
+            if seen.contains(&feature) {
+                continue;
+            }
+            seen.push(feature);
+            for item in self.features.get(feature).into_iter().flatten() {
+                if let Some(dep) = item.strip_prefix("dep:") {
+                    on.push(dep);
+                } else if let Some((dep, _)) = item.split_once('/') {
+                    if !dep.ends_with('?') {
+                        on.push(dep);
+                    }
+                } else {
+                    pending.push(item);
+                }
+            }
+        }
+        self.dependencies
+            .iter()
+            .filter(|d| d.optional && d.kind.is_none() && !on.contains(&d.name.as_str()))
+            .map(|d| d.name.as_str())
+            .collect()
+    }
 }
 
 #[derive(Deserialize)]
@@ -130,6 +172,7 @@ pub fn load_facts() -> Result<Facts, Failure> {
             continue;
         };
         let mut deps = Vec::new();
+        let optional_off = package.optional_off();
         for dep in &node.deps {
             let Some(target) = names.get(dep.pkg.as_str()) else {
                 continue;
@@ -138,6 +181,7 @@ pub fn load_facts() -> Result<Facts, Failure> {
                 let kind = match kind.kind.as_deref() {
                     Some("dev") => DepKind::Dev,
                     Some("build") => DepKind::Build,
+                    _ if optional_off.contains(&target.name.as_str()) => DepKind::Optional,
                     _ => DepKind::Normal,
                 };
                 deps.push(Dep {

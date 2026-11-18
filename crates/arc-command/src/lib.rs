@@ -21,7 +21,9 @@
 //!   (CORE-CMD-013, CORE-CMD-015, [`command_line`]);
 //! - the Arc Automation Protocol server: framing, session negotiation, the command methods and
 //!   the error model (CORE-CMD-019, CORE-CMD-021, CORE-CMD-022, CORE-CMD-027, [`protocol`]);
-//! - read and write roots with the check bound to the opened handle (CORE-CMD-032, [`roots`]).
+//! - read and write roots with the check bound to the opened handle (CORE-CMD-032, [`roots`]);
+//! - the headless runner with the shared CLI subcommands, flags and exit codes (CORE-CMD-031,
+//!   `headless`, feature `headless`).
 //!
 //! A command is a typed Rust function over its parameters and a [`Context`]:
 //!
@@ -55,6 +57,8 @@
 pub mod command_line;
 pub mod context;
 pub mod error;
+#[cfg(feature = "headless")]
+pub mod headless;
 pub mod invoke;
 pub mod line;
 pub mod prompt;

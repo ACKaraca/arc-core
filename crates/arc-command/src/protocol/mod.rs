@@ -177,6 +177,18 @@ impl ServerConfig {
         }
     }
 
+    /// A command session of this configuration granted `permissions`.
+    fn session(&self, permissions: BTreeSet<Permission>) -> Session {
+        Session {
+            surface: Surface::Automation,
+            permissions,
+            limits: self.limits,
+            clock: Arc::clone(&self.clock),
+            units: self.units.clone(),
+            roots: self.roots.clone(),
+        }
+    }
+
     fn max_line(&self) -> usize {
         let max = self.max_message_bytes.min(self.limits.input_bytes);
         usize::try_from(max).unwrap_or(usize::MAX)
@@ -528,16 +540,7 @@ impl<'a> Server<'a> {
                 if invocation.cancel.is_cancelled() {
                     return Err(Error::new(codes::CANCELLED).into());
                 }
-                match Invoker::new(self.registry).invoke(document, &session, invocation) {
-                    Ok(outcome) => Ok(run_result(&outcome)),
-                    Err(error) => {
-                        if let Some(panic) = error.details().get("panic") {
-                            self.log
-                                .log(LogLevel::Error, "command.fault", &format!("{panic:?}"));
-                        }
-                        Err(Failure::from(error))
-                    }
-                }
+                self.invoke(document, &session, invocation)
             }))
             .unwrap_or_else(|payload| {
                 self.log.log(
@@ -552,6 +555,97 @@ impl<'a> Server<'a> {
                 .unwrap_or_else(PoisonError::into_inner)
                 .remove(&key);
             let _ = out.send(response(&id, answer));
+        }
+    }
+
+    /// Answers one command method (`command.list`, `command.describe`, `command.validate` or
+    /// `command.run`) with `params` as a request would, without framing or threads: in a
+    /// session granted the whole `ceiling`, with `command.run` executed on the calling thread.
+    /// The headless runner answers its one-shot subcommands with it.
+    ///
+    /// # Errors
+    ///
+    /// The JSON-RPC error object the request would be answered with.
+    pub fn call(&self, method: &str, params: Value) -> Result<Value, Value> {
+        let session = self.config.session(self.config.ceiling.clone());
+        let answer = catch_unwind(AssertUnwindSafe(|| {
+            let Value::Object(params) = params else {
+                return Err(invalid_request("params"));
+            };
+            match method {
+                "command.run" => decode::<RunParams>(method, params).and_then(|p| {
+                    if p.preview {
+                        return Err(Error::new(codes::PREVIEW_UNSUPPORTED).into());
+                    }
+                    let document = self.document(&p.document)?;
+                    let mut invocation = Invocation::new(p.command, p.params);
+                    invocation.seed = p.seed;
+                    invocation.expected_revision = p.expected_revision;
+                    self.invoke(document, &session, invocation)
+                }),
+                _ => self.query(&session, method, params),
+            }
+        }))
+        .unwrap_or_else(|payload| {
+            self.log.log(
+                LogLevel::Error,
+                "protocol.panic",
+                &panic_text(payload.as_ref()),
+            );
+            Err(Error::new(codes::PROTOCOL_INTERNAL).into())
+        });
+        answer.map_err(|failure| {
+            let (error, extra) = *failure.0;
+            errors::error_object(&error, extra)
+        })
+    }
+
+    /// Answers the command methods that do not run a command; any other method is unknown.
+    fn query(&self, session: &Session, method: &str, params: Map<String, Value>) -> Answer {
+        match method {
+            "command.list" => decode::<ListParams>(method, params).and_then(|p| {
+                let snapshot = p
+                    .document
+                    .map(|d| self.document(&d).map(Document::snapshot))
+                    .transpose()?;
+                let commands: Vec<Value> = self
+                    .registry
+                    .iter()
+                    .filter(|spec| spec.exposure().contains(&Surface::Automation))
+                    .map(|spec| self.entry(spec, session, snapshot.as_ref()))
+                    .collect();
+                Ok(json!({"commands": commands}))
+            }),
+            "command.describe" => decode::<DescribeParams>(method, params).and_then(|p| {
+                let spec = self.command(&p.command)?;
+                let snapshot = p
+                    .document
+                    .map(|d| self.document(&d).map(Document::snapshot))
+                    .transpose()?;
+                Ok(self.entry(&spec, session, snapshot.as_ref()))
+            }),
+            "command.validate" => decode::<ValidateParams>(method, params).and_then(|p| {
+                let spec = self.command(&p.command)?;
+                let violations = spec.validate(&p.params, &session.limits)?;
+                Ok(json!({"valid": violations.is_empty(), "violations": violations}))
+            }),
+            _ => Err(Error::new(codes::PROTOCOL_METHOD_UNKNOWN)
+                .with_arg("method", method)
+                .into()),
+        }
+    }
+
+    /// Runs `invocation` through the invoker and logs the panic of a faulted command.
+    fn invoke(&self, document: &Document, session: &Session, invocation: Invocation) -> Answer {
+        match Invoker::new(self.registry).invoke(document, session, invocation) {
+            Ok(outcome) => Ok(run_result(&outcome)),
+            Err(error) => {
+                if let Some(panic) = error.details().get("panic") {
+                    self.log
+                        .log(LogLevel::Error, "command.fault", &format!("{panic:?}"));
+                }
+                Err(Failure::from(error))
+            }
         }
     }
 
@@ -766,32 +860,9 @@ impl<'a> Reader<'_, 'a> {
             "arc.shutdown" => return Reply::Shutdown,
             "arc.ping" => Ok(json!({})),
             "arc.capabilities" => Ok(capabilities()),
-            "command.list" => decode::<ListParams>(method, params).and_then(|p| {
-                let snapshot = p
-                    .document
-                    .map(|d| server.document(&d).map(Document::snapshot))
-                    .transpose()?;
-                let commands: Vec<Value> = server
-                    .registry
-                    .iter()
-                    .filter(|spec| spec.exposure().contains(&Surface::Automation))
-                    .map(|spec| server.entry(spec, &session, snapshot.as_ref()))
-                    .collect();
-                Ok(json!({"commands": commands}))
-            }),
-            "command.describe" => decode::<DescribeParams>(method, params).and_then(|p| {
-                let spec = server.command(&p.command)?;
-                let snapshot = p
-                    .document
-                    .map(|d| server.document(&d).map(Document::snapshot))
-                    .transpose()?;
-                Ok(server.entry(&spec, &session, snapshot.as_ref()))
-            }),
-            "command.validate" => decode::<ValidateParams>(method, params).and_then(|p| {
-                let spec = server.command(&p.command)?;
-                let violations = spec.validate(&p.params, &session.limits)?;
-                Ok(json!({"valid": violations.is_empty(), "violations": violations}))
-            }),
+            "command.list" | "command.describe" | "command.validate" => {
+                server.query(&session, method, params)
+            }
             "command.run" => match decode::<RunParams>(method, params) {
                 Ok(p) => return self.run_command(id, session, p),
                 Err(failure) => Err(failure),
@@ -879,14 +950,7 @@ impl<'a> Reader<'_, 'a> {
                 "queuedRuns": MAX_QUEUED_RUNS,
             },
         });
-        self.session = Some(Session {
-            surface: Surface::Automation,
-            permissions: granted,
-            limits: config.limits,
-            clock: Arc::clone(&config.clock),
-            units: config.units.clone(),
-            roots: config.roots.clone(),
-        });
+        self.session = Some(config.session(granted));
         Ok(result)
     }
 
