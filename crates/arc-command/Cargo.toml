@@ -1,0 +1,24 @@
+[package]
+name = "arc-command"
+description = "Commands of the Arc suite: specifications, parameter schemas and validation, guarded execution, the registry and the command catalog."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+arc-base = { workspace = true }
+arc-doc = { workspace = true }
+arc-solve = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+proptest = { workspace = true }
+
+[lints]
+workspace = true

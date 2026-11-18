@@ -59,7 +59,7 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `rayon` | Work-stealing worker pool | MIT or Apache-2.0 |
 | `crossbeam-channel` | Bounded channels between threads | MIT or Apache-2.0 |
 | `arc-swap` | Lock-free publication of snapshots | MIT or Apache-2.0 |
-| `jsonschema` | Validation of command parameters against schemas | MIT |
+| `jsonschema` | Not in use: its dependency chain includes a crate under MIT-0, which is outside the license allowlist; `arc-command` validates the JSON Schema subset its generated schemas use with its own bounded validator | MIT |
 | `schemars` | Schema generation from parameter types | MIT |
 | `quick-xml` | Bounded XML reading and writing (IFC-ZIP manifests, BCF, LandXML, IDS) | MIT |
 | `zip` | Bounded ZIP reading and writing | MIT |

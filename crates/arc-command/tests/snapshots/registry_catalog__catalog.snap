@@ -1,0 +1,546 @@
+---
+source: crates/arc-command/tests/registry_catalog.rs
+expression: text
+---
+{
+  "commands": [
+    {
+      "category": null,
+      "coalesce": null,
+      "deprecated_aliases": [],
+      "description": "test-fail-description",
+      "examples": [],
+      "exposure": [
+        "ui",
+        "command_line",
+        "automation",
+        "mcp",
+        "plugin"
+      ],
+      "id": "test.fail.always",
+      "keywords": null,
+      "label": "test-fail",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "Nothing",
+        "type": "object"
+      },
+      "permissions": [
+        "edit"
+      ],
+      "prompt": false,
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "null",
+        "type": "null"
+      },
+      "transparent": false,
+      "undo": "undoable"
+    },
+    {
+      "category": null,
+      "coalesce": null,
+      "deprecated_aliases": [],
+      "description": "test-panic-description",
+      "examples": [],
+      "exposure": [
+        "automation"
+      ],
+      "id": "test.fault.decode",
+      "keywords": null,
+      "label": "test-panic",
+      "params": {
+        "$defs": {
+          "Boom": {
+            "description": "A value whose decoding panics.",
+            "type": "null"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "boom": {
+            "$ref": "#/$defs/Boom"
+          }
+        },
+        "required": [
+          "boom"
+        ],
+        "title": "Explosive",
+        "type": "object"
+      },
+      "permissions": [
+        "edit"
+      ],
+      "prompt": false,
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "null",
+        "type": "null"
+      },
+      "transparent": false,
+      "undo": "undoable"
+    },
+    {
+      "category": null,
+      "coalesce": null,
+      "deprecated_aliases": [],
+      "description": "test-panic-description",
+      "examples": [],
+      "exposure": [
+        "automation"
+      ],
+      "id": "test.fault.encode",
+      "keywords": null,
+      "label": "test-panic",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "Nothing",
+        "type": "object"
+      },
+      "permissions": [
+        "read"
+      ],
+      "prompt": false,
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "A result whose encoding panics.",
+        "title": "ExplosiveResult",
+        "type": "null"
+      },
+      "transparent": false,
+      "undo": "not_undoable"
+    },
+    {
+      "category": null,
+      "coalesce": null,
+      "deprecated_aliases": [],
+      "description": "test-panic-description",
+      "examples": [],
+      "exposure": [
+        "ui",
+        "command_line",
+        "automation",
+        "mcp",
+        "plugin"
+      ],
+      "id": "test.fault.panic",
+      "keywords": null,
+      "label": "test-panic",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "Nothing",
+        "type": "object"
+      },
+      "permissions": [
+        "edit"
+      ],
+      "prompt": false,
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "null",
+        "type": "null"
+      },
+      "transparent": false,
+      "undo": "undoable"
+    },
+    {
+      "category": null,
+      "coalesce": null,
+      "deprecated_aliases": [],
+      "description": "test-panic-description",
+      "examples": [],
+      "exposure": [
+        "automation"
+      ],
+      "id": "test.fault.predicate",
+      "keywords": null,
+      "label": "test-panic",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "Nothing",
+        "type": "object"
+      },
+      "permissions": [
+        "edit"
+      ],
+      "prompt": false,
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "null",
+        "type": "null"
+      },
+      "transparent": false,
+      "undo": "undoable"
+    },
+    {
+      "category": null,
+      "coalesce": null,
+      "deprecated_aliases": [],
+      "description": "test-touch-description",
+      "examples": [],
+      "exposure": [
+        "ui",
+        "command_line",
+        "automation",
+        "mcp",
+        "plugin"
+      ],
+      "id": "test.file.touch",
+      "keywords": null,
+      "label": "test-touch",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "Nothing",
+        "type": "object"
+      },
+      "permissions": [
+        "read",
+        "file_write"
+      ],
+      "prompt": false,
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "null",
+        "type": "null"
+      },
+      "transparent": false,
+      "undo": "not_undoable"
+    },
+    {
+      "category": null,
+      "coalesce": null,
+      "deprecated_aliases": [
+        "test.item.make"
+      ],
+      "description": "test-create-description",
+      "examples": [
+        {
+          "length": 2.4,
+          "name": "a"
+        },
+        {
+          "length": "2400 mm",
+          "name": "b"
+        }
+      ],
+      "exposure": [
+        "ui",
+        "command_line",
+        "automation",
+        "mcp",
+        "plugin"
+      ],
+      "id": "test.item.create",
+      "keywords": null,
+      "label": "test-create",
+      "params": {
+        "$defs": {
+          "QuantityParam": {
+            "anyOf": [
+              {
+                "description": "A value in SI base units.",
+                "format": "double",
+                "type": "number"
+              },
+              {
+                "description": "An expression with units.",
+                "type": "string"
+              }
+            ],
+            "description": "A quantity parameter: a number in SI base units, or a text with units parsed by\n`arc-solve` (`\"2400 mm\"`, `\"3'6\\\"\"`), where a bare number takes the session's context unit\nof the dimension. Its schema is `anyOf` number and string."
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "length": {
+            "$ref": "#/$defs/QuantityParam"
+          },
+          "name": {
+            "description": "The item name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "length"
+        ],
+        "title": "Create",
+        "type": "object"
+      },
+      "permissions": [
+        "edit"
+      ],
+      "prompt": false,
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "Created",
+        "type": "object"
+      },
+      "transparent": false,
+      "undo": "undoable"
+    },
+    {
+      "category": null,
+      "coalesce": null,
+      "deprecated_aliases": [],
+      "description": "test-delete-description",
+      "examples": [],
+      "exposure": [
+        "ui",
+        "command_line",
+        "automation",
+        "mcp",
+        "plugin"
+      ],
+      "id": "test.item.delete",
+      "keywords": null,
+      "label": "test-delete",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "Target",
+        "type": "object"
+      },
+      "permissions": [
+        "edit"
+      ],
+      "prompt": false,
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "null",
+        "type": "null"
+      },
+      "transparent": false,
+      "undo": "undoable"
+    },
+    {
+      "category": null,
+      "coalesce": null,
+      "deprecated_aliases": [],
+      "description": "test-random-description",
+      "examples": [],
+      "exposure": [
+        "automation"
+      ],
+      "id": "test.item.random",
+      "keywords": null,
+      "label": "test-random",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "Nothing",
+        "type": "object"
+      },
+      "permissions": [
+        "read"
+      ],
+      "prompt": false,
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "format": "uint64",
+        "minimum": 0,
+        "title": "uint64",
+        "type": "integer"
+      },
+      "transparent": false,
+      "undo": "not_undoable"
+    },
+    {
+      "category": null,
+      "coalesce": "test.length",
+      "deprecated_aliases": [],
+      "description": "test-set-length-description",
+      "examples": [
+        {
+          "id": "0190f3c4-0a11-7c2e-8f00-5d6e7f8a9b0c",
+          "length": "3'6\""
+        }
+      ],
+      "exposure": [
+        "ui",
+        "command_line",
+        "automation",
+        "mcp",
+        "plugin"
+      ],
+      "id": "test.item.set_length",
+      "keywords": null,
+      "label": "test-set-length",
+      "params": {
+        "$defs": {
+          "QuantityParam": {
+            "anyOf": [
+              {
+                "description": "A value in SI base units.",
+                "format": "double",
+                "type": "number"
+              },
+              {
+                "description": "An expression with units.",
+                "type": "string"
+              }
+            ],
+            "description": "A quantity parameter: a number in SI base units, or a text with units parsed by\n`arc-solve` (`\"2400 mm\"`, `\"3'6\\\"\"`), where a bare number takes the session's context unit\nof the dimension. Its schema is `anyOf` number and string."
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "length": {
+            "$ref": "#/$defs/QuantityParam"
+          }
+        },
+        "required": [
+          "id",
+          "length"
+        ],
+        "title": "SetLength",
+        "type": "object"
+      },
+      "permissions": [
+        "edit"
+      ],
+      "prompt": false,
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "null",
+        "type": "null"
+      },
+      "transparent": false,
+      "undo": "undoable"
+    },
+    {
+      "category": null,
+      "coalesce": null,
+      "deprecated_aliases": [],
+      "description": "test-summary-description",
+      "examples": [
+        {}
+      ],
+      "exposure": [
+        "ui",
+        "command_line",
+        "automation",
+        "mcp",
+        "plugin"
+      ],
+      "id": "test.item.summary",
+      "keywords": null,
+      "label": "test-summary",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "Nothing",
+        "type": "object"
+      },
+      "permissions": [
+        "read"
+      ],
+      "prompt": false,
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total_length": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "count",
+          "total_length"
+        ],
+        "title": "Summary",
+        "type": "object"
+      },
+      "transparent": true,
+      "undo": "not_undoable"
+    },
+    {
+      "category": null,
+      "coalesce": null,
+      "deprecated_aliases": [],
+      "description": "test-long-description",
+      "examples": [
+        {
+          "steps": 3
+        }
+      ],
+      "exposure": [
+        "ui",
+        "command_line",
+        "automation",
+        "mcp",
+        "plugin"
+      ],
+      "id": "test.long.run",
+      "keywords": null,
+      "label": "test-long",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "steps": {
+            "format": "uint32",
+            "maximum": 1000,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "steps"
+        ],
+        "title": "Steps",
+        "type": "object"
+      },
+      "permissions": [
+        "edit"
+      ],
+      "prompt": false,
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "format": "uint32",
+        "minimum": 0,
+        "title": "uint32",
+        "type": "integer"
+      },
+      "transparent": false,
+      "undo": "undoable"
+    }
+  ],
+  "format": "arc-command-catalog",
+  "version": 1
+}
