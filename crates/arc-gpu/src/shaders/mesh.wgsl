@@ -63,18 +63,22 @@ fn transform(in: VertexIn) -> VertexOut {
     out.normal = normal;
     out.color = in.color;
     out.misc = in.misc;
-    out.instance = in.instance;
     return out;
 }
 
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
-    return transform(in);
+    var out = transform(in);
+    // Read in the entry point: the DirectX 12 backend adds the first instance of the draw only
+    // to an instance index that an entry point reads directly.
+    out.instance = in.instance;
+    return out;
 }
 
 @vertex
 fn vs_edge(in: VertexIn) -> VertexOut {
     var out = transform(in);
+    out.instance = in.instance;
     // Reversed-Z: nearer is greater; never in front of the near plane.
     out.clip.z = min(out.clip.z * EDGE_DEPTH_SCALE, out.clip.w);
     return out;
