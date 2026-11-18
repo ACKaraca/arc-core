@@ -308,7 +308,13 @@ fn copy_name(session: SessionId, n: u64) -> String {
 fn copy_base(from: &Path, directory: &Path, name: &str) -> io::Result<()> {
     let temporary = directory.join(format!("{name}.tmp"));
     let result = fs::copy(from, &temporary)
-        .and_then(|_| File::open(&temporary)?.sync_all())
+        // Opened for writing: a flush through a read-only handle is refused on Windows.
+        .and_then(|_| {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&temporary)?
+                .sync_all()
+        })
         .and_then(|()| fs::rename(&temporary, directory.join(name)));
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
