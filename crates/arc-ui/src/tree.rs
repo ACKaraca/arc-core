@@ -335,7 +335,10 @@ impl TreeView {
                     messages::TREE_EXPAND
                 }
                 .text(localize);
-                let toggle = ui.small_button(if open { "▾" } else { "▸" });
+                let side = ui.spacing().interact_size.y;
+                let toggle = ui.add(
+                    Button::new(if open { "▾" } else { "▸" }).min_size(egui::vec2(side, side)),
+                );
                 toggle.widget_info(|| {
                     WidgetInfo::labeled(Role::Button, true, format!("{name} {}", row.item.label))
                 });

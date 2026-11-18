@@ -142,12 +142,55 @@ fn run_catalogs() -> Result<(), Failure> {
         checked += usize::from(text.is_some());
         problems.extend(catalog::check(&member.name, text.as_deref(), &ids));
     }
+    problems.extend(check_locales(&dir)?);
     report(
         "catalogs",
         checked,
         "catalog(s) match their crates",
         problems,
     )
+}
+
+/// Checks every locale directory next to `en_us` against it.
+fn check_locales(en_us: &Path) -> Result<Vec<String>, Failure> {
+    let Some(locales) = en_us.parent() else {
+        return Ok(Vec::new());
+    };
+    let list = |dir: &Path| -> Result<Vec<String>, Failure> {
+        let mut names = Vec::new();
+        for entry in fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        Ok(names)
+    };
+    let english = list(en_us)?;
+    let mut problems = Vec::new();
+    for locale in list(locales)? {
+        let dir = locales.join(&locale);
+        if locale == "en-US" || !dir.is_dir() {
+            continue;
+        }
+        let present = list(&dir)?;
+        for file in english.iter().filter(|f| !present.contains(f)) {
+            problems.push(format!("{locale}/{file}: file is missing"));
+        }
+        for file in present.iter().filter(|f| !english.contains(f)) {
+            problems.push(format!("{locale}/{file}: file does not exist in en-US"));
+        }
+        for file in english.iter().filter(|f| present.contains(f)) {
+            let read = |d: &Path| {
+                fs::read_to_string(d.join(file)).map_err(|e| format!("{locale}/{file}: {e}"))
+            };
+            problems.extend(catalog::check_translation(
+                &format!("{locale}/{file}"),
+                &read(en_us)?,
+                &read(&dir)?,
+            ));
+        }
+    }
+    Ok(problems)
 }
 
 fn run_schemas() -> Result<(), Failure> {

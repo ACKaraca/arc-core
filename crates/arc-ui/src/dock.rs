@@ -902,7 +902,11 @@ impl DockArea {
                     tab.dnd_set_drag_payload(TabDrag(panel.clone()));
                 }
                 let close = messages::DOCK_CLOSE.text(localize);
-                let x = ui.small_button("×").on_hover_text(close.as_str());
+                // A square of the token row height, so the target is as tall as the tab beside it.
+                let side = ui.spacing().interact_size.y;
+                let x = ui
+                    .add(egui::Button::new("×").min_size(egui::vec2(side, side)))
+                    .on_hover_text(close.as_str());
                 x.widget_info(|| {
                     WidgetInfo::labeled(Role::Button, true, format!("{close} {name}"))
                 });

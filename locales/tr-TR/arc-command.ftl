@@ -1,0 +1,61 @@
+# arc-command tarafından sahip olunan hataların iletileri. Tanımlayıcılar
+# crates/arc-command/src/error.rs içinde kayıtlıdır.
+
+cmd-unknown = { $name } adında bir komut yok.
+cmd-spec-invalid = Komut tanımı kaydedilemiyor.
+cmd-duplicate = { $name } adı zaten kayıtlı.
+cmd-alias-invalid = { $alias } geçerli bir takma ad değil.
+cmd-alias-unknown = { $alias } takma adı yok.
+cmd-alias-deprecated = { $alias }, { $command } komutunun kullanımdan kaldırılmış bir adıdır.
+cmd-name-ambiguous = { $name } adı birden çok komutla eşleşiyor.
+cmd-params-malformed = Parametreler geçerli JSON değil.
+cmd-params-limit-exceeded = Parametreler bir boyut veya derinlik sınırını aşıyor.
+cmd-params-invalid = { $count } parametre değeri geçerli değil.
+cmd-disabled = { $command } komutu şu anda kullanılamıyor.
+cmd-permission-denied = { $command } komutu, bu oturumda bulunmayan bir izin gerektiriyor.
+cmd-not-exposed = { $command } komutu burada kullanılamıyor.
+cmd-cancelled = Komut iptal edildi; hiçbir şey değiştirilmedi.
+cmd-fault = Komut beklenmedik şekilde başarısız oldu; belge eski durumuna döndürüldü.
+cmd-result-invalid = Komut geçersiz bir sonuç üretti; hiçbir şey değiştirilmedi.
+cmd-no-transaction = Komut, işlem olmadan belgeyi değiştirmeye çalıştı.
+cmd-prompt-kind = Bu istem söz konusu girdiyi kabul etmiyor.
+cmd-prompt-range = Değer izin verilen aralığın dışında.
+cmd-prompt-object = Nesne yok veya burada kullanılamaz.
+cmd-prompt-unreadable = Girdi burada okunamıyor.
+cmd-prompt-no-default = Bu istemin varsayılanı yok.
+cmd-prompt-invalid = Komut, kabul edemeyeceği bir girdi istedi.
+cmd-prompt-limit-exceeded = Girdi bir boyut veya sayı sınırını aşıyor.
+cmd-prompt-ended = Girdi bekleyen bir komut yok.
+cmd-line-syntax = Komut satırı okunamıyor.
+cmd-line-limit-exceeded = Komut satırı çok uzun veya çok derin iç içe geçmiş.
+cmd-line-unknown-param = Komutun { $name } adında bir parametresi yok.
+cmd-line-duplicate-param = { $name } parametresi iki kez verilmiş.
+cmd-line-too-many-values = Komut satırında, komutun aldığından fazla değer var.
+cmd-line-value = { $name } değeri geçerli değil.
+cmd-repeat-none = Tekrarlanacak bir komut yok.
+
+# Parametre şemalarından türetilen makinelerin istem iletileri.
+cmd-prompt-param = { $name } değerini girin.
+cmd-keyword-yes = Evet
+cmd-keyword-no = Hayır
+cmd-keyword-value = { $value }
+cmd-protocol-parse = İleti geçerli bir JSON metni değil.
+cmd-protocol-invalid-request = İleti geçerli bir istek değil.
+cmd-protocol-method-unknown = { $method } adında bir yöntem yok.
+cmd-protocol-method-unsupported = { $method } yöntemi bu uygulamada kullanılamıyor.
+cmd-protocol-invalid-params = { $method } yönteminin parametreleri geçerli değil.
+cmd-protocol-internal = İstek beklenmedik şekilde başarısız oldu.
+cmd-protocol-limit-exceeded = İleti bir boyut, derinlik veya sayı sınırını aşıyor.
+cmd-protocol-not-initialized = Oturum önce başlatılmalıdır.
+cmd-protocol-already-initialized = Oturum zaten başlatılmış.
+cmd-protocol-version-unsupported = İstenen aralıkta desteklenen bir protokol sürümü yok.
+cmd-document-unknown = { $document } adında açık bir belge yok.
+cmd-revision-mismatch = Belge { $expected } düzeltmesinden beri değişti.
+cmd-preview-unsupported = Önizleme çalıştırmaları kullanılamıyor.
+cmd-roots-invalid = Bir dosya kökü var olan bir klasör değil.
+cmd-path-rejected = Yol kabul edilebilir değil.
+cmd-path-too-long = Yol çok uzun.
+cmd-path-outside-roots = Yol, izin verilen klasörlerin dışında.
+cmd-path-not-found = Dosya veya klasör yok.
+cmd-path-io = Dosyaya erişilemiyor.
+cmd-cli-usage = Komut satırı bağımsız değişkenleri geçerli değil.

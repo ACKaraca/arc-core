@@ -242,16 +242,22 @@ impl Progress {
         if !view.show_progress {
             return false;
         }
+        // The cancel button is placed first, from the right, so the bar takes the rest of the
+        // width instead of pushing the button out of the row.
         ui.horizontal(|ui| {
-            let bar = match view.fraction {
-                Some(f) => ProgressBar::new(f).show_percentage(),
-                None => ProgressBar::new(0.0).animate(ui.style().animation_time > 0.0),
-            };
-            ui.add(bar);
-            view.show_cancel
-                && ui
-                    .button(messages::PROGRESS_CANCEL.text(localize))
-                    .clicked()
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let cancelled = view.show_cancel
+                    && ui
+                        .button(messages::PROGRESS_CANCEL.text(localize))
+                        .clicked();
+                let bar = match view.fraction {
+                    Some(f) => ProgressBar::new(f).show_percentage(),
+                    None => ProgressBar::new(0.0).animate(ui.style().animation_time > 0.0),
+                };
+                ui.add(bar);
+                cancelled
+            })
+            .inner
         })
         .inner
     }

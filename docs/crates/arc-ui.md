@@ -430,6 +430,54 @@ added: picking and navigation errors keep their `arc-gpu` and `arc-geom` codes.
   with that text and the localized prompt message while a command prompts. A headless test
   inspects these in the AccessKit tree.
 
+## Localization, scale and view cube as implemented
+
+**Case folding.** `text::fold_case(text, language)` folds case for comparison with the rule of
+`language`, a BCP 47 tag. For Turkish (`tr`) and Azerbaijani (`az`) `I` folds to `ı` and `İ` to
+`i`, so a query typed with either letter matches the Turkish word it stands for; for every other
+language, including the empty tag, it is Unicode lowercasing, so ASCII behavior is unchanged.
+Folding is idempotent and has no global state. `palette::rank_in` and
+`diagnostics::filter_in` take the language (`rank` and `filter` fold with the empty tag);
+`Palette::language` and `DiagnosticsPanel::language` hold the active tag for the widgets.
+Diagnostic codes are matched with plain lowercasing in every language, since they are ASCII
+identifiers. The tree filter is applied by the `TreeSource`, which is the caller's; sources call
+`text::matches_filter(name, filter, language)` to apply the same rule.
+
+**Turkish catalogs.** `locales/tr-TR/` holds a translation of every English catalog, with the
+same identifiers, attributes and variables per message, and a glossary in `arc-base.ftl`.
+`cargo xtask catalogs` checks every locale directory besides `en-US` against it: the same files,
+the same message identifiers and attributes, the same set of variables in each message and valid
+Fluent syntax; a missing or extra message fails. Plural messages use the exact number `[0]`,
+`[1]` and the `other` category, since Turkish selects `other` for every count.
+
+**Scale.** `tests/layout.rs` draws the menu bar, toolbar, palette, notifications with progress,
+command line, property grid, tree, diagnostics, a dock holding the last four, and the viewport
+with a texture and the view cube, in all four themes, three densities and at 75, 100, 200 and
+300 percent. It measures, from the AccessKit bounds after three passes: that no node leaves its
+container or its parent's bounds, that no two leaf nodes overlap by more than half a point in
+both directions (nodes with identical rectangles, the view cube's alternative handles, are one
+region), that the cube lies inside the viewport, that buttons, check boxes and text fields are
+at least the token row height tall (`Metrics::row_height` after density and scale) and that list
+rows are equally tall. It does not measure text truncation inside a node, painted pixels or
+closed popups. The test found and the kit fixed three defects: the progress row pushed its
+cancel button out of the row, the diagnostics header row did not wrap, and the dock close
+button and the tree expand button were shorter than a row.
+
+**View cube** (feature `viewport`, `view_cube`). `ViewCube::show_over` draws an orthographic
+cube in the top right corner of a viewport rectangle, oriented like the camera, with the
+localized name of each face that faces the eye. The cube has 26 targets, `CubeTarget`, each a
+direction from the view target toward the eye with components in -1, 0, 1: six faces, twelve
+edges and eight corners. The world is Z-up; faces are Top (+Z), Bottom (-Z), Front (-Y), Back
+(+Y), Right (+X) and Left (-X); the up hint is +Y when looking along Z and +Z otherwise. The pure
+rule `view_cube::hit(frame, q)` maps a view-plane position to the part under it: the point is
+solved onto each face that faces the eye, and within `EDGE_BAND` (0.3 of the half width) of one
+or two face edges it selects the edge or corner, otherwise the face. A click or Enter or Space on
+a focused target returns a `ViewIntent` (target, direction, up hint); `ViewIntent::frame_from`
+turns it into a `ViewFrame` that keeps the target, distance, projection and clip planes, and the
+caller animates with `arc_gpu::navigation::interpolate`. The 26 targets are focusable buttons
+named by `ui-view-cube-*` messages, hidden ones included. Only the pointer-hovered region is
+highlighted; a focused target is shown by a focus indicator around the whole cube.
+
 ## Capabilities
 
 ### Workspace

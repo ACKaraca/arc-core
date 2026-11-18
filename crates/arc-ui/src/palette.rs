@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use egui::{Button, Key, Modifiers, Ui};
 
 use crate::command::{CommandView, Intent};
-use crate::text::{Localize, messages};
+use crate::text::{Localize, fold_case, messages};
 
 /// Query characters taken into account.
 pub const MAX_QUERY_CHARS: usize = 64;
@@ -70,8 +70,8 @@ impl Recent {
     }
 }
 
-fn normalize(text: &str, max: usize) -> String {
-    text.trim().to_lowercase().chars().take(max).collect()
+fn normalize(text: &str, max: usize, language: &str) -> String {
+    fold_case(text.trim(), language).chars().take(max).collect()
 }
 
 /// The match kind of `query` in `field` and the span of a subsequence match.
@@ -105,9 +105,23 @@ fn match_field(query: &str, field: &str) -> Option<(MatchKind, usize)> {
 type SortKey<'a> = (Reverse<MatchKind>, usize, usize, &'a str, &'a str, usize);
 
 /// Ranks the enabled `commands` for `query` and returns at most `limit` matches, best first.
+/// Case is folded without a language rule; see [`rank_in`].
 #[must_use]
 pub fn rank(query: &str, commands: &[CommandView], recent: &Recent, limit: usize) -> Vec<Ranked> {
-    let query = normalize(query, MAX_QUERY_CHARS);
+    rank_in("", query, commands, recent, limit)
+}
+
+/// [`rank`] with case folded by the rule of `language` (a BCP 47 tag): in Turkish `I` matches `ı`
+/// and `İ` matches `i`.
+#[must_use]
+pub fn rank_in(
+    language: &str,
+    query: &str,
+    commands: &[CommandView],
+    recent: &Recent,
+    limit: usize,
+) -> Vec<Ranked> {
+    let query = normalize(query, MAX_QUERY_CHARS, language);
     let mut found: Vec<SortKey<'_>> = Vec::new();
     for (index, view) in commands.iter().enumerate() {
         if !view.is_enabled() {
@@ -120,7 +134,9 @@ pub fn rank(query: &str, commands: &[CommandView], recent: &Recent, limit: usize
                 .into_iter()
                 .chain(view.aliases.iter().take(MAX_TERMS).map(String::as_str))
                 .chain(view.keywords.iter().take(MAX_TERMS).map(String::as_str))
-                .filter_map(|field| match_field(&query, &normalize(field, MAX_FIELD_CHARS)))
+                .filter_map(|field| {
+                    match_field(&query, &normalize(field, MAX_FIELD_CHARS, language))
+                })
                 .max_by_key(|&(kind, span)| (kind, Reverse(span)))
         };
         if let Some((kind, span)) = best {
@@ -141,6 +157,8 @@ pub fn rank(query: &str, commands: &[CommandView], recent: &Recent, limit: usize
 pub struct Palette {
     /// The query text.
     pub query: String,
+    /// The active language tag, which selects the case-folding rule; empty for none.
+    pub language: String,
     selected: usize,
 }
 
@@ -162,7 +180,7 @@ impl Palette {
         if field.changed() {
             self.selected = 0;
         }
-        let ranked = rank(&self.query, commands, recent, MAX_SHOWN);
+        let ranked = rank_in(&self.language, &self.query, commands, recent, MAX_SHOWN);
         if ranked.is_empty() {
             ui.label(messages::PALETTE_NO_RESULTS.text(localize));
             return None;
@@ -221,6 +239,19 @@ mod tests {
             .iter()
             .map(|r| commands[r.index].id.clone())
             .collect()
+    }
+
+    #[test]
+    fn turkish_query_matches_dotted_and_dotless_i() {
+        let all = vec![view("a.b.c", "Işık"), view("a.b.d", "İzmir")];
+        let found = |lang: &str, q: &str| -> usize {
+            rank_in(lang, q, &all, &Recent::default(), usize::MAX).len()
+        };
+        assert_eq!(found("tr-TR", "ışık"), 1);
+        assert_eq!(found("tr-TR", "IŞIK"), 1);
+        assert_eq!(found("tr-TR", "izmir"), 1);
+        assert_eq!(found("tr-TR", "İZMİR"), 1);
+        assert_eq!(found("en-US", "ışık"), 0);
     }
 
     #[test]

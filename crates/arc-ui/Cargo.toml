@@ -1,6 +1,6 @@
 [package]
 name = "arc-ui"
-description = "The widget kit of the Arc suite on egui: theme tokens, density and scale, icons, localized strings, menus and toolbars from data, key bindings, the command palette, notifications and progress, docking and workspaces, the command line, the property grid and numeric input, the tree, the diagnostics panel, and (feature `viewport`) the viewport widget with selection gestures."
+description = "The widget kit of the Arc suite on egui: theme tokens, density and scale, icons, localized strings, menus and toolbars from data, key bindings, the command palette, notifications and progress, docking and workspaces, the command line, the property grid and numeric input, the tree, the diagnostics panel, and (feature `viewport`) the viewport widget with selection gestures and the view cube."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

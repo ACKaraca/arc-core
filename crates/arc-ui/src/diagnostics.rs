@@ -12,7 +12,7 @@ use egui::{Button, ScrollArea, Ui};
 
 use crate::command::{Intent, object_list};
 use crate::quantity::error_text;
-use crate::text::{Localize, messages};
+use crate::text::{Localize, fold_case, messages};
 
 /// Filter characters compared.
 pub const MAX_FILTER_CHARS: usize = 256;
@@ -45,13 +45,21 @@ pub fn filter(
     filter: &DiagnosticsFilter,
     localize: &dyn Localize,
 ) -> Vec<usize> {
-    let text: String = filter
-        .text
-        .trim()
-        .to_lowercase()
-        .chars()
-        .take(MAX_FILTER_CHARS)
-        .collect();
+    filter_in("", diagnostics, filter, localize)
+}
+
+/// [`filter`] with case folded by the rule of `language` (a BCP 47 tag).
+#[must_use]
+pub fn filter_in(
+    language: &str,
+    diagnostics: &[Diagnostic],
+    filter: &DiagnosticsFilter,
+    localize: &dyn Localize,
+) -> Vec<usize> {
+    let cut = |t: String| -> String { t.chars().take(MAX_FILTER_CHARS).collect() };
+    let text = cut(fold_case(filter.text.trim(), language));
+    // Error codes are ASCII identifiers: they match the plain lowercase query in every language.
+    let code_text = cut(filter.text.trim().to_lowercase());
     diagnostics
         .iter()
         .enumerate()
@@ -61,10 +69,8 @@ pub fn filter(
         })
         .filter(|(_, d)| {
             text.is_empty()
-                || d.code().contains(&text)
-                || error_text(&d.error, localize)
-                    .to_lowercase()
-                    .contains(&text)
+                || d.code().contains(&code_text)
+                || fold_case(&error_text(&d.error, localize), language).contains(&text)
         })
         .map(|(i, _)| i)
         .collect()
@@ -82,6 +88,8 @@ pub fn navigate(diagnostic: &Diagnostic, command: &str) -> Option<Intent> {
 pub struct DiagnosticsPanel {
     /// The filter.
     pub filter: DiagnosticsFilter,
+    /// The active language tag, which selects the case-folding rule; empty for none.
+    pub language: String,
 }
 
 impl DiagnosticsPanel {
@@ -94,7 +102,7 @@ impl DiagnosticsPanel {
         localize: &dyn Localize,
         navigate_command: &str,
     ) -> Option<Intent> {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.checkbox(
                 &mut self.filter.errors,
                 messages::SEVERITY_ERROR.text(localize),
@@ -107,7 +115,12 @@ impl DiagnosticsPanel {
             ui.text_edit_singleline(&mut self.filter.text)
                 .labelled_by(label.id);
         });
-        let kept = filter(&snapshot.diagnostics, &self.filter, localize);
+        let kept = filter_in(
+            &self.language,
+            &snapshot.diagnostics,
+            &self.filter,
+            localize,
+        );
         if kept.is_empty() {
             ui.label(messages::DIAGNOSTICS_NONE.text(localize));
             return None;

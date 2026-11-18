@@ -54,3 +54,12 @@ ui-viewport-selection = { $count ->
    *[other] { $count } objects selected
 }
 ui-viewport-status = { $selection }. { $prompt }
+ui-view-cube = View cube
+ui-view-cube-top = Top
+ui-view-cube-bottom = Bottom
+ui-view-cube-front = Front
+ui-view-cube-back = Back
+ui-view-cube-left = Left
+ui-view-cube-right = Right
+ui-view-cube-edge = { $first }-{ $second } edge
+ui-view-cube-corner = { $first }, { $second }, { $third } corner

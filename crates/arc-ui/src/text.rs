@@ -37,6 +37,38 @@ pub fn resolve(localize: &dyn Localize, id: &str, args: &[(&str, Value)]) -> Str
     localize.message(id, args).unwrap_or_else(|| id.to_owned())
 }
 
+/// Whether `language` (a BCP 47 tag such as `tr-TR`) is Turkish or Azerbaijani, the languages
+/// with a dotted and a dotless `i`.
+fn is_dotted_i_language(language: &str) -> bool {
+    let primary = language.split(['-', '_']).next().unwrap_or_default();
+    primary.eq_ignore_ascii_case("tr") || primary.eq_ignore_ascii_case("az")
+}
+
+/// `text` folded for case-insensitive comparison in `language`. In Turkish and Azerbaijani `I`
+/// folds to `ı` and `İ` to `i`, so `ı`/`I` and `i`/`İ` match as users expect; in every other
+/// language this is Unicode lowercasing. The result is itself unchanged by folding again, and
+/// there is no global state: the language is an input.
+#[must_use]
+pub fn fold_case(text: &str, language: &str) -> String {
+    if !is_dotted_i_language(language) {
+        return text.to_lowercase();
+    }
+    text.chars()
+        .flat_map(|c| match c {
+            'I' => vec!['ı'],
+            'İ' => vec!['i'],
+            other => other.to_lowercase().collect(),
+        })
+        .collect()
+}
+
+/// Whether `name` contains `filter` when both are folded in `language`; an empty filter keeps
+/// every name. Tree sources use it to apply the filter text of a [`crate::tree::TreeView`].
+#[must_use]
+pub fn matches_filter(name: &str, filter: &str, language: &str) -> bool {
+    fold_case(name, language).contains(&fold_case(filter.trim(), language))
+}
+
 /// A message this crate shows, identified for the catalog check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Message {
@@ -152,6 +184,42 @@ pub mod messages {
     pub const VIEWPORT_STATUS: Message = Message {
         message_id: "ui-viewport-status",
     };
+    /// The accessible name of the view cube.
+    pub const VIEW_CUBE: Message = Message {
+        message_id: "ui-view-cube",
+    };
+    /// The name of the top face of the view cube.
+    pub const VIEW_TOP: Message = Message {
+        message_id: "ui-view-cube-top",
+    };
+    /// The name of the bottom face of the view cube.
+    pub const VIEW_BOTTOM: Message = Message {
+        message_id: "ui-view-cube-bottom",
+    };
+    /// The name of the front face of the view cube.
+    pub const VIEW_FRONT: Message = Message {
+        message_id: "ui-view-cube-front",
+    };
+    /// The name of the back face of the view cube.
+    pub const VIEW_BACK: Message = Message {
+        message_id: "ui-view-cube-back",
+    };
+    /// The name of the left face of the view cube.
+    pub const VIEW_LEFT: Message = Message {
+        message_id: "ui-view-cube-left",
+    };
+    /// The name of the right face of the view cube.
+    pub const VIEW_RIGHT: Message = Message {
+        message_id: "ui-view-cube-right",
+    };
+    /// The name of a view cube edge, with the face names `first` and `second`.
+    pub const VIEW_EDGE: Message = Message {
+        message_id: "ui-view-cube-edge",
+    };
+    /// The name of a view cube corner, with the face names `first`, `second` and `third`.
+    pub const VIEW_CORNER: Message = Message {
+        message_id: "ui-view-cube-corner",
+    };
 }
 
 #[cfg(test)]
@@ -189,6 +257,33 @@ pub(crate) mod tests {
                 text = text.replace(&format!("{{ ${name} }}"), &shown);
             }
             Some(text)
+        }
+    }
+
+    #[test]
+    fn turkish_folding_pairs_dotted_and_dotless_i() {
+        use super::{fold_case, matches_filter};
+        assert_eq!(fold_case("IĞDIR İZMİR", "tr-TR"), "ığdır izmir");
+        assert_eq!(
+            fold_case("IĞDIR İZMİR", "en-US"),
+            "iğdir i\u{307}zmi\u{307}r"
+        );
+        assert!(matches_filter("İzmir", "izm", "tr"));
+        assert!(matches_filter("Işık", "ışık", "tr_TR"));
+        assert!(!matches_filter("Işık", "isik", "tr"));
+        assert!(matches_filter("Image", "image", "en-US"));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn folding_is_idempotent_and_total(text in "\\PC{0,60}", lang in "(tr|az|en|de|tr-TR|[a-z]{2,3})") {
+            let once = super::fold_case(&text, &lang);
+            proptest::prop_assert_eq!(super::fold_case(&once, &lang), once);
+        }
+
+        #[test]
+        fn ascii_is_plain_lowercase_outside_turkic(text in "[ -~]{0,60}", lang in "(en|de|fr|en-US|zz|)") {
+            proptest::prop_assert_eq!(super::fold_case(&text, &lang), text.to_ascii_lowercase());
         }
     }
 
@@ -239,6 +334,15 @@ pub(crate) mod tests {
             messages::VIEWPORT,
             messages::VIEWPORT_SELECTION,
             messages::VIEWPORT_STATUS,
+            messages::VIEW_CUBE,
+            messages::VIEW_TOP,
+            messages::VIEW_BOTTOM,
+            messages::VIEW_FRONT,
+            messages::VIEW_BACK,
+            messages::VIEW_LEFT,
+            messages::VIEW_RIGHT,
+            messages::VIEW_EDGE,
+            messages::VIEW_CORNER,
         ] {
             assert!(
                 catalog.contains(&format!("\n{} = ", m.message_id)),

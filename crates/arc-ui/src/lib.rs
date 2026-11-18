@@ -24,7 +24,8 @@
 //! - the virtualized tree and outliner (CORE-UI-012, [`tree`]);
 //! - the diagnostics panel (CORE-UI-020, [`diagnostics`]);
 //! - with the feature `viewport`, the viewport widget, its interaction state machine and the
-//!   selection gestures (CORE-UI-005, CORE-UI-029, `gesture` and `viewport`).
+//!   selection gestures (CORE-UI-005, CORE-UI-029, `gesture` and `viewport`) and the view cube
+//!   (`view_cube`).
 //!
 //! Widgets never run commands; they return an [`Intent`]. No function in this crate panics.
 
@@ -46,6 +47,8 @@ pub mod text;
 pub mod theme;
 pub mod tree;
 #[cfg(feature = "viewport")]
+pub mod view_cube;
+#[cfg(feature = "viewport")]
 pub mod viewport;
 pub mod workspace;
 
@@ -56,7 +59,7 @@ pub use command::{AllEnabled, CommandState, CommandView, Intent, Lookup, object_
 pub use command_line::{
     CommandLineView, History, LineAction, LineCommands, LineContext, LineStatus,
 };
-pub use diagnostics::{DiagnosticsFilter, DiagnosticsPanel};
+pub use diagnostics::{DiagnosticsFilter, DiagnosticsPanel, filter_in};
 pub use dock::{Axis, Dock, DockArea, DockLayout, Floating, Side, Target};
 pub use error::codes;
 #[cfg(feature = "viewport")]
@@ -67,12 +70,14 @@ pub use icons::{IconAtlas, Icons};
 pub use keys::{Binding, ChordResolver, KeyCombo, KeyOutcome, KeySequence, Keymap};
 pub use menu::{Entry, Menu, MenuItem, ToolEntry, Toolbar, ToolbarItem};
 pub use notify::{Notification, Notifications, Progress, ProgressView, Severity};
-pub use palette::{MatchKind, Palette, Ranked, Recent, rank};
+pub use palette::{MatchKind, Palette, Ranked, Recent, rank, rank_in};
 pub use property::{GridContext, PropertyGrid, PropertyModel, PropertyObject, PropertyRow, Shown};
 pub use quantity::{QuantityField, QuantityInput};
-pub use text::{Fallback, Localize, Message, resolve};
+pub use text::{Fallback, Localize, Message, fold_case, matches_filter, resolve};
 pub use theme::{Appearance, Colors, Density, Metrics, Theme, ThemeId, UiScale};
 pub use tree::{TreeCommands, TreeItem, TreeSource, TreeView};
+#[cfg(feature = "viewport")]
+pub use view_cube::{CubeTarget, ViewCube, ViewCubeInput, ViewIntent};
 #[cfg(feature = "viewport")]
 pub use viewport::{ScenePicker, ViewLink, ViewportInput, ViewportOutput, ViewportWidget};
 pub use workspace::{NamedToolbar, ToolSet, Workspace, Workspaces};
