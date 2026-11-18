@@ -430,7 +430,7 @@ fn a_file_swapped_for_a_link_never_exposes_the_canary() {
     t.assert_no_escape();
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(unix)]
 #[test]
 fn a_directory_swapped_for_a_link_never_receives_new_files() {
     let t = Tree::new("race-dir");

@@ -11,16 +11,12 @@
 //! The check is bound to the opened handle; data is read or written only through a handle that
 //! passed it. What each platform guarantees:
 //!
-//! - **Linux and Android**: the location of the opened handle is read back from
-//!   `/proc/self/fd` and must lie inside a root. A new file is created through the verified
-//!   handle of its parent directory (`/proc/self/fd/<dir>/<name>` with exclusive creation), so a
-//!   directory swapped for a link after the check cannot redirect the creation. Without `/proc`
-//!   the generic Unix check below applies.
-//! - **Other Unix systems (macOS)**: after opening, the device and inode of the handle must equal
-//!   those of the path resolved again, which must still lie inside a root. A swap between the
-//!   check and the open is detected and the handle refused before any data is read or written.
-//!   Creating a new file while another process swaps a directory inside the root for a link can
-//!   leave an empty file outside the roots; it is detected, and its handle refused.
+//! - **Unix (Linux, Android, macOS, the BSD systems)**: the root directory is opened, then each
+//!   remaining component of the resolved path is opened relative to the previous directory
+//!   handle without following a link (`openat` with `O_NOFOLLOW | O_DIRECTORY`), and the file is
+//!   opened or created (exclusively) relative to the last one, again without following a link.
+//!   A component that another process swaps for a link after the resolution is refused, so
+//!   neither a read nor a new file can be redirected outside the roots.
 //! - **Windows**: every directory of the resolved path from the root down to the parent is
 //!   opened without following reparse points and without sharing delete access, so none of them
 //!   can be renamed, deleted or replaced by a junction while the file is opened; a reparse point
@@ -242,7 +238,7 @@ pub(crate) fn windows_name_problem(name: &str) -> Option<&'static str> {
 }
 
 /// Maps an operating-system error without its text, which can name host paths.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code, reason = "no file system"))]
+#[cfg_attr(not(any(unix, windows)), allow(dead_code, reason = "no file system"))]
 fn io_error(error: &std::io::Error) -> Error {
     use std::io::ErrorKind;
     match error.kind() {
@@ -258,7 +254,7 @@ fn io_error(error: &std::io::Error) -> Error {
 /// Canonicalizes `path`. When that fails, the error is `cmd.path.outside_roots` unless the
 /// deepest ancestor that resolves lies inside a root of the required kind, so errors reveal
 /// nothing about what exists outside the roots.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code, reason = "no file system"))]
+#[cfg_attr(not(any(unix, windows)), allow(dead_code, reason = "no file system"))]
 fn canonical(roots: &Roots, path: &Path, write: bool) -> Result<PathBuf> {
     std::fs::canonicalize(path).map_err(|e| {
         let inside = path
@@ -270,7 +266,7 @@ fn canonical(roots: &Roots, path: &Path, write: bool) -> Result<PathBuf> {
     })
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(not(any(unix, windows)))]
 mod native {
     use std::fs::File;
     use std::path::{Path, PathBuf};
@@ -292,13 +288,15 @@ mod native {
     }
 }
 
-#[cfg(all(not(target_arch = "wasm32"), not(windows)))]
+#[cfg(unix)]
 mod native {
-    use std::fs::{self, File, OpenOptions};
-    use std::io::ErrorKind;
-    use std::path::{Path, PathBuf};
+    use std::fs::{self, File};
+    use std::os::fd::{AsFd, OwnedFd};
+    use std::path::{Component, Path, PathBuf};
 
-    use arc_base::Result;
+    use arc_base::{Error, Result};
+    use rustix::fs::{CWD, Mode, OFlags, openat};
+    use rustix::io::Errno;
 
     use super::{Roots, canonical, io_error, outside, rejected};
 
@@ -306,116 +304,132 @@ mod native {
         fs::canonicalize(path).ok().filter(|p| p.is_dir())
     }
 
-    /// Where the handle is, read back from `/proc/self/fd`.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    fn handle_path(file: &File) -> Option<PathBuf> {
-        use std::os::fd::AsRawFd;
-        fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    fn handle_path(_: &File) -> Option<PathBuf> {
-        None
-    }
-
-    /// `O_NOFOLLOW` where the handle's location cannot be read back: the open fails when the
-    /// last component is a link, so a file swapped for a link is never opened through it.
-    #[cfg(any(
-        target_vendor = "apple",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd",
-        target_os = "dragonfly"
-    ))]
-    const NO_FOLLOW: i32 = 0x0100;
-
-    #[cfg(not(any(
-        target_vendor = "apple",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd",
-        target_os = "dragonfly"
-    )))]
-    const NO_FOLLOW: i32 = 0;
-
-    /// Open options for a file below a verified directory.
-    fn options() -> OpenOptions {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut options = OpenOptions::new();
-        options.custom_flags(NO_FOLLOW);
-        options
-    }
-
-    /// Verifies that the opened `file`, reached through the canonical path `expected`, lies
-    /// inside a root of the required kind and is a regular file (a directory when `dir`).
-    fn verify(roots: &Roots, file: &File, expected: &Path, write: bool, dir: bool) -> Result<()> {
-        use std::os::unix::fs::MetadataExt;
-        let meta = file.metadata().map_err(|e| io_error(&e))?;
-        if dir != meta.is_dir() || (!dir && !meta.is_file()) {
-            return Err(rejected(if dir { "not_a_directory" } else { "not_a_file" }));
-        }
-        if let Some(real) = handle_path(file) {
-            return roots.holder(&real, write).map(drop).ok_or_else(outside);
-        }
-        let now = fs::canonicalize(expected).map_err(|_| outside())?;
-        // Not following a link: the path may have been swapped for one since it was resolved.
-        let again = fs::symlink_metadata(&now).map_err(|_| outside())?;
-        let same = again.dev() == meta.dev() && again.ino() == meta.ino();
-        if same && roots.holder(&now, write).is_some() {
-            Ok(())
+    /// A link met where the resolved path had none (`ELOOP`, `EMLINK` on FreeBSD) or a
+    /// directory swapped for something else means the tree changed after resolution.
+    fn open_error(e: Errno) -> Error {
+        if [Errno::LOOP, Errno::MLINK, Errno::NOTDIR].contains(&e) {
+            outside()
         } else {
-            Err(outside())
+            io_error(&e.into())
+        }
+    }
+
+    /// Opens `name` below `dir` without following a link in it.
+    fn at(dir: impl AsFd, name: &Path, flags: OFlags) -> Result<OwnedFd> {
+        let flags = flags | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        openat(dir, name, flags, Mode::from_bits_truncate(0o666)).map_err(open_error)
+    }
+
+    /// Opens the canonical directory `dir` below `root` one component at a time, never through
+    /// a link, so a component swapped for a link after resolution is refused, not followed.
+    fn walk(root: &Path, dir: &Path) -> Result<OwnedFd> {
+        let rest = dir.strip_prefix(root).map_err(|_| outside())?;
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY;
+        let mut handle =
+            openat(CWD, root, flags | OFlags::CLOEXEC, Mode::empty()).map_err(open_error)?;
+        for component in rest.components() {
+            let Component::Normal(name) = component else {
+                return Err(outside());
+            };
+            handle = at(&handle, Path::new(name), flags)?;
+        }
+        Ok(handle)
+    }
+
+    /// Opens the existing regular file at the canonical path `path` through its directory chain.
+    fn open_canonical(roots: &Roots, path: &Path, write: bool) -> Result<File> {
+        let root = roots.holder(path, write).ok_or_else(outside)?;
+        if !fs::metadata(path).is_ok_and(|m| m.is_file()) {
+            return Err(rejected("not_a_file"));
+        }
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return Err(rejected("not_a_file"));
+        };
+        let dir = walk(root, parent)?;
+        let mode = if write {
+            OFlags::WRONLY
+        } else {
+            OFlags::RDONLY
+        };
+        let file = File::from(at(&dir, Path::new(name), mode)?);
+        if !file.metadata().map_err(|e| io_error(&e))?.is_file() {
+            return Err(rejected("not_a_file"));
+        }
+        Ok(file)
+    }
+
+    /// Creates `name` in the canonical directory `parent`, or opens and then truncates the
+    /// regular file already there.
+    fn create_canonical(roots: &Roots, parent: &Path, name: &Path) -> Result<File> {
+        let root = roots.holder(parent, true).ok_or_else(outside)?;
+        let dir = walk(root, parent)?;
+        let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL;
+        match openat(
+            &dir,
+            name,
+            flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_bits_truncate(0o666),
+        ) {
+            Ok(fd) => Ok(File::from(fd)),
+            // An existing name, a link among them, is resolved and checked like a read.
+            Err(e) if e == Errno::EXIST => {
+                drop(dir);
+                let target = canonical(roots, &parent.join(name), true)?;
+                let file = open_canonical(roots, &target, true)?;
+                file.set_len(0).map_err(|e| io_error(&e))?;
+                Ok(file)
+            }
+            Err(e) => Err(open_error(e)),
         }
     }
 
     pub(super) fn open_read(roots: &Roots, path: &Path) -> Result<File> {
-        let canonical = canonical(roots, path, false)?;
-        roots.holder(&canonical, false).ok_or_else(outside)?;
-        if !fs::metadata(&canonical).is_ok_and(|m| m.is_file()) {
-            return Err(rejected("not_a_file"));
-        }
-        let file = options()
-            .read(true)
-            .open(&canonical)
-            .map_err(|e| io_error(&e))?;
-        verify(roots, &file, &canonical, false, false)?;
-        Ok(file)
+        open_canonical(roots, &canonical(roots, path, false)?, false)
     }
 
     pub(super) fn create_write(roots: &Roots, parent: &Path, name: &Path) -> Result<File> {
-        let parent = canonical(roots, parent, true)?;
-        roots.holder(&parent, true).ok_or_else(outside)?;
-        let target = parent.join(name);
-        // On Linux the file is reached through the verified handle of its directory.
-        let dir = File::open(&parent).map_err(|e| io_error(&e))?;
-        verify(roots, &dir, &parent, true, true)?;
-        let via = handle_path(&dir).map_or_else(
-            || target.clone(),
-            |_| {
-                use std::os::fd::AsRawFd;
-                PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(name)
-            },
-        );
-        let created = options().write(true).create_new(true).open(&via);
-        let (file, existed) = match created {
-            Ok(file) => (file, false),
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                let canonical = canonical(roots, &target, true)?;
-                roots.holder(&canonical, true).ok_or_else(outside)?;
-                if !fs::metadata(&canonical).is_ok_and(|m| m.is_file()) {
-                    return Err(rejected("not_a_file"));
-                }
-                let file = options().write(true).open(&via).map_err(|e| io_error(&e))?;
-                (file, true)
-            }
-            Err(e) => return Err(io_error(&e)),
-        };
-        verify(roots, &file, &target, true, false)?;
-        drop(dir);
-        if existed {
-            file.set_len(0).map_err(|e| io_error(&e))?;
+        create_canonical(roots, &canonical(roots, parent, true)?, name)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #![allow(clippy::unwrap_used, reason = "tests")]
+
+        use super::*;
+
+        /// A directory inside the root that becomes a link to outside after its path was
+        /// resolved is refused for reading and creating, and nothing appears outside.
+        #[test]
+        fn a_directory_replaced_by_a_link_after_resolution_is_refused() {
+            let base = std::env::temp_dir().join(format!("arc-roots-swap-{}", std::process::id()));
+            let (root, outside_dir) = (base.join("root"), base.join("outside"));
+            fs::create_dir_all(root.join("d")).unwrap();
+            fs::create_dir_all(&outside_dir).unwrap();
+            fs::write(outside_dir.join("canary.txt"), "CANARY").unwrap();
+            let roots = Roots::new([&root], [&root]).unwrap();
+            let dir = fs::canonicalize(root.join("d")).unwrap();
+            // The swap the resolution did not see.
+            fs::remove_dir(&dir).unwrap();
+            std::os::unix::fs::symlink(&outside_dir, &dir).unwrap();
+            let code = |r: Result<File>| r.map(drop).unwrap_err().code().to_owned();
+            assert_eq!(
+                code(open_canonical(&roots, &dir.join("canary.txt"), false)),
+                "cmd.path.outside_roots"
+            );
+            assert_eq!(
+                code(open_canonical(&roots, &dir.join("canary.txt"), true)),
+                "cmd.path.outside_roots"
+            );
+            assert_eq!(
+                code(create_canonical(&roots, &dir, Path::new("new.txt"))),
+                "cmd.path.outside_roots"
+            );
+            let entries: Vec<_> = fs::read_dir(&outside_dir).unwrap().collect();
+            let canary = fs::read_to_string(outside_dir.join("canary.txt"));
+            let _ = fs::remove_dir_all(&base);
+            assert_eq!(entries.len(), 1, "a file appeared outside the roots");
+            assert_eq!(canary.unwrap(), "CANARY");
         }
-        Ok(file)
     }
 }
 

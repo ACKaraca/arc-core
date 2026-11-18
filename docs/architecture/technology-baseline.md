@@ -80,6 +80,7 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `proptest` | Property tests | MIT or Apache-2.0 |
 | `robust` | Adaptive exact orientation and in-circle predicates in `arc-geom` | MIT or Apache-2.0 |
 | `rstar` | R*-tree behind the spatial index of `arc-geom`; no `rstar` type appears in a public signature | MIT or Apache-2.0 |
+| `rustix` | Directory-relative opens that never follow a link (`openat` with `O_NOFOLLOW`) behind the file roots of `arc-command`, Unix only (features `std` and `fs`, no default features) | Apache-2.0 WITH LLVM-exception or Apache-2.0 or MIT |
 | `spade` | Constrained Delaunay triangulation behind the polygon triangulation of `arc-geom`; no `spade` type appears in a public signature | MIT or Apache-2.0 |
 | `toml` | Reading the layer table and manifests in `xtask` | MIT or Apache-2.0 |
 | `wgpu` | The renderer of `arc-gpu`, pinned to one version and re-exported; features: Vulkan, Metal, DirectX 12, OpenGL and WGSL only | MIT or Apache-2.0 |

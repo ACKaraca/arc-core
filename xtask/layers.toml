@@ -46,6 +46,7 @@ third_party = [
   "resvg",
   "robust",
   "rstar",
+  "rustix",
   "schemars",
   "rusqlite",
   "serde",

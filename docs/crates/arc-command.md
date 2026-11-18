@@ -483,19 +483,14 @@ validate every request they send and every message the server writes against the
   `cmd.path.io` with `reason` `denied`, `exists` or `other`.
 - The check is bound to the opened handle; data is read or written only through a handle that
   passed it, and an existing file is truncated only after the check. Per platform:
-  - Linux and Android: the location of the opened handle is read back from `/proc/self/fd`
-    and must lie inside a root; a file is created with exclusive creation through the
-    verified handle of its parent directory (`/proc/self/fd/<dir>/<name>`), so a directory
-    swapped for a link after the check cannot redirect the creation. Without `/proc` the
-    generic Unix check applies.
-  - Other Unix systems: the file is opened without following a link in its last component
-    (macOS and the BSD systems), and the device and inode of the handle must equal those of
-    the path resolved again after opening and read without following a link, which must still
-    lie inside a root. A file swapped for a link is therefore never opened through the link.
-    A directory inside a root that another process swaps for a link between the resolution
-    and the open is not excluded on these systems: creating a new file then can leave an
-    empty file outside the roots, and the re-resolution can accept a file of the swapped
-    directory.
+  - Unix (Linux, Android, macOS and the BSD systems): the root directory is opened, then each
+    remaining component of the resolved path is opened relative to the previous directory
+    handle without following a link (`openat` with `O_NOFOLLOW` and `O_DIRECTORY`), and the
+    file is opened, or created with exclusive creation, relative to the last directory handle
+    without following a link. A directory or file that another process swaps for a link after
+    the resolution is refused (`cmd.path.outside_roots`), so neither a read nor a new file is
+    redirected outside the roots. An existing name, a link among them, is resolved and opened
+    like a read.
   - Windows: after the path is resolved, every directory of the resolved path from the root
     down to the parent is opened without following reparse points and without sharing delete
     access, so none can be renamed, deleted or replaced by a junction meanwhile; a reparse
