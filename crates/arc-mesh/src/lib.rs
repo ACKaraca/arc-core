@@ -3,7 +3,10 @@
 //! This first part provides indexed triangle meshes with attribute channels and face groups
 //! (CORE-MESH-001), their versioned binary encoding with optional quantization
 //! (CORE-MESH-002), and flat, area-weighted and angle-weighted normals with a crease angle and
-//! tangent frames (CORE-MESH-003).
+//! tangent frames (CORE-MESH-003). The second part adds measurements (CORE-MESH-007),
+//! simplification (CORE-MESH-015) and level-of-detail chains (CORE-MESH-016), repair
+//! (CORE-MESH-018), ray queries (CORE-MESH-020), distance queries (CORE-MESH-021) and feature
+//! edges (CORE-MESH-024).
 //!
 //! Positions are `f64` model coordinates; attribute values are `f32`, the precision the GPU
 //! uses. Every [`TriMesh`] is validated when it is built or decoded, so an index outside the
@@ -12,12 +15,23 @@
 //!
 //! No function in this crate panics.
 
+pub mod bvh;
+pub mod distance;
 pub mod encoding;
 pub mod error;
+pub mod features;
+pub mod lod;
+pub mod measure;
 pub mod mesh;
 pub mod normals;
+pub mod repair;
+pub mod simplify;
 pub mod transform;
 
+mod topo;
+
+pub use bvh::{ClosestPoint, MeshBvh, Ray, RayHit};
+pub use distance::{MeshPair, closest_between};
 pub use encoding::{MeshEncoding, Quantization};
 pub use mesh::{
     AttributeKey, Channel, FaceGroup, MAX_CHANNELS, SubObjectKey, TriMesh, TriMeshBuilder,

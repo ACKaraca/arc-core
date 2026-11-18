@@ -96,6 +96,54 @@ pub mod codes {
         category: Category::CorruptData,
         message_id: "mesh-decode-invalid",
     };
+    /// A volume or centroid is requested of a mesh that is not closed and consistently oriented.
+    pub const MEASURE_NOT_CLOSED: ErrorCode = ErrorCode {
+        code: "mesh.measure.not_closed",
+        category: Category::InvalidInput,
+        message_id: "mesh-measure-not-closed",
+    };
+    /// A centroid is requested of a closed mesh that encloses no volume.
+    pub const MEASURE_ZERO_VOLUME: ErrorCode = ErrorCode {
+        code: "mesh.measure.zero_volume",
+        category: Category::InvalidInput,
+        message_id: "mesh-measure-zero-volume",
+    };
+    /// The genus is requested of a mesh with an edge shared by more than two triangles or a vertex whose triangles do not form one fan.
+    pub const TOPOLOGY_NON_MANIFOLD: ErrorCode = ErrorCode {
+        code: "mesh.topology.non_manifold",
+        category: Category::InvalidInput,
+        message_id: "mesh-topology-non-manifold",
+    };
+    /// A ray, query point or distance limit is not finite, or a ray direction is zero.
+    pub const QUERY_INVALID: ErrorCode = ErrorCode {
+        code: "mesh.query.invalid",
+        category: Category::InvalidInput,
+        message_id: "mesh-query-invalid",
+    };
+    /// A query needs a mesh with at least one triangle.
+    pub const QUERY_EMPTY: ErrorCode = ErrorCode {
+        code: "mesh.query.empty",
+        category: Category::InvalidInput,
+        message_id: "mesh-query-empty",
+    };
+    /// A repair option is out of range.
+    pub const REPAIR_INVALID: ErrorCode = ErrorCode {
+        code: "mesh.repair.invalid",
+        category: Category::InvalidInput,
+        message_id: "mesh-repair-invalid",
+    };
+    /// A simplification target or error bound is missing, not finite or negative.
+    pub const SIMPLIFY_INVALID: ErrorCode = ErrorCode {
+        code: "mesh.simplify.invalid",
+        category: Category::InvalidInput,
+        message_id: "mesh-simplify-invalid",
+    };
+    /// A level-of-detail parameter is out of range, or a chain is empty.
+    pub const LOD_INVALID: ErrorCode = ErrorCode {
+        code: "mesh.lod.invalid",
+        category: Category::InvalidInput,
+        message_id: "mesh-lod-invalid",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -114,6 +162,14 @@ pub mod codes {
         QUANTIZATION_INVALID,
         DECODE_INVALID,
         TRANSFORM_NOT_AFFINE,
+        MEASURE_NOT_CLOSED,
+        MEASURE_ZERO_VOLUME,
+        TOPOLOGY_NON_MANIFOLD,
+        QUERY_INVALID,
+        QUERY_EMPTY,
+        REPAIR_INVALID,
+        SIMPLIFY_INVALID,
+        LOD_INVALID,
     ];
 }
 

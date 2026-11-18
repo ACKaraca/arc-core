@@ -8,8 +8,8 @@ attributes, subdivision surfaces, mesh booleans, simplification, repair and geom
 - Indexed triangle meshes with grouped attributes, and the half-edge polygon mesh for editing.
 - Typed attribute storage on vertices, corners, faces and edges.
 - Catmull–Clark subdivision with creases following the published OpenSubdiv rules.
-- Mesh booleans (wrapping Manifold), simplification and meshlets (wrapping `meshopt`), and queries
-  (wrapping `parry`).
+- Mesh booleans (wrapping Manifold), meshlets (wrapping `meshopt`), and first-party simplification,
+  level-of-detail chains, repair, measurements and ray and distance queries.
 - Plane sections of meshes, used by derived views and section caps.
 - Repair operations with change reports.
 - The documented, versioned encoding of meshes stored as document assets.
@@ -40,7 +40,7 @@ which belong to Arc Review.
 | Kind | Crates |
 |---|---|
 | Arc | `arc-base`, `arc-geom` |
-| Third-party | Manifold (through its Rust binding), `meshopt`, `parry` (f64 variant), each from the phase of the first capability that needs it; none in phase 0 |
+| Third-party | Manifold (through its Rust binding) and `meshopt`, each from the phase of the first capability that needs it; none in phase 0 |
 
 ## Test strategy
 
@@ -201,6 +201,116 @@ at the origin; and a cone apex of valence 100,000 is creased in near-linear time
   is `mesh.decode.invalid` with the details `offset` and `reason`, and `cause` when validation
   rejected the mesh.
 
+### Measurements
+
+`measure` implements CORE-MESH-007. The measurements, queries, repair, simplification and level
+chains below are implemented in this crate without third-party dependencies, as pure functions
+over `TriMesh` that take `arc_base::Limits` (vertex and triangle counts above `array_length`, or
+work beyond the stated bound, fail with `mesh.limit.exceeded`).
+
+- **Accumulation.** Coordinates are scaled by an exact power of two before use and sums use
+  compensated (Neumaier) accumulation in `f64`. A result that overflows, or underflows to a
+  subnormal or zero from a non-zero value, fails with `mesh.precision.insufficient`.
+- **Area** (`surface_area`) is the sum of the triangle areas, degenerate triangles included
+  (they contribute about zero).
+- **Volume and centroid** (`volume_and_centroid`, `volume`) use the divergence theorem, summing
+  signed tetrahedra from a reference point near the mesh. The mesh must be closed after welding
+  exactly equal positions: every edge is used as often in one direction as in the other, so a
+  mesh with a reversed triangle or an open edge fails with `mesh.measure.not_closed`. The sign is
+  positive for outward-facing triangles. The centroid of a closed mesh with exactly zero volume
+  fails with `mesh.measure.zero_volume`; `volume` returns 0 for it.
+- **Bounding box** (`bounds`) covers the vertices that triangles use.
+- **Genus** (`component_topology`) reports, per connected component (connected through welded
+  vertices, ordered by lowest triangle index), the vertex, edge and triangle counts, the Euler
+  characteristic, the boundary loops and whether the component is orientable. The genus of an
+  orientable component is `(2 − χ − b) / 2`; it is `None` for a non-orientable one. An edge
+  used by more than two triangles or a vertex whose triangles form more than one fan fails with
+  `mesh.topology.non_manifold`. Triangles with a repeated vertex index are ignored.
+
+### Repair
+
+`repair::repair` implements CORE-MESH-018 and returns the mesh and a `RepairReport`. The steps
+run in this order, and the module documentation states each rule.
+
+- **Weld.** Vertices are visited in index order; a vertex joins the lowest-numbered earlier
+  representative within `tolerance.linear` whose attributes agree, and takes its position and
+  attributes. Attributes agree when every component of every channel differs by at most
+  `tolerance.linear`, unless `positions_only` is set. Candidates come from a spatial hash with
+  cells of the tolerance size (exact bit equality for a tolerance of 0). The rejected
+  alternative, merging transitively, lets chains of nearby vertices drift without bound.
+- **Faces.** Triangles with a repeated vertex after welding or degenerate at the linear
+  tolerance are removed; of triangles with the same three vertices in any winding, the first is
+  kept.
+- **Orientation.** Per component joined across two-triangle edges, the lowest-numbered triangle
+  keeps its winding; a component that cannot be oriented is counted. After holes are filled, a
+  closed consistently wound component with negative signed volume is reversed.
+- **Holes.** A simple boundary loop of at most `max_hole_edges` (at most 1024) edges is closed
+  by ear clipping in the plane of its Newell normal, without new vertices, avoiding diagonals
+  that already are mesh edges; other loops are counted as skipped and left open.
+- **Carried data.** Channels follow vertices. Groups follow triangles (triangle order is kept; a
+  group left empty is dropped; added triangles have no group). If any winding changed, the
+  normal and tangent channels are dropped and named in the report.
+- **Report.** Each kind of change lists its count and the first `max_reported` affected indices
+  of the input mesh, with a flag when truncated.
+
+### Ray queries
+
+`bvh::MeshBvh` implements CORE-MESH-020 and the point queries of CORE-MESH-021. It is built
+once per mesh (median split of triangle box centers, at most four triangles per leaf, boxes
+padded by a few ulps, no recursion). Rays use the watertight triangle test, so a ray through a
+shared edge or vertex hits at least one of the triangles; an exact edge hit reports every
+triangle with that edge. A `Ray` has a unit direction (the input is normalized) and an optional
+closed maximum distance. A hit has the triangle index, barycentric coordinates in vertex order
+and the distance. Hits are ordered by distance and then triangle index, and `first_hit` is the
+first of that order. Non-finite input fails with `mesh.query.invalid`; a mesh without triangles
+with `mesh.query.empty`.
+
+### Distance and closest point
+
+`MeshBvh::closest_point` returns the closest point of a mesh to a point (triangle, barycentric
+coordinates, point, distance; ties to the lowest triangle index). `distance::closest_between`
+walks two hierarchies together and returns the closest pair of triangles and points. Two
+triangles that do not cross have the exact distance (least of vertex-to-triangle and
+edge-to-edge distances). Meshes whose surfaces cross, that is an edge of a triangle passes
+through another triangle within `tolerance.linear`, have distance 0 with a witness pair at most
+the tolerance apart and `intersecting` set; a mesh wholly inside another without crossing has a
+positive distance, because only surfaces are compared. The walk is bounded by
+`64 · array_length` node and triangle pairs.
+
+### Feature edges
+
+`features::feature_edges` implements CORE-MESH-024 after welding exactly equal positions, so
+split normals and seams do not matter. Edges of one triangle are boundary edges, edges of more
+than two are reported separately as non-manifold, and an edge of two triangles is sharp when the
+angle between their normals, with one reversed if they run the edge the same way, exceeds the
+threshold (an angle equal to the threshold is not sharp; a threshold outside [0, π] fails with
+`mesh.crease.invalid`). A box has 12 sharp edges for any threshold below π/2 and none at or
+above it. Triangles degenerate at the linear tolerance are ignored.
+
+### Simplification
+
+`simplify::simplify` implements CORE-MESH-015 by edge collapse with quadric error metrics; the
+module documentation states the rules. Boundary vertices, attribute seams (vertices sharing a
+position), vertices of non-manifold edges and of pinches, and face-group borders are locked
+vertices: they never move and never merge with each other, and a collapse onto a locked end
+keeps it exactly. Locked vertices were chosen over constraint quadrics so features are kept
+exactly. The new position is the quadric minimum on the collapsing edge. A collapse is rejected
+by the link condition (no duplicate triangle or non-manifold edge), when a surviving triangle's
+normal would turn by 60° or more, or when it would become degenerate at the linear tolerance.
+Attributes are interpolated along the edge. Ties break by vertex indices. The result reports the
+stop reason (`TargetReached`, `ErrorBound`, `NoValidCollapse`) and the measured deviation: the
+largest distance from the vertices and edge midpoints of each mesh to the other. The error bound
+applies to the quadric error, an estimate; the measured deviation can differ from it.
+
+### Level-of-detail chains
+
+`lod::build_lod_chain` implements CORE-MESH-016: each level is simplified from the one before to
+about `ratio` of its triangles, down to `min_triangles`, and records the running maximum of the
+sampled deviation from the original (so errors never decrease). `LodChain::select` returns the
+coarsest level whose screen-space error `error · pixels_per_unit / distance` is within the pixel
+budget; the choice is monotonic in the budget and the distance. Invalid parameters fail with
+`mesh.lod.invalid`.
+
 ### Error codes
 
 The codes `arc-mesh` owns. A code is never reused for a different meaning; messages are in
@@ -223,3 +333,11 @@ The codes `arc-mesh` owns. A code is never reused for a different meaning; messa
 | `mesh.quantization.invalid` | `invalid_input` | A quantization error bound is not a finite positive number |
 | `mesh.decode.invalid` | `corrupt_data` | Encoded mesh data is malformed, truncated or oversized |
 | `mesh.transform.not_affine` | `invalid_input` | A transform's matrix does not have the bottom row `[0, 0, 0, 1]` of an affine transform |
+| `mesh.measure.not_closed` | `invalid_input` | A volume or centroid is requested of a mesh that is not closed and consistently oriented |
+| `mesh.measure.zero_volume` | `invalid_input` | A centroid is requested of a closed mesh that encloses no volume |
+| `mesh.topology.non_manifold` | `invalid_input` | The genus is requested of a mesh with an edge shared by more than two triangles or a vertex whose triangles do not form one fan |
+| `mesh.query.invalid` | `invalid_input` | A ray, query point or distance limit is not finite, or a ray direction is zero |
+| `mesh.query.empty` | `invalid_input` | A query needs a mesh with at least one triangle |
+| `mesh.repair.invalid` | `invalid_input` | A repair option is out of range |
+| `mesh.simplify.invalid` | `invalid_input` | A simplification target or error bound is missing, not finite or negative |
+| `mesh.lod.invalid` | `invalid_input` | A level-of-detail parameter is out of range, or a chain is empty |
