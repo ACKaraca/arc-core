@@ -255,7 +255,7 @@ impl Keymap {
 }
 
 /// What a key press did.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum KeyOutcome {
     /// A binding completed.
     Invoke(Intent),
@@ -282,9 +282,7 @@ impl ChordResolver {
         self.last_millis = now_millis;
         if let Some((_, command)) = keymap.bindings.iter().find(|(s, _)| s.0 == self.pending) {
             self.pending.clear();
-            return KeyOutcome::Invoke(Intent {
-                command: command.clone(),
-            });
+            return KeyOutcome::Invoke(Intent::new(command.clone()));
         }
         if keymap
             .bindings
@@ -458,16 +456,12 @@ mod tests {
             &registry(),
         );
         let mut r = ChordResolver::default();
-        let save = KeyOutcome::Invoke(Intent {
-            command: "demo.file.save".into(),
-        });
+        let save = KeyOutcome::Invoke(Intent::new("demo.file.save"));
         assert_eq!(r.press(&map, combo("Ctrl+S"), 0), save);
         assert_eq!(r.press(&map, combo("Ctrl+K"), 10), KeyOutcome::Pending);
         assert_eq!(
             r.press(&map, combo("Ctrl+O"), 10 + CHORD_TIMEOUT_MILLIS),
-            KeyOutcome::Invoke(Intent {
-                command: "demo.file.open".into()
-            })
+            KeyOutcome::Invoke(Intent::new("demo.file.open"))
         );
         assert_eq!(r.press(&map, combo("Ctrl+K"), 5000), KeyOutcome::Pending);
         // Too late: the chord expired, and Ctrl+O alone is unbound.

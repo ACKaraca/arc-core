@@ -1,6 +1,6 @@
 [package]
 name = "arc-ui"
-description = "The widget kit of the Arc suite on egui: theme tokens, density and scale, icons, localized strings, menus and toolbars from data, key bindings, the command palette, notifications and progress."
+description = "The widget kit of the Arc suite on egui: theme tokens, density and scale, icons, localized strings, menus and toolbars from data, key bindings, the command palette, notifications and progress, docking and workspaces, the command line, the property grid and numeric input, the tree and the diagnostics panel."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,14 +11,16 @@ publish.workspace = true
 [dependencies]
 arc-base = { workspace = true }
 arc-command = { workspace = true }
+arc-doc = { workspace = true }
+arc-solve = { workspace = true }
 egui = { workspace = true }
 resvg = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 schemars = { workspace = true }
-serde_json = { workspace = true }
 toml = { workspace = true }
 
 [lints]

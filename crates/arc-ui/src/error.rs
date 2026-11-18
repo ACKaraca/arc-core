@@ -86,6 +86,79 @@ pub mod codes {
         message_id: "ui-keys-too-many",
     };
 
+    /// A dock layout has a malformed node, reference, panel identifier, fraction or window rectangle.
+    pub const DOCK_INVALID: ErrorCode = ErrorCode {
+        code: "ui.dock.invalid",
+        category: Category::InvalidInput,
+        message_id: "ui-dock-invalid",
+    };
+    /// A dock layout nests splits deeper than the limit.
+    pub const DOCK_TOO_DEEP: ErrorCode = ErrorCode {
+        code: "ui.dock.too_deep",
+        category: Category::LimitExceeded,
+        message_id: "ui-dock-too-deep",
+    };
+    /// A dock layout has more nodes, panels or floating trees than the limit.
+    pub const DOCK_TOO_LARGE: ErrorCode = ErrorCode {
+        code: "ui.dock.too_large",
+        category: Category::LimitExceeded,
+        message_id: "ui-dock-too-large",
+    };
+    /// A dock operation names a panel the layout does not show.
+    pub const DOCK_PANEL_UNKNOWN: ErrorCode = ErrorCode {
+        code: "ui.dock.panel_unknown",
+        category: Category::NotFound,
+        message_id: "ui-dock-panel-unknown",
+    };
+    /// A dock layout would show a panel twice.
+    pub const DOCK_PANEL_DUPLICATE: ErrorCode = ErrorCode {
+        code: "ui.dock.panel_duplicate",
+        category: Category::Conflict,
+        message_id: "ui-dock-panel-duplicate",
+    };
+    /// A workspace has a malformed name, toolbar or tool set, or its export text does not parse.
+    pub const WORKSPACE_INVALID: ErrorCode = ErrorCode {
+        code: "ui.workspace.invalid",
+        category: Category::InvalidInput,
+        message_id: "ui-workspace-invalid",
+    };
+    /// No workspace, or no built-in workspace, has the name.
+    pub const WORKSPACE_UNKNOWN: ErrorCode = ErrorCode {
+        code: "ui.workspace.unknown",
+        category: Category::NotFound,
+        message_id: "ui-workspace-unknown",
+    };
+    /// Workspaces, their toolbars or tool sets, or an import text exceed the limit.
+    pub const WORKSPACE_TOO_LARGE: ErrorCode = ErrorCode {
+        code: "ui.workspace.too_large",
+        category: Category::LimitExceeded,
+        message_id: "ui-workspace-too-large",
+    };
+    /// An exported workspace has another format or a newer version.
+    pub const WORKSPACE_VERSION: ErrorCode = ErrorCode {
+        code: "ui.workspace.version",
+        category: Category::Unsupported,
+        message_id: "ui-workspace-version",
+    };
+    /// An entered quantity is outside the field's range.
+    pub const QUANTITY_OUT_OF_RANGE: ErrorCode = ErrorCode {
+        code: "ui.quantity.out_of_range",
+        category: Category::InvalidInput,
+        message_id: "ui-quantity-out-of-range",
+    };
+    /// An entered number is not whole where a whole number is needed.
+    pub const QUANTITY_NOT_INTEGER: ErrorCode = ErrorCode {
+        code: "ui.quantity.not_integer",
+        category: Category::InvalidInput,
+        message_id: "ui-quantity-not-integer",
+    };
+    /// A property grid would compare more objects or fields than the limit.
+    pub const PROPERTY_TOO_LARGE: ErrorCode = ErrorCode {
+        code: "ui.property.too_large",
+        category: Category::LimitExceeded,
+        message_id: "ui-property-too-large",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         SCALE_OUT_OF_RANGE,
@@ -101,6 +174,18 @@ pub mod codes {
         KEYS_CONFLICT,
         KEYS_PREFIX_CONFLICT,
         KEYS_TOO_MANY,
+        DOCK_INVALID,
+        DOCK_TOO_DEEP,
+        DOCK_TOO_LARGE,
+        DOCK_PANEL_UNKNOWN,
+        DOCK_PANEL_DUPLICATE,
+        WORKSPACE_INVALID,
+        WORKSPACE_UNKNOWN,
+        WORKSPACE_TOO_LARGE,
+        WORKSPACE_VERSION,
+        QUANTITY_OUT_OF_RANGE,
+        QUANTITY_NOT_INTEGER,
+        PROPERTY_TOO_LARGE,
     ];
 }
 

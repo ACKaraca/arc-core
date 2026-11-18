@@ -44,7 +44,7 @@ product needs them.
 | Kind | Crates |
 |---|---|
 | Arc | `arc-base`, `arc-solve`, `arc-doc`, `arc-command`, `arc-gpu`; `arc-nodes` (feature `nodes`, node editor, from phase 3) |
-| Third-party | `egui`, `egui_dock`, `egui_table`, `egui_ltreeview`, `egui-snarl`, AccessKit (through egui), `resvg`, `parley` |
+| Third-party | `egui`, AccessKit (through egui), `resvg`; planned for later capabilities: `egui_table`, `egui-snarl`, `parley`. Docking and the tree are widgets of this crate. |
 
 ## Test strategy
 
@@ -124,8 +124,8 @@ return an `Intent` naming a command and never run one. Fallible functions return
 - Resolution against the registry gives the localized label, the display text of the first key
   binding and the localized disabled reason. A command that is not registered or not exposed on
   the UI surface is left out and reported with `ui.command.unknown`; the rest still resolves.
-- The enabled state comes from a `CommandState` the application supplies, because the command
-  specification's enabled predicate is not public outside `arc-command`.
+- The enabled state comes from a `CommandState` the application supplies; it answers in one line
+  from `CommandSpec::enabled` with a `Probe` of the current snapshot, selection and session.
 - Disabled items are drawn disabled with their reason as the hover text. Icon toolbar buttons
   take the command's label as their accessible name and tooltip.
 
@@ -200,6 +200,146 @@ The codes `arc-ui` owns; messages are in `locales/en-US/arc-ui.ftl`.
 | `ui.keys.conflict` | `conflict` | A key sequence is already bound to another command |
 | `ui.keys.prefix_conflict` | `conflict` | A key sequence is a prefix of a bound one, or a bound one is a prefix of it |
 | `ui.keys.too_many` | `limit_exceeded` | A key map has more than 1,024 bindings |
+| `ui.dock.invalid` | `invalid_input` | A dock layout has an empty group other than the main root, a dangling, shared or unreachable node, an active index out of range, a malformed panel identifier, a fraction outside 0.05 to 0.95 or a malformed window rectangle |
+| `ui.dock.too_deep` | `limit_exceeded` | A dock tree nests splits more than 16 levels |
+| `ui.dock.too_large` | `limit_exceeded` | A dock layout has more than 545 nodes, 256 panels or 32 floating trees |
+| `ui.dock.panel_unknown` | `not_found` | A dock operation names a panel or anchor the layout does not show |
+| `ui.dock.panel_duplicate` | `conflict` | A dock layout would show a panel twice |
+| `ui.workspace.invalid` | `invalid_input` | A workspace, toolbar or tool set name is malformed or repeated, a tool set names a malformed command, no built-in workspace is given, or an import text does not parse |
+| `ui.workspace.unknown` | `not_found` | No workspace, or for reset no built-in workspace, has the name |
+| `ui.workspace.too_large` | `limit_exceeded` | More than 64 workspaces, 32 toolbars, 64 tool sets or 256 tools per set, or an import text over 1 MiB |
+| `ui.workspace.version` | `unsupported` | An import text has another format name or a version other than 1 |
+| `ui.quantity.out_of_range` | `invalid_input` | An entered value is outside the field's range |
+| `ui.quantity.not_integer` | `invalid_input` | An entered value is not a whole number where one is needed |
+| `ui.property.too_large` | `limit_exceeded` | The selected objects times their fields exceed 1,000,000 |
+
+## Panels and widgets as implemented
+
+The second part adds the workspace, command input and data widgets. It depends in addition on
+`arc-doc` (field declarations, values and diagnostics), `arc-solve` (expressions with units) and
+`serde_json` (intent parameters and workspace export); no third-party crate was added. Every
+widget has a data model that tests use without drawing. The error codes are in the table above.
+
+### Intents with parameters
+
+An `Intent` carries a command identifier and a JSON object of parameters, which the application
+passes to `CommandLine::start` or an invocation; the command prompts for anything missing.
+Objects are listed as hyphenated identifier texts.
+
+### Docking (CORE-UI-001)
+
+- No published `egui_dock` release supports egui 0.37 (the newest needs egui 0.36), so the dock is
+  this crate's own: a `DockLayout` of a main tree and up to 32 floating trees. A tree is a tab
+  group of panel identifiers (1 to 128 bytes of ASCII letters, digits, `.`, `-`, `_`, starting
+  with a letter) or a horizontal or vertical split with a fraction in 0.05 to 0.95. Only the main
+  root may be an empty group. Splits nest at most 16 levels; a layout holds at most 256 panels,
+  each at most once.
+- The serialized form is a flat node list with indices and a root index per tree, so decoding
+  does not recurse. Every node must be referenced exactly once and reached from a root within
+  the depth limit; then the nodes form trees. Floating trees carry a window rectangle of finite
+  coordinates up to 10^6 points with positive size.
+- Operations: add a panel, move it (into a group at an index, beside a group on a side, beside
+  the whole main tree, or into a new floating tree), close, activate, float, unfloat (beside the
+  main tree on the right) and set a split fraction (clamped). Each works on a copy that is
+  normalized (empty groups removed, a split with one part replaced by that part) and checked, so
+  a failed operation leaves the layout unchanged. Floating trees are data only; native windows
+  for them come with the application shell.
+- `DockArea` draws the main tree: a tab bar per group with a close button per tab, the active
+  panel's content, and separators that pointer drag or, when focused, the arrow keys along the
+  split (5 % per press) move. A tab dragged onto a group's outer quarter on a side splits the
+  group on that side; onto its center it joins the group. Separators have the role splitter.
+
+### Workspaces (CORE-UI-002)
+
+- A `Workspace` has a name (1 to 64 characters, no control characters or surrounding white
+  space), a dock layout, up to 32 named toolbars and up to 64 named tool sets of up to 256
+  command identifiers; names are unique within a workspace.
+- `Workspaces` holds 1 to 64 built-in workspaces, up to 64 saved ones and the active name. Saving
+  under a built-in name replaces that built-in until `reset`; switching needs an existing name.
+- Export writes `{ "format": "arc-workspace", "version": 1, "workspace": ... }` as JSON text;
+  import reads at most 1 MiB, requires that format and version, and validates the workspace and
+  its layout. The caller reads and writes files.
+
+### Command line (CORE-UI-006, CORE-UI-031, CORE-UI-032)
+
+- `CommandLineView` draws the state of `arc_command::CommandLine` without calling it: the active
+  prompt's localized message (or the command-line label when idle), its keyword options as
+  buttons (a click submits the option), the input field labelled by the prompt, and up to 10
+  completion candidates the caller computed with `CommandLine::complete`. It returns a
+  `LineAction`: submit a text, repeat, back, cancel, invoke an intent, or cancel and then invoke.
+- Escape clears typed text, else steps back one answer, else cancels a command at its first
+  prompt, else (idle) emits the clear-selection intent when the selection is not empty. Enter
+  applies the highlighted completion; otherwise it submits the text (an empty text accepts the
+  prompt's default), and on an idle empty line it repeats the last command.
+- Undo (Ctrl+Z, Cmd+Z on macOS) steps back one answer inside the active command, cancels it at its
+  first prompt, and otherwise emits the document undo intent. Redo (Ctrl+Y or Ctrl+Shift+Z)
+  emits the redo intent; with an active command it cancels the command first, because its
+  answers may refer to state that redo replaces. These keys, Escape and Enter are taken while
+  the field or nothing has focus, before the field's own text undo; the field keeps focus on
+  Escape and the arrow keys.
+- The history keeps 200 submitted lines, most recent first, without repeats, each cut to the
+  driver's line limit. Up and Down highlight completion candidates while there are any for typed
+  text; otherwise they walk the history entries that contain the text typed before the walk
+  (ignoring case), and Down past the newest restores that text.
+
+### Property grid (CORE-UI-010)
+
+- A `PropertyObject` gives an object's field declarations, values and the names of its read-only
+  and overridden fields. The model has the fields every selected object has with the same type,
+  in the first object's order, grouped by aspect in order of first appearance. A row shows the
+  common value (compared bit for bit), the mixed state, or nothing when no object has a value; it
+  is read-only when any object marks it so or its type has no editor, and shows an override marker
+  when any object marks it overridden. Objects times fields are limited to 1,000,000.
+- Editors: a check box (indeterminate when mixed) for truth values, a choice for enums, a text
+  field for text, and numeric fields for integers, reals and quantities. Other types show their
+  canonical JSON text, cut to 64 characters, read-only.
+- A check box or choice commits at once; text and numbers commit on Enter or when the field loses
+  focus with a changed text; Escape restores the shown value. Each commit returns exactly one
+  intent for the grid's edit command with `objects`, `field` (the field path text) and `value`
+  (the value's canonical JSON form, quantities in SI base units).
+
+### Numeric and unit input (CORE-UI-011)
+
+- `QuantityField` reads text with `arc_solve::parse_quantity` in the field's dimension, with the
+  display unit as the unit of bare numbers and the user's decimal separator, then checks the
+  field's range and, for integer fields, that the value is whole. Values show through the
+  display format; without one, as the SI number.
+- Invalid text stays in the field with the error's localized message below it; nothing is
+  returned for it and the value is unchanged.
+- A handle (role spin button) beside the field scrubs the value by the step (one display unit by
+  default) per logical point of drag, a tenth with Shift and ten times with Ctrl, clamped to the
+  range, and returns the value once when the drag ends; focused, Up and Down step it.
+
+### Tree and outliner (CORE-UI-012)
+
+- A `TreeSource` answers child counts, single children by index and the index of a child, each
+  for a parent and a filter text (at most 256 characters) the source applies. The view asks only
+  for the children of expanded nodes and only for the rows in the scrolled window, at most 256
+  rows per frame, using the remembered (parent, index) of each expanded node (at most 4,096,
+  shown at most 64 levels deep) to skip collapsed blocks by count. Each frame the view checks the
+  expanded nodes against the source, following a node to its new index or forgetting it.
+- Intents: select (`objects`, `mode` `replace` or `toggle`; Shift selects the range from the
+  anchor row, at most 10,000 rows; Ctrl or Cmd toggles), rename (`object`, `name`; F2 or a double
+  click starts it, Enter commits, Escape cancels), visibility and lock toggles (`objects` and the
+  new state) and moving a dragged row under the drop row (`objects`, `parent`). Right and Left
+  expand and collapse a focused row; Space selects it.
+
+### Diagnostics panel (CORE-UI-020)
+
+- The panel lists a `DiagnosticsSnapshot` virtualized, each row with its severity name and
+  localized message. Check boxes keep errors and warnings; the text filter (at most 256
+  characters, ignoring case) matches the code or the localized message. Activating a row with
+  objects returns the navigation intent with `objects`.
+
+### Keyboard operation (CORE-UI-026, in part)
+
+- Every control of these widgets is focusable and named: tab buttons and close buttons
+  (`Close <panel>`), separators, the command field (labelled by the prompt), property editors
+  (labelled by the field), scrub handles, tree toggles (`Visible <name>`, `Locked <name>`) and
+  rows, and the filter fields. Focus follows drawing order, which is visual order. A headless
+  test tabs through a dock holding the command line, a property grid, a tree and the diagnostics
+  panel and checks every focused node's name and role and that each comes after the previous one
+  down the page or to its right in the same row.
 
 ## Capabilities
 

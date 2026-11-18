@@ -490,8 +490,9 @@ impl CommandSpec {
         self.validate_examples()
     }
 
-    /// The enabled predicate's verdict.
-    pub(crate) fn enabled(&self, probe: &Probe<'_>) -> std::result::Result<(), Disabled> {
+    /// The enabled predicate's verdict for `probe`; `Ok` for a command without a predicate.
+    /// User interfaces call it to show enabled states and disabled reasons.
+    pub fn enabled(&self, probe: &Probe<'_>) -> std::result::Result<(), Disabled> {
         self.enabled.as_ref().map_or(Ok(()), |p| p(probe))
     }
 

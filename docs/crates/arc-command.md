@@ -133,7 +133,8 @@ parsing and repeat (CORE-CMD-011, CORE-CMD-013, CORE-CMD-015) are described in t
   progress, and the selection to restore afterward.
 - An enabled predicate reads a `Probe` (snapshot, selection, session) and returns a `Disabled`
   reason: a message identifier with arguments. `cmd.disabled` carries the reason's identifier in
-  the detail `reason` and its arguments as further details.
+  the detail `reason` and its arguments as further details. `CommandSpec::enabled` is public
+  so a user interface can show enabled states and disabled reasons without invoking.
 
 ### Guarded execution
 

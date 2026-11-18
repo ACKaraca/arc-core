@@ -193,9 +193,7 @@ impl Palette {
             }
             let clicked = ui.add(button).clicked();
             if clicked || (enter && row == self.selected) {
-                intent = Some(Intent {
-                    command: view.id.clone(),
-                });
+                intent = Some(Intent::new(view.id.clone()));
             }
         }
         intent

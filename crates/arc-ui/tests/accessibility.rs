@@ -167,12 +167,7 @@ fn menu_bar_exposes_names_roles_and_disabled_state_and_emits_intents() {
         );
     }
     let (_, intent) = pass(&ctx, click_events(center(save)), draw);
-    assert_eq!(
-        intent.flatten(),
-        Some(Intent {
-            command: "demo.file.save".into()
-        })
-    );
+    assert_eq!(intent.flatten(), Some(Intent::new("demo.file.save")));
 }
 
 #[test]
@@ -211,12 +206,7 @@ fn icon_toolbar_buttons_are_named_by_their_label() {
             .is_disabled()
     );
     let (_, intent) = pass(&ctx, click_events(center(save)), draw);
-    assert_eq!(
-        intent.flatten(),
-        Some(Intent {
-            command: "demo.file.save".into()
-        })
-    );
+    assert_eq!(intent.flatten(), Some(Intent::new("demo.file.save")));
 }
 
 #[test]
@@ -257,12 +247,7 @@ fn palette_exposes_a_labelled_search_field_and_named_results() {
     let (_, intent) = pass(&ctx, vec![enter], |ui| {
         palette.show(ui, &views, &recent, &English)
     });
-    assert_eq!(
-        intent.flatten(),
-        Some(Intent {
-            command: "demo.file.save".into()
-        })
-    );
+    assert_eq!(intent.flatten(), Some(Intent::new("demo.file.save")));
     palette.query = "zzz".into();
     let (nodes, _) = pass(&ctx, vec![], |ui| {
         palette.show(ui, &views, &recent, &English)

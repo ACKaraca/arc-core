@@ -264,9 +264,7 @@ mod tests {
     fn action(command: &str) -> Action {
         Action {
             label: "demo-open".into(),
-            intent: Intent {
-                command: command.into(),
-            },
+            intent: Intent::new(command),
         }
     }
 

@@ -307,9 +307,7 @@ fn command_button(ui: &mut Ui, view: &CommandView) -> Option<Intent> {
     }
     response.clicked().then(|| {
         ui.close();
-        Intent {
-            command: view.id.clone(),
-        }
+        Intent::new(view.id.clone())
     })
 }
 
@@ -377,9 +375,7 @@ pub fn show_toolbar(ui: &mut Ui, entries: &[ToolEntry], icons: Option<&Icons>) -
                 None => response.on_hover_text(tip),
             };
             if response.clicked() {
-                intent = Some(Intent {
-                    command: view.id.clone(),
-                });
+                intent = Some(Intent::new(view.id.clone()));
             }
         }
         intent

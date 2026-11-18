@@ -21,7 +21,7 @@ upstream crates are used unmodified, and any fork carries a patch ledger with re
 - A **workspace** is a named layout: dock tree of panels (tabs, splits, floating windows), toolbar
   and menu configuration, and the visible tool sets. Products ship default workspaces; users save
   their own. Workspaces are stored per user and can be exported as files.
-- Docking is built on `egui_dock`: panels can be tabbed, split, dragged out into native windows
+- Docking is a widget of `arc-ui` over a validated layout of tabs and splits: panels can be tabbed, split, dragged out into native windows
   (multi-viewport) and restored. Window positions are restored per monitor configuration; a layout
   saved on a monitor that is no longer present opens on the primary monitor.
 - Document tabs hold one document each; a document may have several viewport panels and sheet

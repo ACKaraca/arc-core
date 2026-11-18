@@ -88,6 +88,58 @@ pub mod messages {
     pub const PROGRESS_CANCEL: Message = Message {
         message_id: "ui-progress-cancel",
     };
+    /// The accessible name of a dock separator.
+    pub const DOCK_SEPARATOR: Message = Message {
+        message_id: "ui-dock-separator",
+    };
+    /// The button that closes a dock panel.
+    pub const DOCK_CLOSE: Message = Message {
+        message_id: "ui-dock-close",
+    };
+    /// The command line's label while no command is active.
+    pub const COMMAND_LINE: Message = Message {
+        message_id: "ui-command-line",
+    };
+    /// Shown for a field whose selected objects differ.
+    pub const PROPERTY_MIXED: Message = Message {
+        message_id: "ui-property-mixed",
+    };
+    /// The marker of an overridden field.
+    pub const PROPERTY_OVERRIDDEN: Message = Message {
+        message_id: "ui-property-overridden",
+    };
+    /// The accessible name of a numeric field's scrub handle.
+    pub const QUANTITY_SCRUB: Message = Message {
+        message_id: "ui-quantity-scrub",
+    };
+    /// The label of the tree's filter field.
+    pub const TREE_FILTER: Message = Message {
+        message_id: "ui-tree-filter",
+    };
+    /// The button that expands a tree node.
+    pub const TREE_EXPAND: Message = Message {
+        message_id: "ui-tree-expand",
+    };
+    /// The button that collapses a tree node.
+    pub const TREE_COLLAPSE: Message = Message {
+        message_id: "ui-tree-collapse",
+    };
+    /// The visibility toggle of a tree node.
+    pub const TREE_VISIBLE: Message = Message {
+        message_id: "ui-tree-visible",
+    };
+    /// The lock toggle of a tree node.
+    pub const TREE_LOCKED: Message = Message {
+        message_id: "ui-tree-locked",
+    };
+    /// The label of the diagnostics filter field.
+    pub const DIAGNOSTICS_FILTER: Message = Message {
+        message_id: "ui-diagnostics-filter",
+    };
+    /// Shown when no diagnostic passes the filter.
+    pub const DIAGNOSTICS_NONE: Message = Message {
+        message_id: "ui-diagnostics-none",
+    };
 }
 
 #[cfg(test)]
@@ -159,6 +211,19 @@ pub(crate) mod tests {
             messages::SEVERITY_WARNING,
             messages::SEVERITY_ERROR,
             messages::PROGRESS_CANCEL,
+            messages::DOCK_SEPARATOR,
+            messages::DOCK_CLOSE,
+            messages::COMMAND_LINE,
+            messages::PROPERTY_MIXED,
+            messages::PROPERTY_OVERRIDDEN,
+            messages::QUANTITY_SCRUB,
+            messages::TREE_FILTER,
+            messages::TREE_EXPAND,
+            messages::TREE_COLLAPSE,
+            messages::TREE_VISIBLE,
+            messages::TREE_LOCKED,
+            messages::DIAGNOSTICS_FILTER,
+            messages::DIAGNOSTICS_NONE,
         ] {
             assert!(
                 catalog.contains(&format!("\n{} = ", m.message_id)),

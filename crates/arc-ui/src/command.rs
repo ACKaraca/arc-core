@@ -14,10 +14,44 @@ use crate::keys::Keymap;
 use crate::text::{Localize, resolve};
 
 /// A request to invoke a command, emitted by a widget.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// `params` are the parameters the widget knows (an edited field and its value, the objects
+/// involved); the application passes them to `arc_command::CommandLine::start` or an
+/// invocation, which prompts for whatever is missing.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Intent {
     /// The command identifier.
     pub command: String,
+    /// The parameters by name; empty for a plain command.
+    pub params: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Intent {
+    /// An intent for `command` without parameters.
+    #[must_use]
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            params: serde_json::Map::new(),
+        }
+    }
+
+    /// Adds the parameter `name`.
+    #[must_use]
+    pub fn with(mut self, name: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.params.insert(name.to_owned(), value.into());
+        self
+    }
+}
+
+/// The parameter value of a list of objects: their identifiers as hyphenated texts.
+#[must_use]
+pub fn object_list(ids: &[arc_base::ObjectId]) -> serde_json::Value {
+    serde_json::Value::Array(
+        ids.iter()
+            .map(|id| serde_json::Value::String(id.to_string()))
+            .collect(),
+    )
 }
 
 /// Whether a command can run now. The application answers from the command's enabled
