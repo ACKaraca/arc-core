@@ -76,6 +76,12 @@ fn vs_main(in: VertexIn) -> VertexOut {
     // Read in the entry point: the DirectX 12 backend adds the first instance of the draw only
     // to an instance index that an entry point reads directly.
     out.instance = in.instance;
+    // Painted masks and paper lie in the plane of the drawing. Their depth is moved back by the
+    // edge allowance so that coplanar lines drawn over them win on every backend: mesh and line
+    // positions are computed by different shaders and need not agree to the last bit.
+    if ((in.misc.y & (PAINT_BACKGROUND | PAINT_PAPER)) != 0u) {
+        out.clip.z = out.clip.z / EDGE_DEPTH_SCALE;
+    }
     return out;
 }
 
