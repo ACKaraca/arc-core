@@ -109,6 +109,18 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "gpu-navigation-invalid",
     };
+    /// A product extractor panicked; the object keeps its previous items.
+    pub const EXTRACTOR_PANICKED: ErrorCode = ErrorCode {
+        code: "gpu.extractor.panicked",
+        category: Category::Internal,
+        message_id: "gpu-extractor-panicked",
+    };
+    /// A worker or render thread could not be started, or the render thread stopped unexpectedly.
+    pub const THREAD_FAILED: ErrorCode = ErrorCode {
+        code: "gpu.thread.failed",
+        category: Category::FailedOperation,
+        message_id: "gpu-thread-failed",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -129,6 +141,8 @@ pub mod codes {
         PRECISION_INSUFFICIENT,
         PICK_INVALID,
         NAVIGATION_INVALID,
+        EXTRACTOR_PANICKED,
+        THREAD_FAILED,
     ];
 }
 
@@ -150,6 +164,7 @@ mod tests {
             .iter()
             .chain(arc_geom::error::codes::ALL)
             .chain(arc_mesh::error::codes::ALL)
+            .chain(arc_doc::error::codes::ALL)
             .chain(codes::ALL)
             .copied()
             .collect();

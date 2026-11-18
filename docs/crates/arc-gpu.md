@@ -43,7 +43,7 @@ override API).
 
 | Kind | Crates |
 |---|---|
-| Arc | `arc-base`, `arc-geom`, `arc-mesh` (in use); `arc-doc` (extractors, from CORE-GPU-003); `arc-draft` (feature `draft`, display-list extractor, from phase 1); `arc-scene` (feature `scene`, material and camera conversion, from phase 4) |
+| Arc | `arc-base`, `arc-geom`, `arc-mesh`, `arc-doc` (snapshots and change events for extraction) (in use); `arc-draft` (feature `draft`, display-list extractor, from phase 1); `arc-scene` (feature `scene`, material and camera conversion, from phase 4) |
 | Third-party | `wgpu` (in use: Vulkan, Metal, DirectX 12 and OpenGL backends, WGSL), `glam`, `lyon`, `swash` (glyph rasterization); `image` (PNG reference images, tests only: headless rendering returns raw RGBA8 buffers) |
 
 ## Test strategy
@@ -137,8 +137,9 @@ contract. The platform guarantees are in the
 ## Phase 0 rules
 
 The first part implements CORE-GPU-001, 002, 004, 006, 007, 008 and 031; the second part adds
-CORE-GPU-014, 022, 023, 025 and 027 as passes and per-frame inputs that do not change the scene.
-Rendering is headless; viewport targets, the render thread and extraction are later parts.
+CORE-GPU-014, 022, 023, 025 and 027 as passes and per-frame inputs that do not change the scene;
+the third part adds CORE-GPU-003, 029 and 030: extraction from document snapshots and viewports
+rendered on their own thread, on demand. Window surfaces and compositing are the UI kit's.
 
 ### Adapter selection
 
@@ -364,6 +365,69 @@ its image position), `zoom_to_sphere` (zoom extents and zoom to selection with
 slerp that never pass through a degenerate frame). The module documentation states each rule;
 property tests check the invariants with coordinates up to 10⁷ from the origin.
 
+### Incremental extraction
+
+`arc_gpu::extract` turns document objects into render items using `arc-doc` snapshots, revisions
+and committed-event changes.
+
+- An `ExtractorRegistry` maps an object type key to an extractor, a function
+  `(snapshot, object, cancel token) → Extraction`. An `Extraction` is the object's complete list
+  of items plus the geometries they use: `Extraction::add_geometry` returns a handle valid only
+  in that extraction. An object whose type has no extractor has no items.
+- An `ExtractionDriver` owns 1 to 16 worker threads (std threads, no external pool).
+  `submit(snapshot, objects)` gives each object the next sequence number; the job's **stamp** is
+  `(snapshot revision, sequence)`. A newer submission for an object replaces its queued job and
+  cancels its running one; a cancelled job's result is dropped, so the queue holds at most one
+  job per object. `submit_changes(snapshot, changes)` takes the changes of a committed event;
+  for "everything changed" it queues every object of the snapshot and every object whose last
+  result had items, so deleted objects are removed.
+- A job resolves its object in the snapshot. An object that is not there yields `Removed`; an
+  extractor error yields `Failed` with that error; a panic is caught and yields
+  `gpu.extractor.panicked`. `take_results` returns the results delivered so far; per object a
+  newer result replaces older ones, except that a failure never replaces an older success.
+  Dropping the driver cancels its jobs and joins the workers after their current extractor.
+- `Scene::apply_extractions` applies results in any order. A result changes the scene only when
+  its stamp is greater than the stamp last applied for its object (`Scene::applied_stamp`), so
+  a late result of an older revision never replaces a newer one, and a removal keeps its stamp
+  so an older result cannot bring a deleted object back. New items replace the object's items
+  after their geometries are uploaded; the geometries the object owned before are then removed.
+  A failed result, or one the scene rejects (invalid items, an unknown local geometry handle,
+  more geometries than `max_items_per_object`, a device error while uploading), leaves the
+  object's items and stamp as they were. The `ApplyReport` counts applied and stale results and
+  lists the failures. Objects that receive items through extraction are not changed with
+  `Scene::update` directly.
+
+### Viewports and redraw
+
+A `Viewport` owns a render thread, a scene and a renderer; `Viewport::new(gpu, config)` starts
+the thread, which draws the first frame.
+
+- **Inputs.** `set_camera`, `resize`, `set_settings`, `set_highlight` (hovered object and the
+  selection, compared as a set), `set_overlay`, `update_scene` (extraction results) and
+  `request_progressive_frame` record the input in a mailbox under a short lock and wake the
+  thread; they never wait for a frame. The mailbox holds the latest value of each input and, per
+  object, the pending result with the greatest stamp (failed results are skipped), so it stays
+  bounded and a camera sent while a frame renders replaces the pending one. Sizes, settings,
+  selections and pending objects are checked against the limits at the call.
+- **On-demand redraw.** The thread draws only for a `DirtyReasons` flag: camera, size,
+  settings, highlight or overlay set to a different value, extraction results that changed the
+  scene, or a requested progressive frame. A frame takes every change pending when it starts.
+  Otherwise the thread waits on a condition variable and submits no GPU work.
+  `Viewport::frames` counts frames, `Viewport::dirty` reports pending reasons and each `Frame`
+  carries the reasons it was drawn for.
+- **Frames.** Each frame renders into its own `Rgba8UnormSrgb` texture usable as a texture
+  binding and copy source; the `Frame` holds the texture and a view for a compositor on the same
+  device and, when `ViewportConfig::readback` is set, the read-back `Image`. Without readback the
+  thread waits for the device to finish each frame, so at most one frame is in flight.
+  `latest_frame` returns the newest frame without waiting; `wait_frame` and `sync` (every
+  earlier call handled) wait with a caller-given bound and fail with `gpu.timeout`.
+- **Errors.** An error on the thread (a rejected extraction result, a device error) is returned
+  by the next call, which still records its input. After `gpu.device.lost` the thread stops and
+  every call returns that code; a thread that ends otherwise makes calls return
+  `gpu.thread.failed`. Dropping the viewport asks the thread to stop and waits for it at most 10
+  seconds (`JOIN_TIMEOUT`); a thread still finishing a frame after that is detached and exits
+  after the frame.
+
 ### Reference images
 
 Reference images live in `crates/arc-gpu/tests/reference/` and are compared only on the pinned
@@ -400,3 +464,5 @@ The codes `arc-gpu` owns. A code is never reused for a different meaning; messag
 | `gpu.precision.insufficient` | `failed_operation` | A camera-relative translation or projection cannot be represented in `f32` |
 | `gpu.pick.invalid` | `invalid_input` | A pick region is empty or outside the image, or the pick tolerance is negative, not finite or above the line width limit |
 | `gpu.navigation.invalid` | `invalid_input` | A navigation parameter is out of range: a non-finite value, a zero or negative zoom factor or image size, a negative radius, or a pan anchor at or behind the eye |
+| `gpu.extractor.panicked` | `internal` | A product extractor panicked; the object keeps its previous items |
+| `gpu.thread.failed` | `failed_operation` | A worker or render thread could not be started, or the render thread stopped unexpectedly |

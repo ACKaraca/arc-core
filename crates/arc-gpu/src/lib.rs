@@ -12,6 +12,10 @@
 //! pre-selection and selection highlights with outline and tint (CORE-GPU-023), overlays drawn
 //! above the scene (CORE-GPU-025) and `f64` navigation functions (CORE-GPU-027).
 //!
+//! The third part adds incremental extraction from document snapshots on a worker pool
+//! (CORE-GPU-003) and viewports rendered on their own thread (CORE-GPU-029) that draw only when
+//! an input changed (CORE-GPU-030).
+//!
 //! Typical use: create a [`Gpu`] from [`GpuSettings`], a [`Scene`] on it, upload geometry with
 //! [`Scene::add_geometry`], set items with [`Scene::update`], and render with
 //! [`Renderer::render_to_image`].
@@ -25,13 +29,19 @@ mod block;
 pub mod adapter;
 pub mod camera;
 pub mod error;
+pub mod extract;
 pub mod navigation;
 pub mod overlay;
 pub mod pool;
 pub mod render;
 pub mod scene;
+pub mod viewport;
 
 pub use adapter::{AdapterKind, AdapterReport, BackendKind, Gpu, GpuSettings, ReducedFeature};
+pub use extract::{
+    ApplyReport, Extraction, ExtractionDriver, ExtractionResult, Extractor, ExtractorRegistry,
+    Outcome,
+};
 pub use overlay::{Anchor, Grid, MarkerShape, Overlay, OverlayPrimitive};
 pub use pool::PoolUsage;
 pub use render::{
@@ -41,5 +51,6 @@ pub use scene::{
     FEATURE_EDGE_ANGLE, GeometryId, ItemKey, LineCap, LineItem, LineJoin, LinePath, LineStyle,
     LineWidth, MemoryReport, MeshInstance, MeshItem, RenderItem, Scene, SceneLimits, WriteCounters,
 };
+pub use viewport::{DirtyReasons, Frame, Viewport, ViewportConfig};
 /// The pinned `wgpu` version, re-exported for products that add their own passes.
 pub use wgpu;

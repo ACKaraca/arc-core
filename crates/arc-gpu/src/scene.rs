@@ -89,6 +89,19 @@ pub struct ItemKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GeometryId(u64);
 
+impl GeometryId {
+    /// The bit of a handle local to one [`crate::Extraction`]; a scene never issues it.
+    pub(crate) const LOCAL: u64 = 1 << 63;
+
+    pub(crate) const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub(crate) const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 /// One instance of a mesh item.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MeshInstance {
@@ -413,6 +426,8 @@ pub struct Scene {
     last_frame: WriteCounters,
     last_eye: Option<Point3>,
     all_translations_dirty: bool,
+    /// The applied extraction stamp and owned geometries of each extracted object.
+    pub(crate) extracted: crate::extract::Applied,
 }
 
 fn put_f32(out: &mut Vec<u8>, values: &[f32]) {
@@ -606,6 +621,7 @@ impl Scene {
                 last_frame: WriteCounters::default(),
                 last_eye: None,
                 all_translations_dirty: true,
+                extracted: crate::extract::Applied::default(),
             })
         })
     }
@@ -702,6 +718,7 @@ impl Scene {
         })?;
         self.pending.vertex += vertex_bytes.len() as u64;
         self.pending.index += (index_bytes.len() + edge_bytes.len()) as u64;
+        // Cannot reach `GeometryId::LOCAL`: one geometry per call, 2^63 calls.
         let id = GeometryId(self.next_geometry);
         self.next_geometry += 1;
         self.geometries.insert(

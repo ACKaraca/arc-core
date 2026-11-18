@@ -127,6 +127,7 @@ name = "arc-gpu"
 version = "0.1.0"
 dependencies = [
  "arc-base",
+ "arc-doc",
  "arc-geom",
  "arc-mesh",
  "image",

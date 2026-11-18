@@ -1,6 +1,6 @@
 [package]
 name = "arc-gpu"
-description = "The real-time viewport renderer of the Arc suite on wgpu: adapter selection, retained scenes, meshes, exact-width lines, shading modes, picking, highlights, overlays, navigation and headless rendering."
+description = "The real-time viewport renderer of the Arc suite on wgpu: adapter selection, retained scenes, meshes, exact-width lines, shading modes, picking, highlights, overlays, navigation, incremental extraction, off-thread on-demand viewports and headless rendering."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 arc-base = { workspace = true }
+arc-doc = { workspace = true }
 arc-geom = { workspace = true }
 arc-mesh = { workspace = true }
 wgpu = { workspace = true }

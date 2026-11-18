@@ -169,7 +169,7 @@ impl RenderSettings {
         outline_px: 2,
     };
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         let unit = |v: f32| (0.0..=1.0).contains(&v);
         let colors = [
             self.background,
@@ -577,6 +577,26 @@ impl Renderer {
         settings: &RenderSettings,
         extras: &FrameExtras<'_>,
     ) -> Result<Image> {
+        let (_, rgba8) = self.draw(scene, frame, (width, height), settings, extras, true)?;
+        Ok(Image {
+            width,
+            height,
+            rgba8: rgba8.unwrap_or_default(),
+        })
+    }
+
+    /// Renders a frame into a new color texture that can be sampled and copied, and reads it
+    /// back when `readback` is set. Without readback the call returns once the device has
+    /// finished the frame, so at most one frame is in flight.
+    pub(crate) fn draw(
+        &mut self,
+        scene: &mut Scene,
+        frame: &ViewFrame,
+        (width, height): (u32, u32),
+        settings: &RenderSettings,
+        extras: &FrameExtras<'_>,
+        readback: bool,
+    ) -> Result<(wgpu::Texture, Option<Vec<u8>>)> {
         let samples = self.check(scene, width, height, settings)?;
         let (eye, base) = Self::view_uniform(
             scene,
@@ -635,17 +655,23 @@ impl Renderer {
                 kinds.extend([Kind::OverlayLine, Kind::OverlayFill]);
             }
             self.ensure(samples, settings.cull_back_faces, &kinds);
-            let rgba8 = self.encode_color(scene, &plan)?;
-            Ok(Image {
-                width,
-                height,
-                rgba8,
-            })
+            let (texture, encoder) = self.encode_color(scene, &plan)?;
+            if readback {
+                let rgba8 = read_texture(&self.gpu, encoder, &texture, width, height)?;
+                return Ok((texture, Some(rgba8)));
+            }
+            let submission = self.gpu.queue().submit([encoder.finish()]);
+            wait(&self.gpu, submission)?;
+            Ok((texture, None))
         })
     }
 
     #[allow(clippy::too_many_lines)] // The passes of a frame, in order.
-    fn encode_color(&self, scene: &Scene, plan: &ColorFrame<'_>) -> Result<Vec<u8>> {
+    fn encode_color(
+        &self,
+        scene: &Scene,
+        plan: &ColorFrame<'_>,
+    ) -> Result<(wgpu::Texture, wgpu::CommandEncoder)> {
         let device = self.gpu.device();
         let settings = plan.settings;
         let (width, height) = (plan.width, plan.height);
@@ -671,7 +697,7 @@ impl Renderer {
             (width, height),
             1,
             COLOR_FORMAT,
-            wgpu::TextureUsages::COPY_SRC,
+            wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
         );
         let resolved = resolved_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let multisampled = (plan.samples > 1).then(|| {
@@ -822,7 +848,7 @@ impl Renderer {
                 }
             }
         }
-        read_texture(&self.gpu, encoder, &resolved_texture, width, height)
+        Ok((resolved_texture, encoder))
     }
 
     fn outline_bind_group(
@@ -1505,6 +1531,21 @@ fn texture(
 
 /// Submits `encoder` with a copy of `texture` (four bytes per texel) and reads it back
 /// without the row padding of the copy.
+/// Waits until the device has finished `submission`, at most [`READBACK_TIMEOUT`].
+fn wait(gpu: &Gpu, submission: wgpu::SubmissionIndex) -> Result<()> {
+    match gpu.device().poll(wgpu::PollType::Wait {
+        submission_index: Some(submission),
+        timeout: Some(READBACK_TIMEOUT),
+    }) {
+        Ok(_) => Ok(()),
+        Err(wgpu::PollError::Timeout) => Err(Error::new(codes::TIMEOUT)),
+        Err(other) => {
+            gpu.check()?;
+            Err(Error::new(codes::VALIDATION).with_source(other))
+        }
+    }
+}
+
 fn read_texture(
     gpu: &Gpu,
     mut encoder: wgpu::CommandEncoder,
