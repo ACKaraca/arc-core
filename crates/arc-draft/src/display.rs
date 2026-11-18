@@ -30,9 +30,11 @@ use crate::appearance::{
     style_of,
 };
 use crate::clip::{Piece, cut, keeps, piece};
+use crate::dimension::{DIMENSION, Resolution};
 use crate::error::codes;
 use crate::fonts::{Fonts, Substitutions, font_table_id};
 use crate::layout::{Overrides, view};
+use crate::leader::{LEADER, MULTILEADER};
 use crate::linetype::{DEFAULT_MAX_DASHES, DashOptions, Dashes, Pattern, dashes};
 use crate::text::{RICH_TEXT, TEXT};
 use crate::text_layout::{
@@ -86,6 +88,9 @@ pub struct DisplayOptions {
     /// The fonts of text entities: the provider, the user's substitution table and the default
     /// stroke font.
     pub fonts: Fonts,
+    /// The current annotation scale of [`space_list`]: annotative primitives of other scales
+    /// are left out. Viewport lists use the viewport's annotation scale instead.
+    pub annotation_scale: f64,
 }
 
 impl Default for DisplayOptions {
@@ -96,6 +101,7 @@ impl Default for DisplayOptions {
             max_primitives: usize::try_from(Limits::DEFAULT.array_length).unwrap_or(usize::MAX),
             max_dashes: DEFAULT_MAX_DASHES,
             fonts: Fonts::default(),
+            annotation_scale: 1.0,
         }
     }
 }
@@ -165,8 +171,12 @@ pub struct Primitive {
     /// The sub-object key: the nested entities from below `source` down to the drawing entity,
     /// outermost first; empty when `source` draws it.
     pub path: Vec<ObjectId>,
-    /// The part of the drawing entity: 0 for its shape, 1 for the frame of a wipeout.
+    /// The part of the drawing entity: 0 for its shape, 1 for the frame of a wipeout; for
+    /// dimensions and leaders the code of [`crate::annotation::Part`].
     pub part: u32,
+    /// The annotation scale of the representation the primitive belongs to; `None` for a
+    /// primitive shown at every scale.
+    pub annotation_scale: Option<f64>,
 }
 
 /// The display list of one entity, the result of its [`DISPLAY`] node.
@@ -202,16 +212,24 @@ pub struct DisplayList {
 }
 
 /// What building a list reads: the dependency graph, or a snapshot directly.
-trait Reader {
+pub(crate) trait Reader {
     fn field(&self, id: ObjectId, name: &str) -> Result<Option<Value>>;
     fn type_key(&self, id: ObjectId) -> Option<String>;
     fn owner(&self, id: ObjectId) -> Result<Option<ObjectId>>;
     fn members(&self, container: ObjectId) -> Vec<ObjectId>;
     fn list(&self, id: ObjectId) -> Result<DerivedValue>;
+    /// The dimension styles whose `parent` is `style`.
+    fn children(&self, style: ObjectId) -> Vec<ObjectId>;
+    /// The resolution of the dimension `id`.
+    fn resolved(&self, id: ObjectId) -> Result<Resolution>;
 }
 
-struct GraphReader<'a, 'b> {
-    ctx: &'a EvalContext<'b>,
+pub(crate) struct GraphReader<'a, 'b> {
+    pub(crate) ctx: &'a EvalContext<'b>,
+}
+
+fn parent_field() -> ReferenceField {
+    ReferenceField::Field(arc_doc::FieldPath::new("parent"))
 }
 
 impl Reader for GraphReader<'_, '_> {
@@ -241,6 +259,21 @@ impl Reader for GraphReader<'_, '_> {
     }
     fn list(&self, id: ObjectId) -> Result<DerivedValue> {
         self.ctx.node(&node(id)?)
+    }
+    fn children(&self, style: ObjectId) -> Vec<ObjectId> {
+        let field = parent_field();
+        self.ctx
+            .referrers(style)
+            .filter(|r| r.field == field)
+            .map(|r| r.source)
+            .collect()
+    }
+    fn resolved(&self, id: ObjectId) -> Result<Resolution> {
+        let value = self.ctx.node(&crate::dimension::resolved_node(id)?)?;
+        value
+            .downcast_ref::<Resolution>()
+            .cloned()
+            .ok_or_else(|| Error::new(codes::OBJECT_WRONG_TYPE))
     }
 }
 
@@ -285,6 +318,30 @@ impl Reader for SnapshotReader<'_> {
         };
         Ok(Arc::new(build(&inner, id, self.options)?))
     }
+    fn children(&self, style: ObjectId) -> Vec<ObjectId> {
+        let field = parent_field();
+        self.snapshot
+            .referrers(style)
+            .filter(|r| r.field == field)
+            .map(|r| r.source)
+            .collect()
+    }
+    fn resolved(&self, id: ObjectId) -> Result<Resolution> {
+        crate::dimension::resolve_with(self, id, &self.options.tolerance)
+    }
+}
+
+/// Runs `f` with a reader of `snapshot`.
+pub(crate) fn with_snapshot<R>(
+    snapshot: &Snapshot,
+    options: &DisplayOptions,
+    f: impl FnOnce(&dyn Reader) -> R,
+) -> R {
+    f(&SnapshotReader {
+        snapshot,
+        options,
+        depth: 0,
+    })
 }
 
 fn nesting(limit: u32) -> Error {
@@ -316,7 +373,11 @@ pub fn node(entity: ObjectId) -> Result<NodeKey> {
     Ok(NodeKey::object(entity, DerivedKey::new(DISPLAY)?))
 }
 
-fn read(reader: &dyn Reader, id: ObjectId, names: &[&str]) -> Result<Vec<Option<Value>>> {
+pub(crate) fn read(
+    reader: &dyn Reader,
+    id: ObjectId,
+    names: &[&str],
+) -> Result<Vec<Option<Value>>> {
     names.iter().map(|name| reader.field(id, name)).collect()
 }
 
@@ -373,7 +434,7 @@ fn dash(
 }
 
 /// The appearance of one level, with values set to `block` left open.
-struct Look {
+pub(crate) struct Look {
     resolved: Resolved,
     style: Style,
     layer: Option<ObjectId>,
@@ -408,16 +469,16 @@ impl Look {
         }
     }
 
-    fn color(&self) -> Option<Sourced<ColorValue>> {
+    pub(crate) fn color(&self) -> Option<Sourced<ColorValue>> {
         Self::open(&self.style.color, &self.resolved.color)
     }
-    fn linetype(&self) -> Option<Sourced<Option<ObjectId>>> {
+    pub(crate) fn linetype(&self) -> Option<Sourced<Option<ObjectId>>> {
         Self::open(&self.style.linetype, &self.resolved.linetype)
     }
-    fn lineweight(&self) -> Option<Sourced<Option<f64>>> {
+    pub(crate) fn lineweight(&self) -> Option<Sourced<Option<f64>>> {
         Self::open(&self.style.lineweight, &self.resolved.lineweight)
     }
-    fn transparency(&self) -> Option<Sourced<f64>> {
+    pub(crate) fn transparency(&self) -> Option<Sourced<f64>> {
         Self::open(&self.style.transparency, &self.resolved.transparency)
     }
 }
@@ -438,7 +499,7 @@ fn close(primitive: &mut Primitive) {
     primitive.transparency.get_or_insert_with(|| default(0.0));
 }
 
-fn decode_curve(value: Option<&Option<Value>>) -> Result<Curve2> {
+pub(crate) fn decode_curve(value: Option<&Option<Value>>) -> Result<Curve2> {
     match value {
         Some(Some(Value::Geometry(bytes))) => Curve2::decode(&bytes.0, &Limits::DEFAULT)
             .map_err(|e| Error::new(codes::GEOMETRY_INVALID).with_source(e)),
@@ -502,6 +563,7 @@ fn is_space(reader: &dyn Reader, container: Option<ObjectId>) -> bool {
 }
 
 /// The list of one entity, as described in the crate specification.
+#[expect(clippy::too_many_lines, reason = "one match over every entity type")]
 fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<EntityList> {
     let key = reader
         .type_key(id)
@@ -538,6 +600,7 @@ fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<
         source: id,
         path: Vec::new(),
         part: 0,
+        annotation_scale: None,
     };
     let linetype = base.linetype.as_ref().and_then(|l| l.value);
     match key.as_str() {
@@ -559,7 +622,12 @@ fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<
         }
         TEXT | RICH_TEXT => {
             let layout = text_layout_of(reader, id, &key, options)?;
-            list.primitives = text_primitives(reader, id, &layout, &base, &options.tolerance)?;
+            let placement = text_placement(reader, id)?;
+            list.primitives = text_primitives(&layout, &placement, &base, &options.tolerance)?;
+        }
+        DIMENSION | LEADER | MULTILEADER => {
+            list.primitives =
+                crate::annotation_display::primitives(reader, id, &key, &base, &look, options)?;
         }
         WIPEOUT => {
             let Curve2::Polyline(boundary) = decode_curve(Some(&reader.field(id, "geometry")?))?
@@ -602,18 +670,18 @@ fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<
     Ok(list)
 }
 
-fn read_number(reader: &dyn Reader, id: ObjectId, name: &str) -> Result<Option<f64>> {
+pub(crate) fn read_number(reader: &dyn Reader, id: ObjectId, name: &str) -> Result<Option<f64>> {
     Ok(number(reader.field(id, name)?))
 }
 
-fn read_enum(reader: &dyn Reader, id: ObjectId, name: &str) -> Result<u32> {
+pub(crate) fn read_enum(reader: &dyn Reader, id: ObjectId, name: &str) -> Result<u32> {
     Ok(match reader.field(id, name)? {
         Some(Value::Enum(code)) => code,
         _ => 0,
     })
 }
 
-fn read_flag(reader: &dyn Reader, id: ObjectId, name: &str) -> Result<bool> {
+pub(crate) fn read_flag(reader: &dyn Reader, id: ObjectId, name: &str) -> Result<bool> {
     Ok(matches!(reader.field(id, name)?, Some(Value::Bool(true))))
 }
 
@@ -661,11 +729,6 @@ fn text_layout_of(
     options: &DisplayOptions,
 ) -> Result<TextLayout> {
     let (style, height, _, _) = text_style(reader, id)?;
-    // A document without a table depends on its creation through the failed read.
-    let table = match reader.field(font_table_id(), "entries") {
-        Ok(entries) => Substitutions::from_value(entries.as_ref()),
-        Err(_) => Substitutions::default(),
-    };
     let paragraphs;
     let mut input = TextInput {
         paragraphs: &[],
@@ -731,8 +794,23 @@ fn text_layout_of(
         };
     }
     input.paragraphs = &paragraphs;
+    lay_out(reader, &input, options)
+}
+
+/// Lays out `input` with the document's substitution table, read through `reader`, and the
+/// fonts of `options`.
+pub(crate) fn lay_out(
+    reader: &dyn Reader,
+    input: &TextInput<'_>,
+    options: &DisplayOptions,
+) -> Result<TextLayout> {
+    // A document without a table depends on its creation through the failed read.
+    let table = match reader.field(font_table_id(), "entries") {
+        Ok(entries) => Substitutions::from_value(entries.as_ref()),
+        Err(_) => Substitutions::default(),
+    };
     crate::text_layout::layout(
-        &input,
+        input,
         &table,
         &options.fonts,
         &LayoutOptions {
@@ -740,6 +818,21 @@ fn text_layout_of(
             max_items: options.max_primitives,
         },
     )
+}
+
+/// The style values of the text style `style` (the defaults without one).
+pub(crate) fn text_style_of(reader: &dyn Reader, style: Option<ObjectId>) -> Result<TextStyle> {
+    let Some(style) = style else {
+        return Ok(TextStyle::default());
+    };
+    Ok(TextStyle {
+        font: match reader.field(style, "font")? {
+            Some(Value::String(s)) => Some(s),
+            _ => None,
+        },
+        width_factor: read_number(reader, style, "width_factor")?.unwrap_or(1.0),
+        oblique: read_number(reader, style, "oblique")?.unwrap_or(0.0),
+    })
 }
 
 /// The map of a text from text space to its container: translation to `position`, rotation,
@@ -767,17 +860,16 @@ fn text_placement(reader: &dyn Reader, id: ObjectId) -> Result<Transform2> {
     )))
 }
 
-/// The primitives of a laid-out text: one stroke per curve of a stroke run, one glyph
-/// primitive per outline run. Text strokes are continuous whatever the linetype; a run with
-/// its own color takes it with the source `Object`.
-fn text_primitives(
-    reader: &dyn Reader,
-    id: ObjectId,
+/// The primitives of a laid-out text mapped by `placement`: one stroke per curve of a stroke
+/// run, one glyph primitive per outline run. Text strokes are continuous whatever the
+/// linetype; a run with its own color takes it with the source `Object`.
+pub(crate) fn text_primitives(
     layout: &TextLayout,
+    placement: &Transform2,
     base: &Primitive,
     tolerance: &Tolerance,
 ) -> Result<Vec<Primitive>> {
-    let placement = text_placement(reader, id)?;
+    let placement = *placement;
     let continuous = Some(Sourced {
         value: None,
         source: Source::Object,
@@ -896,6 +988,26 @@ fn reference_transform(
     )))
 }
 
+/// The block definition the block reference `id` inserts and the map of the reference.
+pub(crate) fn block_ref_transform(
+    reader: &dyn Reader,
+    id: ObjectId,
+) -> Result<(ObjectId, Transform2)> {
+    if reader.type_key(id).as_deref() != Some(BLOCK_REF) {
+        return Err(Error::new(codes::OBJECT_WRONG_TYPE).with_detail("id", id.to_string()));
+    }
+    let mut values = vec![None; entity::KIND];
+    values.extend(read(
+        reader,
+        id,
+        &["block", "position", "scale", "rotation"],
+    )?);
+    let block = reference(values.get(entity::KIND))
+        .ok_or_else(|| Error::new(codes::FIELD_INVALID).with_arg("field", "block"))?;
+    let map = reference_transform(reader, &values, block, reader.owner(id)?)?;
+    Ok((block, map))
+}
+
 /// Fills an open value of an inserted primitive with the reference's own value: a value of
 /// the reference itself becomes the source `Block { level }`.
 fn fill<T: Clone>(slot: &mut Option<Sourced<T>>, own: Option<Sourced<T>>, level: usize) {
@@ -910,7 +1022,7 @@ fn fill<T: Clone>(slot: &mut Option<Sourced<T>>, own: Option<Sourced<T>>, level:
     }
 }
 
-fn reference_list(
+pub(crate) fn reference_list(
     reader: &dyn Reader,
     values: &[Option<Value>],
     base: Primitive,
@@ -1019,7 +1131,7 @@ pub fn register_evaluators(evaluators: &mut Evaluators, options: DisplayOptions)
             evaluator(options.clone()),
         )?;
     }
-    Ok(())
+    crate::dimension::register_evaluators(evaluators, &options)
 }
 
 /// The list of `entity` evaluated directly from `snapshot`, without the graph: the same rules
@@ -1073,6 +1185,7 @@ fn gather(
     lists: Lists<'_>,
     space: ObjectId,
     frozen: &BTreeSet<ObjectId>,
+    scale: f64,
     options: &DisplayOptions,
     out: &mut DisplayList,
 ) -> Result<Vec<Primitive>> {
@@ -1109,7 +1222,10 @@ fn gather(
     let mut primitives = Vec::new();
     for (_, _, list) in ordered {
         for p in &list.primitives {
-            if !p.layers.iter().any(|l| is_hidden(*l)) {
+            // Annotation scales match exactly: both are the stored values.
+            #[expect(clippy::float_cmp, reason = "stored scales are compared exactly")]
+            let shown = p.annotation_scale.is_none_or(|s| s == scale);
+            if shown && !p.layers.iter().any(|l| is_hidden(*l)) {
                 primitives.push(p.clone());
             }
         }
@@ -1206,7 +1322,15 @@ pub fn space_list(
     options: &DisplayOptions,
 ) -> Result<DisplayList> {
     let mut out = DisplayList::default();
-    let mut primitives = gather(snapshot, lists, space, &BTreeSet::new(), options, &mut out)?;
+    let mut primitives = gather(
+        snapshot,
+        lists,
+        space,
+        &BTreeSet::new(),
+        options.annotation_scale,
+        options,
+        &mut out,
+    )?;
     apply_masks(&mut primitives, &options.tolerance, &mut out.failed);
     out.primitives = primitives;
     dedup(&mut out.failed);
@@ -1284,6 +1408,7 @@ pub fn viewport_list(
         lists,
         view.model,
         &view.overrides.frozen,
+        view.annotation_scale,
         options,
         &mut out,
     )?;

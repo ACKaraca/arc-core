@@ -27,6 +27,11 @@
 //! layout space owns at most one settings object (`draft.layout.owner_invalid`,
 //! `draft.layout.duplicate`); a touched space of kind `model` owns neither.
 //!
+//! **Disassociated dimensions.** Every commit reports a warning
+//! `draft.dimension.disassociated` (detail `id`) for each dimension with a definition point
+//! whose referenced geometry was deleted, so the diagnostics list holds those of the current
+//! revision.
+//!
 //! **Dimension style parents.** A dimension style with a parent has a kind other than `all`,
 //! and its parent has the kind `all` and no parent (`draft.style.parent_invalid`).
 
@@ -343,7 +348,7 @@ fn dim_parents(candidate: &Snapshot, touched: &BTreeMap<ObjectId, Change>) -> Ve
 }
 
 /// The drafting document validators: nesting with the depth bound `max_nesting`, names,
-/// layout owners and dimension style parents.
+/// layout owners, dimension style parents and disassociated dimensions (a warning).
 #[must_use]
 pub fn validators(max_nesting: u32) -> Vec<DocumentValidator> {
     let nesting: DocumentValidator =
@@ -352,7 +357,9 @@ pub fn validators(max_nesting: u32) -> Vec<DocumentValidator> {
     let layouts: DocumentValidator = Arc::new(|_, candidate, touched| layouts(candidate, touched));
     let parents: DocumentValidator =
         Arc::new(|_, candidate, touched| dim_parents(candidate, touched));
-    vec![nesting, names, layouts, parents]
+    let disassociated: DocumentValidator =
+        Arc::new(|_, candidate, _| crate::dimension::disassociated(candidate));
+    vec![nesting, names, layouts, parents, disassociated]
 }
 
 /// Adds [`validators`] with [`DEFAULT_MAX_NESTING`] to `document`.

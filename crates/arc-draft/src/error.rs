@@ -237,6 +237,50 @@ pub mod codes {
         message_id: "draft-text-tabs-invalid",
     };
 
+    /// The definition points of a dimension do not number what its kind needs.
+    pub const DIMENSION_POINTS_INVALID: ErrorCode = ErrorCode {
+        code: "draft.dimension.points_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-dimension-points-invalid",
+    };
+    /// The definition points of a dimension define no measurement: coincident points, parallel
+    /// lines, a zero radius or a dimension line through the vertex.
+    pub const DIMENSION_DEGENERATE: ErrorCode = ErrorCode {
+        code: "draft.dimension.degenerate",
+        category: Category::InvalidInput,
+        message_id: "draft-dimension-degenerate",
+    };
+    /// A referenced object and sub-object key give no point.
+    pub const DIMENSION_REFERENCE_INVALID: ErrorCode = ErrorCode {
+        code: "draft.dimension.reference_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-dimension-reference-invalid",
+    };
+    /// A dimension lost the geometry it referenced and keeps its last points (a warning).
+    pub const DIMENSION_DISASSOCIATED: ErrorCode = ErrorCode {
+        code: "draft.dimension.disassociated",
+        category: Category::NotFound,
+        message_id: "draft-dimension-disassociated",
+    };
+    /// A chain member is not a linear or aligned dimension, or is listed twice.
+    pub const CHAIN_MEMBER_INVALID: ErrorCode = ErrorCode {
+        code: "draft.chain.member_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-chain-member-invalid",
+    };
+    /// An annotation scale is not a finite positive number, or is listed twice.
+    pub const ANNOTATION_SCALE_INVALID: ErrorCode = ErrorCode {
+        code: "draft.annotation.scale_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-annotation-scale-invalid",
+    };
+    /// A leader has fewer points than it needs.
+    pub const LEADER_POINTS_INVALID: ErrorCode = ErrorCode {
+        code: "draft.leader.points_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-leader-points-invalid",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         GEOMETRY_INVALID,
@@ -277,6 +321,13 @@ pub mod codes {
         TEXT_TOO_LARGE,
         TEXT_STACK_INVALID,
         TEXT_TABS_INVALID,
+        DIMENSION_POINTS_INVALID,
+        DIMENSION_DEGENERATE,
+        DIMENSION_REFERENCE_INVALID,
+        DIMENSION_DISASSOCIATED,
+        CHAIN_MEMBER_INVALID,
+        ANNOTATION_SCALE_INVALID,
+        LEADER_POINTS_INVALID,
     ];
 }
 

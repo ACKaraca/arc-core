@@ -67,6 +67,9 @@ pub const ENTITIES: &[&str] = &[
     WIPEOUT,
     crate::text::TEXT,
     crate::text::RICH_TEXT,
+    crate::dimension::DIMENSION,
+    crate::leader::LEADER,
+    crate::leader::MULTILEADER,
 ];
 
 /// The types that contain entities: spaces and block definitions.
@@ -667,6 +670,8 @@ fn declarations() -> arc_base::Result<Vec<TypeDecl>> {
         .chain(crate::layout::declarations())
         .chain(crate::style::declarations())
         .chain(crate::text::declarations())
+        .chain(crate::dimension::declarations())
+        .chain(crate::leader::declarations())
         .map(|(key, fields, validators)| {
             let mut decl = TypeDecl::new(TypeKey::new(key)?, Schema::new(version, fields));
             decl.validators = validators;
@@ -746,7 +751,7 @@ mod tests {
     fn every_type_registers_and_field_indices_match_names() {
         let mut registry = TypeRegistry::new();
         register_types(&mut registry).unwrap();
-        assert_eq!(registry.len(), 24);
+        assert_eq!(registry.len(), 28);
         let name = |key: &str, i: usize| registry.get(key).unwrap().schema.fields[i].name.clone();
         assert_eq!(name(LINE, entity::EXTRUSION), "extrusion");
         assert_eq!(name(LINE, entity::KIND), "geometry");

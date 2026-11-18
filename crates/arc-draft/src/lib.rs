@@ -22,17 +22,27 @@
 //!   export (CORE-DRAFT-034, [`text_layout`]), the Arc stroke-font format and the shipped font
 //!   (CORE-DRAFT-035, [`stroke_font`]), and font providers with substitution (CORE-DRAFT-036,
 //!   [`fonts`]); outline fonts lay out with `parley` under the feature `outline-text`;
+//! - dimensions with measurement formatting, associativity through sub-object keys and
+//!   dimension chains (CORE-DRAFT-010 to 012, [`dimension`], [`format`]), leaders and
+//!   multi-leaders (CORE-DRAFT-013, [`leader`]) and annotation scaling (CORE-DRAFT-014,
+//!   [`annotation`]);
 //! - the `core.draft.*` commands ([`register_commands`]).
 //!
 //! Splines wait for the NURBS curves of `arc-geom`. No function in this crate panics.
 
+pub mod annotation;
+mod annotation_commands;
+mod annotation_display;
 pub mod appearance;
 pub mod clip;
 pub mod commands;
+pub mod dimension;
 pub mod display;
 pub mod error;
 pub mod fonts;
+pub mod format;
 pub mod layout;
+pub mod leader;
 pub mod linetype;
 pub mod order;
 #[cfg(feature = "outline-text")]
@@ -50,7 +60,8 @@ pub use types::register_types;
 pub use validate::install;
 
 /// Registers the derived nodes of the drafting types: the display list of every entity
-/// ([`display::DISPLAY`]) with `options`, and the effective data of every style
+/// ([`display::DISPLAY`]) with `options`, the resolution of every dimension
+/// ([`dimension::RESOLVED`]), and the effective data of every style
 /// ([`style::EFFECTIVE`]).
 ///
 /// # Errors

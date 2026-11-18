@@ -126,6 +126,25 @@ fn dim_style_fields() -> Vec<FieldDecl> {
         real("measurement_scale", 1.0, f64::MIN_POSITIVE, f64::MAX),
         real("overall_scale", 1.0, f64::MIN_POSITIVE, f64::MAX),
         text("description", TEXT_BYTES),
+        size("rounding", 0.0),
+        flag("suppress_leading_zeros", false),
+        flag("suppress_trailing_zeros", false),
+        FieldDecl::new("decimal_separator", ValueType::String)
+            .with_default(Value::String(".".into()))
+            .with_bound(Bound::Length { max: 4 }),
+        flag("unit_suffix", false),
+        FieldDecl::new("angular_precision", ValueType::I64)
+            .with_default(Value::I64(0))
+            .with_bound(Bound::Int { min: 0, max: 8 }),
+        FieldDecl::new("text_vertical", variants(&["centered", "above"]))
+            .with_default(Value::Enum(0)),
+        FieldDecl::new(
+            "tolerance",
+            variants(&["none", "symmetric", "deviation", "limits"]),
+        )
+        .with_default(Value::Enum(0)),
+        size("tolerance_upper", 0.0),
+        size("tolerance_lower", 0.0),
     ]
 }
 
@@ -141,6 +160,7 @@ fn leader_style_fields() -> Vec<FieldDecl> {
         FieldDecl::new("content", variants(&["text", "block", "tolerance", "none"]))
             .with_default(Value::Enum(0)),
         text("description", TEXT_BYTES),
+        size("text_gap", 0.625),
     ]
 }
 

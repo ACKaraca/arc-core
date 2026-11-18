@@ -20,6 +20,7 @@ use arc_geom::encoding::GeomCodec;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::dimension::DIMENSION;
 use crate::error::codes;
 use crate::fonts::{FONT_TABLE, document_table, font_table_id};
 use crate::layout::{LAYOUT, Orientation, VIEWPORT, viewport};
@@ -270,6 +271,62 @@ const NAMES: &[Names] = &[
         message_id: "draft-command-purge",
         description: Description {
             message_id: "draft-command-purge-description",
+        },
+    },
+    Names {
+        id: "core.draft.dimension.create",
+        message_id: "draft-command-dimension-create",
+        description: Description {
+            message_id: "draft-command-dimension-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.chain.create",
+        message_id: "draft-command-chain-create",
+        description: Description {
+            message_id: "draft-command-chain-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.chain.add",
+        message_id: "draft-command-chain-add",
+        description: Description {
+            message_id: "draft-command-chain-add-description",
+        },
+    },
+    Names {
+        id: "core.draft.chain.remove",
+        message_id: "draft-command-chain-remove",
+        description: Description {
+            message_id: "draft-command-chain-remove-description",
+        },
+    },
+    Names {
+        id: "core.draft.chain.respace",
+        message_id: "draft-command-chain-respace",
+        description: Description {
+            message_id: "draft-command-chain-respace-description",
+        },
+    },
+    Names {
+        id: "core.draft.leader.create",
+        message_id: "draft-command-leader-create",
+        description: Description {
+            message_id: "draft-command-leader-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.multileader.create",
+        message_id: "draft-command-multileader-create",
+        description: Description {
+            message_id: "draft-command-multileader-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.annotation.scales",
+        message_id: "draft-command-annotation-scales",
+        description: Description {
+            message_id: "draft-command-annotation-scales-description",
         },
     },
 ];
@@ -766,11 +823,11 @@ pub struct Substitute {
     pub substitute: Option<String>,
 }
 
-fn wrong_type(id: ObjectId) -> Error {
+pub(crate) fn wrong_type(id: ObjectId) -> Error {
     Error::new(codes::OBJECT_WRONG_TYPE).with_detail("id", id.to_string())
 }
 
-fn field_invalid(field: &str) -> Error {
+pub(crate) fn field_invalid(field: &str) -> Error {
     Error::new(codes::FIELD_INVALID).with_arg("field", field)
 }
 
@@ -784,7 +841,7 @@ fn key_of(snapshot: &Snapshot, id: ObjectId) -> Result<String> {
 }
 
 /// Fails with `draft.object.wrong_type` unless `id` is live and of one of `keys`.
-fn expect(snapshot: &Snapshot, id: ObjectId, keys: &[&str]) -> Result<String> {
+pub(crate) fn expect(snapshot: &Snapshot, id: ObjectId, keys: &[&str]) -> Result<String> {
     let key = key_of(snapshot, id)?;
     if keys.contains(&key.as_str()) {
         Ok(key)
@@ -793,7 +850,7 @@ fn expect(snapshot: &Snapshot, id: ObjectId, keys: &[&str]) -> Result<String> {
     }
 }
 
-fn values_of(snapshot: &Snapshot, id: ObjectId) -> Result<Vec<Option<Value>>> {
+pub(crate) fn values_of(snapshot: &Snapshot, id: ObjectId) -> Result<Vec<Option<Value>>> {
     Ok(snapshot.get(snapshot.resolve(id)?)?.values.clone())
 }
 
@@ -824,7 +881,7 @@ fn set_order(ctx: &mut Context<'_>, changes: Vec<(ObjectId, i64)>) -> Result<()>
     Ok(())
 }
 
-fn point2([x, y]: [f64; 2]) -> Value {
+pub(crate) fn point2([x, y]: [f64; 2]) -> Value {
     Value::Point2(Point2::new(x, y))
 }
 
@@ -859,7 +916,7 @@ fn create(
 }
 
 /// Creates the entity of `key` in `owner` on top of the container's draw order.
-fn create_entity(
+pub(crate) fn create_entity(
     ctx: &mut Context<'_>,
     key: &str,
     owner: ObjectId,
@@ -1050,6 +1107,29 @@ fn modify(ctx: &mut Context<'_>, p: SetField, family: &[&str]) -> Result<()> {
 fn delete(ctx: &mut Context<'_>, p: Delete, family: &[&str]) -> Result<()> {
     let limits = *ctx.limits();
     let txn = ctx.txn()?;
+    let snapshot = txn.snapshot().clone();
+    // Dimensions keep the points of geometry about to be deleted as their last positions.
+    let doomed: Vec<ObjectId> = p.objects.iter().map(|IdParam(id)| *id).collect();
+    let mut dimensions: Vec<ObjectId> = doomed
+        .iter()
+        .flat_map(|id| {
+            snapshot
+                .referrers(*id)
+                .map(|r| r.source)
+                .collect::<Vec<_>>()
+        })
+        .filter(|id| !doomed.contains(id) && key_of(&snapshot, *id).is_ok_and(|k| k == DIMENSION))
+        .collect();
+    dimensions.sort();
+    dimensions.dedup();
+    if !dimensions.is_empty() {
+        let options = crate::dimension::resolution_options();
+        for id in dimensions {
+            if let Some(points) = crate::dimension::frozen_points(&snapshot, id, &options) {
+                txn.modify(id, FieldPath::new("points"), Some(points))?;
+            }
+        }
+    }
     for IdParam(id) in p.objects {
         expect(txn.snapshot(), id, family)?;
         txn.delete(id)?;
@@ -1452,7 +1532,7 @@ fn substitute(ctx: &mut Context<'_>, p: Substitute) -> Result<()> {
     Ok(())
 }
 
-fn spec<P, R>(
+pub(crate) fn spec<P, R>(
     id: &'static str,
     run: impl Fn(&mut Context<'_>, P) -> Result<R> + Send + Sync + 'static,
 ) -> CommandSpec
@@ -1544,7 +1624,7 @@ pub fn register_commands(registry: &mut Registry) -> Result<()> {
             serde_json::json!({"requested": "Old Drafting", "substitute": "Arc Stroke"}),
         ),
     ];
-    for spec in specs {
+    for spec in specs.into_iter().chain(crate::annotation_commands::specs()) {
         registry.register(spec)?;
     }
     Ok(())

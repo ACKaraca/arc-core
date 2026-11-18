@@ -275,7 +275,7 @@ and deletion rules; text and dimension layout come later), 021, 027, 028 and 029
 |---|---|
 | `core.draft.wipeout` | common fields; `geometry`: a closed polyline; `frame` |
 | `core.draft.layout` | `paper_name`; `paper_width`, `paper_height` (positive, in the layout's unit, the paper as named); `orientation` (`portrait`, `landscape`); `margin_left`, `margin_bottom`, `margin_right`, `margin_top` (not negative); `origin`; `plot_scale` (positive, default 1); `plot_style_table`; `plot_area` (`layout`, `extents`, `window`); `window_min`, `window_max` |
-| `core.draft.viewport` | `model` (the space shown); `center`; `width`, `height` (positive); `view_center`; `scale` (positive, default 1); `rotation` in radians; `clip` (optional closed polyline); `locked`; `annotation_scale` (positive, default 1, stored only); `layer_overrides`: up to 4096 records of `layer`, `frozen`, `color`, `linetype`, `lineweight`, `transparency` |
+| `core.draft.viewport` | `model` (the space shown); `center`; `width`, `height` (positive); `view_center`; `scale` (positive, default 1); `rotation` in radians; `clip` (optional closed polyline); `locked`; `annotation_scale` (positive, default 1; see annotation scaling below); `layer_overrides`: up to 4096 records of `layer`, `frozen`, `color`, `linetype`, `lineweight`, `transparency` |
 | `core.draft.text_style` | `name`; `font` (by name); `height` (0: set per text); `width_factor` (positive); `oblique` (at most 85 degrees either way); `backwards`; `upside_down`; `vertical`; `description` |
 | `core.draft.dim_style` | `name`; `parent`; `kind` (`all`, `linear`, `angular`, `radial`, `diameter`, `ordinate`, `arc_length`); `text_style`; `text_height`; `text_gap`; `arrow` (`closed_filled`, `closed`, `open`, `dot`, `tick`, `none`); `arrow_size`; `extension_offset`; `extension_beyond`; `unit_format` (`decimal`, `engineering`, `architectural`, `fractional`, `scientific`); `precision` (0 to 8); `measurement_scale`; `overall_scale`; `description` |
 | `core.draft.leader_style` | `name`; `text_style`; `text_height`; `arrow`; `arrow_size`; `landing`; `landing_length`; `content` (`text`, `block`, `tolerance`, `none`); `description` |
@@ -562,6 +562,221 @@ concerned. A change of the provider or the user table takes new `DisplayOptions`
 
 Text fields also change through `core.draft.entity.modify`.
 
+## Dimensions, leaders and annotation scaling as implemented
+
+The fourth part of the crate implements CORE-DRAFT-010, 011, 012, 013 and 014.
+
+### Object types
+
+`register_types` also adds these types, each at schema version 1.0. Dimensions, leaders and
+multi-leaders are entities.
+
+| Type key | Fields |
+|---|---|
+| `core.draft.dimension` | common fields; `kind` (`linear`, `aligned`, `angular_lines`, `angular_points`, `angular_arc`, `radial`, `diameter`, `arc_length`, `ordinate_x`, `ordinate_y`); `points`: definition point records; `line_position`; `rotation` in radians; `text_override`; `text_position`; `style` (a dimension style); `annotative`; `scales` |
+| `core.draft.dim_chain` | `kind` (`baseline`, `continued`); `members`: up to 1024 dimensions; `spacing` (not negative, default 10) |
+| `core.draft.leader` | common fields; `points` (up to 4096, the arrow tip first); `spline` (stored; the leader is drawn through its points); `arrow` (absent: the style's); `style` (a leader style); `annotative`; `scales` |
+| `core.draft.multileader` | common fields; `leaders`: lists of points, each from its arrow tip; `position`; `direction` (`right`, `left`); `content` (`text`, `block`, `tolerance`, `none`); `text`; `block`; `block_scale` (positive); `tolerance`: up to 64 rows of cell texts; `attachment` (`top`, `middle`, `bottom`); `style`; `annotative`; `scales` |
+
+A definition point record holds `position`, `object` (any entity), `path` (records of one
+`member` each, at most 64), `key` (`none`, `start`, `end`, `mid`, `center`, `quadrant`,
+`parameter`), `quadrant` (0 to 3) and `parameter`. A representation record holds `scale`
+(positive), `position` and `text_position` (both optional). The dimension style gains
+`rounding` (an increment, 0 for none), `suppress_leading_zeros`, `suppress_trailing_zeros`,
+`decimal_separator` (its first character; default `.`), `unit_suffix`, `angular_precision` (0 to
+8), `text_vertical` (`centered`, `above`), `tolerance` (`none`, `symmetric`, `deviation`,
+`limits`), `tolerance_upper` and `tolerance_lower`; the leader style gains `text_gap`. Alternate
+units are not provided.
+
+Type validators: a dimension has exactly the number of definition points its kind needs
+(`draft.dimension.points_invalid`): two for linear, aligned, radial, diameter and ordinate
+dimensions, three for `angular_points` (vertex, first, second), `angular_arc` and `arc_length`
+(center, start, end), four for `angular_lines` (two points on each line). A text override holds
+no control character (`draft.text.content_invalid`). A leader has at least two points and every
+leader line of a multi-leader at least one (`draft.leader.points_invalid`). No annotation scale is
+listed twice (`draft.annotation.scale_invalid`).
+
+### Measurement and formatting (CORE-DRAFT-010)
+
+`dimension::measure` gives the measured value in drawing units, or radians for an angle, from the
+resolved points:
+
+- `linear`: the distance of the two points along the direction `rotation` (0 horizontal, π/2
+  vertical, any other value rotated); `aligned`: their distance.
+- `angular_points`: of the two sectors between the rays from the vertex, the one that contains
+  `line_position` (so a reflex angle is measured from the other side); `angular_lines`: of the four
+  sectors of the two lines about their intersection, the one that contains `line_position`;
+  `angular_arc`: the counterclockwise angle from start to end about the center (a full turn when
+  they coincide).
+- `radial` and `diameter`: once and twice the distance from the center to the point on the curve.
+- `arc_length`: the radius (center to start) times the `angular_arc` angle.
+- `ordinate_x` and `ordinate_y`: the signed x or y distance of the feature from the datum.
+
+Coincident points that leave a direction undefined, lines within the angular tolerance of
+parallel, a zero radius and a dimension arc through the vertex fail with
+`draft.dimension.degenerate`.
+
+The written value is the measured value times the style's `measurement_scale` (lengths only),
+formatted by `format::format_length` or `format::format_angle`:
+
+- The value is rounded to the nearest multiple of `rounding` when it is positive, then written
+  with `precision` decimals. `suppress_trailing_zeros` drops zeros at the end of the fraction and
+  a separator left alone; `suppress_leading_zeros` drops the zero before the separator of a value
+  below 1 (`.5`, `-.5`). A value that rounds to zero has no sign. The separator is
+  `decimal_separator`. With `unit_suffix`, the symbol of the container's unit follows after a
+  space.
+- `fractional` writes a whole number and a reduced fraction with the denominator 2^precision
+  (`2 3/8`); `scientific` writes a mantissa with `precision` decimals and a signed two-digit
+  exponent (`1.25E+02`); `engineering` and `architectural` convert the value to inches (a
+  unitless container counts as inches) and write feet and inches, the inches as decimals or a
+  fraction (`5'-2.38"`, `5'-2 3/8"`), without a unit suffix.
+- Angles are written in decimal degrees with `angular_precision` decimals, followed by `°`.
+- The text is `text_override`, or `{}` without one. Its first `{}` stands for the value and its
+  tolerance; other text is written as is, and a template without `{}` has no value. A `symmetric`
+  tolerance writes ` ±upper` after the value; `deviation` writes the value and a stacked fraction
+  `+upper` over `-lower`; `limits` writes value + upper over value − lower as a stacked fraction
+  in place of the value. Tolerances of angles are in degrees.
+
+### Dimension geometry
+
+`dimension::geometry` is a pure function of a definition, the sizes (text height, gap, arrow,
+arrow size, extension offset and overshoot, text placement) and the text width. It returns
+strokes and fills, each with its `annotation::Part`, and the center and rotation of the text
+block. Text rotations are reduced to (−π/2, π/2] so text reads from left to right or from
+bottom to top.
+
+- **Linear and aligned.** The dimension line runs along the measured direction through
+  `line_position`; its ends are the feet of the two points on it. Each extension line runs from
+  `extension_offset` past its point to `extension_beyond` past its end of the dimension line.
+- **Fit.** The text and arrows fit when the dimension line is at least the text width plus two
+  gaps plus two arrow sizes long (no arrow sizes for `none`). Then the arrows point outward to
+  the tips from inside and the text is centered on the line, which is broken around it (text
+  width plus a gap on each side), or lies above it by the gap plus half the text height with
+  `text_vertical` `above`. Otherwise the arrows point inward from outside, the line extends two
+  arrow sizes past each tip, and the text lies beyond the second tip.
+- **Moved text.** With `text_position` (or a representation's), the text is centered there and
+  a line runs from the middle of the dimension line toward it, ending half the text width plus
+  the gap before it.
+- **Angular and arc length.** The dimension arc is centered on the vertex through
+  `line_position`. Extension lines run radially from the definition points; for two lines, from
+  the nearer end of a line only when the arc lies beyond that line's extent. The fit rule uses
+  the arc's length; the arrows are tangent at its ends; the text is centered at its middle, the
+  arc broken around it.
+- **Radial.** The line runs from the center to the point on the curve with the arrow at that
+  point. The text lies on that ray at the projection of `line_position`: inside the curve the
+  line is broken around it; outside, the arrow points in and a line runs from the curve toward
+  the text.
+- **Diameter.** The line runs between the point on the curve and its reflection through the
+  center, with arrows at both, as a linear dimension line with the text at the center.
+- **Ordinate.** A leader runs from `extension_offset` past the feature perpendicular to the
+  measured axis to the height (or width) of `line_position`, then to `line_position`; the text
+  lies beyond its end. Ordinate dimensions have no arrows and ignore `rotation`.
+- **Arrowheads** (`annotation::arrowhead`, size s along the pointing direction): `closed_filled`
+  a filled triangle from the tip to two corners s back and s/6 aside; `closed` its outline;
+  `open` its two sides; `dot` a filled disc of radius s/4 centered on the tip; `tick` a stroke of
+  length s through the tip at 45° counterclockwise from the direction; `none` nothing.
+
+### Associativity (CORE-DRAFT-011)
+
+- A definition point with the key `none` is free: its `position`. Otherwise it references
+  `object`, an entity in the dimension's container, and through `path` the nested entities below
+  it when it is a block reference: each entry is a member of the definition the one before
+  inserts, and the point is mapped by the maps of the references on the way.
+- Keys: `start` and `end` of a curve (`start` is also a point entity's position and a block
+  reference's insertion point; a point entity also gives its position for `end`, `mid` and
+  `center`); `mid` the point at the middle of a bounded parameter range; `center` of a circle,
+  arc, ellipse or elliptical arc; `quadrant` the point `quadrant` quarter turns from the positive
+  x axis of a circle or arc, or at that eccentric angle of an ellipse; `parameter` the curve point
+  at `parameter` within the parameter range. Anything else fails with
+  `draft.dimension.reference_invalid`, as does a path whose entries are not nested that way.
+- The derived node `core.draft.dimension.resolved` of a dimension reads the referenced geometry
+  and gives the points and the measured value (`dimension::Resolution`); `dimension::resolve`
+  evaluates it from a snapshot. The display list reads the node, so editing referenced geometry
+  regenerates exactly the dimensions that reference it. The measured value is never stored.
+- `core.draft.dimension.create` stores the resolved point as the `position` of an associated
+  point and refuses an object outside the dimension's container.
+- The `object` and `member` references are cleared when their target is deleted (on-delete
+  `clear`). `core.draft.entity.delete` first stores the resolved points of every dimension that
+  refers to a deleted entity, so the dimension keeps its last geometry. A point with a key and a
+  cleared reference is disassociated and stays at its stored position; the document validator
+  reports a warning `draft.dimension.disassociated` (detail `id`) for each such dimension on every
+  commit. A deletion through another command keeps the positions the dimension last stored.
+
+### Chains (CORE-DRAFT-012)
+
+A chain is owned by the container of its first member and holds linear or aligned dimensions,
+each once (`draft.chain.member_invalid`). Spacing follows the first member: with its first point
+p, its line position l and the unit normal n of its dimension line (turned a quarter
+counterclockwise from its direction), member i of a baseline chain gets the line position
+l + i · spacing · n · sign((l − p) · n) (sign 1 for 0), so each member's dimension line lies one
+spacing farther from the points than the one before; every member of a continued chain gets l,
+so the dimension lines are collinear. The chain commands write the members and apply the rule.
+A member deleted elsewhere leaves the chain (on-delete `clear`) without a new spacing until the
+next chain command.
+
+### Leaders and multi-leaders (CORE-DRAFT-013)
+
+- A leader draws a polyline through its points (repeated points dropped), its arrow at the first
+  point pointing from the next distinct point, and, when the style's `landing` is set, a
+  horizontal landing of `landing_length` from the last point in the horizontal direction of the
+  last segment (right for a vertical one).
+- A multi-leader's landing runs `landing_length` (0 without `landing`) to `position` along
+  `direction`; every leader line runs through its points to the start of the landing with an
+  arrow at its first point. The content's near side lies `text_gap` beyond `position`.
+- Text content is the `text`, one paragraph per line, laid out at the style's text height and
+  anchored at its left (`right`) or right (`left`) edge and at its top, middle or bottom by
+  `attachment`. Block content inserts `block` at that point with `block_scale`, unrotated, like a
+  block reference. A tolerance frame draws each cell as a box of its text width and the text
+  height plus `text_gap` on every side, the cells of a row side by side and the rows downward,
+  with the cell text centered in its box; the frame's top, middle or bottom lies at the
+  landing's height by `attachment`.
+- A style's `content` is stored; the multi-leader's own `content` decides.
+
+### Annotation scaling (CORE-DRAFT-014)
+
+- An annotative dimension, leader or multi-leader stores one representation per supported scale
+  (paper length per model length). Its style sizes (text height, gaps, arrow size, extension
+  offset and overshoot, landing length, and the multi-leader's block scale) are paper sizes: the
+  representation of scale s divides them by s, so they measure their paper size in a viewport of
+  annotation scale s. A representation's `position` replaces the dimension's `line_position` or
+  the multi-leader's `position`, and its `text_position` the dimension's text position; a leader
+  uses neither. Adding a scale never changes existing representations.
+- A non-annotative object multiplies dimension style sizes by the style's `overall_scale` (leader
+  sizes are used as they are) and is shown at every scale.
+- The display list of an annotative object holds the primitives of every representation, each
+  with its scale in `Primitive::annotation_scale`. `viewport_list` keeps those whose scale equals
+  the viewport's `annotation_scale` exactly, and `space_list` those equal to
+  `DisplayOptions::annotation_scale` (default 1). An object without a representation for the
+  scale is not shown there; the nearest-scale display the architecture allows by setting is not
+  provided.
+
+### Display lists
+
+Dimensions, leaders and multi-leaders contribute to their `core.draft.display` node. Their
+strokes and fills carry the entity's appearance with a continuous linetype (source `Object`)
+and `part` set to the `annotation::Part` code: 0 dimension line, arc or leader line, 1 extension
+line, 2 arrowhead, 3 text, 4 tolerance frame box, 5 landing, 6 block content. Text is laid out
+by `text_layout::layout` with the text style the dimension or leader style names, centered (for
+dimensions) or anchored as above, and drawn like text entities. A dimension style with a child
+of the dimension's kind (`linear` for linear and aligned, `angular`, `radial`, `diameter`,
+`ordinate`, `arc_length`) uses the child's values. A list reads the object, its style, the
+child styles, the text style, the substitution table and, for a dimension, its resolution node,
+so a change of any of these regenerates it.
+
+### Commands
+
+| Command | Effect |
+|---|---|
+| `core.draft.dimension.create` | Creates a dimension in `owner` of `kind` from `points` (each a free `position`, or `object`, optional `path`, `key`, `quadrant`, `parameter`) with `line_position` and optional `rotation`, `text_override`, `text_position`, `style`, `layer`, `annotative`, `scales` |
+| `core.draft.chain.create` | Creates a `baseline` or `continued` chain of `members` with optional `spacing` (default 10) and spaces it |
+| `core.draft.chain.add`, `core.draft.chain.remove` | Adds `dimension` at the end of `chain`, or removes it, and spaces the chain again |
+| `core.draft.chain.respace` | Sets an optional new `spacing` and spaces the chain again |
+| `core.draft.leader.create` | Creates a leader in `owner` through `points` with optional `spline`, `arrow`, `style`, `layer`, `annotative`, `scales` |
+| `core.draft.multileader.create` | Creates a multi-leader in `owner` with `leaders`, `position` and optional `direction`, `content`, `text`, `block`, `block_scale`, `tolerance`, `attachment`, `style`, `layer`, `annotative`, `scales` |
+| `core.draft.annotation.scales` | Sets `annotative` of dimensions, leaders and multi-leaders, adds a representation for each scale of `add` they lack and removes those of `remove` |
+
+Other fields change through `core.draft.entity.modify`.
+
 ## Error codes
 
 The codes of every part of the crate:
@@ -606,3 +821,10 @@ The codes of every part of the crate:
 | `draft.text.too_large` | `limit_exceeded` | A text has more paragraphs, runs, tab stops or bytes than the limits allow |
 | `draft.text.stack_invalid` | `invalid_input` | A stacked run lacks a denominator, or an ordinary run has one |
 | `draft.text.tabs_invalid` | `invalid_input` | Tab stops are not finite, positive and ascending |
+| `draft.dimension.points_invalid` | `invalid_input` | A dimension does not have the number of definition points its kind needs |
+| `draft.dimension.degenerate` | `invalid_input` | The definition points of a dimension define no measurement |
+| `draft.dimension.reference_invalid` | `invalid_input` | A referenced object and sub-object key give no point |
+| `draft.dimension.disassociated` | `not_found` | A dimension lost referenced geometry and keeps its last points (a warning) |
+| `draft.chain.member_invalid` | `invalid_input` | A chain member is not a linear or aligned dimension, or is listed twice |
+| `draft.annotation.scale_invalid` | `invalid_input` | An annotation scale is not a positive number or is listed twice |
+| `draft.leader.points_invalid` | `invalid_input` | A leader or a leader line has too few points |

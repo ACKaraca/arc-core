@@ -89,7 +89,8 @@ pub mod viewport {
     pub const CLIP: usize = 7;
     /// `locked`: the view (`model`, `view_center`, `scale`, `rotation`) cannot change.
     pub const LOCKED: usize = 8;
-    /// `annotation_scale`: stored for annotation scaling, positive.
+    /// `annotation_scale`: the scale whose representations of annotative objects the viewport
+    /// shows, positive.
     pub const ANNOTATION_SCALE: usize = 9;
     /// `layer_overrides`: records of `layer`, `frozen`, `color`, `linetype`, `lineweight`,
     /// `transparency`.
@@ -313,6 +314,8 @@ pub struct View {
     pub clip: Polyline2,
     /// The layer overrides.
     pub overrides: Overrides,
+    /// The annotation scale: annotative objects show their representation for it.
+    pub annotation_scale: f64,
 }
 
 fn unit_of(snapshot: &Snapshot, space: Option<ObjectId>) -> SpaceUnit {
@@ -389,6 +392,7 @@ pub fn view(snapshot: &Snapshot, id: ObjectId) -> arc_base::Result<View> {
         transform,
         clip,
         overrides: overrides_of(values),
+        annotation_scale: f64_at(values, viewport::ANNOTATION_SCALE).unwrap_or(1.0),
     })
 }
 
