@@ -217,6 +217,12 @@ fn recover_bytes(dir: &TempDir, n: usize, bytes: &[u8], states: &[State]) {
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(directory.join("x.arcrec"), bytes).unwrap();
     let found = orphans(&root);
+    // A file that reads as a database without identification or tables is an interrupted
+    // creation: it is not listed and recovers nothing.
+    if found.is_empty() {
+        let _ = std::fs::remove_dir_all(&root);
+        return;
+    }
     assert_eq!(found.len(), 1);
     let options = RecoverOptions::new(&root, SessionId::from_u128(100 + n as u128));
     if let Ok(recovered) =
@@ -315,4 +321,16 @@ fn a_record_out_of_order_ends_the_replay_at_the_last_good_record() {
     let again = recover_one(&dir.path("app"), 6);
     assert_eq!(again.replayed, 3);
     assert!(again.stopped.is_none());
+}
+
+/// Regression: a process killed while creating its recovery database leaves a file without
+/// tables; the scan does not offer it for recovery.
+#[test]
+fn a_database_whose_creation_was_interrupted_is_not_listed() {
+    let dir = TempDir::new("rec-uninitialized");
+    let root = dir.path("app");
+    let folder = root.join(recovery::DIRECTORY).join("document");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join(format!("session.{}", recovery::EXTENSION)), b"").unwrap();
+    assert!(orphans(&root).is_empty());
 }

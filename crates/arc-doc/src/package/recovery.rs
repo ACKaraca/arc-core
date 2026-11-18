@@ -577,11 +577,13 @@ fn create(
     conn.query_row("PRAGMA journal_mode = WAL", [], |row| {
         row.get::<_, String>(0)
     })?;
-    conn.execute_batch(&format!(
-        "PRAGMA synchronous = FULL; PRAGMA application_id = {}; PRAGMA user_version = {FORMAT};",
+    conn.execute_batch("PRAGMA synchronous = FULL;")?;
+    let txn = conn.transaction()?;
+    // Inside the transaction, so that a kill leaves either an empty database or a complete one.
+    txn.execute_batch(&format!(
+        "PRAGMA application_id = {}; PRAGMA user_version = {FORMAT};",
         i64::from(APPLICATION_ID)
     ))?;
-    let txn = conn.transaction()?;
     txn.execute_batch(SCHEMA)?;
     {
         let mut meta = txn.prepare("INSERT INTO arc_meta (key, value) VALUES (?1, ?2)")?;
@@ -852,7 +854,8 @@ fn orphaned(database: &Path) -> bool {
 }
 
 /// Lists the recovery databases under `<root>/recovery` that no live process holds, in path
-/// order, at most `limits.record_count`. A database that cannot be read is listed with its
+/// order, at most `limits.record_count`. A database whose creation was interrupted before its
+/// tables existed is not listed. A database that cannot be read is listed with its
 /// [`Orphan::problem`]. Fails with `doc.recovery.unavailable` only when the directory exists and
 /// cannot be listed; a missing directory lists nothing.
 pub fn scan(root: &Path, limits: &Limits) -> Result<Vec<Orphan>> {
@@ -876,7 +879,7 @@ pub fn scan(root: &Path, limits: &Limits) -> Result<Vec<Orphan>> {
             if found.len() >= max {
                 break 'outer;
             }
-            if orphaned(&path) {
+            if orphaned(&path) && !uninitialized(&path) {
                 found.push(path);
             }
         }
@@ -886,6 +889,23 @@ pub fn scan(root: &Path, limits: &Limits) -> Result<Vec<Orphan>> {
         .into_iter()
         .map(|path| inspect(path, limits))
         .collect())
+}
+
+/// Whether the process died while creating the database: the file opens as a database with
+/// no application id and no tables. The identification, the tables and the first rows are written in one transaction before any
+/// commit is acknowledged, so such a file holds nothing to recover.
+fn uninitialized(path: &Path) -> bool {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    Connection::open_with_flags(path, flags)
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT (SELECT count(*) FROM sqlite_master) + application_id \
+                 FROM pragma_application_id",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .is_ok_and(|content| content == 0)
 }
 
 fn inspect(path: PathBuf, limits: &Limits) -> Orphan {
