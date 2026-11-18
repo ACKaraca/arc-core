@@ -195,6 +195,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-io-dxf"
+version = "0.1.0"
+dependencies = [
+ "arc-base",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "arc-mesh"
 version = "0.1.0"
 dependencies = [

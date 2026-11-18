@@ -16,3 +16,6 @@
 *.pdf binary
 *.ttf binary
 *.otf binary
+
+# Hand-written DXF test inputs keep their bytes, line endings included
+crates/arc-io-dxf/tests/data/*.dxf -text

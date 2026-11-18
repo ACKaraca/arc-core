@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ACKaraca/arc-core/blob/main/schemas/loss-report.schema.json",
+  "title": "Arc interchange loss report",
+  "description": "The report every arc-io-* import and export returns, also when nothing was lost. Fields are specified in docs/architecture/interchange.md, section Loss reports (CORE-IO-004).",
+  "type": "object",
+  "required": ["header", "summary", "items"],
+  "additionalProperties": false,
+  "properties": {
+    "header": { "$ref": "#/$defs/header" },
+    "summary": { "$ref": "#/$defs/summary" },
+    "items": { "type": "array", "items": { "$ref": "#/$defs/item" } }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "optional_text": { "type": ["string", "null"] },
+    "outcome": { "enum": ["mapped", "approximated", "preserved", "dropped", "failed"] },
+    "header": {
+      "type": "object",
+      "required": ["format", "version", "direction", "file_name", "file_hash", "application", "application_version", "time", "limits"],
+      "additionalProperties": false,
+      "properties": {
+        "format": { "type": "string" },
+        "version": { "type": "string" },
+        "direction": { "enum": ["import", "export"] },
+        "file_name": { "$ref": "#/$defs/optional_text" },
+        "file_hash": { "$ref": "#/$defs/optional_text" },
+        "application": { "$ref": "#/$defs/optional_text" },
+        "application_version": { "$ref": "#/$defs/optional_text" },
+        "time": { "$ref": "#/$defs/optional_text" },
+        "limits": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/limits" }] }
+      }
+    },
+    "limits": {
+      "description": "The limits profile of an import, as arc_base::Limits.",
+      "type": "object",
+      "required": ["input_bytes", "decompressed_bytes", "decompression_ratio", "record_count", "nesting_depth", "string_bytes", "array_length", "memory_bytes", "wall_clock_seconds"],
+      "additionalProperties": false,
+      "properties": {
+        "input_bytes": { "$ref": "#/$defs/count" },
+        "decompressed_bytes": { "$ref": "#/$defs/count" },
+        "decompression_ratio": { "$ref": "#/$defs/count" },
+        "record_count": { "$ref": "#/$defs/count" },
+        "nesting_depth": { "$ref": "#/$defs/count" },
+        "string_bytes": { "$ref": "#/$defs/count" },
+        "array_length": { "$ref": "#/$defs/count" },
+        "memory_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "wall_clock_seconds": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["mapped", "approximated", "preserved", "dropped", "failed"],
+      "additionalProperties": false,
+      "properties": {
+        "mapped": { "$ref": "#/$defs/count" },
+        "approximated": { "$ref": "#/$defs/count" },
+        "preserved": { "$ref": "#/$defs/count" },
+        "dropped": { "$ref": "#/$defs/count" },
+        "failed": { "$ref": "#/$defs/count" }
+      }
+    },
+    "item": {
+      "type": "object",
+      "required": ["outcome", "severity", "source_id", "record_kind", "object_id", "reason", "message_id", "arguments"],
+      "additionalProperties": false,
+      "properties": {
+        "outcome": { "$ref": "#/$defs/outcome" },
+        "severity": { "enum": ["info", "warning", "error"] },
+        "source_id": { "$ref": "#/$defs/optional_text" },
+        "record_kind": { "$ref": "#/$defs/optional_text" },
+        "object_id": { "$ref": "#/$defs/optional_text" },
+        "reason": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$" },
+        "message_id": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]*$" },
+        "arguments": {
+          "type": "object",
+          "required": ["count"],
+          "properties": { "count": { "$ref": "#/$defs/count" } },
+          "additionalProperties": { "type": ["integer", "string"] }
+        }
+      }
+    }
+  }
+}

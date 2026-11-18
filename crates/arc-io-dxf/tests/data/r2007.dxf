@@ -1,0 +1,50 @@
+  0
+SECTION
+  2
+HEADER
+  9
+$ACADVER
+  1
+AC1021
+  9
+$DWGCODEPAGE
+  3
+ANSI_1252
+  0
+ENDSEC
+  0
+SECTION
+  2
+ENTITIES
+  0
+MTEXT
+  5
+40
+100
+AcDbEntity
+  8
+Katman_Ç
+100
+AcDbMText
+ 10
+0.0
+ 20
+0.0
+ 30
+0.0
+ 40
+2.5
+ 41
+20.0
+ 71
+1
+  3
+Ağaç ışığı ve şöğüş:
+  1
+İstanbul \U+263A
+  7
+Standard
+  0
+ENDSEC
+  0
+EOF
