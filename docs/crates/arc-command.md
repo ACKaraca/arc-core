@@ -14,7 +14,7 @@ architecture is specified in [commands-and-automation.md](../architecture/comman
 - Command-line and inline-parameter parsing and completion.
 - The guarded executor integration with `arc-doc` transactions.
 - Macros and batch files.
-- The protocol server (feature `server`): framing, sessions, method families, errors, versioning.
+- The protocol server: framing, sessions, method families, errors, versioning.
 - The MCP adapter derived from the registry.
 - The headless runner and the shared CLI argument conventions.
 - Read and write roots and the escape-test suite.
@@ -320,6 +320,194 @@ group      = "(" , { group | char - ( "(" | ")" ) } , ")" ;
   `last()` exposes the command and parameters for a surface that prefers to re-enter the prompts.
   `cmd.repeat.none` when nothing completed yet.
 
+## Automation protocol and file roots as implemented
+
+The modules are `protocol` (CORE-CMD-019, CORE-CMD-021, CORE-CMD-022, CORE-CMD-027) and
+`roots` (CORE-CMD-032, CORE-CMD-033). The process that owns stdin and stdout
+(`<product>-cli serve --stdio`) and the shared CLI conventions (CORE-CMD-031) are later units;
+this layer serves a session over any byte stream pair.
+
+### Framing
+
+- `Server::serve` reads newline-delimited JSON-RPC 2.0 from a `BufRead` and writes to a `Write`,
+  one UTF-8 message per line terminated by `\n` (a `\r` before it is ignored; a last line
+  without a newline counts). Blank lines are ignored. Nothing but protocol messages is written
+  to the output; diagnostics go to the caller's `Log` (`level`, a stable event name such as
+  `protocol.panic`, and free-form detail), which the process maps to stderr.
+- A line is at most 64 MiB (`MAX_MESSAGE_BYTES`), and at most the configured
+  `max_message_bytes` and `limits.input_bytes`. A longer line is consumed to its newline
+  without being kept, so memory stays bounded and the next line is read normally; it is
+  answered with -32008 (`cmd.protocol.limit_exceeded`, detail `limit`: `message_bytes`) and
+  id `null`.
+- Nesting is counted before parsing; deeper than the session's `nesting_depth` plus 2 (the
+  message and its `params`) is -32008 with `limit` `nesting_depth`. Text that is not UTF-8 or
+  not JSON is -32700 (`cmd.protocol.parse`, detail `reason`: `utf8` or `json`), id `null`.
+- The architecture defines one message per line, so batches are not accepted: an array is
+  -32600 (`cmd.protocol.invalid_request`, `reason` `batch`) with id `null`, answered once.
+- A request has `jsonrpc: "2.0"`, a string `method`, an `id` that is a string or an integer,
+  and optional `params`, an object. The id is echoed as the same JSON value. A message whose
+  `id` has another type is -32600 (`reason` `id`) with id `null`; a request with a wrong
+  `jsonrpc` or no method is -32600 (`jsonrpc`, `method`) with its id; `params` that is an array
+  is -32602 (`by_position`); another `params` type is -32600 (`params`). A message without
+  `id` that is otherwise well formed is a notification: the client defines none, so it is
+  logged and ignored. Unknown members are ignored.
+- Every request with an id gets exactly one response. Responses and notifications are written
+  with sorted object keys, so identical inputs and seeds give identical bytes.
+
+### Session
+
+- One `serve` call is one session. Before `arc.initialize` succeeds every other method is
+  -32600 (`cmd.protocol.not_initialized`); a second `arc.initialize` is -32600
+  (`cmd.protocol.already_initialized`). A name that is not a protocol method is -32601
+  (`cmd.protocol.method_unknown`) in any state.
+- `arc.initialize` parameters: `clientName` (1 to 256 bytes), `protocolVersions`
+  (`{"min": "1.0", "max": "1.0"}`, each `major.minor` with one to five digits per part and
+  values up to 65535) and `permissions` (permission class names, default none). The chosen
+  version is the newest of `SUPPORTED_VERSIONS` (currently `1.0`) within `[min, max]`; none is
+  -32011 (`cmd.protocol.version_unsupported`) with the detail `supported`, the list of
+  supported versions. Granted classes are the requested ones the host's `ceiling` contains.
+  Malformed parameters are -32602 (`cmd.protocol.invalid_params`, detail `reason`).
+- The result: `protocolVersion`; `server` with `name`, `version` (the product's) and
+  `arcCore` (this crate's version); `permissions` (granted, sorted); `roots` with `read` and
+  `write` (canonical paths; read roots only with `file_read` or `file_write` granted, write
+  roots only with `file_write`); `capabilities` (`methods`, `batch: false`, `preview: false`,
+  `notifications: ["event.notify"]`); `limits` (`messageBytes`, `nestingDepth`, `queuedRuns`).
+  `arc.capabilities` returns the same `capabilities`; `arc.ping` returns `{}`.
+- `arc.shutdown` cancels running and waiting commands, waits until each is answered, answers
+  `null` and ends the session; nothing after it is read. The end of the input stream cancels
+  the same way. The documented methods of later capabilities (documents, queries, events,
+  selection, views) are -32001 (`cmd.protocol.method_unsupported`).
+
+### Command methods
+
+| Method | Parameters | Result |
+|---|---|---|
+| `command.list` | optional `document` | `commands`: the catalog entry of every command exposed on `automation`, in identifier order |
+| `command.describe` | `command` (identifier or alias), optional `document` | that command's entry |
+| `command.validate` | `command`, `params` (default `{}`) | `valid`, `violations` (pointer and kind, as in parameter validation) |
+| `command.run` | `document`, `command`, `params` (default `{}`), optional `expectedRevision`, `preview` (default `false`), `seed` (default 0) | `command` (identifier), `revision`, `value`, `diagnostics` |
+| `command.cancel` | `id`, the request id of a `command.run` | `cancelled`: whether a running or waiting run was found |
+
+- An entry is the catalog entry plus `permitted` (the granted classes cover the command's).
+  The architecture lists every exposed command, so commands the session may not run are listed
+  with `permitted: false` rather than hidden. With `document`, an entry also has `enabled` and,
+  when disabled, `disabledReason` (`messageId`, `arguments`); a predicate that panics counts as
+  disabled with `cmd-fault`. Labels are message identifiers; this layer does not localize.
+- A command not exposed on `automation` is -32001 (`cmd.not_exposed`), an unknown name -32001
+  (`cmd.unknown`), an unknown document -32005 (`cmd.document.unknown`). `command.validate`
+  checks limits and the schema without permissions or predicates.
+- `command.run` goes through `Invoker::invoke` on the session's surface `automation`, so
+  exposure, permissions, limits, schema and predicate are checked as for every surface.
+  `expectedRevision` is compared with the snapshot the command runs on, inside its job, so no
+  other change slips in between; a mismatch is -32006 (`cmd.revision.mismatch`, details
+  `expected`, `current`) and nothing runs. Preview runs are CORE-CMD-006, a later row: `preview:
+  true` is -32001 (`cmd.preview.unsupported`) and never runs the command.
+- Diagnostics have `severity` (`error` or `warning`), `code`, `category`, `messageId`,
+  `arguments`, `details` and `objects`. The result names no created identifiers yet; the
+  change summary arrives with previews.
+- **Concurrency**: the caller's thread reads and answers requests; one worker per session runs
+  `command.run` requests one at a time in arrival order; a writer thread owns the output. Every
+  other request, `command.cancel` included, is answered while a command runs. At most 64 runs
+  (`MAX_QUEUED_RUNS`) are running or waiting; more is -32008 (`limit` `queued_runs`), and a run
+  with the id of a pending run is -32600 (`duplicate_id`). Cancelling a waiting run answers it
+  with -32007 without running it; cancelling a running one rolls it back (-32007) when it
+  reaches a checkpoint. At most 256 written messages wait for the output; a client that stops
+  reading holds the session back rather than growing its memory. Without threads (WebAssembly) `serve` fails with `Unsupported`.
+- **Progress**: a run's progress, forwarded by the invoker only after 300 ms, is sent as the
+  notification `event.notify` with `params` `{"event": "command.progress", "requestId",
+  "fraction", "messageId"}` before the run's response. Subscriptions are CORE-CMD-024; until
+  then every session receives progress of its own runs.
+
+### Errors
+
+Every error object has `code` (below), `message` (the stable error code) and `data` with
+`code`, `category`, `messageId`, `arguments` and `details`. The detail `panic` is never sent
+(it is logged); `violations` is sent as an array of `{pointer, kind}`. Operating-system error
+text is never sent, and path errors carry no paths. A panic while handling a message is
+contained and answered with -32603 (`cmd.protocol.internal`); a panic inside a command is -32012
+(`cmd.fault`).
+
+| Protocol code | Errors |
+|---|---|
+| -32700 | `cmd.protocol.parse` |
+| -32600 | `cmd.protocol.invalid_request`, `cmd.protocol.not_initialized`, `cmd.protocol.already_initialized` |
+| -32601 | `cmd.protocol.method_unknown` |
+| -32602 | `cmd.protocol.invalid_params` |
+| -32603 | `cmd.protocol.internal` |
+| -32001 | `cmd.unknown`, `cmd.not_exposed`, category `unsupported` |
+| -32002 | category `invalid_input` |
+| -32003 | `cmd.disabled` |
+| -32004 | category `permission_denied` |
+| -32005 | category `not_found` |
+| -32006 | category `conflict` |
+| -32007 | category `cancelled` |
+| -32008 | category `limit_exceeded` |
+| -32009 | `cmd.path.outside_roots` |
+| -32010 | categories `io`, `corrupt_data`, `failed_operation` |
+| -32011 | `cmd.protocol.version_unsupported` |
+| -32012 | category `internal` |
+
+A code named in the table takes precedence over its category.
+
+### Published schemas
+
+`schemas/automation/requests.json` and `schemas/automation/responses.json` describe the
+messages of the methods above (JSON Schema draft 2020-12 with `$id`). The conformance tests
+validate every request they send and every message the server writes against them.
+
+### Read and write roots
+
+- `Roots::new(read, write)` canonicalizes each root, which must be an existing directory
+  (`cmd.roots.invalid`, detail `index`). Write roots are also read roots. A `Session` holds its
+  `Roots`; the default grants nothing, so a session without roots denies all file access.
+  Commands reach files only through `Context::open_read` (class `file_read` or `file_write`)
+  and `Context::create_write` (class `file_write`); a missing class is
+  `cmd.permission_denied`.
+- `open_read(path)` opens a regular file; `create_write(path)` creates a file in an existing
+  directory or truncates an existing one. The architecture lists no directory operations, so
+  there are none.
+- A path must be non-empty, absolute and free of NUL (`cmd.path.rejected`, `reason` `empty`,
+  `relative`, `nul`) and at most `MAX_PATH_LEN` long: 4095 bytes on Linux and Android, 32767
+  UTF-16 code units on Windows, 1023 bytes elsewhere (`cmd.path.too_long`, also when the system
+  reports a name too long). On Windows, a component with `:` (`alternate_data_stream`) or a
+  reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM0`-`COM9`,
+  `LPT0`-`LPT9` and the superscript digits 1 to 3 after `COM` and `LPT`, with any extension, ignoring case and trailing dots and spaces;
+  `device_name`) is rejected, a device-namespace or non-disk verbatim path is `device`, and a
+  UNC path is `network` unless a root is a UNC path. `create_write` needs a file name as the
+  last component (`not_a_file_name`); a path naming something other than a regular file is
+  `not_a_file`.
+- The canonical form must lie inside a root of the required kind, compared component by
+  component as the system returns it (`cmd.path.outside_roots`); no Unicode normalization or
+  case folding is applied, so a variant is accepted only when the system resolves it to an
+  object inside a root. A missing path is `cmd.path.not_found`; other system errors are
+  `cmd.path.io` with `reason` `denied`, `exists` or `other`.
+- The check is bound to the opened handle; data is read or written only through a handle that
+  passed it, and an existing file is truncated only after the check. Per platform:
+  - Linux and Android: the location of the opened handle is read back from `/proc/self/fd`
+    and must lie inside a root; a file is created with exclusive creation through the
+    verified handle of its parent directory (`/proc/self/fd/<dir>/<name>`), so a directory
+    swapped for a link after the check cannot redirect the creation. Without `/proc` the
+    generic Unix check applies.
+  - Other Unix systems: the device and inode of the handle must equal those of the path
+    resolved again after opening, which must still lie inside a root. A swap is detected and
+    the handle refused before any data moves; creating a new file while another process swaps
+    a directory inside a root for a link can leave an empty file outside the roots.
+  - Windows: after the path is resolved, every directory of the resolved path from the root
+    down to the parent is opened without following reparse points and without sharing delete
+    access, so none can be renamed, deleted or replaced by a junction meanwhile; a reparse
+    point found on that chain (a swap after resolution) is refused, and the file is opened
+    without following a reparse point. A new file is created with exclusive creation inside the
+    held chain; an existing name, a link among them, is resolved and opened like a read.
+  - WebAssembly: there is no file system; granting a root fails and every access is
+    `cmd.path.outside_roots`.
+  - Everywhere: opening a named pipe that another process places at a checked path can block.
+- The escape-test suite (`tests/escape.rs`) builds a tree with a canary file outside the
+  roots and tries absolute and relative symbolic links out, links in, link loops, `..` chains,
+  Unicode normalization and case variants, NUL, over-long paths, junctions on Windows (skipped
+  with a message when the system refuses to create them) and races (a thread swapping a file
+  or a directory for a link while another opens it repeatedly), asserting that the canary is
+  never read, written or joined by a new file.
+
 ### Error codes
 
 | Code | Category | Meaning |
@@ -356,6 +544,25 @@ group      = "(" , { group | char - ( "(" | ")" ) } , ")" ;
 | `cmd.line.too_many_values` | `invalid_input` | More positional values than positional parameters |
 | `cmd.line.value` | `invalid_input` | An inline value does not fit its parameter |
 | `cmd.repeat.none` | `not_found` | There is no completed command to repeat |
+| `cmd.protocol.parse` | `invalid_input` | A protocol message is not UTF-8 JSON |
+| `cmd.protocol.invalid_request` | `invalid_input` | A protocol message is not a valid request; the detail `reason` says why |
+| `cmd.protocol.method_unknown` | `not_found` | The protocol has no method of that name |
+| `cmd.protocol.method_unsupported` | `unsupported` | The protocol method belongs to a later capability |
+| `cmd.protocol.invalid_params` | `invalid_input` | The parameters of a protocol method are malformed; the detail `reason` says why |
+| `cmd.protocol.internal` | `internal` | A fault escaped while handling a protocol message |
+| `cmd.protocol.limit_exceeded` | `limit_exceeded` | A message or the number of queued runs exceeds a limit; the detail `limit` names it |
+| `cmd.protocol.not_initialized` | `conflict` | A request other than `arc.initialize` arrived first |
+| `cmd.protocol.already_initialized` | `conflict` | `arc.initialize` arrived in an initialized session |
+| `cmd.protocol.version_unsupported` | `unsupported` | No supported protocol version lies in the client's range; the detail `supported` lists them |
+| `cmd.document.unknown` | `not_found` | The session has no document of that identifier |
+| `cmd.revision.mismatch` | `conflict` | The expected revision is not the document's current revision |
+| `cmd.preview.unsupported` | `unsupported` | Preview runs are not provided yet |
+| `cmd.roots.invalid` | `invalid_input` | A root to grant is not an existing directory |
+| `cmd.path.rejected` | `invalid_input` | The path is not acceptable; the detail `reason` says why |
+| `cmd.path.too_long` | `limit_exceeded` | The path is longer than the platform allows |
+| `cmd.path.outside_roots` | `permission_denied` | The path lies outside the read or write roots |
+| `cmd.path.not_found` | `not_found` | The path names nothing |
+| `cmd.path.io` | `io` | The system refused the file operation; the detail `reason` says how |
 
 ## Capabilities
 

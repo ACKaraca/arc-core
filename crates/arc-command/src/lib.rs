@@ -18,7 +18,10 @@
 //! - command-line parsing with inline positional and named parameters, the canonical line form
 //!   and completion data (CORE-CMD-013, [`line`]);
 //! - the command-line driver that continues with prompts and repeats the last command
-//!   (CORE-CMD-013, CORE-CMD-015, [`command_line`]).
+//!   (CORE-CMD-013, CORE-CMD-015, [`command_line`]);
+//! - the Arc Automation Protocol server: framing, session negotiation, the command methods and
+//!   the error model (CORE-CMD-019, CORE-CMD-021, CORE-CMD-022, CORE-CMD-027, [`protocol`]);
+//! - read and write roots with the check bound to the opened handle (CORE-CMD-032, [`roots`]).
 //!
 //! A command is a typed Rust function over its parameters and a [`Context`]:
 //!
@@ -55,7 +58,9 @@ pub mod error;
 pub mod invoke;
 pub mod line;
 pub mod prompt;
+pub mod protocol;
 pub mod registry;
+pub mod roots;
 pub mod schema;
 pub mod spec;
 
@@ -72,6 +77,8 @@ pub use prompt::{
     Accept, Answer, Feedback, KeywordOption, Message, Point, PointDims, Prompt, PromptInput,
     PromptMachine, PromptSequence, PromptSession, PromptState, PromptStep, Step,
 };
+pub use protocol::{Log, LogLevel, NoLog, Server, ServerConfig};
 pub use registry::{CATALOG_FORMAT, CATALOG_VERSION, Registry, Resolved, Via};
+pub use roots::Roots;
 pub use schema::{Violation, ViolationKind, parse_params};
 pub use spec::{CommandSpec, Disabled, Permission, Predicate, Surface, UndoBehavior};

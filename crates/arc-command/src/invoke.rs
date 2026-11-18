@@ -47,6 +47,9 @@ pub struct Invocation {
     pub cancel: Cancel,
     /// Where progress goes.
     pub progress: Option<Arc<dyn ProgressSink>>,
+    /// The revision the document must be at when the command starts; otherwise the invocation
+    /// fails with `cmd.revision.mismatch` without running.
+    pub expected_revision: Option<u64>,
 }
 
 impl std::fmt::Debug for Invocation {
@@ -60,8 +63,8 @@ impl std::fmt::Debug for Invocation {
 }
 
 impl Invocation {
-    /// A call of `command` with `params`, no selection, seed 0, no group, a fresh token and no
-    /// progress sink.
+    /// A call of `command` with `params`, no selection, seed 0, no group, a fresh token, no
+    /// progress sink and no expected revision.
     #[must_use]
     pub fn new(command: impl Into<String>, params: Value) -> Self {
         Self {
@@ -72,6 +75,7 @@ impl Invocation {
             group: None,
             cancel: Cancel::new(),
             progress: None,
+            expected_revision: None,
         }
     }
 }
@@ -122,6 +126,20 @@ fn map_error(error: Error) -> Error {
         }
         _ if error.category() == Category::Cancelled => Error::new(codes::CANCELLED),
         _ => error,
+    }
+}
+
+/// `cmd.revision.mismatch` unless `snapshot` is at the expected revision.
+fn expect_revision(expected: Option<u64>, snapshot: &Snapshot) -> Result<()> {
+    match expected {
+        Some(expected) if expected != snapshot.revision() => {
+            let as_int = |r: u64| i64::try_from(r).unwrap_or(i64::MAX);
+            Err(Error::new(codes::REVISION_MISMATCH)
+                .with_arg("expected", as_int(expected))
+                .with_detail("expected", as_int(expected))
+                .with_detail("current", as_int(snapshot.revision())))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -230,6 +248,7 @@ fn run_on_snapshot(
         selection: &invocation.selection,
         session,
     };
+    expect_revision(invocation.expected_revision, snapshot)?;
     disabled(spec, &probe)?;
     let mut context = Context::new(
         None,
@@ -267,6 +286,7 @@ fn run_in_txn(
             selection: &invocation.selection,
             session: &session,
         };
+        expect_revision(invocation.expected_revision, &base)?;
         disabled(&spec, &probe)?;
         let meta = txn.meta_mut();
         meta.command = canonical;

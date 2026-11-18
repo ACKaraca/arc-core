@@ -212,36 +212,39 @@ impl Registry {
         let commands: Vec<Value> = self
             .iter()
             .filter(|spec| !spec.exposure().is_empty())
-            .map(|spec| {
-                let aliases: Vec<&String> = self
-                    .deprecated
-                    .iter()
-                    .filter(|(_, id)| id.as_str() == spec.id())
-                    .map(|(alias, _)| alias)
-                    .collect();
-                json!({
-                    "id": spec.id(),
-                    "label": spec.label(),
-                    "description": spec.description(),
-                    "category": spec.category(),
-                    "keywords": spec.keywords(),
-                    "params": spec.params_schema(),
-                    "result": spec.result_schema(),
-                    "examples": spec.examples(),
-                    "permissions": spec.permissions(),
-                    "exposure": spec.exposure(),
-                    "undo": spec.undo(),
-                    "coalesce": spec.coalesce(),
-                    "transparent": spec.is_transparent(),
-                    "prompt": spec.prompt().is_some(),
-                    "deprecated_aliases": aliases,
-                })
-            })
+            .map(|spec| self.entry(spec))
             .collect();
         json!({
             "format": CATALOG_FORMAT,
             "version": CATALOG_VERSION,
             "commands": commands,
+        })
+    }
+
+    /// The catalog entry of `spec`.
+    pub(crate) fn entry(&self, spec: &CommandSpec) -> Value {
+        let aliases: Vec<&String> = self
+            .deprecated
+            .iter()
+            .filter(|(_, id)| id.as_str() == spec.id())
+            .map(|(alias, _)| alias)
+            .collect();
+        json!({
+            "id": spec.id(),
+            "label": spec.label(),
+            "description": spec.description(),
+            "category": spec.category(),
+            "keywords": spec.keywords(),
+            "params": spec.params_schema(),
+            "result": spec.result_schema(),
+            "examples": spec.examples(),
+            "permissions": spec.permissions(),
+            "exposure": spec.exposure(),
+            "undo": spec.undo(),
+            "coalesce": spec.coalesce(),
+            "transparent": spec.is_transparent(),
+            "prompt": spec.prompt().is_some(),
+            "deprecated_aliases": aliases,
         })
     }
 

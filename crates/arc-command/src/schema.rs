@@ -118,17 +118,9 @@ fn limit(reason: &'static str) -> Error {
     Error::new(codes::PARAMS_LIMIT_EXCEEDED).with_detail("limit", reason)
 }
 
-/// Parses parameter text after checking its size and nesting depth against `limits`
-/// (`input_bytes`, `nesting_depth`), then checks the parsed value with [`check_limits`].
-///
-/// # Errors
-///
-/// `cmd.params.limit_exceeded` or `cmd.params.malformed`.
-pub fn parse_params(text: &str, limits: &Limits) -> Result<Value> {
-    if u64::try_from(text.len()).unwrap_or(u64::MAX) > limits.input_bytes {
-        return Err(limit("input_bytes"));
-    }
-    // Nesting depth before parsing, so a deep text never reaches the parser.
+/// The deepest nesting of arrays and objects in JSON `text`, counted without parsing (brackets
+/// inside strings do not count), so a deep text can be refused before it reaches a parser.
+pub(crate) fn text_depth(text: &str) -> u32 {
     let (mut depth, mut max, mut in_string, mut escaped) = (0_u32, 0_u32, false, false);
     for byte in text.bytes() {
         if in_string {
@@ -150,6 +142,21 @@ pub fn parse_params(text: &str, limits: &Limits) -> Result<Value> {
             _ => {}
         }
     }
+    max
+}
+
+/// Parses parameter text after checking its size and nesting depth against `limits`
+/// (`input_bytes`, `nesting_depth`), then checks the parsed value with [`check_limits`].
+///
+/// # Errors
+///
+/// `cmd.params.limit_exceeded` or `cmd.params.malformed`.
+pub fn parse_params(text: &str, limits: &Limits) -> Result<Value> {
+    if u64::try_from(text.len()).unwrap_or(u64::MAX) > limits.input_bytes {
+        return Err(limit("input_bytes"));
+    }
+    // Nesting depth before parsing, so a deep text never reaches the parser.
+    let max = text_depth(text);
     if max > limits.nesting_depth {
         return Err(limit("nesting_depth"));
     }

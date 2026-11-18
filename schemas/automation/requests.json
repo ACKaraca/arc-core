@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:arc:automation:1.0:requests",
+  "title": "Arc Automation Protocol 1.0: requests",
+  "description": "A request line of the methods provided by arc-command; `params` follows the definition named after the method.",
+  "type": "object",
+  "properties": {
+    "jsonrpc": {
+      "const": "2.0"
+    },
+    "id": {
+      "type": [
+        "string",
+        "integer"
+      ]
+    },
+    "method": {
+      "type": "string"
+    },
+    "params": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "jsonrpc",
+    "method"
+  ],
+  "$defs": {
+    "arc.initialize": {
+      "type": "object",
+      "properties": {
+        "clientName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "protocolVersions": {
+          "type": "object",
+          "properties": {
+            "min": {
+              "type": "string"
+            },
+            "max": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ],
+          "additionalProperties": true
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "read",
+              "edit",
+              "file_read",
+              "file_write",
+              "network",
+              "process",
+              "settings"
+            ]
+          }
+        }
+      },
+      "required": [
+        "clientName",
+        "protocolVersions"
+      ],
+      "additionalProperties": true
+    },
+    "arc.shutdown": {
+      "type": "object"
+    },
+    "arc.ping": {
+      "type": "object"
+    },
+    "arc.capabilities": {
+      "type": "object"
+    },
+    "command.list": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": true
+    },
+    "command.describe": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "document": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "additionalProperties": true
+    },
+    "command.validate": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "params": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "additionalProperties": true
+    },
+    "command.run": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "params": {
+          "type": "object"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "document",
+        "command"
+      ],
+      "additionalProperties": true
+    },
+    "command.cancel": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

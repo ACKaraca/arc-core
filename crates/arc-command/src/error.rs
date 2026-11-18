@@ -202,6 +202,121 @@ pub mod codes {
         message_id: "cmd-repeat-none",
     };
 
+    /// A protocol message is not UTF-8 JSON.
+    pub const PROTOCOL_PARSE: ErrorCode = ErrorCode {
+        code: "cmd.protocol.parse",
+        category: Category::InvalidInput,
+        message_id: "cmd-protocol-parse",
+    };
+    /// A protocol message is not a valid request; the detail `reason` says why.
+    pub const PROTOCOL_INVALID_REQUEST: ErrorCode = ErrorCode {
+        code: "cmd.protocol.invalid_request",
+        category: Category::InvalidInput,
+        message_id: "cmd-protocol-invalid-request",
+    };
+    /// The protocol has no method of that name.
+    pub const PROTOCOL_METHOD_UNKNOWN: ErrorCode = ErrorCode {
+        code: "cmd.protocol.method_unknown",
+        category: Category::NotFound,
+        message_id: "cmd-protocol-method-unknown",
+    };
+    /// The protocol method exists but this server does not provide it.
+    pub const PROTOCOL_METHOD_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "cmd.protocol.method_unsupported",
+        category: Category::Unsupported,
+        message_id: "cmd-protocol-method-unsupported",
+    };
+    /// The parameters of a protocol method are malformed; the detail `reason` says why.
+    pub const PROTOCOL_INVALID_PARAMS: ErrorCode = ErrorCode {
+        code: "cmd.protocol.invalid_params",
+        category: Category::InvalidInput,
+        message_id: "cmd-protocol-invalid-params",
+    };
+    /// A fault escaped while handling a protocol message.
+    pub const PROTOCOL_INTERNAL: ErrorCode = ErrorCode {
+        code: "cmd.protocol.internal",
+        category: Category::Internal,
+        message_id: "cmd-protocol-internal",
+    };
+    /// A protocol message or the number of queued runs exceeds a limit; the detail `limit` names it.
+    pub const PROTOCOL_LIMIT_EXCEEDED: ErrorCode = ErrorCode {
+        code: "cmd.protocol.limit_exceeded",
+        category: Category::LimitExceeded,
+        message_id: "cmd-protocol-limit-exceeded",
+    };
+    /// A request other than `arc.initialize` arrived before the session was initialized.
+    pub const PROTOCOL_NOT_INITIALIZED: ErrorCode = ErrorCode {
+        code: "cmd.protocol.not_initialized",
+        category: Category::Conflict,
+        message_id: "cmd-protocol-not-initialized",
+    };
+    /// `arc.initialize` arrived in an initialized session.
+    pub const PROTOCOL_ALREADY_INITIALIZED: ErrorCode = ErrorCode {
+        code: "cmd.protocol.already_initialized",
+        category: Category::Conflict,
+        message_id: "cmd-protocol-already-initialized",
+    };
+    /// No protocol version the server supports lies in the client's range.
+    pub const PROTOCOL_VERSION_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "cmd.protocol.version_unsupported",
+        category: Category::Unsupported,
+        message_id: "cmd-protocol-version-unsupported",
+    };
+    /// The session has no document of that identifier.
+    pub const DOCUMENT_UNKNOWN: ErrorCode = ErrorCode {
+        code: "cmd.document.unknown",
+        category: Category::NotFound,
+        message_id: "cmd-document-unknown",
+    };
+    /// The expected revision is not the document's current revision.
+    pub const REVISION_MISMATCH: ErrorCode = ErrorCode {
+        code: "cmd.revision.mismatch",
+        category: Category::Conflict,
+        message_id: "cmd-revision-mismatch",
+    };
+    /// Preview runs are not provided by this implementation.
+    pub const PREVIEW_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "cmd.preview.unsupported",
+        category: Category::Unsupported,
+        message_id: "cmd-preview-unsupported",
+    };
+    /// A root to grant is not an existing directory.
+    pub const ROOTS_INVALID: ErrorCode = ErrorCode {
+        code: "cmd.roots.invalid",
+        category: Category::InvalidInput,
+        message_id: "cmd-roots-invalid",
+    };
+    /// The path is not acceptable; the detail `reason` says why.
+    pub const PATH_REJECTED: ErrorCode = ErrorCode {
+        code: "cmd.path.rejected",
+        category: Category::InvalidInput,
+        message_id: "cmd-path-rejected",
+    };
+    /// The path is longer than the platform allows.
+    pub const PATH_TOO_LONG: ErrorCode = ErrorCode {
+        code: "cmd.path.too_long",
+        category: Category::LimitExceeded,
+        message_id: "cmd-path-too-long",
+    };
+    /// The path lies outside the read or write roots of the session.
+    pub const PATH_OUTSIDE_ROOTS: ErrorCode = ErrorCode {
+        code: "cmd.path.outside_roots",
+        category: Category::PermissionDenied,
+        message_id: "cmd-path-outside-roots",
+    };
+    /// The path names nothing.
+    pub const PATH_NOT_FOUND: ErrorCode = ErrorCode {
+        code: "cmd.path.not_found",
+        category: Category::NotFound,
+        message_id: "cmd-path-not-found",
+    };
+    /// The operating system refused the file operation; the detail `reason` says how.
+    pub const PATH_IO: ErrorCode = ErrorCode {
+        code: "cmd.path.io",
+        category: Category::Io,
+        message_id: "cmd-path-io",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         UNKNOWN,
@@ -236,6 +351,25 @@ pub mod codes {
         LINE_TOO_MANY_VALUES,
         LINE_VALUE,
         REPEAT_NONE,
+        PROTOCOL_PARSE,
+        PROTOCOL_INVALID_REQUEST,
+        PROTOCOL_METHOD_UNKNOWN,
+        PROTOCOL_METHOD_UNSUPPORTED,
+        PROTOCOL_INVALID_PARAMS,
+        PROTOCOL_INTERNAL,
+        PROTOCOL_LIMIT_EXCEEDED,
+        PROTOCOL_NOT_INITIALIZED,
+        PROTOCOL_ALREADY_INITIALIZED,
+        PROTOCOL_VERSION_UNSUPPORTED,
+        DOCUMENT_UNKNOWN,
+        REVISION_MISMATCH,
+        PREVIEW_UNSUPPORTED,
+        ROOTS_INVALID,
+        PATH_REJECTED,
+        PATH_TOO_LONG,
+        PATH_OUTSIDE_ROOTS,
+        PATH_NOT_FOUND,
+        PATH_IO,
     ];
 }
 

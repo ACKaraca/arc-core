@@ -158,12 +158,18 @@ fn run_schemas() -> Result<(), Failure> {
     }
     let mut problems = Vec::new();
     let mut checked = 0;
-    for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
-        let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
-        if path.extension().is_some_and(|e| e == "json") {
-            let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            checked += 1;
-            problems.extend(schemas::check(&path.display().to_string(), &text));
+    let mut pending = vec![dir];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|e| e == "json") {
+                let text =
+                    fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                checked += 1;
+                problems.extend(schemas::check(&path.display().to_string(), &text));
+            }
         }
     }
     report("schemas", checked, "schema(s) are well formed", problems)

@@ -17,6 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::codes;
+use crate::roots::Roots;
 use crate::spec::{Permission, Surface};
 
 /// Progress is forwarded only once a command has run this long (CORE-CMD-008).
@@ -59,6 +60,9 @@ pub struct Session {
     pub clock: Arc<dyn Clock>,
     /// The context units: a bare number in a quantity text takes the unit of its dimension.
     pub units: Vec<Unit>,
+    /// The file roots; commands reach files only through [`Context::open_read`] and
+    /// [`Context::create_write`].
+    pub roots: Roots,
 }
 
 impl fmt::Debug for Session {
@@ -72,7 +76,7 @@ impl fmt::Debug for Session {
 
 impl Session {
     /// A session on `surface` with the `granted` classes, default limits, a clock standing at
-    /// 0 and no context units.
+    /// 0, no context units and no file roots.
     #[must_use]
     pub fn new(surface: Surface, granted: impl IntoIterator<Item = Permission>) -> Self {
         Self {
@@ -81,6 +85,7 @@ impl Session {
             limits: Limits::DEFAULT,
             clock: Arc::new(FixedClock(0)),
             units: Vec::new(),
+            roots: Roots::none(),
         }
     }
 }
@@ -281,6 +286,35 @@ impl<'a> Context<'a> {
             };
             sink.progress(fraction, message_id);
         }
+    }
+
+    /// Opens the regular file at `path` for reading, inside the session's roots
+    /// ([`Roots::open_read`]); the session needs the class `file_read` or `file_write`.
+    ///
+    /// # Errors
+    ///
+    /// `cmd.permission_denied` (detail `permission`) and the errors of [`Roots::open_read`].
+    pub fn open_read(&self, path: &std::path::Path) -> Result<std::fs::File> {
+        let granted = &self.session.permissions;
+        if !granted.contains(&Permission::FileRead) && !granted.contains(&Permission::FileWrite) {
+            return Err(Error::new(codes::PERMISSION_DENIED).with_detail("permission", "file_read"));
+        }
+        self.session.roots.open_read(path)
+    }
+
+    /// Creates or truncates the file at `path` for writing, inside the session's write roots
+    /// ([`Roots::create_write`]); the session needs the class `file_write`.
+    ///
+    /// # Errors
+    ///
+    /// `cmd.permission_denied` (detail `permission`) and the errors of [`Roots::create_write`].
+    pub fn create_write(&self, path: &std::path::Path) -> Result<std::fs::File> {
+        if !self.session.permissions.contains(&Permission::FileWrite) {
+            return Err(
+                Error::new(codes::PERMISSION_DENIED).with_detail("permission", "file_write")
+            );
+        }
+        self.session.roots.create_write(path)
     }
 
     /// The quantity of `param` in `dimension`. A number is taken in SI base units; a text is

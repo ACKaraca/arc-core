@@ -1,0 +1,586 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:arc:automation:1.0:responses",
+  "title": "Arc Automation Protocol 1.0: server messages",
+  "description": "Every line a server built on arc-command writes: a success response, an error response or a notification. A result follows the definition named after the request's method.",
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "result": true
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": [
+            "string",
+            "integer",
+            "null"
+          ]
+        },
+        "error": {
+          "$ref": "#/$defs/errorObject"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "error"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "method": {
+          "const": "event.notify"
+        },
+        "params": {
+          "$ref": "#/$defs/progress"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "errorObject": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            -32700,
+            -32600,
+            -32601,
+            -32602,
+            -32603,
+            -32001,
+            -32002,
+            -32003,
+            -32004,
+            -32005,
+            -32006,
+            -32007,
+            -32008,
+            -32009,
+            -32010,
+            -32011,
+            -32012
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "data": {
+          "$ref": "#/$defs/errorData"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "errorData": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "category": {
+          "enum": [
+            "invalid_input",
+            "not_found",
+            "conflict",
+            "unsupported",
+            "limit_exceeded",
+            "permission_denied",
+            "io",
+            "corrupt_data",
+            "cancelled",
+            "failed_operation",
+            "internal"
+          ]
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "arguments": {
+          "type": "object"
+        },
+        "details": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "code",
+        "category",
+        "messageId",
+        "arguments",
+        "details"
+      ],
+      "additionalProperties": false
+    },
+    "progress": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "const": "command.progress"
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "messageId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "event",
+        "requestId",
+        "fraction",
+        "messageId"
+      ],
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "methods": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "batch": {
+          "type": "boolean"
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "notifications": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "methods",
+        "batch",
+        "preview",
+        "notifications"
+      ],
+      "additionalProperties": false
+    },
+    "commandEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "keywords": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "params": {
+          "type": "object"
+        },
+        "result": {
+          "type": [
+            "object",
+            "boolean"
+          ]
+        },
+        "examples": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "read",
+              "edit",
+              "file_read",
+              "file_write",
+              "network",
+              "process",
+              "settings"
+            ]
+          }
+        },
+        "exposure": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "ui",
+              "command_line",
+              "automation",
+              "mcp",
+              "plugin"
+            ]
+          }
+        },
+        "undo": {
+          "enum": [
+            "undoable",
+            "not_undoable",
+            "undo_control"
+          ]
+        },
+        "coalesce": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transparent": {
+          "type": "boolean"
+        },
+        "prompt": {
+          "type": "boolean"
+        },
+        "deprecated_aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "permitted": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "disabledReason": {
+          "type": "object",
+          "properties": {
+            "messageId": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "messageId",
+            "arguments"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "description",
+        "category",
+        "keywords",
+        "params",
+        "result",
+        "examples",
+        "permissions",
+        "exposure",
+        "undo",
+        "coalesce",
+        "transparent",
+        "prompt",
+        "deprecated_aliases",
+        "permitted"
+      ],
+      "additionalProperties": false
+    },
+    "arc.initialize": {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "string"
+        },
+        "server": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            },
+            "arcCore": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "version",
+            "arcCore"
+          ],
+          "additionalProperties": false
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "read",
+              "edit",
+              "file_read",
+              "file_write",
+              "network",
+              "process",
+              "settings"
+            ]
+          }
+        },
+        "roots": {
+          "type": "object",
+          "properties": {
+            "read": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "write": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "read",
+            "write"
+          ],
+          "additionalProperties": false
+        },
+        "capabilities": {
+          "$ref": "#/$defs/capabilities"
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "messageBytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "nestingDepth": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "queuedRuns": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "messageBytes",
+            "nestingDepth",
+            "queuedRuns"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "protocolVersion",
+        "server",
+        "permissions",
+        "roots",
+        "capabilities",
+        "limits"
+      ],
+      "additionalProperties": false
+    },
+    "arc.shutdown": {
+      "type": "null"
+    },
+    "arc.ping": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "arc.capabilities": {
+      "$ref": "#/$defs/capabilities"
+    },
+    "command.list": {
+      "type": "object",
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/commandEntry"
+          }
+        }
+      },
+      "required": [
+        "commands"
+      ],
+      "additionalProperties": false
+    },
+    "command.describe": {
+      "$ref": "#/$defs/commandEntry"
+    },
+    "command.validate": {
+      "type": "object",
+      "properties": {
+        "valid": {
+          "type": "boolean"
+        },
+        "violations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pointer": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "pointer",
+              "kind"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "valid",
+        "violations"
+      ],
+      "additionalProperties": false
+    },
+    "command.run": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "value": true,
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/diagnostic"
+          }
+        }
+      },
+      "required": [
+        "command",
+        "revision",
+        "value",
+        "diagnostics"
+      ],
+      "additionalProperties": false
+    },
+    "command.cancel": {
+      "type": "object",
+      "properties": {
+        "cancelled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "cancelled"
+      ],
+      "additionalProperties": false
+    },
+    "diagnostic": {
+      "type": "object",
+      "properties": {
+        "severity": {
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "code": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "arguments": {
+          "type": "object"
+        },
+        "details": {
+          "type": "object"
+        },
+        "objects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "severity",
+        "code",
+        "category",
+        "messageId",
+        "arguments",
+        "details",
+        "objects"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
