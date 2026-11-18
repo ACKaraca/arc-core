@@ -59,3 +59,6 @@ cmd-path-outside-roots = The path is outside the allowed folders.
 cmd-path-not-found = The file or folder does not exist.
 cmd-path-io = The file cannot be accessed.
 cmd-cli-usage = The command-line arguments are not valid.
+cmd-macro-malformed = Line { $line } of the macro is not valid.
+cmd-macro-version-unsupported = The macro format version { $version } is not supported.
+cmd-macro-limit-exceeded = The macro exceeds a size or count limit.

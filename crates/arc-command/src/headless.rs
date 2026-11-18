@@ -22,13 +22,14 @@ use arc_doc::package::{self, LockOwner, Mode, Package};
 use arc_doc::{Document, DocumentConfig, LoadOptions, TypeRegistry};
 use serde_json::{Map, Value, json};
 
-use crate::context::Clock;
+use crate::context::{Clock, Session};
 use crate::error::codes;
+use crate::macros::{self, MacroStep, Recorder, parse_macro};
 use crate::protocol::{Log, LogLevel, Server, ServerConfig, errors};
 use crate::registry::Registry;
 use crate::roots::Roots;
 use crate::schema::parse_params;
-use crate::spec::Permission;
+use crate::spec::{Permission, Surface};
 
 /// The exit code of a runner invocation; the numbers follow the headless CLI conventions of
 /// the automation architecture.
@@ -143,14 +144,18 @@ usage: <product>-cli <subcommand> [flags]
   commands                                      list the commands (JSON)
   describe <command>                            describe one command
   validate-params <command> [--params P]        validate parameters without running
-  run <file> --command <id> [--params P] [--seed N] [--save]
+  run <file> --command <id> [--params P] [--seed N] [--save] [--record M]
                                                 run one command against a package
+  play <file> --macro M [--save]                play a macro or command list on a package
+  batch <file>... --macro M [--save]            play it on each package, one result per file
   inspect <file> [--check]                      dump a package (and check it)
   validate <file>                               check a package
-  serve --stdio [<file>...] [--save]            serve the automation protocol on stdin/stdout
+  serve --stdio [<file>...] [--save] [--record M]
+                                                serve the automation protocol on stdin/stdout
   help                                          this text
 flags: --read-root <dir>, --write-root <dir> (repeatable), --allow-edit, --allow-network,
-       --allow-process, --json (output is always JSON); P is JSON text or @<file>
+       --allow-process, --json (output is always JSON); P is JSON text or @<file>;
+       M is a macro file path inside the read roots (--macro) or write roots (--record)
 ";
 
 /// The subcommands.
@@ -163,6 +168,8 @@ enum Sub {
     Inspect,
     Validate,
     Serve,
+    Play,
+    Batch,
     Help,
 }
 
@@ -177,6 +184,8 @@ struct Options {
     save: bool,
     check: bool,
     stdio: bool,
+    macro_path: Option<PathBuf>,
+    record: Option<PathBuf>,
     read_roots: Vec<PathBuf>,
     write_roots: Vec<PathBuf>,
     allow: BTreeSet<Permission>,
@@ -244,6 +253,8 @@ fn parse(args: Vec<OsString>) -> Result<Options, Failure> {
         Some("inspect") => Sub::Inspect,
         Some("validate") => Sub::Validate,
         Some("serve") => Sub::Serve,
+        Some("play") => Sub::Play,
+        Some("batch") => Sub::Batch,
         Some("help" | "--help" | "-h") => Sub::Help,
         Some(_) => return Err(usage("unknown_subcommand")),
         None => return Err(usage("no_subcommand")),
@@ -257,6 +268,8 @@ fn parse(args: Vec<OsString>) -> Result<Options, Failure> {
         save: false,
         check: false,
         stdio: false,
+        macro_path: None,
+        record: None,
         read_roots: Vec::new(),
         write_roots: Vec::new(),
         allow: BTreeSet::new(),
@@ -329,6 +342,16 @@ fn flag_into(
             once(o.params.is_some())?;
             o.params = Some(value()?);
         }
+        "--macro" => {
+            allowed(&[Sub::Play, Sub::Batch])?;
+            once(o.macro_path.is_some())?;
+            o.macro_path = Some(PathBuf::from(value()?));
+        }
+        "--record" => {
+            allowed(&[Sub::Run, Sub::Serve])?;
+            once(o.record.is_some())?;
+            o.record = Some(PathBuf::from(value()?));
+        }
         "--seed" => {
             allowed(&[Sub::Run])?;
             once(o.seed.is_some())?;
@@ -355,7 +378,7 @@ fn flag_into(
                 }
                 "--json" => {}
                 "--save" => {
-                    allowed(&[Sub::Run, Sub::Serve])?;
+                    allowed(&[Sub::Run, Sub::Serve, Sub::Play, Sub::Batch])?;
                     o.save = true;
                 }
                 "--check" => {
@@ -378,7 +401,13 @@ fn check_arity(o: &Options) -> Result<(), Failure> {
     let count = o.positional.len();
     let fits = match o.sub {
         Sub::Commands => count == 0,
-        Sub::Describe | Sub::ValidateParams | Sub::Run | Sub::Inspect | Sub::Validate => count == 1,
+        Sub::Describe
+        | Sub::ValidateParams
+        | Sub::Run
+        | Sub::Inspect
+        | Sub::Validate
+        | Sub::Play => count == 1,
+        Sub::Batch => count >= 1,
         Sub::Serve | Sub::Help => true,
     };
     if !fits {
@@ -389,6 +418,13 @@ fn check_arity(o: &Options) -> Result<(), Failure> {
     }
     if o.sub == Sub::Serve && !o.stdio {
         return Err(usage("missing_flag:--stdio"));
+    }
+    if matches!(o.sub, Sub::Play | Sub::Batch) && o.macro_path.is_none() {
+        return Err(usage("missing_flag:--macro"));
+    }
+    // A macro names no document, so a recording covers one.
+    if o.record.is_some() && count > 1 {
+        return Err(usage("record_documents"));
     }
     Ok(())
 }
@@ -429,10 +465,18 @@ where
     }
     let limits = Limits::DEFAULT;
     let config = config(&o, product)?;
+    if o.sub == Sub::Batch {
+        return batch(&o, product, &config, &limits, &mut stdout);
+    }
+    // The record file is created first, so a path outside the write roots fails before
+    // anything runs.
+    let record_file = o.record.as_deref().map(|p| config.roots.create_write(p));
+    let record_file = record_file.transpose()?;
+    let recorder = Recorder::new(&product.name, &product.version, &limits);
     let log = StderrLog(Mutex::new(stderr));
     let mut documents = BTreeMap::new();
     let mut packages = Vec::new();
-    if matches!(o.sub, Sub::Run | Sub::Serve) {
+    if matches!(o.sub, Sub::Run | Sub::Serve | Sub::Play) {
         for path in &o.positional {
             let path = Path::new(path);
             let key = path
@@ -447,7 +491,11 @@ where
             packages.push(package);
         }
     }
-    let server = Server::new(&product.registry, &documents, config, &log);
+    let session = session(&config, &limits);
+    let mut server = Server::new(&product.registry, &documents, config, &log);
+    if record_file.is_some() {
+        server = server.with_recorder(&recorder);
+    }
     let call = |method: &str, params: Value| server.call(method, params).map_err(failure);
     let name = || -> Result<String, Failure> {
         o.positional
@@ -484,17 +532,25 @@ where
                 json!({"document": document, "command": o.command, "params": params,
                        "seed": o.seed.unwrap_or(0)}),
             )?;
-            if o.save {
-                save(&mut packages, &documents)?;
-            }
+            save_if(o.save, &mut packages, &documents)?;
+            write_record(record_file, &recorder)?;
+            (result, Exit::Success)
+        }
+        Sub::Play => {
+            let steps = read_macro(&session, o.macro_path.as_deref(), &limits)?;
+            let document = documents
+                .values()
+                .next()
+                .ok_or_else(|| usage("arguments"))?;
+            let result = play_on(product, document, &session, &steps)?;
+            save_if(o.save, &mut packages, &documents)?;
             (result, Exit::Success)
         }
         Sub::Inspect | Sub::Validate => check(o.sub, o.check, file(), &limits)?,
-        Sub::Serve | Sub::Help => {
+        Sub::Serve | Sub::Batch | Sub::Help => {
             server.serve(stdin, &mut stdout).map_err(io_failure)?;
-            if o.save {
-                save(&mut packages, &documents)?;
-            }
+            save_if(o.save, &mut packages, &documents)?;
+            write_record(record_file, &recorder)?;
             return Ok(Exit::Success);
         }
     };
@@ -519,6 +575,115 @@ fn config(o: &Options, product: &Product) -> Result<ServerConfig, Failure> {
     config.roots = Roots::new(&o.read_roots, &o.write_roots)?;
     config.clock = Arc::clone(&product.clock);
     Ok(config)
+}
+
+/// A command session granted the whole ceiling of `config`, as [`Server::call`] uses.
+fn session(config: &ServerConfig, limits: &Limits) -> Session {
+    Session {
+        surface: Surface::Automation,
+        permissions: config.ceiling.clone(),
+        limits: *limits,
+        clock: Arc::clone(&config.clock),
+        units: config.units.clone(),
+        roots: config.roots.clone(),
+    }
+}
+
+/// Writes the recorded macro to the record file, if there is one.
+fn write_record(file: Option<std::fs::File>, recorder: &Recorder) -> Result<(), Failure> {
+    let Some(mut file) = file else {
+        return Ok(());
+    };
+    file.write_all(recorder.text().as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(io_failure)
+}
+
+/// Reads and parses the macro at `path` through the session's read roots, at most
+/// `input_bytes` bytes.
+fn read_macro(
+    session: &Session,
+    path: Option<&Path>,
+    limits: &Limits,
+) -> Result<Vec<MacroStep>, Failure> {
+    let path = path.ok_or_else(|| usage("missing_flag:--macro"))?;
+    let file = session.roots.open_read(path)?;
+    let mut bytes = Vec::new();
+    file.take(limits.input_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(io_failure)?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        Error::new(codes::MACRO_MALFORMED)
+            .with_arg("line", 0)
+            .with_detail("line", 0)
+            .with_detail("reason", "utf8")
+    })?;
+    Ok(parse_macro(&text, limits)?.steps)
+}
+
+/// Plays `steps` on `document` and gives the output: the revision after playback and, per
+/// step, its line number, command and result value.
+fn play_on(
+    product: &Product,
+    document: &Document,
+    session: &Session,
+    steps: &[MacroStep],
+) -> Result<Value, Failure> {
+    let outcomes = macros::play(&product.registry, document, session, steps, "macro")?;
+    let results: Vec<Value> = steps
+        .iter()
+        .zip(&outcomes)
+        .map(|(step, outcome)| {
+            json!({"line": step.line_number, "command": outcome.command, "value": outcome.value})
+        })
+        .collect();
+    Ok(json!({"revision": document.snapshot().revision(), "results": results}))
+}
+
+/// `batch`: plays the macro on each package in turn, saving each that succeeded with
+/// `--save`, and writes one line `{"file", "result"}` or `{"file", "error"}` per package.
+/// Exit 1 when any package failed; a macro that cannot be read fails before any package.
+fn batch<W: Write>(
+    o: &Options,
+    product: &Product,
+    config: &ServerConfig,
+    limits: &Limits,
+    stdout: &mut W,
+) -> Result<Exit, Failure> {
+    let session = session(config, limits);
+    let steps = read_macro(&session, o.macro_path.as_deref(), limits)?;
+    let mut exit = Exit::Success;
+    for path in &o.positional {
+        let path = Path::new(path);
+        let played = open(product, path, o.save, limits).and_then(|(mut package, document)| {
+            let result = play_on(product, &document, &session, &steps)?;
+            if o.save {
+                package.save_document(&document, &[], None, &mut |_| Ok(()))?;
+            }
+            Ok(result)
+        });
+        let file = path.to_string_lossy();
+        let line = match played {
+            Ok(result) => json!({"file": file, "result": result}),
+            Err(failure) => {
+                exit = Exit::Failed;
+                json!({"file": file, "error": failure.error})
+            }
+        };
+        writeln!(stdout, "{line}").map_err(io_failure)?;
+    }
+    stdout.flush().map_err(io_failure)?;
+    Ok(exit)
+}
+
+/// Writes `error` to `stderr` as the runner reports errors (one line `{"error": <error
+/// object>}`) and returns its exit code. Product subcommands use it to report like the shared
+/// ones.
+pub fn report_error<E: Write>(error: Error, stderr: &mut E) -> Exit {
+    let failure = Failure::from(error);
+    let line = json!({"error": failure.error}).to_string();
+    let _ = writeln!(stderr, "{line}");
+    failure.exit
 }
 
 fn failure(error: Value) -> Failure {
@@ -563,6 +728,19 @@ fn open(
         DocumentConfig::default(),
     )?;
     Ok((package, document))
+}
+
+/// [`save`] when `wanted`.
+fn save_if(
+    wanted: bool,
+    packages: &mut [Package],
+    documents: &BTreeMap<String, Document>,
+) -> Result<(), Failure> {
+    if wanted {
+        save(packages, documents)
+    } else {
+        Ok(())
+    }
 }
 
 /// Saves every document into its package, in the order they were named.
@@ -717,6 +895,20 @@ mod tests {
             reason(parse(args(&["commands", "--nope"]))),
             "unknown_flag:--nope"
         );
+        assert_eq!(reason(parse(args(&["play", "a"]))), "missing_flag:--macro");
+        assert_eq!(reason(parse(args(&["batch", "--macro", "m"]))), "arguments");
+        assert_eq!(
+            reason(parse(args(&["run", "a", "--macro", "m"]))),
+            "flag_not_allowed:--macro"
+        );
+        assert_eq!(
+            reason(parse(args(&[
+                "serve", "--stdio", "--record", "r", "a", "b"
+            ]))),
+            "record_documents"
+        );
+        let o = parse(args(&["batch", "a", "b", "--macro=m", "--save"])).unwrap();
+        assert_eq!((o.sub, o.positional.len()), (Sub::Batch, 2));
     }
 
     #[test]

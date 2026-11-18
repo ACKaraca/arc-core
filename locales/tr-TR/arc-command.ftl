@@ -59,3 +59,6 @@ cmd-path-outside-roots = Yol, izin verilen klasörlerin dışında.
 cmd-path-not-found = Dosya veya klasör yok.
 cmd-path-io = Dosyaya erişilemiyor.
 cmd-cli-usage = Komut satırı bağımsız değişkenleri geçerli değil.
+cmd-macro-malformed = Makronun { $line }. satırı geçerli değil.
+cmd-macro-version-unsupported = { $version } makro biçimi sürümü desteklenmiyor.
+cmd-macro-limit-exceeded = Makro bir boyut veya sayı sınırını aşıyor.

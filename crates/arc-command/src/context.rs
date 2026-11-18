@@ -138,8 +138,12 @@ enum Store<'a> {
     Snapshot(&'a Snapshot),
 }
 
+/// The factor the snapshot revision is mixed into the seed with; playback of a macro on another
+/// revision adjusts the seed by it (see `macros`).
+pub(crate) const REVISION_MIX: u64 = 0x9E37_79B9_7F4A_7C15;
+
 /// SplitMix64, the random stream of a context.
-fn split_mix(state: &mut u64) -> u64 {
+pub(crate) fn split_mix(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = *state;
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -181,7 +185,7 @@ impl<'a> Context<'a> {
     ) -> Self {
         // The revision makes each invocation's stream distinct within one document, so
         // repeated invocations with the same seed never generate the same identifiers.
-        let mut stream = seed ^ snapshot.revision().wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let mut stream = seed ^ snapshot.revision().wrapping_mul(REVISION_MIX);
         let stream = split_mix(&mut stream);
         Self {
             store: txn.map_or(Store::Snapshot(snapshot), Store::Txn),

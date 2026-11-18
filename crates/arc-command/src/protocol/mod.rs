@@ -34,6 +34,7 @@ pub use framing::{PipeReader, PipeWriter, pipe};
 use crate::context::{Clock, FixedClock, Probe, ProgressSink, Session};
 use crate::error::codes;
 use crate::invoke::{Invocation, Invoker, Outcome};
+use crate::macros::Recorder;
 use crate::registry::Registry;
 use crate::roots::Roots;
 use crate::schema::text_depth;
@@ -202,6 +203,7 @@ pub struct Server<'a> {
     documents: &'a BTreeMap<String, Document>,
     config: ServerConfig,
     log: &'a dyn Log,
+    recorder: Option<&'a Recorder>,
 }
 
 impl std::fmt::Debug for Server<'_> {
@@ -468,7 +470,17 @@ impl<'a> Server<'a> {
             documents,
             config,
             log,
+            recorder: None,
         }
+    }
+
+    /// Records every `command.run` that succeeds, of every session, into `recorder`
+    /// (CORE-CMD-016). A step the recorder refuses is logged as `macro.record` and the run is
+    /// answered as usual.
+    #[must_use]
+    pub fn with_recorder(mut self, recorder: &'a Recorder) -> Self {
+        self.recorder = Some(recorder);
+        self
     }
 
     /// Serves one session: reads requests from `input` until `arc.shutdown` or the end of the
@@ -637,8 +649,20 @@ impl<'a> Server<'a> {
 
     /// Runs `invocation` through the invoker and logs the panic of a faulted command.
     fn invoke(&self, document: &Document, session: &Session, invocation: Invocation) -> Answer {
+        // Runs are one at a time per session, so this is the revision the command runs on.
+        let recorded = self
+            .recorder
+            .map(|recorder| (recorder, invocation.clone(), document.snapshot().revision()));
         match Invoker::new(self.registry).invoke(document, session, invocation) {
-            Ok(outcome) => Ok(run_result(&outcome)),
+            Ok(outcome) => {
+                if let Some((recorder, invocation, revision)) = recorded
+                    && let Err(error) = recorder.record(self.registry, &invocation, revision)
+                {
+                    self.log
+                        .log(LogLevel::Warning, "macro.record", error.code());
+                }
+                Ok(run_result(&outcome))
+            }
             Err(error) => {
                 if let Some(panic) = error.details().get("panic") {
                     self.log

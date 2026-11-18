@@ -8,8 +8,9 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use arc_command::FixedClock;
-use arc_command::headless::{Exit, Product, run};
+use arc_command::headless::{Exit, Product};
 use arc_doc::package::LockOwner;
+use arc_shell_cli::run;
 use proptest::prelude::*;
 
 fn product() -> Product {
@@ -33,6 +34,9 @@ fn word() -> impl Strategy<Value = String> {
             "inspect",
             "validate",
             "serve",
+            "play",
+            "batch",
+            "render",
             "help",
             "--stdio",
             "--save",
@@ -45,6 +49,13 @@ fn word() -> impl Strategy<Value = String> {
             "--seed",
             "--read-root",
             "--write-root",
+            "--macro",
+            "--record",
+            "--output",
+            "--view",
+            "--width",
+            "--height",
+            "/tmp",
             "--",
             "--params=@",
             "shell.point.create",

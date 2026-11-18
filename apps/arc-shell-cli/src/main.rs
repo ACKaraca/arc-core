@@ -1,5 +1,5 @@
 //! `arc-shell-cli`: the reference headless CLI. Gathers the arguments, streams, clock and
-//! edit-lock owner and runs the shared runner; every error becomes an exit code.
+//! edit-lock owner and runs [`arc_shell_cli::run`]; every error becomes an exit code.
 
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_command::Clock;
-use arc_command::headless::{self, Exit};
+use arc_command::headless::Exit;
 use arc_doc::package::LockOwner;
 
 /// The system clock.
@@ -37,7 +37,7 @@ fn main() -> ExitCode {
         time_unix_ms: SystemClock.now_unix_millis(),
     };
     let exit = match arc_shell_cli::product(Arc::new(SystemClock), owner) {
-        Ok(product) => headless::run(
+        Ok(product) => arc_shell_cli::run(
             std::env::args_os().skip(1),
             &product,
             io::stdin().lock(),

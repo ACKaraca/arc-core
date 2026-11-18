@@ -168,7 +168,31 @@ every change is a transaction of the invoker. `product(clock, owner)` bundles th
 `arc_command::headless::run`, and the binary's `main` only passes the process arguments, the
 standard streams, the system clock and the edit-lock owner (user and host from the environment)
 and returns the runner's exit code. The subcommands, flags and exit codes are those of the
-[headless runner](arc-command.md#headless-runner-as-implemented).
+[headless runner](arc-command.md#headless-runner-as-implemented), plus the product subcommand
+`render`; `arc_shell_cli::run` dispatches `render` and passes every other subcommand to the
+runner.
+
+`render <file> --output <png> [--view <name>] [--width <n>] [--height <n>]` (also
+`--read-root`, `--write-root`, `--json`) renders the package headless:
+
+- The package is opened read-only. `render::extract_sample` turns each point into a dot and
+  each line into a segment, 3 px wide, color sRGB (40, 40, 40); layers draw nothing. The
+  windowed shell has its own copy of this extractor in `apps/arc-shell`, since one application
+  cannot depend on the other and `arc-shell-sample` (layer 4) may not depend on `arc-gpu`
+  (layer 5).
+- The view is the default view: orthographic, looking down −z with +y up, zoomed with
+  `arc_gpu::navigation::zoom_to_sphere` to the sphere around the box of all drawn points,
+  enlarged by 10 %; with nothing drawn it is centered on the origin, 10 m tall. The sample set
+  defines no named views, so `--view` accepts only `default`; another name is `cmd.cli.usage`
+  with reason `unknown_view`.
+- The image is `--width` × `--height` pixels (default 800 × 600, decimal `u32`), rendered in
+  the shaded mode on a white background by `arc-gpu` on the adapter its selection rules choose,
+  which falls back to a software adapter when nothing better exists. The PNG (8-bit RGBA) is
+  written through `Roots::create_write`, so `--output` must lie inside a write root
+  (`cmd.path.outside_roots`, exit 5, without one).
+- Standard output is one JSON object: `view`, `width`, `height`, `objects` (the number of
+  objects drawn) and `adapter` (`name`, `software`, `fallback`). Errors are reported like the
+  runner's, with the same exit codes; `gpu.*` errors map by their categories.
 
 ### Error codes
 

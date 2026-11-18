@@ -326,6 +326,84 @@ group      = "(" , { group | char - ( "(" | ")" ) } , ")" ;
   An application uses it to route command-line runs through its own entry point. The methods
   above are `drive` with the invoker as runner.
 
+## Macros and batch as implemented
+
+The module `macros` covers CORE-CMD-016 and CORE-CMD-018 after
+[Macro recording](../architecture/commands-and-automation.md#macro-recording). Input
+placeholders (CORE-CMD-017) are not provided: a step's parameters are always its recorded
+values.
+
+### Macro format
+
+A macro is UTF-8 JSON Lines text, one JSON object per line, each line ending with `\n`, object
+keys sorted. The first line is the header; every further line is one step.
+
+| Line | Members |
+|---|---|
+| Header | `format`: `"arc-macro"`; `version`: the format version, `1`; `protocol`: the automation protocol version of the recording crate (`"1.0"`); `product`: `{"name", "version"}` of the recording product |
+| Step | `line`: the command line in [canonical form](#command-line-grammar); `seed`: the invocation seed (default 0); `revision`: the revision of the snapshot the command ran on (optional); `selection`: identifier texts of the selection (optional, omitted when empty) |
+
+```json
+{"format":"arc-macro","product":{"name":"arc-shell","version":"0.1.0"},"protocol":"1.0","version":1}
+{"line":"shell.layer.create name=walls","revision":0,"seed":1}
+```
+
+- A step has no other members; an unknown member is `cmd.macro.malformed`. The header's
+  product is informational: playback does not compare it with the running product, and a
+  command the running registry does not have fails its line with `cmd.unknown`.
+- **Versioning.** The reader accepts only `version` 1 and reports any other version as
+  `cmd.macro.version_unsupported` (detail `version`). A change that a version 1 reader would
+  read differently, or reject (a new member, a new meaning of a member, a different line
+  form), increments `version`, adds the new version to the reader while it keeps reading every
+  earlier one, and adds fixtures of each version; the writer writes the newest version.
+- **Batch lists.** Text whose first non-blank line does not start with `{` is a list of command
+  lines, one per line; blank lines and lines starting with `#` are skipped, and each line is a
+  step with seed 0 and no revision. This is the input form of `batch` besides macros.
+- **Bounds** (`parse_macro`): the whole text at most `limits.input_bytes`, each line at most
+  `limits.string_bytes` and at most `limits.record_count` steps (`cmd.macro.limit_exceeded`,
+  detail `limit`: `input_bytes`, `line_bytes`, `line_count`); a header or step that is not
+  that JSON object is `cmd.macro.malformed` with the details `line` (1-based) and `reason`
+  (`header`, `step`, `empty` for a blank `line` at playback, `utf8` for a file that is not
+  UTF-8). The command line of a step is further bounded by the command-line grammar (64 KiB).
+
+### Recording
+
+- A `Recorder` holds the header and the steps; it is shared between threads and keeps at most
+  `limits.record_count` steps (more is `cmd.macro.limit_exceeded`, limit `line_count`, and the
+  step is not kept). `record(registry, invocation, revision)` writes the invocation's
+  parameters as their canonical line with `format_line`, its seed, its selection and the
+  revision it ran on. `text()` gives the macro.
+- `Server::with_recorder` attaches a recorder to the protocol server: every `command.run`
+  (and every `Server::call` of `command.run`) that succeeds is recorded, with the revision of
+  the document read just before the run (runs of a session are serialized). Failed, rejected
+  and cancelled runs are not recorded. A step the recorder refuses is logged as the event
+  `macro.record` and the run is answered as usual.
+- The command specification has no property marking a command as non-deterministic or as
+  interactive only, so every successful invocation is recorded, transparent and read-only
+  commands included. Prompt answers are never recorded; their resulting parameters are, as the
+  canonical line.
+
+### Playback
+
+- `play(registry, document, session, steps, group)` opens the undo group `group` on the
+  document, then for each step parses its line with `parse_line` (no localized names) and runs
+  it through `Invoker::invoke` with the session, so exposure, permissions, limits, the schema
+  and the predicate are checked as for every surface. On success the group ends, forms one
+  undo step, and the outcome of each step is returned in order.
+- At the first failing step playback stops, the group is rolled back
+  (`Document::fail_group`), and the step's error (of the line parser or the invoker, with its
+  own code) is returned with the detail `line`, the step's line number. The document content
+  is then as before playback; that includes the content before the failing line, which the
+  failing line itself never changes.
+- **Determinism.** A command's identifier stream is its seed mixed with the revision it runs on
+  (see [Context](#context-sessions-and-predicates)). A recorded step replaces the recorded
+  revision's mix by the current revision's, so it generates the identifiers it generated when
+  recorded: the same starting package and the same macro give the same objects, identifiers
+  included, and a macro recorded on one package and played on another creates objects with
+  the recorded identifiers. A step without a revision (a batch list line) mixes in an
+  order-independent digest of the identifiers of the objects present when playback starts,
+  because a package opened again starts at revision 0 and would otherwise repeat identifiers.
+
 ## Automation protocol and file roots as implemented
 
 The modules are `protocol` (CORE-CMD-019, CORE-CMD-021, CORE-CMD-022, CORE-CMD-027) and
@@ -524,7 +602,7 @@ fault is exit 70). A product's `main` passes the process arguments and streams a
 code. Arguments are parsed by hand: no argument-parsing crate is in the technology baseline.
 
 - Standard output carries JSON only: one value and a newline, sorted keys, or the protocol
-  messages of `serve --stdio`. Errors go to standard error as one line
+  messages of `serve --stdio`, or one line per package for `batch`. Errors go to standard error as one line
   `{"error": <error object>}` with the protocol's error object
   ([Errors](#errors)); protocol log records go there as `{"level", "event", "detail"}` lines.
 - The one-shot subcommands answer through `Server::call`, the synchronous form of a protocol
@@ -541,10 +619,12 @@ code. Arguments are parsed by hand: no argument-parsing crate is in the technolo
 | `commands` | Lists the commands exposed on `automation` | `command.list` result |
 | `describe <command>` | Describes one command (identifier or alias) | `command.describe` result |
 | `validate-params <command> [--params P]` | Validates parameters without running; exit 3 when invalid | `command.validate` result |
-| `run <file> --command <id> [--params P] [--seed N] [--save]` | Opens the package, runs one command through the invoker; with `--save` opens it under the edit lock and saves the document in place after a successful run | `command.run` result |
+| `run <file> --command <id> [--params P] [--seed N] [--save] [--record M]` | Opens the package, runs one command through the invoker; with `--save` opens it under the edit lock and saves the document in place after a successful run; with `--record` writes the run as a macro | `command.run` result |
+| `play <file> --macro M [--save]` | Opens the package and [plays](#playback) the macro or batch list `M` on it; with `--save` saves it in place after a successful playback | `{"revision", "results": [{"line", "command", "value"}]}` |
+| `batch <file>... --macro M [--save]` | Plays `M` on each package in turn, each opened, played and (with `--save`, only when its playback succeeded) saved on its own; a package that fails to open or play does not stop the others | One line per package, in order: `{"file", "result"}` with the `play` output, or `{"file", "error"}` with the error object |
 | `inspect <file> [--check]` | `arc_doc::package::inspect`; with `--check` adds `findings`, exit 3 when there are any | Inspection JSON |
 | `validate <file>` | `arc_doc::package::check`; exit 3 when there are findings | `{"findings": [...]}` |
-| `serve --stdio [<file>...] [--save]` | Serves the protocol on stdin and stdout; each package is a document named by its file stem (a stem twice, or one not UTF-8, is a usage error); with `--save` each is saved in place when the session ends | Protocol messages |
+| `serve --stdio [<file>...] [--save] [--record M]` | Serves the protocol on stdin and stdout; each package is a document named by its file stem (a stem twice, or one not UTF-8, is a usage error); with `--save` each is saved in place when the session ends; with `--record` the session's successful runs are written as a macro when it ends | Protocol messages |
 | `help` (also `--help`) | Writes the usage text to standard error | Nothing |
 
 A finding is the protocol's error `data` (`code`, `category`, `messageId`, `arguments`,
@@ -558,14 +638,16 @@ A finding is the protocol's error `data` (`code`, `category`, `messageId`, `argu
 | `--command <id>` | `run` | The command; required |
 | `--params <P>` | `run`, `validate-params` | JSON text, or `@<file>` for a file's text (at most `input_bytes`); default `{}` |
 | `--seed <n>` | `run` | The invocation seed, a decimal `u64`; default 0 |
-| `--save` | `run`, `serve` | Save in place |
+| `--save` | `run`, `serve`, `play`, `batch` | Save in place |
+| `--macro <M>` | `play`, `batch` | The macro or batch list; required. Read through the read roots (`cmd.path.outside_roots` without one), at most `input_bytes` |
+| `--record <M>` | `run`, `serve` | Record successful runs into the macro file `M`, created (or truncated) through the write roots before anything runs, and written when the run or session ends; a failed `run` leaves it empty. A macro names no document, so more than one package is a usage error (`record_documents`) |
 | `--check` | `inspect` | Add the check's findings |
 | `--stdio` | `serve` | Required; the only transport |
 
 | Exit | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | The command or operation failed: categories `not_found`, `conflict`, `cancelled`, `io`, `failed_operation` |
+| 1 | The command or operation failed: categories `not_found`, `conflict`, `cancelled`, `io`, `failed_operation`; `batch`: at least one package failed (each failure is on its output line) |
 | 2 | Usage error (`cmd.cli.usage`, detail `reason`), or parameters missing a required member (`cmd.params.invalid` with a `required` violation): a CLI never prompts |
 | 3 | Input invalid or corrupt: categories `invalid_input`, `corrupt_data`; invalid parameters from `validate-params`; package findings from `inspect --check` and `validate` |
 | 4 | Unsupported: category `unsupported` |
@@ -573,8 +655,13 @@ A finding is the protocol's error `data` (`code`, `category`, `messageId`, `argu
 | 6 | Limit exceeded: category `limit_exceeded` |
 | 70 | Internal fault: category `internal`, or a fault contained by the runner |
 
-Exit 7 (`--fail-on-loss`) belongs to conversions, which the shared set does not have yet. The
-conventions' `info`, `convert`, `batch`, `render`, `upgrade` and `mcp` subcommands and the
+Exit 7 (`--fail-on-loss`) belongs to conversions, which the shared set does not have yet. A
+`batch` whose macro cannot be read fails before any package with that error's exit code. The
+conventions name `batch <file> <macro.jsonl>` for one package; here one package is `play` and
+`batch` takes several packages, so the macro is the flag `--macro`. `render` needs a renderer,
+which this layer does not have; the reference CLI adds it as a product subcommand
+([Reference CLI](arc-app.md#reference-cli-core-app-026)). The
+conventions' `info`, `convert`, `render`, `upgrade` and `mcp` subcommands and the
 `--log-level`, `--log-format`, `--locale`, `--limits` and `--output` flags are not provided;
 they are usage errors. The architecture names parameter validation as a protocol method only and
 gives `validate <file>` the package check, so parameter validation is the separate subcommand
@@ -636,6 +723,9 @@ gives `validate <file>` the package check, so parameter validation is the separa
 | `cmd.path.not_found` | `not_found` | The path names nothing |
 | `cmd.path.io` | `io` | The system refused the file operation; the detail `reason` says how |
 | `cmd.cli.usage` | `invalid_input` | The runner's arguments do not follow its grammar; the detail `reason` says what is wrong |
+| `cmd.macro.malformed` | `invalid_input` | A macro or batch line is not well formed; the details `line` and `reason` say where and why |
+| `cmd.macro.version_unsupported` | `unsupported` | A macro header names a format version that is not read; the detail `version` names it |
+| `cmd.macro.limit_exceeded` | `limit_exceeded` | A macro, one of its lines or a recording exceeds a limit; the detail `limit` names it |
 
 ## Capabilities
 

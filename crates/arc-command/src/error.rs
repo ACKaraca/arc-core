@@ -323,6 +323,27 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "cmd-cli-usage",
     };
+    /// A macro or batch text is not well formed; the details `line` and `reason` say where
+    /// and why.
+    pub const MACRO_MALFORMED: ErrorCode = ErrorCode {
+        code: "cmd.macro.malformed",
+        category: Category::InvalidInput,
+        message_id: "cmd-macro-malformed",
+    };
+    /// A macro header names a format version this crate does not read; the detail `version`
+    /// names it.
+    pub const MACRO_VERSION_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "cmd.macro.version_unsupported",
+        category: Category::Unsupported,
+        message_id: "cmd-macro-version-unsupported",
+    };
+    /// A macro text, one of its lines, or a recording exceeds a limit; the detail `limit`
+    /// names it.
+    pub const MACRO_LIMIT_EXCEEDED: ErrorCode = ErrorCode {
+        code: "cmd.macro.limit_exceeded",
+        category: Category::LimitExceeded,
+        message_id: "cmd-macro-limit-exceeded",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -378,6 +399,9 @@ pub mod codes {
         PATH_NOT_FOUND,
         PATH_IO,
         CLI_USAGE,
+        MACRO_MALFORMED,
+        MACRO_VERSION_UNSUPPORTED,
+        MACRO_LIMIT_EXCEEDED,
     ];
 }
 

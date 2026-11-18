@@ -46,7 +46,8 @@ fluent-bundle = { version = "0.16.0", default-features = false }
 # bundled fonts, under a font license outside the allowlist) stay off.
 egui = { version = "0.37.0", default-features = false }
 glam = "0.34"
-# PNG encoding and decoding of reference images in the `arc-gpu` tests; every other format stays off.
+# PNG reference images in the `arc-gpu` tests and PNG output of the reference CLI; every other
+# format stays off.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 # Snapshot tests only; default features (terminal colors) stay off.
 insta = { version = "1.49", default-features = false }
