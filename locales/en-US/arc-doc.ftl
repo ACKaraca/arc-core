@@ -78,3 +78,6 @@ doc-package-incremental-refused = The package cannot be saved in place ({ $reaso
 doc-package-asset-not-found = The package holds no asset { $hash }.
 doc-package-asset-corrupt = The stored asset { $hash } is damaged.
 doc-package-save-panicked = Saving the document failed because of a defect; the file was not changed.
+doc-descriptor-invalid = A stored type description is invalid.
+doc-package-recovery-needed = The package { $path } was left by an interrupted save; open it for editing to restore it.
+doc-package-index-mismatch = The stored index { $table } of object { $id } does not match the object.

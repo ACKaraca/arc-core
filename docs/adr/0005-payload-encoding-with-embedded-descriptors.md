@@ -54,3 +54,10 @@ appended field of a minor version is optional or has a default, as stated in
 is specified in [arc-doc](../crates/arc-doc.md#field-descriptors-core-doc-004); its JSON Schema is
 not published yet. Canonical encoding means that bit-identical values give identical bytes. The
 payload encoding is unchanged.
+
+## Amendment: published descriptor schema
+
+The JSON Schema of the descriptor grammar (`descriptor_format` 1) is published as
+`schemas/package-descriptor.schema.json`, and `arc-doc` parses stored descriptors back into
+schemas that decode the payloads of their version; the earlier statement that the schema is not
+published yet no longer holds. The descriptor grammar and the payload encoding are unchanged.

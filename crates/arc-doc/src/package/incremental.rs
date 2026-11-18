@@ -114,7 +114,7 @@ fn same(a: &Arc<Object>, b: &Arc<Object>) -> bool {
 
 /// The live typed object `id` of `snapshot` with its type key; `None` for an unknown, deleted
 /// or held identifier.
-fn typed(snapshot: &Snapshot, id: ObjectId) -> Option<(&TypeKey, &Arc<Object>)> {
+pub(super) fn typed(snapshot: &Snapshot, id: ObjectId) -> Option<(&TypeKey, &Arc<Object>)> {
     let handle = snapshot.resolve(id).ok()?;
     if snapshot.held_object(handle).is_some() {
         return None;

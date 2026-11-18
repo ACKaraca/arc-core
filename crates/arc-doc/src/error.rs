@@ -477,6 +477,27 @@ pub mod codes {
         category: Category::Internal,
         message_id: "doc-package-save-panicked",
     };
+    /// A stored field descriptor is not valid JSON of the descriptor grammar, has another
+    /// `descriptor_format`, exceeds a hostile-input limit or describes a schema the registry
+    /// would reject.
+    pub const DESCRIPTOR_INVALID: ErrorCode = ErrorCode {
+        code: "doc.descriptor.invalid",
+        category: Category::CorruptData,
+        message_id: "doc-descriptor-invalid",
+    };
+    /// A package has a hot rollback journal left by an interrupted save and was opened
+    /// read-only, which cannot roll it back.
+    pub const PACKAGE_RECOVERY_NEEDED: ErrorCode = ErrorCode {
+        code: "doc.package.recovery_needed",
+        category: Category::Conflict,
+        message_id: "doc-package-recovery-needed",
+    };
+    /// A stored derived index row differs from the one recomputed from the payloads.
+    pub const PACKAGE_INDEX_MISMATCH: ErrorCode = ErrorCode {
+        code: "doc.package.index_mismatch",
+        category: Category::CorruptData,
+        message_id: "doc-package-index-mismatch",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -557,6 +578,9 @@ pub mod codes {
         PACKAGE_ASSET_NOT_FOUND,
         PACKAGE_ASSET_CORRUPT,
         PACKAGE_SAVE_PANICKED,
+        DESCRIPTOR_INVALID,
+        PACKAGE_RECOVERY_NEEDED,
+        PACKAGE_INDEX_MISMATCH,
     ];
 }
 

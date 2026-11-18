@@ -64,6 +64,11 @@ pub(crate) fn sql_error(error: rusqlite::Error, path: &str) -> Error {
             ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase => {
                 Error::new(codes::PACKAGE_CORRUPT).with_arg("path", path)
             }
+            // SQLITE_READONLY_ROLLBACK: a hot journal that a read-only connection cannot roll
+            // back.
+            ErrorCode::ReadOnly if failure.extended_code == 776 => {
+                Error::new(codes::PACKAGE_RECOVERY_NEEDED).with_arg("path", path)
+            }
             ErrorCode::TooBig => {
                 Error::new(codes::LOAD_LIMIT_EXCEEDED).with_arg("limit", "input_bytes")
             }
@@ -74,7 +79,7 @@ pub(crate) fn sql_error(error: rusqlite::Error, path: &str) -> Error {
     base.with_source(error)
 }
 
-fn value_invalid(table: &'static str, column: &'static str) -> Error {
+pub(super) fn value_invalid(table: &'static str, column: &'static str) -> Error {
     Error::new(codes::PACKAGE_VALUE_INVALID)
         .with_arg("table", table)
         .with_arg("column", column)
@@ -121,7 +126,7 @@ pub(crate) fn check_header(path: &Path) -> Result<u32> {
 
 /// Opens `path` read-only. The connection never writes to the file or its directory; values
 /// longer than `input_bytes` fail with `doc.load.limit_exceeded` when they are read.
-fn connect(path: &Path, limits: &Limits) -> Result<Connection> {
+pub(super) fn connect(path: &Path, limits: &Limits) -> Result<Connection> {
     let name = display(path);
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = Connection::open_with_flags(path, flags).map_err(|e| sql_error(e, &name))?;
@@ -136,7 +141,7 @@ fn connect(path: &Path, limits: &Limits) -> Result<Connection> {
 }
 
 /// Opens and checks the package: header, `arc_meta`, format version, schema and metadata.
-fn open(path: &Path, limits: &Limits) -> Result<(Connection, FormatVersion, Metadata)> {
+pub(super) fn open(path: &Path, limits: &Limits) -> Result<(Connection, FormatVersion, Metadata)> {
     let major = check_header(path)?;
     let name = display(path);
     let conn = connect(path, limits)?;
@@ -172,10 +177,10 @@ pub(crate) fn open_checked(path: &Path, limits: &Limits) -> Result<(FormatVersio
 }
 
 /// Reads one column of a row, checking its storage class.
-struct Cells<'r, 's> {
-    row: &'r Row<'s>,
-    table: &'static str,
-    path: &'r str,
+pub(super) struct Cells<'r, 's> {
+    pub(super) row: &'r Row<'s>,
+    pub(super) table: &'static str,
+    pub(super) path: &'r str,
 }
 
 impl Cells<'_, '_> {
@@ -183,21 +188,21 @@ impl Cells<'_, '_> {
         self.row.get_ref(at).map_err(|e| sql_error(e, self.path))
     }
 
-    fn blob(&self, at: usize, column: &'static str) -> Result<Vec<u8>> {
+    pub(super) fn blob(&self, at: usize, column: &'static str) -> Result<Vec<u8>> {
         match self.get(at)? {
             ValueRef::Blob(bytes) => Ok(bytes.to_vec()),
             _ => Err(value_invalid(self.table, column)),
         }
     }
 
-    fn opt_blob(&self, at: usize, column: &'static str) -> Result<Option<Vec<u8>>> {
+    pub(super) fn opt_blob(&self, at: usize, column: &'static str) -> Result<Option<Vec<u8>>> {
         match self.get(at)? {
             ValueRef::Null => Ok(None),
             _ => self.blob(at, column).map(Some),
         }
     }
 
-    fn text(&self, at: usize, column: &'static str) -> Result<String> {
+    pub(super) fn text(&self, at: usize, column: &'static str) -> Result<String> {
         match self.get(at)? {
             ValueRef::Text(bytes) => {
                 String::from_utf8(bytes.to_vec()).map_err(|_| value_invalid(self.table, column))
@@ -206,21 +211,21 @@ impl Cells<'_, '_> {
         }
     }
 
-    fn opt_text(&self, at: usize, column: &'static str) -> Result<Option<String>> {
+    pub(super) fn opt_text(&self, at: usize, column: &'static str) -> Result<Option<String>> {
         match self.get(at)? {
             ValueRef::Null => Ok(None),
             _ => self.text(at, column).map(Some),
         }
     }
 
-    fn int(&self, at: usize, column: &'static str) -> Result<i64> {
+    pub(super) fn int(&self, at: usize, column: &'static str) -> Result<i64> {
         match self.get(at)? {
             ValueRef::Integer(value) => Ok(value),
             _ => Err(value_invalid(self.table, column)),
         }
     }
 
-    fn any(&self, at: usize, column: &'static str) -> Result<MetaValue> {
+    pub(super) fn any(&self, at: usize, column: &'static str) -> Result<MetaValue> {
         Ok(match self.get(at)? {
             ValueRef::Null => MetaValue::Null,
             ValueRef::Integer(value) => MetaValue::Integer(value),
@@ -233,7 +238,7 @@ impl Cells<'_, '_> {
 
 /// Runs `query` and maps every row with `map`, failing with `doc.load.limit_exceeded` beyond
 /// `record_count` rows.
-fn rows<T>(
+pub(super) fn rows<T>(
     conn: &Connection,
     query: &str,
     table: &'static str,
@@ -253,7 +258,7 @@ fn rows<T>(
     Ok(out)
 }
 
-fn meta_entries(
+pub(super) fn meta_entries(
     conn: &Connection,
     path: &str,
     limits: &Limits,
@@ -316,7 +321,7 @@ fn metadata(mut entries: BTreeMap<String, MetaValue>) -> Result<Metadata> {
     })
 }
 
-fn stored_object(cells: &Cells<'_, '_>) -> Result<StoredObject> {
+pub(super) fn stored_object(cells: &Cells<'_, '_>) -> Result<StoredObject> {
     Ok(StoredObject {
         id: cells.blob(0, "id")?,
         type_key: cells.text(1, "type_key")?,
@@ -339,7 +344,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 }
 
 /// True when the stored hash of a row of encoding 0 is not the BLAKE3 hash of its payload.
-fn hash_mismatch(row: &StoredObject) -> bool {
+pub(super) fn hash_mismatch(row: &StoredObject) -> bool {
     row.encoding == 0 && blake3::hash(&row.payload).as_bytes().as_slice() != row.payload_hash
 }
 

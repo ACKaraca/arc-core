@@ -97,7 +97,7 @@ fn invalid(code: arc_base::ErrorCode, reason: &'static str) -> Error {
     Error::new(code).with_detail("reason", reason)
 }
 
-fn check_schema(schema: &Schema) -> Result<()> {
+pub(crate) fn check_schema(schema: &Schema) -> Result<()> {
     let version = schema.version;
     if version.major == 0 {
         return Err(invalid(codes::TYPE_VERSION_INVALID, "major version 0"));

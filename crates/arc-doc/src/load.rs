@@ -85,7 +85,7 @@ pub struct StoredObject {
 }
 
 /// One `arc_type` row: a type and schema version the document was written with, and its JSON
-/// field descriptor (carried unchanged; building a schema from it is not provided yet).
+/// field descriptor (carried unchanged; [`Schema::from_descriptor`] parses it).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StoredType {
     /// `type_key`.
@@ -683,12 +683,12 @@ fn header_invalid(column: &'static str) -> Error {
 }
 
 /// The identifier of 16 bytes in UUID byte order; the nil identifier is not one.
-fn parse_id(bytes: &[u8]) -> Option<ObjectId> {
+pub(crate) fn parse_id(bytes: &[u8]) -> Option<ObjectId> {
     let raw = u128::from_be_bytes(bytes.try_into().ok()?);
     (raw != 0).then(|| ObjectId::from_u128(raw))
 }
 
-fn parse_version(row: &StoredObject) -> Result<SchemaVersion> {
+pub(crate) fn parse_version(row: &StoredObject) -> Result<SchemaVersion> {
     let major = u32::try_from(row.major)
         .ok()
         .filter(|major| *major >= 1)
@@ -699,7 +699,7 @@ fn parse_version(row: &StoredObject) -> Result<SchemaVersion> {
 
 /// The header of `row` with every valid column, and the error of the first invalid one (in the
 /// order owner, flags, name, partition); an invalid column takes its default.
-fn parse_header(row: &StoredObject, limits: &Limits) -> (Header, Option<Error>) {
+pub(crate) fn parse_header(row: &StoredObject, limits: &Limits) -> (Header, Option<Error>) {
     let mut first = None;
     let mut keep = |error: Error| {
         first.get_or_insert(error);

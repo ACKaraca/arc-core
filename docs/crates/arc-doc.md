@@ -253,8 +253,9 @@ each minor version of the current major version and of every migration source, a
 declaration that would not register. A minor version's descriptor lists the fields present at
 that minor version. The contents a descriptor carries are listed in
 [document-package.md](../architecture/document-package.md#payload-encoding); this section fixes
-their JSON grammar. Building a `Schema` from a descriptor (as preserved objects and package
-inspection need) is not provided yet. The output is pretty-printed with
+their JSON grammar, published as the JSON Schema `schemas/package-descriptor.schema.json`;
+`Schema::from_descriptor` parses a descriptor back (see
+[inspection](#inspection-check-and-saving-a-document-core-doc-050)). The output is pretty-printed with
 two-space indentation and no trailing newline; keys appear in the fixed order below, numbers in
 their shortest round-trip form, map defaults in key order. It depends only on the declaration, so
 it is byte-identical across runs, platforms and registration orders.
@@ -1046,8 +1047,8 @@ save may replace the file it was opened from on every platform.
   and at read as the format requires (`doc.package.preview_invalid`, argument `kind`, detail
   `reason`). Previews are read with `Package::previews`; a save without previews leaves
   `arc_preview` empty.
-- **Not yet.** The journal table of the package, foreign data, the `arc_diagnostic` rows and
-  inspection are not written or read by this version; the sections below describe the
+- **Not yet.** The journal table of the package, foreign data and the `arc_diagnostic` rows
+  are not written or read by this version; the sections below describe the
   incremental and background saves, assets and the recovery journal.
 
 The `package_kill` test kills a child process saving 400 objects at random points 50 times in
@@ -1163,8 +1164,8 @@ the kill and lands on the state after a whole number of transactions (`kill_duri
 ignored, runs 300). `recovery_journal` covers replay onto unchanged and changed bases, a document
 never saved, truncation at a save, deletion on a clean close, recovery after recovery and
 hostile databases (truncations and byte mutations recover a prefix or fail with a stable code).
-A save does not call `saved` by itself yet: the application, or the save unit, calls it after a
-successful save. Assets first referenced since the last save are not recorded yet.
+`Package::save` does not call `saved`; `Package::save_document` does (see
+[saving a document](#inspection-check-and-saving-a-document-core-doc-050)). Assets first referenced since the last save are not recorded yet.
 ### Incremental and background saves and assets (CORE-DOC-043, CORE-DOC-045, CORE-DOC-047)
 
 - **Strategies.** `Package::save(save, strategy, progress)` saves a `Save` by a `Strategy`:
@@ -1211,8 +1212,8 @@ successful save. Assets first referenced since the last save are not recorded ye
   its schema, which makes SQLite roll back a hot rollback journal left by an interrupted save;
   the header check runs before, so a newer-format file stays untouched, and SQLite's file locks
   keep the journal of a save running in another process. A read-only open never writes and
-  cannot roll back: on a file with a hot journal it fails with `doc.package.io_failed`, and the
-  journal stays.
+  cannot roll back: on a file with a hot journal it fails with `doc.package.recovery_needed`,
+  and the journal stays.
 - **Background save.** `BackgroundSave::start(package, request, progress)` moves the package and
   a `SaveRequest` (the owned form of `Save` with an `Arc<Loaded>`, and the strategy) onto a
   storage thread of its own and calls `progress` there. The snapshot is immutable, so the saved
@@ -1264,6 +1265,72 @@ times (1,000 in the ignored `incremental_kill_1000`), including kills inside the
 leave a hot journal for the next open. `package_background` saves while commits continue and
 cancels at several steps; `package_asset` covers the threshold, deduplication, damaged chunks
 flipped in the file, hostile asset tables and compaction.
+
+### Inspection, check and saving a document (CORE-DOC-050)
+
+- **Descriptor parsing.** `Schema::from_descriptor(text, limits)` returns the type key and the
+  schema a descriptor describes: its version, its fields in order, each with `since_minor` 0.
+  A descriptor of minor version m lists the fields present at m without saying when each was
+  appended, so the schema decodes exactly the payloads written at m (`written_minor` m), the
+  ones a stored row of that version holds. The text is hostile: at most `input_bytes`, JSON
+  nested at most `MAX_DESCRIPTOR_NESTING` (72) deep, checked before parsing, the grammar
+  exactly (no unknown or missing key; `descriptor_format` 1), at most `array_length` fields,
+  variants and targets per list, types nested at most 16 deep, a schema the registry accepts
+  (the checks of `TypeRegistry::register` without the migration chain), and defaults of their
+  field's type that encode within `limits`. Every failure is `doc.descriptor.invalid` with
+  detail `reason` (`input_bytes`, `nesting`, `grammar`, `descriptor_format`, `type_key`,
+  `schema`, `default`, `cardinality`, `targets`, `array_length`). The test validates generated
+  descriptors against the published JSON Schema with a test-local validator of the keywords the
+  schema uses (`pattern` and `maxLength` excepted, which the parser checks).
+- **Inspection.** `package::inspect(path, limits)` opens the file as a read-only open does and
+  returns JSON: `format_version`, `metadata` (every `arc_meta` entry; a blob as hexadecimal),
+  `statistics` (`file_bytes`, counts of objects, type rows, references, properties, journal
+  records, assets, chunks and previews, payload, asset and chunk bytes, and per type key its
+  objects and payload bytes), `types` (each row with its descriptor as JSON, or `error`) and
+  `objects` in identifier order with their columns and either `values` (field name to the
+  canonical JSON form of the value) or `error` (`code`, `arguments`). No registry is used: each
+  row is decoded with the descriptor stored for its type and version, so every type decodes,
+  registered or not; a row its descriptor does not describe reports the decoder's code. A
+  package of a newer format major version fails with `doc.package.newer_format`, as the reader
+  refuses it.
+- **Check.** `package::check(path, limits)` returns a list of findings, each an error with a
+  stable code; `doc.package.corrupt` lines of `PRAGMA integrity_check` (detail `message`, at
+  most 64) end it early. Otherwise: an undecodable descriptor (`doc.descriptor.invalid`), and
+  per object row (detail `id`, the identifier in hexadecimal) an invalid header
+  (`doc.load.header_invalid`), an undeclared version (`doc.load.version_undeclared`), a payload
+  its descriptor does not decode (its `doc.payload.*` code), a stored hash of an encoding-0 row
+  that is not the BLAKE3 hash of the payload (`doc.package.hash_mismatch`), a reference (owner
+  or value) to a missing object or one of a type its field does not allow
+  (`doc.reference.dangling`, argument `field`), and derived index rows other than the
+  recomputed ones (`doc.package.index_mismatch`, arguments `table`, `id`). Because a save
+  indexes only the owner of a row whose type it did not have registered or whose payload does
+  not decode, and the check uses no registry, an object's index rows match when they equal
+  either all recomputed rows (owner and reference values in `arc_reference`, indexed scalar
+  fields in `arc_property`) or the owner row alone with no property row. Index rows naming a
+  missing object are findings too, and every asset is read to its end, which verifies its
+  chunks and its hash (`doc.package.asset_corrupt`). Inspection and check open the file
+  read-only and never write to it or its directory; a hot journal fails both with
+  `doc.package.recovery_needed`.
+- **Saving a document.** `Package::open_document(registry, evaluators, options, config)` loads
+  the package into a `Document` that remembers the package's path, `save_counter` and the
+  loaded revision. `Package::save_document(document, previews, recovery, progress)` reads, as a
+  job between two commits, the latest snapshot and the journal; `Save::touched` maps every
+  object a journal transaction changed to the 16 identifier bytes of the last one (UUID byte
+  order), the metadata saved is the package's, and the load side table is the document's.
+  When the document's remembered path and `save_counter` are this package's and the journal
+  holds one transaction for every revision since the remembered one, the save is incremental
+  with the `Touch` map of the transactions since: `Created` when the first operation on an
+  object since then created it, otherwise `Modified` or `Deleted` by whether it is live now,
+  and no entry for one created and deleted again. Otherwise (a document never saved to this
+  package, a recovered document, a journal cut after a failed append) it is the full rewrite
+  in place, as is a refused incremental save. A successful save remembers the new
+  `save_counter` and revision and, with a recovery journal, calls `saved` with the new
+  fingerprint and the last saved transaction, so the journal holds nothing to replay; a failure
+  of that call is returned (`doc.recovery.unavailable`) after the file was saved. The
+  `package_document` test runs random edits, a save, edits and a second save, checks that the
+  second wrote only the rows of the objects changed since the first (marked rows keep their
+  marker), that the reopened file equals the document, and that a clean close then leaves no
+  recovery database.
 
 ### Error codes
 
@@ -1349,3 +1416,6 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.package.asset_not_found` | `not_found` | No asset with the hash is stored in the package |
 | `doc.package.asset_corrupt` | `corrupt_data` | A stored chunk or asset does not match its hash or length, or its rows are malformed |
 | `doc.package.save_panicked` | `internal` | A save unwound on the storage thread; the file holds the previous state |
+| `doc.descriptor.invalid` | `corrupt_data` | A stored field descriptor does not follow the grammar, has another format, exceeds a limit or describes a schema the registry rejects |
+| `doc.package.recovery_needed` | `conflict` | A package with a hot rollback journal was opened read-only; an open for editing rolls the journal back |
+| `doc.package.index_mismatch` | `corrupt_data` | A stored derived index row differs from the rows recomputed from the object rows, or names a missing object |

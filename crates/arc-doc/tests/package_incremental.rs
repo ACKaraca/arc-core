@@ -660,7 +660,8 @@ fn a_hot_journal_is_rolled_back_by_an_open_for_editing() {
     let journal = std::path::PathBuf::from(journal);
     // A read-only open never writes, so it cannot roll back: it fails rather than read a
     // half-written state, and leaves the journal in place.
-    assert!(Package::open(&hot, Mode::ReadOnly, &Limits::DEFAULT).is_err());
+    let error = Package::open(&hot, Mode::ReadOnly, &Limits::DEFAULT).unwrap_err();
+    assert_eq!(error.code(), codes::PACKAGE_RECOVERY_NEEDED.code);
     assert!(journal.exists());
     // Opening for editing rolls the journal back: the file holds the previous state again.
     assert_eq!(stored_state(&hot, [3, 3]), 3);

@@ -209,8 +209,8 @@ CREATE INDEX arc_asset_chunk_chunk ON arc_asset_chunk (chunk);
   relationship rule (for references), default, valid range or length bound, optionality, indexing
   and aspect. The descriptor is sufficient for a generic decoder to turn any payload into JSON
   without Arc code. The descriptor grammar is specified in
-  [arc-doc](../crates/arc-doc.md#field-descriptors-core-doc-004); its JSON Schema
-  (`schemas/package-descriptor.schema.json`) is not published yet.
+  [arc-doc](../crates/arc-doc.md#field-descriptors-core-doc-004) and published as the JSON
+  Schema `schemas/package-descriptor.schema.json` (`descriptor_format` 1).
 - Geometry values use encodings owned and documented by their crate (`arc-geom`, `arc-mesh`,
   `arc-brep`); the descriptor names the encoding and its version.
 - Encoding is deterministic: bit-identical object values always produce the same bytes, so
@@ -441,4 +441,9 @@ sqlite3 model.archb "SELECT source, field FROM arc_reference WHERE target = x'01
 Every product CLI provides `inspect <file>`, which prints metadata and statistics and, with
 `--json`, decodes objects through the embedded descriptors. `inspect --check` verifies
 SQLite integrity, payload hashes, chunk hashes, reference integrity and the derived indexes, and
-reports problems without modifying the file.
+reports problems without modifying the file. Both build on `arc-doc`'s `inspect` and `check`,
+specified in [arc-doc](../crates/arc-doc.md#inspection-check-and-saving-a-document-core-doc-050):
+they need no type registry, so a derived index row set matches when it is either everything
+recomputed from the payload or, as a save writes for a row whose type it did not know, the
+owner row alone. A file with a hot rollback journal is refused until an open for editing rolls
+the journal back.

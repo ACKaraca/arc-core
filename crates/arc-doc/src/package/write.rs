@@ -26,7 +26,7 @@ use crate::error::codes;
 use crate::load::{Loaded, StoredObject, StoredType};
 use crate::registry::TypeRegistry;
 use crate::relationship::references;
-use crate::schema::{TypeKey, Value};
+use crate::schema::{RelationshipRule, TypeKey, Value};
 use crate::snapshot::{Object, Snapshot};
 
 /// A step of a full rewrite, reported before it starts. Returning an error from the progress
@@ -457,7 +457,7 @@ pub(super) fn meta_entries(metadata: &Metadata, thumbnail: bool) -> Vec<(&str, S
 }
 
 /// The `arc_property` value and unit of an indexed field's value: scalars only.
-fn property(value: &Value) -> Option<(SqlValue, Option<String>)> {
+pub(super) fn property(value: &Value) -> Option<(SqlValue, Option<String>)> {
     Some(match value {
         Value::Bool(value) => (SqlValue::Integer(i64::from(*value)), None),
         Value::I64(value) => (SqlValue::Integer(*value), None),
@@ -492,21 +492,24 @@ pub(super) fn insert_references(
     object: &Object,
 ) -> rusqlite::Result<()> {
     for reference in references(registry, key, object) {
-        let rule = &reference.spec.rule;
-        let rule = serde_json::json!({
-            "strength": rule.strength,
-            "on_delete": rule.on_delete,
-            "on_copy": rule.on_copy,
-        })
-        .to_string();
         insert.execute(params![
             id_bytes(object.id),
             reference.field.to_string(),
             id_bytes(reference.target),
-            rule
+            rule_text(&reference.spec.rule)
         ])?;
     }
     Ok(())
+}
+
+/// The `arc_reference.rule` text of `rule`.
+pub(super) fn rule_text(rule: &RelationshipRule) -> String {
+    serde_json::json!({
+        "strength": rule.strength,
+        "on_delete": rule.on_delete,
+        "on_copy": rule.on_copy,
+    })
+    .to_string()
 }
 
 /// Writes the `arc_property` rows of the typed object `object` of type `key` with `insert`

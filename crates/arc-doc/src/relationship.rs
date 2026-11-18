@@ -108,6 +108,19 @@ pub(crate) fn references_and_cardinality<'a>(
     (walk.found, walk.violation)
 }
 
+/// The references held in `values`, field values of `fields`, without the header owner: what
+/// [`references`] lists after the owner, for a field list that does not come from a registry
+/// (the schema of a stored descriptor).
+#[cfg(feature = "package")]
+pub(crate) fn field_references<'a>(
+    fields: &'a [FieldDecl],
+    values: &[Option<Value>],
+) -> Vec<Reference<'a>> {
+    let mut walk = Walk::default();
+    walk.fields(fields, values, None);
+    walk.found
+}
+
 /// The references that differ between two states of one object of type `type_key` with the
 /// same major schema version: those `old` holds and those `new` holds in the header owner, if it
 /// changed, and in the reference-holding fields whose values differ. Unchanged fields are

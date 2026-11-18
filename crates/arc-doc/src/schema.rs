@@ -299,7 +299,7 @@ pub struct GeometryEncoding {
 }
 
 /// The strength of a reference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Strength {
     /// The target's life ends with the source: deleting the source deletes the target.
@@ -311,7 +311,7 @@ pub enum Strength {
 }
 
 /// What happens to the source when the target of a reference is deleted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnDelete {
     /// The source is deleted too.
@@ -323,7 +323,7 @@ pub enum OnDelete {
 }
 
 /// What a copy of the source does with the target of a reference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnCopy {
     /// The target is copied and the copy refers to the new target.

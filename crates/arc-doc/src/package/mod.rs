@@ -10,7 +10,9 @@
 
 mod asset;
 mod background;
+mod document;
 mod incremental;
+mod inspect;
 mod lock;
 mod preview;
 mod read;
@@ -33,7 +35,9 @@ use crate::schema::AssetHash;
 
 pub use asset::{AssetReader, CHUNK_AVG, CHUNK_MAX, CHUNK_MIN, WHOLE_MAX, asset_values};
 pub use background::{BackgroundSave, Finished, SaveRequest};
+pub(crate) use document::Baseline;
 pub use incremental::{Saved, Strategy, Touch, touched_between};
+pub use inspect::{check, inspect};
 pub use lock::{LockHolder, LockOwner, lock_path};
 pub use preview::{MAX_PREVIEW_BYTES, PNG, PREVIEW, Preview, SHEET_PREFIX, THUMBNAIL};
 pub use write::{Contents, ROWS_PER_TICK, Save, SaveProgress, SaveStep, save_as, write};

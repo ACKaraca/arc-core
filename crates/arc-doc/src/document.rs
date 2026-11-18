@@ -29,7 +29,7 @@ use crate::executor::{
 };
 use crate::graph::{Evaluators, Graph, NodeKey, NodeView};
 use crate::journal::Journal;
-use crate::load::{Loaded, LoadedRows};
+use crate::load::{LoadCounts, Loaded, LoadedRows};
 #[cfg(feature = "package")]
 use crate::record::TxnRecord;
 use crate::registry::TypeRegistry;
@@ -168,7 +168,12 @@ pub struct Document {
     scheduler: Scheduler,
     diagnostics: Arc<DiagnosticsList>,
     load_diagnostics: Vec<Diagnostic>,
-    rows: LoadedRows,
+    /// The load this document came from, without its snapshot and diagnostics: what a save
+    /// needs beyond the snapshot. Empty for a document never loaded.
+    loaded: Loaded,
+    /// Where the document was last loaded from or saved to (see `crate::package`).
+    #[cfg(feature = "package")]
+    pub(crate) saved: Mutex<Option<crate::package::Baseline>>,
 }
 
 impl std::fmt::Debug for Document {
@@ -226,6 +231,13 @@ impl Document {
             Some(Arc::clone(&diagnostics)),
             Some(emitter),
         )?;
+        let base = Loaded {
+            snapshot: Snapshot::empty(Arc::clone(shared.cell.load().registry())),
+            diagnostics: Vec::new(),
+            types: Vec::new(),
+            rows: LoadedRows::default(),
+            counts: LoadCounts::default(),
+        };
         let executor = Executor::start(Core {
             shared: Arc::clone(&shared),
             ids: config.ids,
@@ -240,7 +252,9 @@ impl Document {
             scheduler,
             diagnostics,
             load_diagnostics: Vec::new(),
-            rows: LoadedRows::default(),
+            loaded: base,
+            #[cfg(feature = "package")]
+            saved: Mutex::new(None),
         })
     }
 
@@ -256,16 +270,21 @@ impl Document {
         evaluators: Arc<Evaluators>,
         config: DocumentConfig,
     ) -> Result<Self> {
-        let mut document = Self::open(loaded.snapshot, evaluators, config)?;
-        document.load_diagnostics = loaded
-            .diagnostics
-            .into_iter()
-            .map(Diagnostic::from)
-            .collect();
+        let Loaded {
+            snapshot,
+            diagnostics,
+            types,
+            rows,
+            counts,
+        } = loaded;
+        let mut document = Self::open(snapshot, evaluators, config)?;
+        document.load_diagnostics = diagnostics.into_iter().map(Diagnostic::from).collect();
         document
             .diagnostics
             .add_load(document.load_diagnostics.iter().cloned());
-        document.rows = loaded.rows;
+        document.loaded.types = types;
+        document.loaded.rows = rows;
+        document.loaded.counts = counts;
         Ok(document)
     }
 
@@ -587,7 +606,32 @@ impl Document {
     /// The original rows of the load this document came from, which a save needs.
     #[must_use]
     pub fn loaded_rows(&self) -> &LoadedRows {
-        &self.rows
+        &self.loaded.rows
+    }
+
+    /// The load this document came from without its snapshot and diagnostics (type rows, side
+    /// table and counts), as a save takes it.
+    #[cfg(feature = "package")]
+    pub(crate) fn loaded(&self) -> &Loaded {
+        &self.loaded
+    }
+
+    /// Calls `read` on the executor, between two commits, with the latest snapshot and the
+    /// journal that leads to it, and returns its value. Must not be called from a job of this
+    /// document. Fails with `doc.executor.stopped` when the document is closed.
+    #[cfg(feature = "package")]
+    pub(crate) fn read_state<T, F>(&self, read: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Snapshot, &Journal) -> T + Send + 'static,
+    {
+        self.on_executor(move |core| {
+            let snapshot = core.shared.cell.load();
+            let value = read(&snapshot, &lock(&core.shared.history).journal);
+            Ok(core.nothing(value))
+        })
+        .wait()
+        .map(|completed| completed.value)
     }
 
     /// Stops the executor after the running job and waits for it (unless called from a job);
