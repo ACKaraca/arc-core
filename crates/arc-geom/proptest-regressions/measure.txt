@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ae665b219f6c1831b2e3899931b92d93cb910aed1afc334b84761d3e75cc2aa3 # shrinks to r = Region { parts: [RegionPart { outer: Loop2 { curves: [Circle(Circle2 { center: [0.0, 0.0], radius: 8.0 })] }, holes: [] }] }, exponent = 0.0
+cc ae3d601095a4a94105deeb24bdf396d38026969978ca53929bae6b1986025d09 # shrinks to r = Region { parts: [RegionPart { outer: Loop2 { curves: [Segment(Segment2 { start: [-7.399662531014782, -6.0], end: [7.399662531014782, -6.0] }), Segment(Segment2 { start: [7.399662531014782, -6.0], end: [7.399662531014781, -6.0] }), Arc(Arc2 { center: [7.399662531014782, 0.0], radius: 6.0, start_angle: 4.71238898038469, sweep: 3.141592653589793, chord: None }), Segment(Segment2 { start: [7.399662531014783, 6.0], end: [7.399662531014782, 6.0] }), Segment(Segment2 { start: [7.399662531014782, 6.0], end: [-7.399662531014782, 6.0] }), Arc(Arc2 { center: [-7.399662531014782, 0.0], radius: 6.0, start_angle: 1.5707963267948966, sweep: 3.141592653589793, chord: None }), Segment(Segment2 { start: [-7.3996625310147826, -6.0], end: [-7.399662531014782, -6.0] })] }, holes: [] }] }, exponent = -54.88508991553459

@@ -98,10 +98,10 @@ impl Loop2 {
 /// One smooth piece of a loop boundary with the end points the chain shares with its
 /// neighbors.
 #[derive(Debug, Clone, Copy)]
-struct Element {
-    piece: Piece,
-    start: Point2,
-    end: Point2,
+pub(crate) struct Element {
+    pub(crate) piece: Piece,
+    pub(crate) start: Point2,
+    pub(crate) end: Point2,
 }
 
 impl Loop2 {
@@ -327,7 +327,7 @@ impl Loop2 {
 
     /// The smooth pieces of the boundary in order, with the straight joints across any gaps
     /// between consecutive curves.
-    fn elements(&self) -> Vec<Element> {
+    pub(crate) fn elements(&self) -> Vec<Element> {
         let mut out = Vec::new();
         let count = self.curves.len();
         for (index, curve) in self.curves.iter().enumerate() {
@@ -393,7 +393,7 @@ fn area_term(element: &Element, origin: Point2) -> f64 {
 }
 
 /// `θ − sin θ`, by its Taylor series where the difference cancels.
-fn sweep_minus_sine(theta: f64) -> f64 {
+pub(crate) fn sweep_minus_sine(theta: f64) -> f64 {
     if theta.abs() >= 0.5 {
         return theta - theta.sin();
     }
@@ -831,7 +831,7 @@ pub(crate) mod tests {
 
     /// The default number of cases of the properties that flatten a reference densely: fewer
     /// than the usual 256 regions, each queried at many points; `PROPTEST_CASES` overrides it.
-    fn dense_cases() -> u32 {
+    pub(crate) fn dense_cases() -> u32 {
         std::env::var("PROPTEST_CASES")
             .ok()
             .and_then(|v| v.parse().ok())

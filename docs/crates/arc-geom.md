@@ -558,6 +558,11 @@ The codes `arc-geom` owns. A code is never reused for a different meaning; messa
 | `geom.offset.join_invalid` | `invalid_input` | A miter limit is not a finite number of at least 1 |
 | `geom.offset.too_many_pieces` | `limit_exceeded` | An offset needs more pieces or samples than the limit allows |
 | `geom.index.too_many_points` | `limit_exceeded` | A point index is built from more points than the limit allows |
+| `geom.region.self_intersecting` | `invalid_input` | A closed curve given to build a region crosses, touches or overlaps itself away from the joints of its consecutive curves |
+| `geom.region.curves_intersect` | `invalid_input` | Two closed curves given to build a region cross, touch or overlap |
+| `geom.arrangement.too_large` | `limit_exceeded` | Building a planar arrangement of curves needs more elements, candidate pairs, intersections, vertices or edges than the limit allows |
+| `geom.trace.not_enclosed` | `failed_operation` | No closed boundary of the curves encloses the picked point |
+| `geom.trace.on_boundary` | `invalid_input` | The picked point lies within the linear tolerance of a boundary curve |
 
 ### Spatial index (CORE-GEOM-027)
 
@@ -727,9 +732,12 @@ line and ray; `offset` rejects rays and lines with `geom.curve.unbounded`.
 - What remains of each round join is then shaped by the join style: kept (`JoinStyle::Round`),
   replaced by its chord (`JoinStyle::Bevel`), or by the tangent lines at its ends up to their
   intersection when that lies within `limit·|d|` of the corner and by its chord otherwise
-  (`JoinStyle::Miter { limit }`, `limit ≥ 1`). A chord lies inside the circle of radius `|d|`
-  about the corner, which no kept part enters, so it crosses nothing; the lines of a miter lie
-  outside that circle and are not checked against other parts.
+  (`JoinStyle::Miter { limit }`, `limit ≥ 1`), or by the tangent lines at its ends up to the
+  line tangent to it at its middle, at distance `|d|` from the corner, and that line between them
+  (`JoinStyle::Square`; for a join of sweep `φ` the tangent lines are `|d|·tan(φ/4)` long). A
+  chord lies inside the circle of radius `|d|` about the corner, which no kept part enters, so it
+  crosses nothing; the lines of a miter or square join lie outside that circle and are not
+  checked against other parts.
 - `d = 0` returns the curve. A collapsed circle or arc, or an offset of which nothing remains,
   fails with `geom.offset.collapsed`; a NURBS point of zero derivative with
   `geom.offset.degenerate`; a miter limit below 1 or not finite with `geom.offset.join_invalid`;
@@ -759,3 +767,207 @@ recursion; at most `limits.array_length` points (`geom.index.too_many_points`), 
 
 The property tests compare both queries with a brute-force scan on integer-grid points with many
 exact ties, in 2D scaled by powers of two from 2^-1000 to 2^1000 and in 3D, and on random points.
+
+### Planar arrangements
+
+Region construction, boundary tracing, region booleans and region offsets share one planar
+arrangement of exact curves (crate-private).
+
+- The curves are split into smooth elements: segments, circular arcs (a polyline arc keeps its
+  chord form) and elliptical arcs; a circle or ellipse is its full arc and a polyline its
+  segments. Rays and lines fail with `geom.curve.unbounded` and NURBS curves, whose
+  intersections are not implemented, with `geom.curve.kind_unsupported`, each with the detail
+  `curve`.
+- Candidate pairs are the pairs of elements whose bounding boxes, expanded by
+  `tolerance.linear`, meet in an R*-tree; each pair is intersected with `intersect`. The work is
+  near-linear in the number of elements plus candidate pairs. More than `limits.array_length`
+  elements, candidate pairs, intersections, cut points or edges fail with
+  `geom.arrangement.too_large`.
+- Each element is cut at its intersection parameters (both ends of an overlap) and a closed
+  element also at its thirds. The cut points, element ends first, are snapped: points within
+  twice `tolerance.linear` are one vertex, represented by its first point (so input vertices stay
+  exact). A sub-edge whose ends snap together is dropped when it is at most four times
+  `tolerance.linear` long and split at its middle otherwise. A segment is rebuilt between its end
+  vertices and a circular arc as the arc with the same sweep on the chord between them (moving
+  it by at most the snap distance); an elliptical arc keeps its own ends, and a loop built from
+  it closes the remaining gap with a segment. Sub-edges with the same end vertices whose middles
+  lie within twice `tolerance.linear` of each other are one edge, with the geometry of the first
+  in input order and the sum of their winding weights.
+- Around each vertex the half-edges are ordered by the angle of their tangents measured from a
+  direction 1 radian above the x axis (so that axis-aligned tangents do not sit on the cut of
+  the angle range) and, where the angles differ by at most `max(tolerance.angular, 1e-12)`, by
+  signed curvature: of two curves leaving with the same tangent, the one turning more to the
+  left lies counterclockwise. The next half-edge around a face is the first one clockwise from
+  the reverse of the current one at its end, so every cycle has its face on the left. In each
+  connected component the cycle of least signed area is the component's outer boundary; every
+  other cycle bounds a face.
+- Coordinates whose grid cell (in units of twice the linear tolerance) exceeds 2^52 fail with
+  `geom.precision.insufficient`, as does a set of half-edges that does not close into cycles.
+
+### Region construction (CORE-GEOM-016)
+
+`build_region(curves, tolerance, limits)` builds the region bounded by closed composites; a
+single closed curve (circle, ellipse, closed polyline) is a composite of one curve.
+
+- Every composite must end within `tolerance.linear` of its start: otherwise
+  `geom.region.loop_open` with the detail `curves` listing all open ones (such as `"1,2"`). A
+  NURBS curve fails with `geom.curve.kind_unsupported` and the detail `curves`. No composites
+  is `geom.region.empty`.
+- The elements of all composites are intersected pairwise as in the arrangement. Two
+  consecutive elements of one composite may meet only within twice `tolerance.linear` of their
+  shared joint; any other point, and any overlap, within one composite fails with
+  `geom.region.self_intersecting`. Any contact between two composites (crossing, touching from
+  either side, or overlapping) fails with `geom.region.curves_intersect`. Both carry the detail
+  `curves` with every offending composite. Nothing is repaired or guessed.
+- Each composite becomes a loop (`Loop2::new`; a loop of zero area fails with
+  `geom.region.loop_zero_area` and the detail `curve`). The containment depth of a loop is the
+  number of other loops that contain it: candidates come from an R*-tree of the loop boxes, and
+  each is decided by classifying points of the loop (the middle of each curve, then each start)
+  until one is not on the candidate's boundary. Loops of even depth are outer loops; a loop of
+  odd depth is a hole of the containing loop of least area. `Region::new` turns outer loops
+  counterclockwise and holes clockwise, whatever the input orientation.
+
+The property tests build groups of concentric circles and squares of random orientation at
+scales from 1e-100 to 1e100, compare region membership at random points with an even-odd test
+on the densely flattened input, check the loop count and orientation, and add a circle crossing
+a random curve, which must be reported together with that curve. Unit tests cover open,
+self-intersecting (crossing and pinched), touching, NURBS and empty input and the limit.
+
+### Boundary tracing (CORE-GEOM-017)
+
+`trace_region(curves, pick, islands, tolerance, limits)` returns the region around `pick`
+bounded by arbitrary bounded curves (open or closed, crossing each other), for hatching and area
+tools.
+
+- The arrangement of all curves is built with zero winding weights. The traced face is the
+  bounded face whose boundary cycle has the least area among those containing `pick`.
+  Dangling ends and curves joining two otherwise separate groups have the same face on both
+  sides and never bound the result. Gaps are not bridged: an end that misses another curve by
+  more than twice `tolerance.linear` leaves the boundary open.
+- An island is a connected group of curves inside the traced face that does not touch its
+  outer boundary. The face that contains each such group is the bounded face of least area,
+  among the other groups, containing one of its vertices. The depth of a face is the length of
+  the shortest path of faces from the traced face, crossing one curve per step, without leaving
+  the traced face's outer boundary. `IslandMode::Outermost` fills depth 0 only (the face itself:
+  islands are holes), `IslandMode::Alternating` every even depth (islands are holes, faces inside
+  them two curves deep are filled again, and so on), and `IslandMode::Ignore` every depth (the
+  whole area inside the outer boundary). The boundary of the filled faces against the unfilled
+  ones becomes the region, so adjacent filled faces merge.
+- A non-finite pick fails with `geom.input.not_finite`; a pick within `tolerance.linear` of a
+  curve bounding a face that contains it with `geom.trace.on_boundary`; a pick outside every
+  closed boundary with `geom.trace.not_enclosed`.
+
+The property tests trace random arrangements of two to five segments and arcs, half of them
+inside a closing box, from a random pick: the result contains the pick, every sampled boundary
+point lies within 1e-5 of an input curve, and the result agrees with a flood fill of a 48 × 48
+raster whose walls are the cells within 0.71 cells of a curve, at every cell at least two cells
+from a curve; a box always encloses the pick. Arrangements with near misses the raster cannot
+resolve (curves that do not meet, or free ends and curves they do not reach, within three cells)
+are skipped. Unit tests cover crossing and overshooting lines, a dangling segment, an open gap
+of 1e-3, a circle cut by a chord, nested squares and a double-circle island in all three modes,
+and hostile input.
+
+### Region booleans (CORE-GEOM-018)
+
+`boolean(a, b, op, tolerance, limits)` returns `a op b` for `BooleanOp::Union`, `Difference`,
+`Intersection` and `ExclusiveOr`, or `None` when the result is empty.
+
+- All loops of both regions go into one arrangement; each curve carries the winding weight 1
+  for its region in its direction (outer loops counterclockwise, holes clockwise, so a region's
+  winding number is 1 inside and 0 outside). The winding numbers of the faces of a component
+  follow from the weights of the edges crossed from its outer face; the winding numbers of the
+  outer face are the sums, over the loops of the other components, of ±1 for each loop (by its
+  orientation) that contains a vertex of the component, the first vertex not on that loop's
+  boundary deciding. A face is in the result when the operation holds for its two memberships;
+  the edges between a member face and a non-member face, oriented with the member on their
+  left, are walked into cycles. Cycles of positive area are outer loops; each other cycle is a
+  hole of the outer loop of least area that contains it.
+- No curve is flattened: every output edge is a piece of an input segment, circular arc or
+  elliptical arc, so an output edge on an input arc is an arc with its radius (rebuilt on the
+  chord between its snapped end vertices, so within the snap distance) and an output edge on an
+  input elliptical arc is a piece of that elliptical arc.
+- Coincidence is resolved in the arrangement: overlapping curves of the two regions are cut at
+  the ends of the overlap, and their pieces, which share their end vertices and lie within twice
+  `tolerance.linear` of each other, become one edge with the geometry of `a`'s curve (the first
+  in input order) and the sum of the weights. Shared edges, touching vertices and coincident or
+  tangent arcs are therefore decided once for both regions.
+- The result loops neither cross nor overlap; loops may touch at isolated vertices (two squares
+  sharing only a corner give two parts that touch there), where the walk separates them.
+
+The property tests check `|A ∪ B| = |A| + |B| − |A ∩ B|`, `|A △ B| = |A ∪ B| − |A ∩ B|` and
+`|A − B| = |A| − |A ∩ B|` within 1e-9 relative, and point membership at random points farther
+than 1e-3 from both boundaries, for random regions with line, arc and elliptical boundaries
+moved and rotated against each other, and for unions of rectangles and circles on a small
+integer grid (shared edges, vertices and tangencies) scaled from 1e-100 to 1e100 together with
+the tolerance. Unit tests check that the union of two overlapping circles has only arc edges
+with the input radii, shared edges, corner contact, identical regions, holes and islands,
+internal and external tangency, disjoint regions and hostile input.
+
+### Region offsets (CORE-GEOM-019)
+
+`offset_region(region, distance, join, tolerance, limits)` offsets a region outward for a
+positive distance and inward for a negative one, or returns `None` when nothing remains.
+
+- Every loop is offset with `offset_composite` by `−distance`: to its right, which is outside
+  the region for counterclockwise outer loops and clockwise holes. The join styles are those of
+  curve offsets: `JoinStyle::Round`, `Miter { limit }`, `Bevel` and `Square`. A loop whose offset
+  collapses (`geom.offset.collapsed`) contributes nothing.
+- Offset chains close within four times `tolerance.linear` (the chaining gap of curve
+  offsets); a chain whose box diagonal is at most eight times `tolerance.linear` is a sliver and
+  is dropped. Where the loop removal of a curve offset leaves a closed loop as open chains whose
+  ends overshoot their crossing (the tolerance band along a shallow crossing), each chain is
+  followed by the chain whose start is nearest to its end, at most `|distance|` away (otherwise
+  `geom.precision.insufficient`), and the joint between them makes a small reversed lobe.
+- The loops are combined in an arrangement by winding number, keeping the points with a
+  positive winding number: offsets of different loops that meet merge, a grown hole cuts away
+  what it overlaps, reversed lobes vanish, and loops that vanish are removed. An inward offset
+  larger than the inradius gives `None`, not an error. `distance = 0` returns the region.
+- Elliptical arcs offset to NURBS curves, which loops do not hold yet, so a region with an
+  elliptical boundary fails with `geom.curve.kind_unsupported`.
+
+The property tests offset star-shaped bulge polygons, with or without a circular hole, scaled
+from 1e-50 to 1e50 with the tolerance, by three sorted distances from −2.5 to 2.5 times the
+scale with round joins: every sampled point of every result curve lies at the offset distance
+from the source boundary within 1e-5 times the scale, and the area does not decrease as the
+distance grows. Unit tests check a square with every join style against closed-form areas,
+inward offsets past the inradius, merging squares, holes that close, grown holes that cut the
+outer loop, an annulus that vanishes, and rejected input.
+
+### Region measurements (CORE-GEOM-020)
+
+`Loop2::measure(tolerance)` and `Region::measure(tolerance)` return `Measurements`: the area,
+the perimeter (holes included), the centroid, and the second moments `SecondMoments { xx, yy,
+xy }` (`∫x² dA`, `∫y² dA`, `∫x·y dA`) about axes through the centroid parallel to the x and y
+axes. `Measurements::about_axes(origin, x_axis)` gives the second moments in any frame by the
+parallel-axis rule and rotation (`geom.direction.zero` for a zero axis). A loop is measured
+whatever its orientation.
+
+- The integrals follow from Green's theorem as sums over the boundary pieces, relative to the
+  center of the bounding box. A piece from `a` to `b` contributes the triangle of the reference
+  point with `a` and `b` (closed forms: area `½·a×b`, first moment `A·(a + b)/3`, second moment
+  `A/12·(2·a aᵀ + a bᵀ + b aᵀ + 2·b bᵀ)`) and, for an arc, the segment between its chord and
+  the arc.
+- A circular arc is the image of an arc of the unit circle under `r·I`, an elliptical arc under
+  the linear map `[major, minor]` of its eccentric angle; the segment's moments are those of the
+  unit-circle segment of the same half-sweep `β`, mapped linearly (area by the determinant) and
+  placed at the middle of the chord. The unit segment, in the frame of its chord, has `∫u` and
+  `∫uv` zero and `a₀ = β − sin β cos β`, `∫v`, `∫u²`, `∫v²` in closed form as the sector minus
+  the triangle with the center, moved to the chord, for `β ≥ 1`. Below `β = 1` these closed forms
+  cancel (a bulge of 1e-10 loses every digit), and the same integrals are evaluated as boundary
+  integrals over the arc with `v = 2·sin((β + t)/2)·sin((β − t)/2)`, which does not cancel, by
+  8-point Gauss–Legendre quadrature on panels of at most ¼ radian; the integrands are
+  trigonometric polynomials of degree at most 4, so the quadrature error is below 1e-20
+  relative, far below the rounding of `f64`. A polyline arc takes its radius and bisector from
+  its exact chord below a half turn; a plain arc uses its exact radius and angles.
+- The perimeter is the sum of the curve lengths: exact for segments and circular arcs, by the
+  adaptive quadrature of `CurveEval::length` within `tolerance.linear` for elliptical arcs.
+- Results that are not finite (second moments overflow above about 1e75 times the unit) fail
+  with `geom.precision.insufficient`.
+
+The property tests compare area, centroid and second moments of random regions with line, arc
+and elliptical boundaries with the moments of their flattening (chord 1e-4, turning 0.002) within
+1e-5 relative, and check that scaling by 10^±70 scales area, perimeter and second moments by
+`s²`, `s` and `s⁴`. Unit tests compare rectangles, disks, an annulus (also about a tangent line),
+a rotated ellipse, circular segments of sweeps from 1e-6 to 6, a rounded rectangle and nearly
+straight polyline arcs with closed forms, and the quadrature with the closed forms where both are
+accurate.

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc eb8d7b367d3efeca3012031eb49618fb387e3dc87400b03b267a8d9b31c2eb3a # shrinks to outer = Loop2 { curves: [Polyline(Polyline2 { vertices: [PolylineVertex { point: [2.0, 0.0], bulge: 0.0, start_width: 0.0, end_width: 0.0 }, PolylineVertex { point: [1.0000000000000002, 1.7320508075688772], bulge: 0.0, start_width: 0.0, end_width: 0.0 }, PolylineVertex { point: [-0.9999999999999996, 1.7320508075688774], bulge: 0.0, start_width: 0.0, end_width: 0.0 }, PolylineVertex { point: [-2.0, 2.4492935982947064e-16], bulge: 0.0, start_width: 0.0, end_width: 0.0 }, PolylineVertex { point: [-1.7482289998095766, -3.028021450935504], bulge: 0.0, start_width: 0.0, end_width: 0.0 }, PolylineVertex { point: [1.0000000000000002, -1.7320508075688772], bulge: 0.4396539260309403, start_width: 0.0, end_width: 0.0 }], closed: true })] }, hole = None, d = [0.0, 0.0, -0.828858739662042]

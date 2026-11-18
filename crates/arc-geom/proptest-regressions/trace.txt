@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 650814caa321404128f392d2b0f0d0ea45d40d86408a4451316d400cc2df849c # shrinks to boxed = true, mut curves = [Arc(Arc2 { center: [-1.785763916483985, 2.584993315772964], radius: 1.0, start_angle: 0.0, sweep: 5.845289156465112, chord: None }), Segment(Segment2 { start: [-1.4934180919406288, 0.0], end: [0.0, 0.0] })], pick = (0.0, 1.0760090163464906)

@@ -330,6 +330,38 @@ pub mod codes {
         message_id: "geom-index-too-many-points",
     };
 
+    /// The curves given to build a region cross or touch themselves.
+    pub const REGION_SELF_INTERSECTING: ErrorCode = ErrorCode {
+        code: "geom.region.self_intersecting",
+        category: Category::InvalidInput,
+        message_id: "geom-region-self-intersecting",
+    };
+    /// Two of the closed curves given to build a region cross, touch or overlap.
+    pub const REGION_CURVES_INTERSECT: ErrorCode = ErrorCode {
+        code: "geom.region.curves_intersect",
+        category: Category::InvalidInput,
+        message_id: "geom-region-curves-intersect",
+    };
+    /// An arrangement of curves needs more elements, candidate pairs, intersections or edges
+    /// than the limit allows.
+    pub const ARRANGEMENT_TOO_LARGE: ErrorCode = ErrorCode {
+        code: "geom.arrangement.too_large",
+        category: Category::LimitExceeded,
+        message_id: "geom-arrangement-too-large",
+    };
+    /// No closed boundary of the curves encloses the picked point.
+    pub const TRACE_NOT_ENCLOSED: ErrorCode = ErrorCode {
+        code: "geom.trace.not_enclosed",
+        category: Category::FailedOperation,
+        message_id: "geom-trace-not-enclosed",
+    };
+    /// The picked point lies on one of the curves.
+    pub const TRACE_ON_BOUNDARY: ErrorCode = ErrorCode {
+        code: "geom.trace.on_boundary",
+        category: Category::InvalidInput,
+        message_id: "geom-trace-on-boundary",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         INPUT_NOT_FINITE,
@@ -385,6 +417,11 @@ pub mod codes {
         OFFSET_JOIN_INVALID,
         OFFSET_TOO_MANY_PIECES,
         INDEX_TOO_MANY_POINTS,
+        REGION_SELF_INTERSECTING,
+        REGION_CURVES_INTERSECT,
+        ARRANGEMENT_TOO_LARGE,
+        TRACE_NOT_ENCLOSED,
+        TRACE_ON_BOUNDARY,
     ];
 }
 

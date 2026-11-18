@@ -11,7 +11,9 @@
 //!
 //! No function in this crate panics.
 
+mod arrange;
 pub mod bbox;
+pub mod boolean;
 pub mod closest;
 pub mod curve;
 pub mod edit;
@@ -22,17 +24,22 @@ pub mod flatten;
 pub mod index;
 pub mod intersect;
 pub mod kdtree;
+pub mod measure;
 pub mod nurbs;
 pub mod offset;
 pub mod polyline;
 pub mod predicates;
 pub mod primitives;
 pub mod region;
+pub mod region_build;
+pub mod region_offset;
+pub mod trace;
 pub mod transform;
 pub mod triangulate;
 pub mod view;
 
 pub use bbox::{Aabb2, Aabb3};
+pub use boolean::{BooleanOp, boolean};
 pub use closest::{CurvePoint, CurveProject, FootPoint};
 pub use curve::Curve2;
 pub use edit::{
@@ -44,12 +51,16 @@ pub use flatten::CurveFlatten;
 pub use index::{SpatialIndex2, SpatialIndex3};
 pub use intersect::{Contact, Intersection, Orientation, intersect, intersect_with_limits};
 pub use kdtree::{KdTree2, KdTree3};
+pub use measure::{Measurements, SecondMoments};
 pub use nurbs::Nurbs2;
 pub use offset::{JoinStyle, offset, offset_composite};
 pub use polyline::{Polyline2, PolylineSegment, PolylineVertex};
 pub use predicates::{Sign, incircle, orient2d};
 pub use primitives::{Arc2, Circle2, Ellipse2, EllipticalArc2, Line2, Ray2, Segment2};
 pub use region::{Containment, Loop2, Region, RegionPart};
+pub use region_build::build_region;
+pub use region_offset::offset_region;
+pub use trace::{IslandMode, trace_region};
 pub use triangulate::{TriangleMesh2, triangulate, triangulate_with};
 pub use view::{Projection, ViewFrame};
 

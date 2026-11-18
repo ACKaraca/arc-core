@@ -32,9 +32,11 @@
 //!    dropped. What remains of each round join is then replaced according to the join style:
 //!    kept ([`JoinStyle::Round`]), by its chord ([`JoinStyle::Bevel`]), or by the tangent lines
 //!    at its ends up to their intersection when that lies within `limit·|d|` of the corner and by
-//!    its chord otherwise ([`JoinStyle::Miter`]). A chord lies inside the circle of radius `|d|`
-//!    about the corner, which no kept piece enters, so it crosses nothing; the lines of a miter
-//!    lie outside it and are not checked against other pieces.
+//!    its chord otherwise ([`JoinStyle::Miter`]), or by the tangent lines at its ends up to the
+//!    line tangent to it at its middle and that line ([`JoinStyle::Square`]). A chord lies
+//!    inside the circle of radius `|d|` about the corner, which no kept piece enters, so it
+//!    crosses nothing; the lines of a miter or square join lie outside it and are not checked
+//!    against other pieces.
 //! 5. The kept sub-pieces are chained end to start within four times `tolerance.linear`, each
 //!    chain starting from the first unused piece in order of the raw chain; a chain is closed
 //!    when it ends within that distance of its start.
@@ -100,6 +102,9 @@ pub enum JoinStyle {
     },
     /// A straight segment between the offset ends.
     Bevel,
+    /// The tangent lines extended from the offset ends to the line tangent to the round join
+    /// at its middle, at distance `|d|` from the corner, and that line between them.
+    Square,
 }
 
 impl Line2 {
@@ -420,6 +425,18 @@ fn join_pieces(
             out.extend(straight(miter, s)?);
             Ok(out)
         }
+        JoinStyle::Square => {
+            // The tangent at the middle of the round join of sweep φ meets the tangents at its
+            // ends |d|·tan(φ/4) from them.
+            let (a, b) = (e - v, s - v);
+            let sweep = cross(&a, &b).abs().atan2(a.dot(&b));
+            let reach = d.abs() * (0.25 * sweep).tan();
+            let (p, q) = (e + t0 * reach, s - t1 * reach);
+            let mut out = straight(e, p)?;
+            out.extend(straight(p, q)?);
+            out.extend(straight(q, s)?);
+            Ok(out)
+        }
     }
 }
 
@@ -545,7 +562,11 @@ fn run(
     let mut pieces = Vec::with_capacity(kept.len());
     for (piece, corner) in kept {
         match (corner, &piece, join) {
-            (Some(v), Curve2::Arc(arc), JoinStyle::Miter { .. } | JoinStyle::Bevel) => {
+            (
+                Some(v),
+                Curve2::Arc(arc),
+                JoinStyle::Miter { .. } | JoinStyle::Bevel | JoinStyle::Square,
+            ) => {
                 let (p, q) = (arc.point_at(0.0), arc.point_at(arc.sweep().abs()));
                 let tangents = (piece.tangent(0.0), piece.tangent(arc.sweep().abs()));
                 pieces.extend(join_pieces(p, q, v, Some(tangents), d, join)?);
