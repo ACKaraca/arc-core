@@ -111,6 +111,9 @@ const IGNORE: u8 = 2;
 struct Control {
     mode: AtomicU8,
     open: Mutex<bool>,
+    /// Waits on `open`; a condition variable serves one mutex only.
+    opened: Condvar,
+    /// Waits on `started`.
     changed: Condvar,
     /// The value each run read, and whether its token was cancelled when it ended.
     runs: Mutex<Vec<(i64, bool)>>,
@@ -121,13 +124,13 @@ struct Control {
 impl Control {
     fn open(&self) {
         *self.open.lock().unwrap() = true;
-        self.changed.notify_all();
+        self.opened.notify_all();
     }
 
     fn wait_open(&self, timeout: Duration) -> bool {
         let open = self.open.lock().unwrap();
         *self
-            .changed
+            .opened
             .wait_timeout_while(open, timeout, |o| !*o)
             .unwrap()
             .0
