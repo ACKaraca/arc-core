@@ -21,7 +21,7 @@
 
 use arc_base::{Color, Error, Result};
 use arc_geom::flatten::CurveFlatten;
-use arc_geom::{Curve2, Polyline2};
+use arc_geom::{Curve2, Polyline2, Region};
 use tiny_skia::{
     FillRule, LineCap, LineJoin, Mask, Paint, Path, PathBuilder, Pixmap, Stroke, Transform,
 };
@@ -158,6 +158,28 @@ impl Space {
     /// The flattened vertices of a curve; `None` when it cannot be flattened.
     fn flatten(&self, curve: &Curve2) -> Option<Vec<arc_base::math::Point2>> {
         curve.flatten(self.chord(), ANGLE, MAX_VERTICES).ok()
+    }
+
+    /// One path of every loop of every part, to be filled with the even-odd rule.
+    fn region(&self, region: &Region) -> Option<Path> {
+        let mut builder = PathBuilder::new();
+        for part in region.parts() {
+            for lp in std::iter::once(part.outer()).chain(part.holes()) {
+                let mut points: Vec<arc_base::math::Point2> = Vec::new();
+                for curve in lp.curves() {
+                    for p in curve.flatten(self.chord(), ANGLE, MAX_VERTICES).ok()? {
+                        if points.last() != Some(&p) {
+                            points.push(p);
+                        }
+                    }
+                }
+                if points.len() > 1 && points.first() == points.last() {
+                    points.pop();
+                }
+                self.line(&mut builder, &points, true);
+            }
+        }
+        builder.finish()
     }
 
     fn polygon(&self, region: &Polyline2) -> Option<Path> {
@@ -366,6 +388,19 @@ fn draw(pixmap: &mut Pixmap, space: &Space, item: &Item, mask: &Mask, paper: Col
                     &path,
                     &paint(pen.color),
                     FillRule::Winding,
+                    identity,
+                    Some(mask),
+                );
+                true
+            }
+            None => false,
+        },
+        ItemKind::RegionFill { region, pen } => match space.region(region) {
+            Some(path) => {
+                pixmap.fill_path(
+                    &path,
+                    &paint(pen.color),
+                    FillRule::EvenOdd,
                     identity,
                     Some(mask),
                 );

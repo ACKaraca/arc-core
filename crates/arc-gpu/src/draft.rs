@@ -425,10 +425,17 @@ fn cross(o: Point2, a: Point2, b: Point2) -> f64 {
 fn triangles(boundary: &Polyline2, options: &DraftOptions) -> Result<Vec<Triangle>> {
     let tolerance = &options.display.tolerance;
     let outer = Loop2::new(vec![Curve2::Polyline(boundary.clone())], tolerance)?;
-    let region = Region::new(vec![RegionPart::new(outer, Vec::new())])?;
+    region_triangles(
+        &Region::new(vec![RegionPart::new(outer, Vec::new())])?,
+        options,
+    )
+}
+
+fn region_triangles(region: &Region, options: &DraftOptions) -> Result<Vec<Triangle>> {
+    let tolerance = &options.display.tolerance;
     let max = usize::try_from(options.limits.max_geometry_vertices).unwrap_or(usize::MAX);
     let mesh = triangulate(
-        &region,
+        region,
         tolerance.tessellation_chord,
         tolerance.tessellation_angle,
         max,
@@ -505,12 +512,12 @@ fn intersect(
 /// The mesh item of a fill or mask, and the geometry it uses.
 fn region_item(
     extraction: &mut Extraction,
-    boundary: &Polyline2,
+    tris: Vec<Triangle>,
     clip: Option<&[Triangle]>,
     instance: MeshInstance,
     options: &DraftOptions,
 ) -> Result<Option<RenderItem>> {
-    let mut tris = triangles(boundary, options)?;
+    let mut tris = tris;
     if let Some(clip) = clip {
         tris = intersect(&tris, clip, options)?;
     }
@@ -588,22 +595,12 @@ impl Builder<'_> {
             // exist yet; stroke text arrives as strokes and is drawn.
             Shape::Glyphs { .. } => Ok(()),
             Shape::Fill(boundary) | Shape::Mask(boundary) => {
-                let mut instance = MeshInstance::new(color_of(p));
-                if matches!(p.shape, Shape::Mask(_)) {
-                    instance.flags = self.mask;
-                }
-                let clip = self.clip.map(|c| c.triangles.as_slice());
-                if let Some(item) = region_item(
-                    &mut self.out.extraction,
-                    boundary,
-                    clip,
-                    instance,
-                    self.options,
-                )? {
-                    self.out.extraction.items.push(item);
-                    self.out.sub_objects.push(vec![sub]);
-                }
-                Ok(())
+                let tris = triangles(boundary, self.options)?;
+                self.region_primitive(p, tris, sub)
+            }
+            Shape::Region(region) => {
+                let tris = region_triangles(region, self.options)?;
+                self.region_primitive(p, tris, sub)
             }
             Shape::Point(q) => self.stroke(
                 p,
@@ -621,6 +618,26 @@ impl Builder<'_> {
                 self.stroke(p, paths, pattern, sub)
             }
         }
+    }
+
+    fn region_primitive(
+        &mut self,
+        p: &Primitive,
+        tris: Vec<Triangle>,
+        sub: SubObject,
+    ) -> Result<()> {
+        let mut instance = MeshInstance::new(color_of(p));
+        if matches!(p.shape, Shape::Mask(_)) {
+            instance.flags = self.mask;
+        }
+        let clip = self.clip.map(|c| c.triangles.as_slice());
+        if let Some(item) =
+            region_item(&mut self.out.extraction, tris, clip, instance, self.options)?
+        {
+            self.out.extraction.items.push(item);
+            self.out.sub_objects.push(vec![sub]);
+        }
+        Ok(())
     }
 
     fn stroke(
@@ -842,7 +859,13 @@ fn paper(
     let sheet = rectangle(Point2::origin(), Point2::new(w, h))?;
     let mut instance = MeshInstance::new(Color::WHITE);
     instance.flags = PAINT_PAPER;
-    if let Some(item) = region_item(&mut out.extraction, &sheet, None, instance, options)? {
+    if let Some(item) = region_item(
+        &mut out.extraction,
+        triangles(&sheet, options)?,
+        None,
+        instance,
+        options,
+    )? {
         out.extraction.items.push(item);
         out.sub_objects.push(Vec::new());
     }

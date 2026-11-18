@@ -74,6 +74,7 @@ pub const ENTITIES: &[&str] = &[
     crate::dimension::DIMENSION,
     crate::leader::LEADER,
     crate::leader::MULTILEADER,
+    crate::hatch::HATCH,
 ];
 
 /// The types that contain entities: spaces and block definitions.
@@ -682,6 +683,7 @@ fn declarations() -> arc_base::Result<Vec<TypeDecl>> {
         .chain(crate::style::declarations())
         .chain(crate::text::declarations())
         .chain(crate::dimension::declarations())
+        .chain(crate::hatch::declarations())
         .chain(crate::leader::declarations())
         .chain(crate::plot_style::declarations())
         .map(|(key, fields, validators)| {
@@ -763,7 +765,7 @@ mod tests {
     fn every_type_registers_and_field_indices_match_names() {
         let mut registry = TypeRegistry::new();
         register_types(&mut registry).unwrap();
-        assert_eq!(registry.len(), 30);
+        assert_eq!(registry.len(), 32);
         let name = |key: &str, i: usize| registry.get(key).unwrap().schema.fields[i].name.clone();
         assert_eq!(name(LINE, entity::EXTRUSION), "extrusion");
         assert_eq!(name(LINE, entity::KIND), "geometry");
@@ -775,6 +777,14 @@ mod tests {
         assert_eq!(name(LAYER, layer::DESCRIPTION), "description");
         assert_eq!(name(BLOCK, table::BLOCK_ATTRIBUTES), "attributes");
         assert_eq!(name(LINETYPE, table::LINETYPE_ELEMENTS), "elements");
+        assert_eq!(
+            name(crate::hatch::HATCH, crate::hatch::field::OBJECTS),
+            "boundary_objects"
+        );
+        assert_eq!(
+            name(crate::hatch::HATCH, crate::hatch::field::GRADIENT_COLOR2),
+            "gradient_color2"
+        );
         assert!(register_types(&mut registry).is_err());
     }
 

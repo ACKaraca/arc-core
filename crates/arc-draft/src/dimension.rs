@@ -310,7 +310,7 @@ impl DefinitionPoint {
 }
 
 /// A reference to any entity whose deletion clears it.
-fn clearing_reference(targets: &[&str], cardinality: Cardinality) -> ValueType {
+pub(crate) fn clearing_reference(targets: &[&str], cardinality: Cardinality) -> ValueType {
     ValueType::Reference(ReferenceSpec {
         targets: targets
             .iter()

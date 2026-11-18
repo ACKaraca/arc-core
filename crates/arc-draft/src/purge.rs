@@ -16,7 +16,7 @@ use crate::types::{BLOCK, LAYER, LINETYPE};
 /// The types purge considers.
 #[must_use]
 pub fn purgeable() -> Vec<&'static str> {
-    let mut keys = vec![LAYER, LINETYPE, BLOCK];
+    let mut keys = vec![LAYER, LINETYPE, BLOCK, crate::hatch::HATCH_PATTERN];
     keys.extend_from_slice(STYLES);
     keys
 }

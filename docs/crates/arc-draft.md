@@ -924,6 +924,129 @@ otherwise; at most `max_pixels` pixels, `draft.raster.too_large`) and `Raster::p
 - **Not drawn.** Outline glyph runs, and curves that cannot be flattened within one million
   vertices, are skipped and counted in `Raster::skipped`. TIFF is not written.
 
+## Hatches as implemented
+
+The sixth part of the crate implements CORE-DRAFT-003 and CORE-DRAFT-020: hatches (`hatch`), hatch
+patterns and their file format (`hatch_pattern`). The file format is specified in
+[hatch-pattern-format.md](../architecture/hatch-pattern-format.md) and decided in
+[ADR-0016](../adr/0016-hatch-pattern-format.md).
+
+### Object types
+
+`register_types` also adds these types, each at schema version 1.0. A hatch is an entity.
+
+| Type key | Fields |
+|---|---|
+| `core.draft.hatch` | common fields; `kind` (`pattern`, `solid`, `gradient`); `loops`: up to 4096 geometry values; `island` (`alternating`, `outermost`, `ignore`); `boundary_objects`: up to 4096 records of one optional reference each; `pick`; `pattern` (a hatch pattern); `inline`: up to 64 line families; `scale` (positive, default 1); `angle` in radians; `origin`; `gradient_kind` (`linear`, `radial`); `gradient_angle`; `gradient_color1`; `gradient_color2` |
+| `core.draft.hatch_pattern` | `name` (unique, `draft.name.taken`); `description`; `lines`: up to 64 line families |
+
+A line family record holds `angle` (degrees), `origin`, `shift`, `spacing` and `dashes` (up to 32
+numbers), with the meaning of the [file format](../architecture/hatch-pattern-format.md#line-families).
+Type validators: every stored loop is a circle, an ellipse or a closed polyline and there is at least
+one (`draft.hatch.boundary_invalid`); every family follows the rules of the format
+(`draft.pattern.line_invalid`); a pattern hatch has a `pattern` or at least one inline family, and a
+pattern object has at least one family (`draft.pattern.empty`). A pattern in use by a hatch cannot be
+deleted. Unused patterns are purged by `core.draft.purge`.
+
+### Boundary and islands
+
+- **Stored loops.** `loops` is the last boundary: closed circles, ellipses and closed bulge
+  polylines (lines and arcs) in the `arc.geom` encoding. A boundary of other curves is stored as the
+  closed polyline of its lines and arcs; a boundary with elliptical arc pieces is refused with
+  `draft.hatch.boundary_invalid`.
+- **Island mode.** The region is built from the loops by `arc_geom::build_region`. `alternating`
+  fills by nesting parity (a loop at even depth is an outer loop, at odd depth a hole);
+  `outermost` keeps the loops of depth 0 with their direct holes and drops what is nested deeper;
+  `ignore` keeps only the loops of depth 0, filled whole. Loops that cross or touch fail with the
+  errors of `build_region`.
+- **Create from curves.** `core.draft.hatch.create` with `boundary` joins the curves into closed
+  chains (gaps up to the linear tolerance) and stores all loops of the arrangement; the island mode
+  applies when the hatch resolves, so changing it later needs no new boundary. An open chain fails
+  with `draft.hatch.boundary_invalid`.
+- **Create from a point.** `core.draft.hatch.pick` traces the region around `pick` among the curve
+  entities of the owner (or the given `objects`) with `arc_geom::trace_region` and the island mode;
+  it stores the loops of the traced region. The errors of tracing are passed on
+  (`geom.trace.not_enclosed`, `geom.trace.on_boundary`). The stored loops hold the result of the
+  mode, so they resolve to the same region.
+
+### Associativity
+
+- A hatch with `boundary_objects` follows those objects: the derived node
+  `core.draft.hatch.resolved` reads their geometry and gives the region
+  (`hatch::Resolution`), by joining their curves into closed chains, or by tracing around `pick`
+  when the hatch was created from a point. The display list reads the node, so editing a boundary
+  object regenerates exactly the hatches that reference it. `hatch::resolve` evaluates the node
+  from a snapshot.
+- Boundary objects are entities of the hatch's container; a line, arc, circle, ellipse, elliptical
+  arc or polyline. The `object` references are cleared when their target is deleted.
+  `core.draft.entity.delete` first stores the current region of every associated hatch that refers
+  to a deleted entity in `loops`, so the hatch keeps its last boundary. A hatch with a cleared
+  record is disassociated: it resolves from its stored loops, and the document validator reports
+  a warning `draft.hatch.disassociated` (detail `id`) on every commit. Setting
+  `boundary_objects` to an empty list through `core.draft.hatch.modify` ends the warning. A deletion
+  through another command keeps the loops the hatch last stored.
+- A stale boundary that no longer bounds a region makes the node fail with the error of the
+  construction; the hatch is then listed in `failed` by the space list.
+
+### Pattern generation
+
+`hatch::generate` is a pure function from a `Region`, line families, a `Placement` (scale, angle,
+origin) and a bound to `Generated { marks, fallback }`; a mark is a segment or a dot.
+
+- **Frame.** The hatch origin is a point of the document: moving the boundary does not move the
+  pattern. A family's lines are laid out as in the file format after scaling by `scale` and rotating
+  by `angle` about the hatch `origin`; the family origin is relative to the hatch origin.
+- **Line range.** For each part of the region the indices of the lines that can reach it come from
+  the part's bounding box projected on the family's normal, so the work depends on the size of the
+  region, not on its distance from the origin.
+- **Clipping.** Each line is intersected with every loop of the part (loops whose box is farther
+  than the linear tolerance from the line are skipped); each stretch between consecutive
+  intersections is kept when its middle point is strictly inside the part (outer loop, outside all
+  holes); adjacent kept stretches join.
+- **Dashes.** A dash list starts at the point of the line the family defines (so the phase depends
+  only on the placement), repeats, and is cut to each kept stretch. A dash shorter than the linear
+  tolerance after cutting is dropped. A dot is a mark when its position lies on a kept stretch.
+- **Bound and fallback.** The number of lines visited plus the number of marks must not exceed the
+  bound; the display list uses the smaller of `DisplayOptions::max_dashes` and `max_primitives`.
+  When the bound is exceeded, or positions in a dash list cannot be told apart in `f64`, the result
+  is `fallback`: no marks, and the hatch is drawn as a solid fill (a region primitive with part 1).
+  No error is raised; a solid fill is the defined result of a pattern too dense to draw.
+- **Errors.** A scale that is not finite and positive, or a non-finite angle or origin:
+  `draft.hatch.parameter_invalid`; an invalid family: `draft.pattern.line_invalid`.
+
+### Display lists
+
+A solid hatch contributes one `Shape::Region` primitive; a pattern hatch contributes one stroke
+per segment and one point per dot, continuous, with the entity's appearance; a gradient hatch
+contributes one `Shape::Region` in `gradient_color1`. The gradient kind, angle and second color are
+stored but no consumer draws them yet: a gradient is shown as a flat fill in its first color. Part
+is 0, or 1 for a pattern that fell back to a solid fill.
+
+`Shape::Region` and `plot::ItemKind::RegionFill` carry an exact `arc_geom::Region`: every loop of
+every part, which consumers fill with the even-odd rule, so holes stay empty. Plot streams encode it
+as item tag 5 (the stream version stays 1; tags 0 to 4 are unchanged). Raster output fills it with the
+even-odd rule; `arc-gpu` triangulates the region with its holes. A viewport list keeps a region that
+reaches the clip boundary whole, like other fills.
+
+### Pattern library and files
+
+`hatch_pattern::PatternFile::parse` reads a pattern file under an `arc_base::Limits` profile and
+`to_text` writes its canonical form. `hatch_pattern::library` is the shipped library
+`patterns/arc-patterns.ahp`: parallel lines at 45 degrees (`diagonal-lines`), `cross-lines`,
+`brick-bond`, `concrete-mix`, `insulation-zigzag`, `gravel-scatter`, `earth-fill`, `steel-double`,
+`wood-grain` and `square-grid`. The library is an original work of the project, distributed under
+the license of this repository; its patterns are designed from the geometry of the materials and
+copy no other product's patterns or names. A fuzz target for the reader is in `fuzz/`.
+
+### Commands
+
+| Command | Effect |
+|---|---|
+| `core.draft.hatch.create` | Creates a hatch in `owner` from `boundary` (curves) or `objects` (associative), with `kind`, `island`, `pattern` or `inline` families, `scale`, `angle`, `origin`, `gradient` and `layer` |
+| `core.draft.hatch.pick` | Creates a hatch around `pick` among the curve entities of `owner` (or `objects`); `associative` (default true) keeps the objects as boundary objects |
+| `core.draft.hatch.modify` | Sets a field of hatches |
+| `core.draft.hatch_pattern.load` | Creates pattern objects from the `text` of a pattern file, or from the shipped library, all or the listed `names`; returns `ids` |
+
 ## Error codes
 
 The codes of every part of the crate:
@@ -983,3 +1106,13 @@ The codes of every part of the crate:
 | `draft.raster.invalid` | `invalid_input` | A raster resolution or size is out of range |
 | `draft.raster.too_large` | `limit_exceeded` | A raster image would have more pixels than the bound |
 | `draft.raster.encode_failed` | `internal` | The PNG encoder failed |
+| `draft.hatch.boundary_invalid` | `invalid_input` | A stored hatch loop is not a closed circle, ellipse or polyline, a hatch has no loop, or a boundary object cannot bound a region |
+| `draft.hatch.parameter_invalid` | `invalid_input` | A hatch scale is not a finite positive number, or its angle or origin is not finite |
+| `draft.hatch.disassociated` | `not_found` | A hatch lost a boundary object and keeps its last boundary (a warning) |
+| `draft.pattern.syntax` | `invalid_input` | A line of a hatch-pattern file is malformed |
+| `draft.pattern.version_unsupported` | `unsupported` | A hatch-pattern file has a version this reader does not read |
+| `draft.pattern.duplicate` | `invalid_input` | A hatch-pattern file defines a name twice |
+| `draft.pattern.line_invalid` | `invalid_input` | A line family breaks a rule of the format |
+| `draft.pattern.empty` | `invalid_input` | A pattern, or a pattern hatch, has no line family |
+| `draft.pattern.limit_exceeded` | `limit_exceeded` | A hatch-pattern file exceeds a bound |
+| `draft.pattern.unknown` | `not_found` | A pattern name is not in the pattern file |

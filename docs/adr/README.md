@@ -24,6 +24,7 @@ collaboration, extensibility, licensing, assistance, robustness, localization, e
 | [0013](0013-geometry-encoding.md) | Hand-written versioned geometry encoding | Accepted |
 | [0014](0014-mesh-encoding.md) | Hand-written versioned mesh encoding with optional quantization | Accepted |
 | [0015](0015-stroke-font-format.md) | Versioned text format for Arc stroke fonts | Accepted |
+| [0016](0016-hatch-pattern-format.md) | Versioned text format for Arc hatch patterns | Accepted |
 
 ## Process
 

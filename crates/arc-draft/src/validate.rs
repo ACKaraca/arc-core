@@ -32,6 +32,9 @@
 //! whose referenced geometry was deleted, so the diagnostics list holds those of the current
 //! revision.
 //!
+//! **Disassociated hatches.** Every commit reports a warning `draft.hatch.disassociated`
+//! (detail `id`) for each hatch that lost a boundary object.
+//!
 //! **Dimension style parents.** A dimension style with a parent has a kind other than `all`,
 //! and its parent has the kind `all` and no parent (`draft.style.parent_invalid`).
 
@@ -236,7 +239,14 @@ fn names(candidate: &Snapshot, touched: &BTreeMap<ObjectId, Change>) -> Vec<Find
         let Some(key) = type_of(candidate, id).map(|k| k.as_str().to_owned()) else {
             continue;
         };
-        if ![LAYER, LINETYPE, BLOCK, PLOT_STYLE_TABLE].contains(&key.as_str())
+        if ![
+            LAYER,
+            LINETYPE,
+            BLOCK,
+            PLOT_STYLE_TABLE,
+            crate::hatch::HATCH_PATTERN,
+        ]
+        .contains(&key.as_str())
             && !STYLES.contains(&key.as_str())
         {
             continue;
@@ -362,7 +372,9 @@ pub fn validators(max_nesting: u32) -> Vec<DocumentValidator> {
         Arc::new(|_, candidate, touched| dim_parents(candidate, touched));
     let disassociated: DocumentValidator =
         Arc::new(|_, candidate, _| crate::dimension::disassociated(candidate));
-    vec![nesting, names, layouts, parents, disassociated]
+    let hatches: DocumentValidator =
+        Arc::new(|_, candidate, _| crate::hatch::disassociated(candidate));
+    vec![nesting, names, layouts, parents, disassociated, hatches]
 }
 
 /// Adds [`validators`] with [`DEFAULT_MAX_NESTING`] to `document`.

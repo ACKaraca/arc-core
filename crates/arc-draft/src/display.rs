@@ -23,7 +23,7 @@ use arc_doc::graph::{
 use arc_doc::relationship::ReferenceField;
 use arc_doc::{ColorValue, Snapshot, TypeKey, Value};
 use arc_geom::encoding::GeomCodec;
-use arc_geom::{Curve2, Loop2, Polyline2};
+use arc_geom::{Curve2, Loop2, Polyline2, Region};
 
 use crate::appearance::{
     Level, Resolved, Setting, Source, Sourced, Style, default_color, layer_style_of, resolve,
@@ -122,6 +122,9 @@ pub enum Shape {
     },
     /// A filled region bounded by a closed polyline.
     Fill(Polyline2),
+    /// A filled region with holes: the area inside an outer loop and outside its holes, whose
+    /// loops are exact curves. A consumer fills it with the even-odd rule over all loops.
+    Region(Region),
     /// A wipeout mask: the region inside the closed polyline is painted in the background
     /// color.
     Mask(Polyline2),
@@ -222,6 +225,8 @@ pub(crate) trait Reader {
     fn children(&self, style: ObjectId) -> Vec<ObjectId>;
     /// The resolution of the dimension `id`.
     fn resolved(&self, id: ObjectId) -> Result<Resolution>;
+    /// The resolved boundary of the hatch `id`.
+    fn hatch(&self, id: ObjectId) -> Result<crate::hatch::Resolution>;
 }
 
 pub(crate) struct GraphReader<'a, 'b> {
@@ -272,6 +277,13 @@ impl Reader for GraphReader<'_, '_> {
         let value = self.ctx.node(&crate::dimension::resolved_node(id)?)?;
         value
             .downcast_ref::<Resolution>()
+            .cloned()
+            .ok_or_else(|| Error::new(codes::OBJECT_WRONG_TYPE))
+    }
+    fn hatch(&self, id: ObjectId) -> Result<crate::hatch::Resolution> {
+        let value = self.ctx.node(&crate::hatch::resolved_node(id)?)?;
+        value
+            .downcast_ref::<crate::hatch::Resolution>()
             .cloned()
             .ok_or_else(|| Error::new(codes::OBJECT_WRONG_TYPE))
     }
@@ -328,6 +340,9 @@ impl Reader for SnapshotReader<'_> {
     }
     fn resolved(&self, id: ObjectId) -> Result<Resolution> {
         crate::dimension::resolve_with(self, id, &self.options.tolerance)
+    }
+    fn hatch(&self, id: ObjectId) -> Result<crate::hatch::Resolution> {
+        crate::hatch::resolve_with(self, id, &self.options.tolerance)
     }
 }
 
@@ -546,6 +561,7 @@ pub(crate) fn transform_shape(shape: &Shape, t: &Transform2, tol: &Tolerance) ->
         },
         Shape::Fill(p) => Shape::Fill(transform_polyline(p, t, tol)?),
         Shape::Mask(p) => Shape::Mask(transform_polyline(p, t, tol)?),
+        Shape::Region(r) => Shape::Region(r.transformed(t, tol)?),
         Shape::Glyphs {
             family,
             index,
@@ -628,6 +644,9 @@ fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<
             let layout = text_layout_of(reader, id, &key, options)?;
             let placement = text_placement(reader, id)?;
             list.primitives = text_primitives(&layout, &placement, &base, &options.tolerance)?;
+        }
+        crate::hatch::HATCH => {
+            list.primitives = crate::hatch::primitives(reader, id, &base, options)?;
         }
         DIMENSION | LEADER | MULTILEADER => {
             list.primitives =
@@ -1135,7 +1154,8 @@ pub fn register_evaluators(evaluators: &mut Evaluators, options: DisplayOptions)
             evaluator(options.clone()),
         )?;
     }
-    crate::dimension::register_evaluators(evaluators, &options)
+    crate::dimension::register_evaluators(evaluators, &options)?;
+    crate::hatch::register_evaluators(evaluators, &options)
 }
 
 /// The list of `entity` evaluated directly from `snapshot`, without the graph: the same rules
@@ -1237,6 +1257,15 @@ fn gather(
     Ok(primitives)
 }
 
+/// The bounding box of the outer loops of `region`.
+pub(crate) fn region_box(region: &Region) -> Option<arc_geom::Aabb2> {
+    region
+        .parts()
+        .iter()
+        .map(|p| p.outer().bounding_box())
+        .reduce(|a, b| a.union(&b))
+}
+
 fn boundary_loop(boundary: &Polyline2, tol: &Tolerance) -> Result<Loop2> {
     Loop2::new(vec![Curve2::Polyline(boundary.clone())], tol)
 }
@@ -1275,6 +1304,12 @@ fn cut_primitive(
         }
         // Glyphs are kept whole; the consumer clips them like fills.
         Shape::Glyphs { .. } => Ok(true),
+        Shape::Region(region) => {
+            let keep = !inside
+                || region_box(region)
+                    .is_some_and(|b| b.intersects(&boundary.bounding_box().expanded(tol.linear)));
+            Ok(keep)
+        }
         Shape::Fill(region) | Shape::Mask(region) => {
             let keep = !inside
                 || region

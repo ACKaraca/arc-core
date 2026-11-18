@@ -22,5 +22,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "hatch_pattern"
+path = "fuzz_targets/hatch_pattern.rs"
+test = false
+doc = false
+bench = false
+
 # Its own workspace root, separate from the repository workspace.
 [workspace]

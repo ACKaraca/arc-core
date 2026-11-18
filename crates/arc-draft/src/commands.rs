@@ -302,6 +302,34 @@ const NAMES: &[Names] = &[
         },
     },
     Names {
+        id: "core.draft.hatch.create",
+        message_id: "draft-command-hatch-create",
+        description: Description {
+            message_id: "draft-command-hatch-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.hatch.pick",
+        message_id: "draft-command-hatch-pick",
+        description: Description {
+            message_id: "draft-command-hatch-pick-description",
+        },
+    },
+    Names {
+        id: "core.draft.hatch.modify",
+        message_id: "draft-command-hatch-modify",
+        description: Description {
+            message_id: "draft-command-hatch-modify-description",
+        },
+    },
+    Names {
+        id: "core.draft.hatch_pattern.load",
+        message_id: "draft-command-hatch-pattern-load",
+        description: Description {
+            message_id: "draft-command-hatch-pattern-load-description",
+        },
+    },
+    Names {
         id: "core.draft.purge",
         message_id: "draft-command-purge",
         description: Description {
@@ -1167,6 +1195,29 @@ pub(crate) fn delete(ctx: &mut Context<'_>, p: Delete, family: &[&str]) -> Resul
             }
         }
     }
+    // Hatches keep the boundary they last followed.
+    let mut hatches: Vec<ObjectId> = doomed
+        .iter()
+        .flat_map(|id| {
+            snapshot
+                .referrers(*id)
+                .map(|r| r.source)
+                .collect::<Vec<_>>()
+        })
+        .filter(|id| {
+            !doomed.contains(id) && key_of(&snapshot, *id).is_ok_and(|k| k == crate::hatch::HATCH)
+        })
+        .collect();
+    hatches.sort();
+    hatches.dedup();
+    if !hatches.is_empty() {
+        let options = crate::dimension::resolution_options();
+        for id in hatches {
+            if let Some(loops) = crate::hatch::frozen_loops(&snapshot, id, &options) {
+                txn.modify(id, FieldPath::new("loops"), Some(loops))?;
+            }
+        }
+    }
     for IdParam(id) in p.objects {
         expect(txn.snapshot(), id, family)?;
         txn.delete(id)?;
@@ -1666,6 +1717,7 @@ pub fn register_commands(registry: &mut Registry) -> Result<()> {
         .chain(crate::annotation_commands::specs())
         .chain(crate::spline::specs())
         .chain(crate::plot_style::specs())
+        .chain(crate::hatch_commands::specs())
     {
         registry.register(spec)?;
     }

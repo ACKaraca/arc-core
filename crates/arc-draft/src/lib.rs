@@ -26,6 +26,8 @@
 //!   dimension chains (CORE-DRAFT-010 to 012, [`dimension`], [`format`]), leaders and
 //!   multi-leaders (CORE-DRAFT-013, [`leader`]) and annotation scaling (CORE-DRAFT-014,
 //!   [`annotation`]);
+//! - hatches with islands, associativity, pattern line generation and the Arc hatch-pattern
+//!   file format and library (CORE-DRAFT-003 and 020, [`hatch`], [`hatch_pattern`]);
 //! - spline entities (CORE-DRAFT-002, [`spline`]);
 //! - plot style tables (CORE-DRAFT-030, [`plot_style`]), plot streams (CORE-DRAFT-031, [`plot`])
 //!   and, with the feature `raster`, raster output (CORE-DRAFT-032, `raster`);
@@ -44,6 +46,9 @@ pub mod display;
 pub mod error;
 pub mod fonts;
 pub mod format;
+pub mod hatch;
+mod hatch_commands;
+pub mod hatch_pattern;
 pub mod layout;
 pub mod leader;
 pub mod linetype;

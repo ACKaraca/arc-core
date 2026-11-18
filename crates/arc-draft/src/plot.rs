@@ -18,7 +18,7 @@ use arc_base::{Color, Error, Limits, ObjectId, Result};
 use arc_doc::relationship::ReferenceField;
 use arc_doc::{Snapshot, Value};
 use arc_geom::encoding::GeomCodec;
-use arc_geom::{Aabb2, Curve2, Loop2, Polyline2, PolylineVertex};
+use arc_geom::{Aabb2, Curve2, Loop2, Polyline2, PolylineVertex, Region};
 
 use crate::appearance::default_color;
 use crate::clip::{Piece, cut, piece};
@@ -186,6 +186,13 @@ pub enum ItemKind {
     Fill {
         /// The closed boundary.
         region: Polyline2,
+        /// The pen, whose color fills.
+        pen: Pen,
+    },
+    /// A filled region with holes: every loop of every part, filled with the even-odd rule.
+    RegionFill {
+        /// The region.
+        region: Region,
         /// The pen, whose color fills.
         pen: Pen,
     },
@@ -357,6 +364,7 @@ fn extent(p: &Primitive) -> Option<Aabb2> {
         },
         Shape::Fill(region) => Some(region.bounding_box()),
         Shape::Mask(_) => None,
+        Shape::Region(region) => crate::display::region_box(region),
         Shape::Glyphs {
             glyphs, placement, ..
         } => {
@@ -713,6 +721,7 @@ fn build(
                     ItemKind::Stroke { curve, pieces, pen }
                 }
                 Shape::Fill(region) => ItemKind::Fill { region, pen },
+                Shape::Region(region) => ItemKind::RegionFill { region, pen },
                 Shape::Mask(region) => ItemKind::Mask { region },
                 Shape::Glyphs {
                     family,
@@ -978,6 +987,11 @@ impl PlotStream {
                 }
                 ItemKind::Fill { region, pen } => {
                     o.u8(2);
+                    o.bytes(&region.encode());
+                    o.pen(pen);
+                }
+                ItemKind::RegionFill { region, pen } => {
+                    o.u8(5);
                     o.bytes(&region.encode());
                     o.pen(pen);
                 }

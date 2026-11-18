@@ -332,6 +332,68 @@ pub mod codes {
         message_id: "draft-raster-encode-failed",
     };
 
+    /// A stored hatch loop is not a closed circle, ellipse or polyline, the hatch has no loop, or
+    /// a boundary object cannot bound a region.
+    pub const HATCH_BOUNDARY_INVALID: ErrorCode = ErrorCode {
+        code: "draft.hatch.boundary_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-hatch-boundary-invalid",
+    };
+    /// A hatch scale is not a finite positive number, or its angle or origin is not finite.
+    pub const HATCH_PARAMETER_INVALID: ErrorCode = ErrorCode {
+        code: "draft.hatch.parameter_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-hatch-parameter-invalid",
+    };
+    /// A hatch lost a boundary object and keeps its last boundary (a warning).
+    pub const HATCH_DISASSOCIATED: ErrorCode = ErrorCode {
+        code: "draft.hatch.disassociated",
+        category: Category::NotFound,
+        message_id: "draft-hatch-disassociated",
+    };
+    /// A line of a hatch-pattern file is malformed.
+    pub const PATTERN_SYNTAX: ErrorCode = ErrorCode {
+        code: "draft.pattern.syntax",
+        category: Category::InvalidInput,
+        message_id: "draft-pattern-syntax",
+    };
+    /// A hatch-pattern file has a format version this reader does not read.
+    pub const PATTERN_VERSION_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "draft.pattern.version_unsupported",
+        category: Category::Unsupported,
+        message_id: "draft-pattern-version-unsupported",
+    };
+    /// A hatch-pattern file defines a pattern name twice.
+    pub const PATTERN_DUPLICATE: ErrorCode = ErrorCode {
+        code: "draft.pattern.duplicate",
+        category: Category::InvalidInput,
+        message_id: "draft-pattern-duplicate",
+    };
+    /// A pattern line family breaks a rule: angle, range, spacing or dash list.
+    pub const PATTERN_LINE_INVALID: ErrorCode = ErrorCode {
+        code: "draft.pattern.line_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-pattern-line-invalid",
+    };
+    /// A pattern, or a pattern hatch, has no line family.
+    pub const PATTERN_EMPTY: ErrorCode = ErrorCode {
+        code: "draft.pattern.empty",
+        category: Category::InvalidInput,
+        message_id: "draft-pattern-empty",
+    };
+    /// A hatch-pattern file exceeds a bound.
+    pub const PATTERN_LIMIT_EXCEEDED: ErrorCode = ErrorCode {
+        code: "draft.pattern.limit_exceeded",
+        category: Category::LimitExceeded,
+        message_id: "draft-pattern-limit-exceeded",
+    };
+    /// A pattern name is not in the pattern file.
+    pub const PATTERN_UNKNOWN: ErrorCode = ErrorCode {
+        code: "draft.pattern.unknown",
+        category: Category::NotFound,
+        message_id: "draft-pattern-unknown",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         GEOMETRY_INVALID,
@@ -387,6 +449,16 @@ pub mod codes {
         RASTER_INVALID,
         RASTER_TOO_LARGE,
         RASTER_ENCODE_FAILED,
+        HATCH_BOUNDARY_INVALID,
+        HATCH_PARAMETER_INVALID,
+        HATCH_DISASSOCIATED,
+        PATTERN_SYNTAX,
+        PATTERN_VERSION_UNSUPPORTED,
+        PATTERN_DUPLICATE,
+        PATTERN_LINE_INVALID,
+        PATTERN_EMPTY,
+        PATTERN_LIMIT_EXCEEDED,
+        PATTERN_UNKNOWN,
     ];
 }
 

@@ -1,0 +1,65 @@
+arc-hatch-patterns 1
+license Original work of the Arc project, distributed under the license of the arc-core repository
+# Units are pattern units; a pattern scale of 1 draws them as drawing units.
+
+pattern brick-bond
+description Courses of bricks with joints staggered by half a brick.
+line 0 0 0 0 6
+line 90 0 0 6 -6 6 -6
+end
+
+pattern concrete-mix
+description Dots and short strokes at three angles, approximating aggregate in concrete.
+line 0 0 0 5 10 0 -10
+line 0 2 3 0 20 3 -17
+line 60 6 0 0 20 2 -18
+line 120 3 7 0 20 2 -18
+end
+
+pattern cross-lines
+description Two sets of continuous lines crossing at a right angle, tilted 45 degrees.
+line 45 0 0 0 4
+line 135 0 0 0 4
+end
+
+pattern diagonal-lines
+description Continuous parallel lines at 45 degrees.
+line 45 0 0 0 3
+end
+
+pattern earth-fill
+description Horizontal ground lines with short diagonal ticks between them.
+line 0 0 0 0 12
+line 45 0 0 0 6 3 -9
+end
+
+pattern gravel-scatter
+description Short irregular strokes and dots at three unrelated angles.
+line 20 0 0 3.1 7.3 1.2 -2.9 0.4 -5.1
+line 100 1 2 -2.7 9.1 0.8 -6.3 1.5 -4.2
+line 160 3 1 4.4 11.7 0 -3.3 1.1 -7.9 0 -5.5
+end
+
+pattern insulation-zigzag
+description Rows of a continuous zigzag line.
+line 45 0 0 5.656854 -5.656854 5.656854 -5.656854
+line -45 4 4 5.656854 5.656854 5.656854 -5.656854
+end
+
+pattern square-grid
+description A square grid of continuous lines.
+line 0 0 0 0 5
+line 90 0 0 0 5
+end
+
+pattern steel-double
+description Pairs of closely spaced parallel lines at 45 degrees.
+line 45 0 0 0 4
+line 45 -0.565685 0.565685 0 4
+end
+
+pattern wood-grain
+description Long slightly tilted dashed lines of unequal length, approximating grain.
+line 3 0 0 11 4 20 -3 12 -5
+line -2 5 1 7 5.5 14 -6 9 -4
+end
