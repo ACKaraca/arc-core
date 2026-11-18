@@ -1038,6 +1038,64 @@ The `package_kill` test kills a child process saving 400 objects at random point
 the default suite (1,000 times in the ignored `kill_during_save_1000`) and checks that the
 target always opens and equals the old or the new state; `package_roundtrip` checks the
 write-back contract through the file against an in-memory load.
+### Regeneration scheduler and diagnostics list (CORE-DOC-031, CORE-DOC-032, CORE-DOC-035)
+
+- **Pool.** `Scheduler` (`arc_doc::scheduler`) evaluates the dirty nodes of one document's graph
+  on a fixed set of `std::thread` workers, `DocumentConfig::workers` of them (default: logical
+  cores minus one, at least one). Each document starts its own pool; one pool shared by all
+  documents of a process, as the [overview](../architecture/overview.md#threading-model)
+  describes, is not implemented yet. The pool is a priority queue, not a work-stealing pool: a
+  node demanded from inside a job is evaluated inline by that job, so workers never wait for
+  each other.
+- **Priorities.** `Priority` is `Blocking`, `Interactive`, `Visible` or `Background`. The
+  application pins nodes to a priority (`Document::regenerate`, `Scheduler::prioritize`, undone
+  by `unpin`) or sets one predicate per priority (`set_rule`); a node takes its pin, else the
+  highest priority whose rule accepts it, else `Background`. `request` queues nodes at their
+  priority without pinning them. Workers take the highest priority first and, within one,
+  the oldest request; batches are queued in key order. A node is queued at most once and runs
+  in at most one scheduler job at a time; re-classifying keeps the queue order. After each
+  commit the nodes that became dirty are queued, and whenever the queue runs dry the graph's
+  dirty nodes are compared with it, so no dirty node is forgotten. Nodes whose job cannot begin,
+  or whose evaluator unwinds (`doc.graph.evaluator_panicked`, also listed as a diagnostic), are
+  left alone until the next commit.
+- **Blocking.** `ensure(node)` evaluates the node on the calling thread, ahead of all queued
+  work, and returns its view once it is clean, failed, blocked or cyclic; when a worker runs
+  the node it waits for that job first. It fails like `Graph::begin`, with `doc.graph.stale`
+  after 16 superseded attempts and `doc.scheduler.stopped` after shutdown. Evaluators read
+  nodes with `EvalContext::node`, never with `ensure`.
+- **Cancellation.** The scheduler is the graph's observer (`Graph::set_observer`). After each
+  applied change set it asks the graph, for every running job, whether the change set changed
+  an input recorded by the job's node or, transitively, by the nodes it depends on
+  (`Graph::inputs_changed_since`, visiting at most 4,096 nodes), and cancels the job's token if
+  so; a job's own reads are only known when it ends, so a first evaluation is not cancelled.
+  A cancelled evaluator stops at its next yield point and the node is queued again ahead of its
+  priority. Cancellation only saves time: `Graph::finish` checks the stale-result rule before
+  the job releases the change sets applied since it began, so an evaluator that never reaches
+  a yield point has its outdated result discarded.
+- **Idle and shutdown.** `is_idle` and `wait_idle(timeout)` tell when no job is queued or
+  running and every dirty node was looked at; a save waits for it. `shutdown`, called by
+  `Document::close` and on drop, removes the observer, cancels running jobs, empties the queue
+  and joins the workers. On `wasm32` the pool has no worker: jobs run on the calling thread
+  when `pump` or `wait_idle` is called.
+- **Events.** After each job and each commit the scheduler drains the graph's transitions and
+  emits one `Regenerated` event with the nodes that became clean and those that became failed,
+  blocked or cyclic. It owns `Graph::drain_transitions` of the document's graph.
+- **Diagnostics list.** `DiagnosticsList` (`Document::diagnostics`) is the document's
+  diagnostics sink. It keeps insertion order and offers `snapshot` (version, `Arc`-shared
+  diagnostics, dropped count; shared until the next change), `for_object`, `for_origin` and
+  `for_source`. Lifetimes by source: a diagnostic delivered at commit (validator warnings,
+  faults) lives until a later commit touches one of its objects, or until the next commit when
+  it names none; a node diagnostic mirrors a failed (error, the evaluator's error), cyclic
+  (error, `doc.graph.cycle`) or blocked (warning, `doc.graph.blocked` with the upstream nodes)
+  node and goes when the node becomes clean, dirty or running or is removed; a load diagnostic
+  lives while its object is held, that is until a commit touches it, and for the whole document
+  when it names no object; link diagnostics (`set_link`, `clear_link`) are kept until cleared
+  and are not produced yet, because external links are a later phase. The list holds at most
+  `DocumentConfig::diagnostics_capacity` diagnostics (10,000 by default): beyond it the least
+  severe, and among equals the oldest, diagnostic is dropped, possibly the new one, and counted.
+  Every change increments the version and emits one `DiagnosticsChanged` event; dropped
+  diagnostics count as removed. A sink set with `Document::set_diagnostics` receives what
+  commits deliver after the list.
 
 ### Error codes
 
@@ -1112,3 +1170,5 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.package.preview_invalid` | `invalid_input` | A preview has an unknown or repeated kind, another media type, a wrong pixel size or too many bytes |
 | `doc.package.last_txn_missing` | `invalid_input` | A save knows no last transaction for an object |
 | `doc.package.meta_invalid` | `corrupt_data` | An `arc_meta` entry the package interprets is malformed |
+| `doc.scheduler.stopped` | `cancelled` | The regeneration scheduler stopped, or could not start a worker, before a node settled |
+| `doc.graph.evaluator_panicked` | `internal` | An evaluator unwound while the scheduler evaluated its node |

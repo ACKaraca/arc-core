@@ -629,10 +629,17 @@ impl State {
     }
 }
 
+/// Called after each [`Graph::apply`], outside the graph's lock, with the applied change set.
+pub type ApplyObserver = Arc<dyn Fn(&ChangeSet) + Send + Sync>;
+
+/// The most nodes [`Graph::inputs_changed_since`] visits; beyond it the answer is `false`.
+pub const SUPERSEDE_WALK_LIMIT: usize = 4_096;
+
 struct Shared {
     evaluators: Arc<Evaluators>,
     depth_limit: usize,
     state: Mutex<State>,
+    observer: Mutex<Option<ApplyObserver>>,
 }
 
 /// The dependency graph of one document: nodes, their recorded dependencies, states and
@@ -684,6 +691,7 @@ impl Graph {
                 running: BTreeMap::new(),
                 transitions: BTreeMap::new(),
             }),
+            observer: Mutex::new(None),
         }))
     }
 
@@ -714,7 +722,23 @@ impl Graph {
     /// and so do their dependents, transitively. The nodes of objects created, deleted or
     /// recreated are removed and their dependents become dirty. Costs time proportional to the
     /// changed inputs and the nodes that become dirty.
+    ///
+    /// The observer set with [`Graph::set_observer`] is then called with `changes`, after the
+    /// graph's lock is released.
     pub fn apply(&self, changes: &ChangeSet, snapshot: Snapshot) {
+        self.apply_locked(changes, snapshot);
+        let observer = self
+            .0
+            .observer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(observer) = observer {
+            observer(changes);
+        }
+    }
+
+    fn apply_locked(&self, changes: &ChangeSet, snapshot: Snapshot) {
         let mut state = self.lock();
         state.snapshot = snapshot;
         state.epoch = state.epoch.saturating_add(1);
@@ -842,27 +866,29 @@ impl Graph {
     /// replaced by the recorded reads, and its result stamp changes only if the outcome
     /// differs from the previous one (early cutoff). Otherwise, and for a cancelled job, the
     /// outcome is discarded and the node stays dirty.
+    // The outcome is checked before the job releases its epoch: releasing the last running job
+    // clears the change sets the check reads.
     pub fn finish(&self, mut job: Job, outcome: Outcome) -> Finish {
         let mut state = self.lock();
         job.done = true;
         let key = job.key.clone();
+        let applied = state
+            .nodes
+            .get(&key)
+            .filter(|node| node.dirty)
+            .and_then(|_| outcome.into_settled(&state, &job));
         state.release_epoch(job.epoch);
         let before = state.kind(&key);
         let Some(node) = state.nodes.get_mut(&key) else {
             return Finish::Stale;
         };
         node.jobs = node.jobs.saturating_sub(1);
-        let dirty = node.dirty;
-        let finish = if dirty {
-            match outcome.into_settled(&state, &job) {
-                Some(applied) => {
-                    apply(&mut state, &key, applied, job.snapshot.revision());
-                    Finish::Applied
-                }
-                None => Finish::Stale,
+        let finish = match applied {
+            Some(applied) => {
+                apply(&mut state, &key, applied, job.snapshot.revision());
+                Finish::Applied
             }
-        } else {
-            Finish::Stale
+            None => Finish::Stale,
         };
         state.note(&key, before);
         finish
@@ -927,10 +953,105 @@ impl Graph {
         Ok(())
     }
 
+    /// Sets the observer [`Graph::apply`] calls after each applied change set, or removes it.
+    /// The regeneration scheduler and the diagnostics list of a document use it.
+    pub fn set_observer(&self, observer: Option<ApplyObserver>) {
+        *self
+            .0
+            .observer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = observer;
+    }
+
+    /// The number of change sets applied so far; a [`Job`] records it when it begins
+    /// ([`Job::epoch`]).
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.lock().epoch
+    }
+
+    /// The nodes that are dirty without a job running for them, in key order. Costs time
+    /// proportional to the dirty and running nodes.
+    #[must_use]
+    pub fn dirty_keys(&self) -> Vec<NodeKey> {
+        let state = self.lock();
+        state
+            .dirty
+            .iter()
+            .filter(|key| state.kind(key) == Some(StateKind::Dirty))
+            .cloned()
+            .collect()
+    }
+
+    /// Whether a change set applied after `epoch` changes an input that `key`, or a node it
+    /// depends on transitively, recorded in its last applied evaluation; also `true` when `key`
+    /// no longer exists. Returns the answer with the current epoch, to pass on the next call.
+    ///
+    /// Only change sets applied while a job was running are kept, so `epoch` should be that of
+    /// a running job ([`Job::epoch`]) or a later one. The walk visits at most
+    /// [`SUPERSEDE_WALK_LIMIT`] nodes and answers `false` beyond it; a job's inputs are only
+    /// known at finish, so the answer is a hint for cancelling running jobs, never a substitute
+    /// for the check of [`Graph::finish`].
+    #[must_use]
+    pub fn inputs_changed_since(&self, key: &NodeKey, epoch: u64) -> (bool, u64) {
+        let state = self.lock();
+        let changes: Vec<&Arc<ChangeSet>> = state
+            .log
+            .iter()
+            .filter(|(at, _)| *at > epoch)
+            .map(|(_, changes)| changes)
+            .collect();
+        let now = state.epoch;
+        if !state.nodes.contains_key(key) {
+            return (true, now);
+        }
+        if changes.is_empty() {
+            return (false, now);
+        }
+        let mut seen: HashSet<&NodeKey> = HashSet::new();
+        let mut work = vec![key];
+        while let Some(current) = work.pop() {
+            if seen.len() >= SUPERSEDE_WALK_LIMIT {
+                break;
+            }
+            if !seen.insert(current) {
+                continue;
+            }
+            let Some(node) = state.nodes.get(current) else {
+                continue;
+            };
+            if node
+                .inputs
+                .iter()
+                .any(|input| changes.iter().any(|changes| changes.contains(input)))
+            {
+                return (true, now);
+            }
+            work.extend(node.deps.iter().map(|(dep, _)| dep));
+        }
+        (false, now)
+    }
+
     fn settled_view(&self, key: &NodeKey) -> Option<NodeView> {
         let state = self.lock();
         let node = state.nodes.get(key)?;
         (!node.dirty && node.settled.is_some()).then(|| node.view(key))
+    }
+}
+
+impl Job {
+    /// The number of change sets the graph had applied when the job began ([`Graph::epoch`]).
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
+impl ChangeSet {
+    /// The objects the change set touches (created, deleted, recreated or modified), in
+    /// identifier order.
+    pub fn changed_objects(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.objects().map(|(id, _)| id)
     }
 }
 

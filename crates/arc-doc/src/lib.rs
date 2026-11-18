@@ -19,6 +19,7 @@
 pub mod commit;
 pub mod descriptor;
 pub mod diagnostic;
+pub mod diagnostics;
 pub mod document;
 pub mod error;
 pub mod events;
@@ -38,6 +39,7 @@ pub mod record;
 pub mod registry;
 pub mod relationship;
 pub mod reverse_index;
+pub mod scheduler;
 pub mod schema;
 pub mod snapshot;
 mod store;
@@ -52,6 +54,7 @@ mod testing;
 pub use commit::{CommitHooks, CommitOutcome, Committed, JournalSink, commit};
 pub use descriptor::descriptor;
 pub use diagnostic::{CollectingSink, Diagnostic, DiagnosticSink, Origin};
+pub use diagnostics::{DiagnosticsList, DiagnosticsSnapshot};
 pub use document::{Document, DocumentConfig};
 pub use events::{Event, EventBus, EventKind, Subscription};
 pub use executor::{Completed, Pending};
@@ -74,6 +77,7 @@ pub use record::{RECORD_FORMAT, TxnRecord};
 pub use registry::TypeRegistry;
 pub use relationship::{Reference, ReferenceField};
 pub use reverse_index::{Referrer, Referrers};
+pub use scheduler::{Priority, Scheduler};
 pub use schema::{
     AssetHash, Bound, Cardinality, ColorSource, ColorValue, EnumVariant, ExternalRef, FieldDecl,
     Finding, GeometryBytes, GeometryEncoding, MigrateFn, Migration, OnCopy, OnDelete,

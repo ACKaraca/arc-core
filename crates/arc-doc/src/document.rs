@@ -1,20 +1,26 @@
 //! The handle of an open document: the latest snapshot, the dependency graph, the executor, the
-//! event bus, the document validators, the journal hook and the diagnostics sink.
+//! event bus, the document validators, the journal hook, the diagnostics list and the
+//! regeneration scheduler.
 //!
 //! Storage and the package are not part of this handle yet.
 
 use std::sync::{Arc, PoisonError, RwLock, RwLockWriteGuard};
+use std::time::Duration;
 
 use arc_base::id::IdGenerator;
 use arc_base::{Limits, Result, SessionId};
 
 use crate::commit::JournalSink;
 use crate::diagnostic::{Diagnostic, DiagnosticSink};
-use crate::events::{EventBus, Subscription};
+use crate::diagnostics::{
+    DEFAULT_DIAGNOSTICS_CAPACITY, DiagnosticsList, DiagnosticsSnapshot, Emitter,
+};
+use crate::events::{Event, EventBus, Subscription};
 use crate::executor::{Core, Executor, Pending, task};
-use crate::graph::{Evaluators, Graph};
+use crate::graph::{Evaluators, Graph, NodeKey, NodeView};
 use crate::load::{Loaded, LoadedRows};
 use crate::registry::TypeRegistry;
+use crate::scheduler::{Priority, Scheduler, default_workers};
 use crate::snapshot::{Snapshot, SnapshotCell};
 use crate::txn::{Txn, TxnLimits};
 use crate::validate::DocumentValidator;
@@ -31,10 +37,16 @@ pub struct DocumentConfig {
     pub txn_limits: TxnLimits,
     /// The limits of the deletion rules at commit (`record_count` bounds cascades).
     pub limits: Limits,
+    /// The worker threads of the regeneration scheduler; with none, regeneration runs when
+    /// pumped ([`Scheduler::pump`]). Ignored on `wasm32`, which has none.
+    pub workers: usize,
+    /// The most diagnostics the diagnostics list holds.
+    pub diagnostics_capacity: usize,
 }
 
 impl Default for DocumentConfig {
-    /// A seeded generator (seed 0) and the session it generates first; default limits.
+    /// A seeded generator (seed 0) and the session it generates first; default limits;
+    /// [`default_workers`] workers; [`DEFAULT_DIAGNOSTICS_CAPACITY`] diagnostics.
     fn default() -> Self {
         let mut ids = IdGenerator::seeded(0);
         let session = ids.generate();
@@ -43,6 +55,8 @@ impl Default for DocumentConfig {
             session,
             txn_limits: TxnLimits::default(),
             limits: Limits::DEFAULT,
+            workers: default_workers(),
+            diagnostics_capacity: DEFAULT_DIAGNOSTICS_CAPACITY,
         }
     }
 }
@@ -78,16 +92,34 @@ impl Shared {
     }
 }
 
+/// The diagnostics sink of a document: the diagnostics list, then the sink set with
+/// [`Document::set_diagnostics`].
+struct Sinks {
+    list: Arc<DiagnosticsList>,
+    extra: Option<Arc<dyn DiagnosticSink>>,
+}
+
+impl DiagnosticSink for Sinks {
+    fn deliver(&self, diagnostics: &[Diagnostic]) {
+        self.list.deliver(diagnostics);
+        if let Some(extra) = &self.extra {
+            extra.deliver(diagnostics);
+        }
+    }
+}
+
 /// An open document.
 ///
 /// Readers call [`Document::snapshot`] on any thread, without the executor and without locks.
 /// Changes are jobs submitted with [`Document::submit`], which run one at a time, in submission
 /// order, on the document's executor ([`crate::executor`]). The handle is `Send + Sync`; share it
 /// in an `Arc` between submitting threads. Dropping it, or [`Document::close`], stops the
-/// executor after the running job.
+/// executor after the running job and the regeneration scheduler.
 pub struct Document {
     shared: Arc<Shared>,
     executor: Executor,
+    scheduler: Scheduler,
+    diagnostics: Arc<DiagnosticsList>,
     load_diagnostics: Vec<Diagnostic>,
     rows: LoadedRows,
 }
@@ -118,6 +150,30 @@ impl Document {
         config: DocumentConfig,
     ) -> Result<Self> {
         let shared = Arc::new(Shared::new(snapshot, evaluators));
+        let weak = Arc::downgrade(&shared);
+        let emitter: Emitter = Arc::new(move |event: &Event| {
+            if let Some(shared) = weak.upgrade() {
+                shared.events.emit(event);
+            }
+        });
+        let diagnostics = Arc::new(DiagnosticsList::new(
+            config.diagnostics_capacity,
+            Some(Arc::clone(&emitter)),
+        ));
+        shared
+            .hooks
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .diagnostics = Some(Arc::new(Sinks {
+            list: Arc::clone(&diagnostics),
+            extra: None,
+        }));
+        let scheduler = Scheduler::start(
+            shared.graph.clone(),
+            config.workers,
+            Some(Arc::clone(&diagnostics)),
+            Some(emitter),
+        )?;
         let executor = Executor::start(Core {
             shared: Arc::clone(&shared),
             ids: config.ids,
@@ -129,6 +185,8 @@ impl Document {
         Ok(Self {
             shared,
             executor,
+            scheduler,
+            diagnostics,
             load_diagnostics: Vec::new(),
             rows: LoadedRows::default(),
         })
@@ -152,6 +210,9 @@ impl Document {
             .into_iter()
             .map(Diagnostic::from)
             .collect();
+        document
+            .diagnostics
+            .add_load(document.load_diagnostics.iter().cloned());
         document.rows = loaded.rows;
         Ok(document)
     }
@@ -230,9 +291,48 @@ impl Document {
         self.hooks().journal = Some(journal);
     }
 
-    /// Sets the sink of validator warnings and faults of every later job.
+    /// Sets a sink that receives the validator warnings and faults of every later job, after
+    /// the document's diagnostics list.
     pub fn set_diagnostics(&self, sink: Arc<dyn DiagnosticSink>) {
-        self.hooks().diagnostics = Some(sink);
+        self.hooks().diagnostics = Some(Arc::new(Sinks {
+            list: Arc::clone(&self.diagnostics),
+            extra: Some(sink),
+        }));
+    }
+
+    /// The document diagnostics list (CORE-DOC-035): validator warnings, faults, failed,
+    /// blocked and cyclic nodes, load findings and unresolved links.
+    #[must_use]
+    pub fn diagnostics(&self) -> &Arc<DiagnosticsList> {
+        &self.diagnostics
+    }
+
+    /// A copy of the diagnostics list for display ([`DiagnosticsList::snapshot`]).
+    #[must_use]
+    pub fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
+        self.diagnostics.snapshot()
+    }
+
+    /// The regeneration scheduler (CORE-DOC-031, CORE-DOC-032).
+    #[must_use]
+    pub fn scheduler(&self) -> &Scheduler {
+        &self.scheduler
+    }
+
+    /// Requests regeneration of `nodes` at `priority` ([`Scheduler::prioritize`]).
+    pub fn regenerate(&self, nodes: impl IntoIterator<Item = NodeKey>, priority: Priority) {
+        self.scheduler.prioritize(nodes, priority);
+    }
+
+    /// Brings `node` to a settled state now, ahead of queued work ([`Scheduler::ensure`]).
+    pub fn ensure(&self, node: &NodeKey) -> Result<NodeView> {
+        self.scheduler.ensure(node)
+    }
+
+    /// Waits at most `timeout` until regeneration is idle ([`Scheduler::wait_idle`]); a save
+    /// calls it to find clean data.
+    pub fn wait_idle(&self, timeout: Duration) -> bool {
+        self.scheduler.wait_idle(timeout)
     }
 
     /// The diagnostics of the load this document came from, in load order.
@@ -248,14 +348,16 @@ impl Document {
     }
 
     /// Stops the executor after the running job and waits for it (unless called from a job);
-    /// queued and later jobs receive `doc.executor.stopped`. Closing twice does nothing more.
+    /// queued and later jobs receive `doc.executor.stopped`. Then stops the regeneration
+    /// scheduler ([`Scheduler::shutdown`]). Closing twice does nothing more.
     pub fn close(&self) {
         self.executor.close();
+        self.scheduler.shutdown();
     }
 }
 
 impl Drop for Document {
     fn drop(&mut self) {
-        self.executor.close();
+        self.close();
     }
 }

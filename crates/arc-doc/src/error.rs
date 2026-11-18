@@ -371,6 +371,18 @@ pub mod codes {
         category: Category::Cancelled,
         message_id: "doc-executor-stopped",
     };
+    /// The regeneration scheduler of the document stopped before the node settled.
+    pub const SCHEDULER_STOPPED: ErrorCode = ErrorCode {
+        code: "doc.scheduler.stopped",
+        category: Category::Cancelled,
+        message_id: "doc-scheduler-stopped",
+    };
+    /// An evaluator unwound while the scheduler evaluated its node.
+    pub const GRAPH_EVALUATOR_PANICKED: ErrorCode = ErrorCode {
+        code: "doc.graph.evaluator_panicked",
+        category: Category::Internal,
+        message_id: "doc-graph-evaluator-panicked",
+    };
 
     /// A journal record is malformed, not canonical, or does not fit the type registry.
     pub const JOURNAL_RECORD_INVALID: ErrorCode = ErrorCode {
@@ -478,6 +490,8 @@ pub mod codes {
         PACKAGE_PREVIEW_INVALID,
         PACKAGE_LAST_TXN_MISSING,
         PACKAGE_META_INVALID,
+        SCHEDULER_STOPPED,
+        GRAPH_EVALUATOR_PANICKED,
     ];
 }
 

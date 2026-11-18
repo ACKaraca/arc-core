@@ -67,3 +67,5 @@ doc-package-locked = The package is being edited by { $user } on { $host }.
 doc-package-preview-invalid = The preview image { $kind } is invalid.
 doc-package-last-txn-missing = The object { $id } has no recorded transaction.
 doc-package-meta-invalid = The package metadata entry { $key } is invalid.
+doc-scheduler-stopped = The document was closed before the derived data could be computed.
+doc-graph-evaluator-panicked = Computing the derived data { $node } failed because of a defect.
