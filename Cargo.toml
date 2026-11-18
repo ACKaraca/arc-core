@@ -27,6 +27,7 @@ arc-shell-sample = { path = "crates/arc-shell-sample" }
 arc-gpu = { path = "crates/arc-gpu" }
 arc-ui = { path = "crates/arc-ui" }
 arc-io-dxf = { path = "crates/arc-io-dxf" }
+arc-io-pdf = { path = "crates/arc-io-pdf" }
 
 # Lock-free publication of document snapshots in `arc-doc`; the optional `serde` feature stays off.
 arc-swap = { version = "1.9.5", default-features = false }

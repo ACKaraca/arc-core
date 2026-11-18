@@ -311,3 +311,150 @@ counts typed records. The crate leaves file name, hash, application and time emp
 
 The `io.*` codes without a format segment are registered here because this is the first crate of
 the family; they move to a shared registry when a second format crate needs them.
+
+## SVG and PDF output as implemented
+
+`arc-io-pdf` writes plot streams (`arc_draft::plot::PlotStream`, see [arc-draft.md](arc-draft.md),
+"Plotting as implemented") to SVG (CORE-IO-038) and PDF (CORE-IO-037). It depends on `arc-base`,
+`arc-geom` and `arc-draft` and on no third-party crate: both writers are Arc-owned, written from
+the published SVG 1.1 and PDF 1.7 file structures, so `krilla` and `lopdf` of the dependency table
+are not used by this part. It reads and writes byte buffers, never paths, and builds for
+`wasm32-unknown-unknown`. The stream's units are millimeters from the lower left corner of the
+page.
+
+### Entry points and options
+
+- `write_svg(stream, options)` writes one page as one SVG document. A caller with several pages
+  calls it once per page; one document with nested page groups was rejected because viewers show
+  only one page of it.
+- `write_pdf(streams, options)` writes one page per stream, in the order given; no stream is
+  `io.pdf.option_invalid` (argument `option` is `streams`).
+- Both return `Output { bytes, report }`. `WriteOptions` holds the limits profile (`constrained`
+  by default), a `Cancel` token, a progress callback, `chord_mm`, `title` and `creation_date`.
+  `chord_mm` is the chord tolerance in millimeters (0.000001 to 100, default 0.005) and `Tolerance`
+  of `arc-base` is not used, because its chord is in meters of model space and a plot needs
+  page-space values.
+- Limits, as for an export: `input_bytes` bounds the file size (the largest file a reader with the
+  same profile accepts), `record_count` the plot items plus pages (and, for SVG, viewport clips), `array_length` the vertices of
+  one polyline, flattened curve or list of pieces, `string_bytes` the title. Counts are checked
+  before any work, the file size before every item and at the end, and each failure is
+  `io.limit_exceeded` whose argument `limit` names the field. `nesting_depth` and the decompression
+  limits do not apply. The caller ends a write by cancelling; the token is checked before every
+  item and a cancelled write returns `base.cancelled`. Progress reports items done and in total
+  (plot items plus one per page, and per clip in SVG) on the first item, every 256 items and at the end.
+- Hostile values: a `chord_mm` outside its range, a title with a control character, a creation
+  date that is not a valid `YYYY-MM-DDTHH:MM:SSZ`, are `io.pdf.option_invalid` (argument
+  `option`). A stream with a page edge that is not finite and positive, larger than 1,000,000
+  millimeters (SVG) or 14400 points (PDF), a plotted area that is not finite and ascending, an
+  item whose clip index is out of range, or any written coordinate that is not finite or beyond
+  1,000,000,000 millimeters is `io.pdf.stream_invalid` (argument `what`).
+
+### What both writers draw
+
+- **Order and clips.** Items are written in stream order. Everything is clipped to the plotted
+  area; an item with a clip index is also clipped to that viewport region (a closed polyline,
+  exact arcs kept). Consecutive items with the same clip share one clip group.
+- **Paper.** The page is first filled with the paper color, opaque, as the raster output does, so
+  masks (wipeouts) written as fills in the paper color hide what is beneath them.
+- **Strokes.** A stroke without pieces draws the whole curve; with pieces it draws exactly those
+  pieces, each a separate subpath, so dashes are the stream's and no dash pattern is written.
+  A piece that is a point is a dot, a disc of the pen width. A point item is a dot. Pen width 0
+  draws a line of width 0 in PDF (the thinnest line) and of 0.05 mm (`HAIRLINE_MM`) in SVG, and
+  dots use the same minimum. End and join styles come from the pen; the miter limit is 4, as in
+  the raster output.
+- **Fills and masks.** A region is a closed polyline with exact arcs; it is filled with the
+  nonzero rule (the stream carries one boundary and no rule; the raster output also fills nonzero).
+  A region fill (parts with holes) is one path of all its loops, each one closed sub-path of its
+  exact curves, filled with the even-odd rule (`fill-rule="evenodd"` in SVG, `f*` in PDF).
+- **Polyline widths.** A polyline with vertex widths is stroked with the larger of the pen width
+  and the mean vertex width, as the raster output does; the taper is not drawn
+  (`io.pdf.polyline_width_approximated`).
+- **Color.** The pen's linear color is converted to 8-bit sRGB; alpha is written as stroke and
+  fill opacity (SVG) or an extended graphics state (PDF). Masks and the paper are opaque.
+- **Text.** Stroke text is stroke items and is written like any stroke. Outline glyph runs are not
+  written: each is a loss item (`io.pdf.glyphs_dropped`, `dropped`). Embedded subset fonts and
+  PDF/A-2b are not provided; PDF/A is not requestable.
+- **Curves.** Segments are lines, polylines are lines and arcs, circles and ellipses are arcs
+  (a full turn is split in half arcs), NURBS curves are flattened with `chord_mm` and a turning
+  angle of 15 degrees (`io.pdf.nurbs_flattened`, argument `tolerance_mm`). A ray or line without
+  pieces, and a curve that cannot be flattened for a reason other than the vertex limit, is not
+  written and is a loss item (`io.pdf.items_failed`, `failed`).
+- **Numbers.** Every number is written with at most four decimals (0.1 micrometer in SVG
+  millimeters, 0.0001 point in PDF), trailing zeros removed, no exponent and no negative zero.
+  Output depends on the stream, the options and the platform's trigonometric functions only:
+  no timestamp, identifier or random value is written.
+
+### SVG
+
+The document is sized in millimeters (`width="210mm"`) with a view box in paper millimeters
+(`viewBox="0 0 210 297"`). The y axis is flipped in the coordinates (y is the page height minus
+the stream's y), so no transform is written and a counterclockwise arc has sweep flag 0.
+
+- Strokes are `path` elements with `fill="none"`, stroke color, width, cap, join and miter limit;
+  lines are `L` commands; circular and elliptical arcs are `A` commands with exact radii and the
+  rotation of the major axis (0 for a circle), split into pieces of at most a half turn. Fills
+  are `path` elements with `fill-rule="nonzero"` (`evenodd` for region fills); dots are `circle` elements.
+- The plotted area and each viewport clip are `clipPath` elements (`a`, `c0`, `c1`, ...) applied
+  by `g` elements.
+- A title is the `title` element, XML-escaped. Layers have no SVG form: the writer reports their
+  number (`io.pdf.layers_dropped`, `dropped`, information).
+
+### PDF
+
+The file is PDF 1.7: a header, indirect objects, a cross-reference table with 20-byte entries,
+a trailer without an identifier, and the start of the table. Object order is fixed: catalog,
+page tree, information dictionary, optional content groups, then page and content stream per page.
+
+- **Pages.** The media box is the page in points (1 mm = 72 / 25.4 pt) from the lower left
+  corner, the origin of the stream.
+- **Content.** Content streams are not compressed (no encoder is added; the vector content is
+  compact and a deflate stream would add a dependency for no capability). Operators are `m`, `l`,
+  `c`, `h`, `re`, `W n`, `S`, `f`, `w`, `J`, `j`, `M`, `RG`, `rg`, `gs`, `q`, `Q`, `BDC`, `EMC`.
+- **Arcs.** PDF has no arc operator. An arc or ellipse is cubic Bezier pieces with control points
+  from the tangents (factor 4/3 tan(a/4) for a piece of angle a). The piece count is the least
+  that keeps the radial error of a circle of radius r below `chord_mm`, using the error
+  0.00027 r (a / 90 degrees)^6 of a piece and at most 90 degrees per piece, at most 1024 pieces
+  per arc; for an ellipse r is the larger semi-axis, which bounds the error. The count of arcs
+  written this way is a loss item (`io.pdf.arcs_approximated`, `approximated`, argument
+  `tolerance_mm`).
+- **Layers.** Each distinct layer of the items of all pages is an optional content group named
+  by the layer's object identifier, listed in the catalog (`OCProperties`, all on), ordered by
+  identifier, and used per page through `Properties`. Consecutive items with the same clip and
+  layer form one `q ... BDC ... EMC ... Q` run; items without a layer are outside any group.
+  The stream carries identifiers, not layer names; a product maps the names (a gap).
+- **Information.** `Producer` is `Arc arc-io-pdf`; `Title` is a literal string for printable
+  ASCII and UTF-16 hexadecimal otherwise; `CreationDate` is written only when
+  `creation_date` is set.
+- Not written: hyperlinks, embedded fonts, PDF/A-2b, compression, a file identifier.
+
+### Loss reports
+
+Every write returns a `LossReport` (header format `svg` or `pdf`, version `1.1` or `1.7`,
+direction `export`) valid against `schemas/loss-report.schema.json`, also when nothing was lost.
+Items are aggregated per reason and plot item kind (`point`, `stroke`, `fill`, `mask`, `glyphs`);
+`source_id` is the source object of the first occurrence. `summary.mapped` counts items written
+without any approximation. The type is the same shape as that of `arc-io-dxf`, defined again
+because the layer table does not allow one format crate to depend on another.
+
+| Reason | Outcome |
+|---|---|
+| `io.pdf.items_written` | `mapped` |
+| `io.pdf.glyphs_dropped` | `dropped` |
+| `io.pdf.layers_dropped` | `dropped` |
+| `io.pdf.nurbs_flattened` | `approximated` |
+| `io.pdf.arcs_approximated` | `approximated` |
+| `io.pdf.polyline_width_approximated` | `approximated` |
+| `io.pdf.items_failed` | `failed` |
+| `io.pdf.sources_failed` | `failed` |
+
+`io.pdf.sources_failed` counts the entities the stream itself lists in `failed`.
+
+### Error codes of the output
+
+| Code | Category | Meaning |
+|---|---|---|
+| `io.limit_exceeded` | `limit_exceeded` | A limit of the profile was exceeded; the argument `limit` names it (the same code as in the DXF table; it moves to a shared registry) |
+| `io.pdf.option_invalid` | `invalid_input` | An option is out of range or malformed; the argument `option` names it |
+| `io.pdf.stream_invalid` | `invalid_input` | A page size, area, clip index or coordinate of the stream cannot be written; the argument `what` names it |
+
+`base.cancelled` is returned when the token is cancelled.

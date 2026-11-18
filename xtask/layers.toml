@@ -69,7 +69,7 @@ third_party = [
 ]
 
 # Crates built for wasm32-unknown-unknown by `cargo xtask wasm`.
-wasm = ["arc-base", "arc-geom", "arc-doc", "arc-mesh", "arc-solve", "arc-command", "arc-draft", "arc-ui", "arc-io-dxf"]
+wasm = ["arc-base", "arc-geom", "arc-doc", "arc-mesh", "arc-solve", "arc-command", "arc-draft", "arc-ui", "arc-io-dxf", "arc-io-pdf"]
 
 # Class of every workspace crate: layer(n), ffi(n), app, testkit or tool.
 [crates]
@@ -87,6 +87,7 @@ arc-scene = "layer(4)"
 arc-nodes = "layer(4)"
 arc-hub-api = "layer(4)"
 arc-io-dxf = "layer(4)"
+arc-io-pdf = "layer(4)"
 # A library above the domain layers, so both reference shells can depend on it (ADR-0001,
 # amendment "Sample set of the reference shell").
 arc-shell-sample = "layer(4)"
