@@ -11,12 +11,21 @@
 //!
 //! Panels are registered as product [`Entry`](crate::product::Entry)s whose factory returns a
 //! `Box<dyn Panel>` (use [`panel`]); the standard panels of this module are the viewport,
-//! property grid, outliner, command line, diagnostics and settings panels.
+//! property grid, outliner, command line, diagnostics, settings and log panels.
+//!
+//! [`Shell::start`] loads the user settings file, applies the appearance settings and lists
+//! recoverable sessions in the recovery prompt; frames draw notifications, the active
+//! document's banners and the prompt above the dock, open dropped files and write the recent
+//! files after a change. Each floating dock tree is a secondary window: [`Shell::windows`]
+//! models them and [`Shell::frame_window`] composes one.
 
 pub mod event_loop;
 pub mod platform;
+pub mod prefs;
+pub mod prompts;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,17 +43,21 @@ use arc_gpu::{Gpu, PickHit, PickRegion, Viewport, ViewportConfig};
 use arc_ui::egui::{self, TextureId, Ui};
 use arc_ui::gesture::ViewPicker;
 use arc_ui::{
-    Appearance, Binding, ChordResolver, Colors, CommandLineView, DiagnosticsPanel, DockArea,
+    Appearance, Binding, ChordResolver, Colors, CommandLineView, DiagnosticsPanel, Dock, DockArea,
     DockLayout, GridContext, Intent, Keymap, LineAction, LineCommands, LineContext, Localize,
-    Lookup, Menu, PropertyGrid, PropertyModel, PropertyObject, TreeCommands, TreeItem, TreeSource,
-    TreeView, ViewportCommands, ViewportInput, ViewportWidget,
+    Lookup, Menu, Message, Notifications, PropertyGrid, PropertyModel, PropertyObject, Severity,
+    TreeCommands, TreeItem, TreeSource, TreeView, ViewportCommands, ViewportInput, ViewportWidget,
 };
 use serde_json::{Map, Value as Json};
 
 use crate::application::{Application, TabId};
 use crate::commands::{self, SelectMode, SelectParams};
 use crate::locale::Localizer;
+use crate::logging::LogRing;
+use crate::recent::RecentEntry;
+use crate::settings::{Scope, SettingType, SettingValue};
 use crate::settings_editor;
+use prompts::{Choice, RecoveryEntry};
 
 /// How long a pick or a settle waits for the render and extraction threads.
 pub const WAIT: Duration = Duration::from_secs(5);
@@ -54,6 +67,8 @@ pub const MAX_ERRORS: usize = 64;
 pub const MAX_LOG: usize = 4096;
 /// The most objects a selection holds.
 pub const MAX_SELECTION: usize = 100_000;
+/// The most dropped files one frame opens.
+pub const MAX_DROPPED: usize = 64;
 /// The worker threads of each tab's extraction.
 const EXTRACTION_WORKERS: usize = 2;
 
@@ -82,6 +97,8 @@ pub struct PanelContext<'a> {
     pub time: f64,
     /// What the panel asks the shell to do.
     pub actions: &'a mut Vec<Action>,
+    /// The recent log records, when the platform keeps them.
+    pub log: Option<&'a LogRing>,
 }
 
 /// What a panel asks the shell to do after drawing.
@@ -95,6 +112,14 @@ pub enum Action {
     Answer(PromptInput),
     /// An error to show.
     Error(Error),
+    /// Set a setting in the user scope (`Some`) or remove it from there (`None`); the shell
+    /// writes the user settings file and applies the appearance settings.
+    Setting {
+        /// The setting key.
+        key: String,
+        /// The new value, or `None` to reset.
+        value: Option<SettingValue>,
+    },
 }
 
 /// A panel of the dock. The factory of a registered panel returns it boxed (see [`panel`]).
@@ -157,6 +182,9 @@ pub struct FrameOutput {
     pub requests: Vec<Request>,
     /// True when the shell has more to show soon (extraction or a viewport frame pending).
     pub busy: bool,
+    /// True when a setting changed in this frame: the caller applies the language with
+    /// [`prefs::apply_language`]; the shell applied the appearance itself.
+    pub settings_changed: bool,
 }
 
 impl std::fmt::Debug for FrameOutput {
@@ -164,6 +192,7 @@ impl std::fmt::Debug for FrameOutput {
         f.debug_struct("FrameOutput")
             .field("requests", &self.requests)
             .field("busy", &self.busy)
+            .field("settings_changed", &self.settings_changed)
             .finish_non_exhaustive()
     }
 }
@@ -312,6 +341,68 @@ pub struct Shell {
     errors: Vec<Error>,
     log: Vec<String>,
     seed: u64,
+    base_appearance: Appearance,
+    notifications: Notifications,
+    recovery: Vec<RecoveryEntry>,
+    files: Option<UserFiles>,
+    recent_written: Option<Vec<RecentEntry>>,
+    log_ring: Option<LogRing>,
+    settings_changed: bool,
+}
+
+/// The user's files the shell reads at start and writes on change.
+#[derive(Debug, Clone)]
+pub struct UserFiles {
+    /// The user settings file (the user scope).
+    pub settings: PathBuf,
+    /// The recent-files file.
+    pub recent: PathBuf,
+}
+
+/// A secondary window: one floating dock tree.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowModel {
+    /// The window identifier, also its key in the window-state file: `float.` and the tree's
+    /// first panel, or `float-<n>` when that is not a valid window identifier or repeats.
+    pub id: String,
+    /// The tree's rectangle `[x, y, width, height]` in logical points, the window's placement
+    /// when none was saved.
+    pub rect: [f32; 4],
+    /// The panels of the tree, in tree order.
+    pub panels: Vec<String>,
+}
+
+fn dock_panels(dock: &Dock, out: &mut Vec<String>) {
+    match dock {
+        Dock::Tabs { tabs, .. } => out.extend(tabs.iter().cloned()),
+        Dock::Split { first, second, .. } => {
+            dock_panels(first, out);
+            dock_panels(second, out);
+        }
+    }
+}
+
+/// The windows of `layout`'s floating trees, in layout order.
+fn window_models(layout: &DockLayout) -> Vec<WindowModel> {
+    let mut out: Vec<WindowModel> = Vec::new();
+    for (n, floating) in layout.floating().iter().enumerate() {
+        let mut panels = Vec::new();
+        dock_panels(&floating.dock, &mut panels);
+        let mut id: String = panels
+            .first()
+            .map(|p| format!("float.{}", p.to_lowercase()))
+            .unwrap_or_default();
+        id.truncate(crate::window_state::MAX_WINDOW_ID_BYTES);
+        if !crate::window_state::is_window_id(&id) || out.iter().any(|w| w.id == id) {
+            id = format!("float-{n}");
+        }
+        out.push(WindowModel {
+            id,
+            rect: floating.rect,
+            panels,
+        });
+    }
+    out
 }
 
 impl std::fmt::Debug for Shell {
@@ -382,6 +473,132 @@ impl Shell {
             errors,
             log: Vec::new(),
             seed: config.seed,
+            base_appearance: config.appearance,
+            notifications: Notifications::default(),
+            recovery: Vec::new(),
+            files: None,
+            recent_written: None,
+            log_ring: None,
+            settings_changed: false,
+        }
+    }
+
+    /// Prepares the first frame: loads the user settings file into the user scope (a malformed
+    /// file is set aside and reported as a notification), remembers the files for writing,
+    /// applies the appearance settings and lists the recoverable sessions in the recovery
+    /// prompt. Nothing is recovered or discarded until the user chooses it. Without `files`
+    /// settings and recent files stay in memory.
+    pub fn start(&mut self, app: &mut Application, files: Option<UserFiles>) {
+        if let Some(files) = &files {
+            match crate::settings_file::load(&files.settings) {
+                Ok(loaded) => {
+                    if let Some(aside) = &loaded.set_aside {
+                        self.notify(Severity::Warning, &aside.problem);
+                    }
+                    if let Err(e) = app.settings_mut().set_layer(Scope::User, loaded.table) {
+                        self.notify(Severity::Error, &e);
+                    }
+                }
+                Err(e) => self.notify(Severity::Error, &e),
+            }
+        }
+        self.files = files;
+        self.appearance = prefs::appearance(app.settings(), self.base_appearance);
+        match app.recoverable() {
+            Ok(orphans) => {
+                self.recovery = orphans
+                    .into_iter()
+                    .map(|orphan| RecoveryEntry {
+                        orphan,
+                        comparison: None,
+                    })
+                    .collect();
+            }
+            Err(e) => self.notify(Severity::Error, &e),
+        }
+        tracing::info!(recoverable = self.recovery.len(), "shell started");
+    }
+
+    fn notify(&mut self, severity: Severity, error: &Error) {
+        let args = error
+            .arguments()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        self.notifications
+            .post(severity, error.message_id(), args, Vec::new(), 0);
+    }
+
+    /// The notifications shown at the top of the main window.
+    #[must_use]
+    pub fn notifications(&self) -> &Notifications {
+        &self.notifications
+    }
+
+    /// The sessions the recovery prompt lists; the prompt shows while this is not empty.
+    #[must_use]
+    pub fn recovery(&self) -> &[RecoveryEntry] {
+        &self.recovery
+    }
+
+    /// Keeps `ring` for the log viewer panel.
+    pub fn set_log_ring(&mut self, ring: LogRing) {
+        self.log_ring = Some(ring);
+    }
+
+    /// The appearance in effect: the configuration's, with the appearance settings applied.
+    #[must_use]
+    pub fn appearance(&self) -> Appearance {
+        self.appearance
+    }
+
+    /// The dock layout.
+    #[must_use]
+    pub fn layout(&self) -> &DockLayout {
+        &self.layout
+    }
+
+    /// The dock layout, to float, move or close panels.
+    pub fn layout_mut(&mut self) -> &mut DockLayout {
+        &mut self.layout
+    }
+
+    /// The secondary windows: one per floating dock tree.
+    #[must_use]
+    pub fn windows(&self) -> Vec<WindowModel> {
+        window_models(&self.layout)
+    }
+
+    /// Docks every panel of window `id` back into the main tree, as when its window closes.
+    /// Returns false for an unknown window.
+    pub fn dock_window(&mut self, id: &str) -> bool {
+        let Some(window) = self.windows().into_iter().find(|w| w.id == id) else {
+            return false;
+        };
+        for panel in window.panels {
+            // A panel that vanished meanwhile has nothing to dock.
+            let _ = self.layout.unfloat(&panel);
+        }
+        true
+    }
+
+    /// Writes the recent files when they changed since the last write (after an open or a
+    /// save) and at quit. Without files from [`Shell::start`] nothing is written.
+    pub fn save_recent(&mut self, app: &Application) {
+        let Some(files) = &self.files else {
+            return;
+        };
+        let now: Vec<RecentEntry> = app.recent().iter().cloned().collect();
+        if self.recent_written.as_ref() == Some(&now) {
+            return;
+        }
+        match app.recent().save(&files.recent) {
+            Ok(()) => self.recent_written = Some(now),
+            Err(e) => {
+                // Reported once; the next change tries again.
+                self.recent_written = Some(now);
+                self.error(e);
+            }
         }
     }
 
@@ -547,30 +764,61 @@ impl Shell {
             .any(|v| v.pending || v.viewport.as_ref().is_some_and(|vp| vp.dirty().any()))
     }
 
-    /// Composes one frame; see the [module documentation](self). Events with non-finite
-    /// or huge positions, deltas or factors are dropped first: egui does not accept them.
+    /// Composes one frame of the main window; see the [module documentation](self). Events
+    /// with non-finite or huge positions, deltas or factors are dropped first: egui does not
+    /// accept them.
     pub fn frame(
         &mut self,
         app: &mut Application,
         ctx: &egui::Context,
+        input: FrameInput<'_>,
+    ) -> FrameOutput {
+        self.compose(app, ctx, input, None)
+    }
+
+    /// Composes one frame of secondary window `window` (see [`Shell::windows`]) in its own
+    /// egui context: its floating tree with the same panels, actions and requests as the main
+    /// window. An unknown window draws nothing. Moving a panel to a tree of another window from
+    /// here is dropped.
+    pub fn frame_window(
+        &mut self,
+        app: &mut Application,
+        ctx: &egui::Context,
+        input: FrameInput<'_>,
+        window: &str,
+    ) -> FrameOutput {
+        self.compose(app, ctx, input, Some(window))
+    }
+
+    /// Opens the files dropped on a window through [`Application::open`].
+    fn open_dropped(&mut self, app: &mut Application, raw: &mut egui::RawInput) {
+        let dropped = std::mem::take(&mut raw.dropped_files);
+        for file in dropped.iter().take(MAX_DROPPED) {
+            match app.open(file.path()) {
+                // Paths can name the user; the record keeps only that a file was opened.
+                Ok(tab) => tracing::info!(
+                    tab = ?tab,
+                    path = %crate::logging::Redacted(file.path().display()),
+                    "dropped file opened"
+                ),
+                Err(e) => self.error(e),
+            }
+        }
+    }
+
+    fn compose(
+        &mut self,
+        app: &mut Application,
+        ctx: &egui::Context,
         mut input: FrameInput<'_>,
+        window: Option<&str>,
     ) -> FrameOutput {
         input.raw.events.retain(finite);
+        self.open_dropped(app, &mut input.raw);
         self.sync_views(app);
         self.pump(app, None);
         self.appearance.apply(ctx);
-        let millis = if input.time.is_finite() && input.time > 0.0 {
-            // A clock beyond u64 milliseconds saturates.
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "saturating"
-            )]
-            let m = (input.time * 1000.0) as u64;
-            m
-        } else {
-            0
-        };
+        let millis = millis(input.time);
         let mut actions: Vec<Action> = self
             .chords
             .handle_events(&self.keymap, &input.raw.events, millis)
@@ -578,7 +826,7 @@ impl Shell {
             .chain(input.menu_intents)
             .map(Action::Intent)
             .collect();
-        let entries = if input.native_menu {
+        let entries = if input.native_menu || window.is_some() {
             Vec::new()
         } else {
             self.menu_entries(app, input.localize)
@@ -592,10 +840,20 @@ impl Shell {
             .iter()
             .map(|(id, message, _)| (id.clone(), arc_ui::resolve(input.localize, message, &[])))
             .collect();
+        let (floating_at, mut own) = self.own_layout(window);
+        let mut choices: Vec<Choice> = Vec::new();
         let full = {
             let app_ref: &Application = app;
             let panels = &mut self.panels;
-            let layout = &mut self.layout;
+            let mut layout = match (&mut own, window) {
+                (Some(own), _) => Some(own),
+                (None, None) => Some(&mut self.layout),
+                (None, Some(_)) => None,
+            };
+            let notifications = &mut self.notifications;
+            let recovery = &self.recovery;
+            let log_ring = self.log_ring.as_ref();
+            let main = window.is_none();
             let mut view = active.and_then(|t| self.views.get_mut(&t));
             if let (Some(v), Some(gpu)) = (view.as_deref_mut(), gpu.as_ref())
                 && v.viewport.is_none()
@@ -613,6 +871,22 @@ impl Shell {
                         }
                     });
                 }
+                if main {
+                    if notifications.active().next().is_some() {
+                        egui::Panel::top("arc-app-notifications").show(ui, |ui| {
+                            if let Some(intent) = notifications.show(ui, &colors, input.localize) {
+                                actions.push(Action::Intent(intent));
+                            }
+                        });
+                    }
+                    if let Some(tab) = active.and_then(|t| app_ref.tab(t).ok()) {
+                        prompts::banners(ui, tab, input.localize, &mut choices);
+                    }
+                    prompts::recovery(ui, recovery, input.localize, &mut choices);
+                }
+                let Some(layout) = layout.as_deref_mut() else {
+                    return;
+                };
                 let title = |id: &str| titles.get(id).cloned().unwrap_or_else(|| id.to_owned());
                 DockArea::default().show(ui, layout, input.localize, &title, &mut |ui, id| {
                     let Some((_, _, p)) = panels.iter_mut().find(|(pid, _, _)| pid == id) else {
@@ -627,27 +901,129 @@ impl Shell {
                         texture,
                         time: input.time,
                         actions: &mut actions,
+                        log: log_ring,
                     };
                     p.show(ui, &mut cx);
                 });
             })
         };
+        if let (Some(at), Some(own)) = (floating_at, own) {
+            self.write_back(at, &own);
+        }
+        self.finish(app, full, choices, actions)
+    }
+
+    /// The position of window `window`'s floating tree and that tree as a layout of its own,
+    /// which the window draws and [`Shell::write_back`] puts back.
+    fn own_layout(&self, window: Option<&str>) -> (Option<usize>, Option<DockLayout>) {
+        let at = window.and_then(|w| self.windows().iter().position(|m| m.id == w));
+        let own = at.and_then(|at| {
+            let tree = self.layout.floating().get(at)?;
+            DockLayout::new(tree.dock.clone(), Vec::new()).ok()
+        });
+        (at, own)
+    }
+
+    /// Carries out what a frame's prompts and panels asked for, in order.
+    fn finish(
+        &mut self,
+        app: &mut Application,
+        full: egui::FullOutput,
+        choices: Vec<Choice>,
+        actions: Vec<Action>,
+    ) -> FrameOutput {
         let mut requests = Vec::new();
+        for choice in choices {
+            if let Err(e) = self.choose(app, choice) {
+                self.error(e);
+            }
+        }
         for action in actions {
             self.act(app, action, &mut requests);
         }
         self.pump(app, None);
+        self.save_recent(app);
         FrameOutput {
             full,
             requests,
             busy: self.busy(),
+            settings_changed: std::mem::take(&mut self.settings_changed),
         }
+    }
+
+    /// Puts floating tree `at` back after its window changed it: emptied trees are removed,
+    /// trees it floated off are appended.
+    fn write_back(&mut self, at: usize, own: &DockLayout) {
+        let mut floating = self.layout.floating().to_vec();
+        if own.panels().is_empty() {
+            if at < floating.len() {
+                floating.remove(at);
+            }
+        } else if let Some(tree) = floating.get_mut(at) {
+            tree.dock = own.root().clone();
+        }
+        floating.extend(own.floating().iter().cloned());
+        match DockLayout::new(self.layout.root().clone(), floating) {
+            Ok(layout) => self.layout = layout,
+            Err(e) => self.error(e),
+        }
+    }
+
+    /// Carries out a choice of the recovery prompt or of a banner.
+    fn choose(&mut self, app: &mut Application, choice: Choice) -> Result<()> {
+        match choice {
+            Choice::Later => {
+                self.recovery.clear();
+                Ok(())
+            }
+            Choice::TakeOver(tab) => app.take_over(tab),
+            Choice::Compare(at) => {
+                let Some(e) = self.recovery.get_mut(at) else {
+                    return Ok(());
+                };
+                e.comparison = Some(app.compare(&e.orphan));
+                Ok(())
+            }
+            Choice::Recover(at) | Choice::Discard(at) => {
+                let Some(e) = self.recovery.get(at) else {
+                    return Ok(());
+                };
+                if matches!(choice, Choice::Recover(_)) {
+                    app.recover(&e.orphan)?;
+                    tracing::info!("session recovered");
+                } else {
+                    app.discard_recovery(&e.orphan)?;
+                    tracing::info!("session discarded");
+                }
+                self.recovery.remove(at);
+                Ok(())
+            }
+        }
+    }
+
+    /// Sets or resets a setting in the user scope and writes the user settings file.
+    fn set_setting(
+        &mut self,
+        app: &mut Application,
+        key: &str,
+        value: Option<SettingValue>,
+    ) -> Result<()> {
+        let file = self.files.as_ref().map(|f| f.settings.clone());
+        let store = app.settings_mut();
+        let result = match value {
+            Some(v) => settings_editor::set(store, Scope::User, key, v, file.as_deref()),
+            None => settings_editor::reset(store, Scope::User, key, file.as_deref()).map(drop),
+        };
+        self.settings_changed = true;
+        self.appearance = prefs::appearance(app.settings(), self.base_appearance);
+        result
     }
 
     /// Carries out one action of a frame.
     fn act(&mut self, app: &mut Application, action: Action, requests: &mut Vec<Request>) {
         let result = match action {
             Action::Error(e) => Err(e),
+            Action::Setting { key, value } => self.set_setting(app, &key, value),
             Action::Intent(intent) => self.dispatch(app, intent, requests),
             Action::Answer(input) => self.line_step(app, LineStep::Answer(input), requests),
             Action::Line(line) => match line {
@@ -855,6 +1231,42 @@ impl Shell {
             }
             _ => Ok(()),
         }
+    }
+}
+
+/// The name of the current log file in the log directory.
+pub const LOG_FILE: &str = "shell.log";
+
+/// Installs the process-wide log subscriber from the log settings of `app` (`log.level`,
+/// `log.max_file_bytes`, `log.max_files`, read once: a change applies at the next start),
+/// writing rotated files under `dir` and keeping recent records in the returned ring for the
+/// log viewer.
+///
+/// # Errors
+/// The errors of [`LogConfig::from_settings`](crate::logging::LogConfig::from_settings) and
+/// [`subscriber_with_ring`](crate::logging::subscriber_with_ring); `app.log.io` when a
+/// subscriber is installed already.
+pub fn install_logging(app: &Application, dir: PathBuf) -> Result<LogRing> {
+    let config = crate::logging::LogConfig::from_settings(dir, LOG_FILE, app.settings())?;
+    let ring = LogRing::new();
+    let subscriber = crate::logging::subscriber_with_ring(&config, ring.clone())?;
+    tracing::subscriber::set_global_default(subscriber)
+        .map_err(|e| Error::new(crate::codes::LOG_IO).with_source(e))?;
+    Ok(ring)
+}
+
+/// The caller's clock in milliseconds; a clock beyond u64 milliseconds saturates.
+fn millis(time: f64) -> u64 {
+    if time.is_finite() && time > 0.0 {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "saturating"
+        )]
+        let m = (time * 1000.0) as u64;
+        m
+    } else {
+        0
     }
 }
 
@@ -1266,17 +1678,124 @@ impl Panel for DiagnosticsPanelView {
     }
 }
 
-/// The settings panel: every setting with its effective value and source, filtered by a
-/// search text. Changing values is not part of this panel yet.
+const SETTINGS_SEARCH: Message = Message {
+    message_id: "app-settings-search",
+};
+const SETTINGS_RESET: Message = Message {
+    message_id: "app-settings-reset",
+};
+const LOG_EMPTY: Message = Message {
+    message_id: "app-log-empty",
+};
+
+fn setting_text(value: &SettingValue) -> String {
+    match value {
+        SettingValue::Bool(v) => v.to_string(),
+        SettingValue::Int(v) => v.to_string(),
+        SettingValue::Float(v) => v.to_string(),
+        SettingValue::Text(v) => v.clone(),
+    }
+}
+
+/// Reads typed text as a value of `ty`; `None` when it does not parse. The store checks ranges
+/// and choices.
+fn parse_setting(ty: &SettingType, text: &str) -> Option<SettingValue> {
+    let text = text.trim();
+    match ty {
+        SettingType::Bool => text.parse().ok().map(SettingValue::Bool),
+        SettingType::Int { .. } => text.parse().ok().map(SettingValue::Int),
+        SettingType::Float => text
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .map(SettingValue::Float),
+        SettingType::Text | SettingType::Choice(_) => Some(SettingValue::Text(text.to_owned())),
+    }
+}
+
+/// The settings panel (CORE-APP-011): every setting with its effective value, filtered by a
+/// search text; values settable in the user scope are edited here (a check box, a choice list
+/// or a text field committed when it loses focus) and reset to what lower scopes give. Edits
+/// become [`Action::Setting`]s, which the shell writes to the user settings file.
 #[derive(Debug, Default)]
 pub struct SettingsPanel {
     /// The search text.
     pub query: String,
+    /// The text fields being edited, by key.
+    drafts: BTreeMap<&'static str, String>,
+}
+
+impl SettingsPanel {
+    fn row(
+        &mut self,
+        ui: &mut Ui,
+        row: &settings_editor::Row,
+        ty: &SettingType,
+        localize: &dyn Localize,
+        actions: &mut Vec<Action>,
+    ) {
+        let label = ui.label(row.key);
+        let mut edit = |value: Option<SettingValue>| {
+            actions.push(Action::Setting {
+                key: row.key.to_owned(),
+                value,
+            });
+        };
+        match (ty, &row.value) {
+            (SettingType::Bool, SettingValue::Bool(on)) => {
+                let mut v = *on;
+                if ui.checkbox(&mut v, "").labelled_by(label.id).changed() {
+                    edit(Some(SettingValue::Bool(v)));
+                }
+            }
+            (SettingType::Choice(choices), SettingValue::Text(current)) => {
+                egui::ComboBox::from_id_salt(("arc-app-setting", row.key))
+                    .selected_text(current.as_str())
+                    .show_ui(ui, |ui| {
+                        for choice in *choices {
+                            if ui.selectable_label(*choice == current, *choice).clicked()
+                                && *choice != current
+                            {
+                                edit(Some(SettingValue::Text((*choice).to_owned())));
+                            }
+                        }
+                    });
+            }
+            (ty, value) => {
+                let draft = self
+                    .drafts
+                    .entry(row.key)
+                    .or_insert_with(|| setting_text(value));
+                let response = ui.text_edit_singleline(draft).labelled_by(label.id);
+                if response.lost_focus() {
+                    match parse_setting(ty, draft) {
+                        Some(v) if v != *value => edit(Some(v)),
+                        Some(_) => {}
+                        None => actions.push(Action::Error(
+                            Error::new(crate::codes::SETTINGS_TYPE_MISMATCH)
+                                .with_arg("key", row.key),
+                        )),
+                    }
+                    self.drafts.remove(row.key);
+                } else if !response.has_focus() {
+                    *draft = setting_text(value);
+                }
+            }
+        }
+        if row.source == Scope::User && ui.button(SETTINGS_RESET.text(localize)).clicked() {
+            actions.push(Action::Setting {
+                key: row.key.to_owned(),
+                value: None,
+            });
+        }
+    }
 }
 
 impl Panel for SettingsPanel {
     fn show(&mut self, ui: &mut Ui, cx: &mut PanelContext<'_>) {
-        ui.text_edit_singleline(&mut self.query);
+        let search = ui.label(SETTINGS_SEARCH.text(cx.localize));
+        ui.text_edit_singleline(&mut self.query)
+            .labelled_by(search.id);
         let store = cx.app.settings();
         let query = self.query.trim().to_lowercase();
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1288,10 +1807,46 @@ impl Panel for SettingsPanel {
                 {
                     continue;
                 }
-                ui.label(format!("{} = {:?} ({:?})", row.key, row.value, row.source))
+                let Some(setting) = store.registry().get(row.key) else {
+                    continue;
+                };
+                // Values above the user scope's reach are shown, not edited.
+                let editable = row.scope >= Scope::User;
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(editable, |ui| {
+                        self.row(ui, &row, &setting.ty, cx.localize, cx.actions);
+                    })
+                    .response
                     .on_hover_text(description);
+                });
             }
         });
+    }
+}
+
+/// The log viewer panel (CORE-APP-015): the recent records the platform keeps in its
+/// [`LogRing`], newest at the bottom. Records are the formatted log lines, so values logged
+/// as [`Redacted`](crate::logging::Redacted) show as `[redacted]`.
+#[derive(Debug, Default)]
+pub struct LogPanel;
+
+impl Panel for LogPanel {
+    fn show(&mut self, ui: &mut Ui, cx: &mut PanelContext<'_>) {
+        let Some(ring) = cx.log.filter(|r| !r.is_empty()) else {
+            ui.label(LOG_EMPTY.text(cx.localize));
+            return;
+        };
+        let height = ui.text_style_height(&egui::TextStyle::Body);
+        egui::ScrollArea::both().stick_to_bottom(true).show_rows(
+            ui,
+            height,
+            ring.len(),
+            |ui, rows| {
+                for record in ring.range(rows) {
+                    ui.add(egui::Label::new(record).extend());
+                }
+            },
+        );
     }
 }
 

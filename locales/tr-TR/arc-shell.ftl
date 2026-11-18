@@ -9,3 +9,4 @@ shell-panel-command-line = Komut Satırı
 shell-panel-diagnostics = Tanılama
 shell-panel-settings = Ayarlar
 shell-title = Arc Kabuğu
+shell-panel-log = Günlük

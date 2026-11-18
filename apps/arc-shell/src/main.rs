@@ -1,6 +1,7 @@
 //! `arc-shell`: the reference windowed shell. Gathers the clock, the edit-lock owner, the data
-//! directory and the files named on the command line, builds the product and runs the event
-//! loop. A start-up failure is reported on standard error with a non-zero exit code.
+//! directory with the user settings, recent files, window states and logs, and the files named
+//! on the command line, builds the product and runs the event loop. A start-up failure is
+//! reported on standard error with a non-zero exit code.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_app::application::{AppConfig, Application};
 use arc_app::recent::RecentFiles;
+use arc_app::shell::UserFiles;
 use arc_app::shell::event_loop::{self, Startup};
 use arc_base::id::{IdGenerator, RandomSource, TimeSource};
 use arc_base::{Error, Limits};
@@ -153,6 +155,12 @@ fn start() -> Result<(), String> {
         gpu,
         title,
         window_states: Some(dir.join("windows.toml")),
+        files: Some(UserFiles {
+            settings: dir.join("settings.toml"),
+            recent: recent_path,
+        }),
+        os_locales,
+        log_dir: Some(dir.join("logs")),
     });
     result.map_err(with)
 }

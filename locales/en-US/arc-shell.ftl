@@ -8,4 +8,5 @@ shell-panel-outliner = Outliner
 shell-panel-command-line = Command line
 shell-panel-diagnostics = Diagnostics
 shell-panel-settings = Settings
+shell-panel-log = Log
 shell-title = Arc Shell

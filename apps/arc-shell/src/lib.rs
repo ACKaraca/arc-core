@@ -1,14 +1,14 @@
 //! The reference windowed shell (CORE-APP-025): the sample document types of
-//! `arc-shell-sample` with a viewport, property grid, outliner, command line, diagnostics and
-//! settings panels, wired into the windowed shell of `arc-app`. The binary only builds this
+//! `arc-shell-sample` with a viewport, property grid, outliner, command line, diagnostics,
+//! settings and log panels, wired into the windowed shell of `arc-app`. The binary only builds this
 //! product and starts the event loop; tests drive the same product headless.
 
 use std::sync::Arc;
 
 use arc_app::product::{Entry, Extractor, FileType, Product, ProductBuilder};
 use arc_app::shell::{
-    self, CommandLinePanel, DiagnosticsPanelView, OutlinerPanel, PropertiesPanel, SettingsPanel,
-    ShellConfig, ViewportPanel,
+    self, CommandLinePanel, DiagnosticsPanelView, LogPanel, OutlinerPanel, PropertiesPanel,
+    SettingsPanel, ShellConfig, ViewportPanel,
 };
 use arc_base::math::Point3;
 use arc_base::{Cancel, Color, Error, Result};
@@ -29,8 +29,10 @@ pub const OUTLINER: &str = "shell.outliner";
 pub const COMMAND_LINE: &str = "shell.command_line";
 /// The diagnostics list.
 pub const DIAGNOSTICS: &str = "shell.diagnostics";
-/// The settings list.
+/// The settings editor.
 pub const SETTINGS: &str = "shell.settings";
+/// The log viewer.
+pub const LOG: &str = "shell.log";
 
 /// The command the property grid's edits name.
 pub const EDIT_COMMAND: &str = "shell.object.set_field";
@@ -105,7 +107,8 @@ fn entry(id: &str, label: Message, make: fn() -> Box<dyn shell::Panel>) -> Entry
 }
 
 /// The product of the reference shell: the sample types and commands, the shell commands, the
-/// `.arc` file type, the six panels and the extractor of points and lines.
+/// appearance settings, the `.arc` file type, the seven panels and the extractor of points and
+/// lines.
 ///
 /// # Errors
 /// The registries' errors; none occur for the sample set.
@@ -114,6 +117,7 @@ pub fn product(clock: Arc<dyn Clock>, owner: LockOwner) -> Result<Product> {
         .with_types(arc_shell_sample::types()?)
         .with_commands(arc_shell_sample::registry()?);
     arc_app::commands::register(builder.commands_mut())?;
+    shell::prefs::register_settings(&mut builder)?;
     builder.file_type(FileType {
         extension: "arc".into(),
         message_id: "shell-file-arc".into(),
@@ -163,6 +167,13 @@ pub fn product(clock: Arc<dyn Clock>, owner: LockOwner) -> Result<Product> {
             },
             || shell::panel(SettingsPanel::default()),
         ),
+        entry(
+            LOG,
+            Message {
+                message_id: "shell-panel-log",
+            },
+            || shell::panel(LogPanel),
+        ),
     ];
     for p in panels {
         builder.panel(p)?;
@@ -186,7 +197,7 @@ fn tabs(panels: &[&str]) -> Dock {
 }
 
 /// The shell configuration: the viewport in the middle, the outliner and the property grid on
-/// the right, the command line with diagnostics and settings below; the default menu bar; and
+/// the right, the command line with diagnostics, settings and the log below; the default menu bar; and
 /// key bindings for the file commands. `seed` seeds the invocations (see
 /// [`ShellConfig::seed`]).
 ///
@@ -209,7 +220,7 @@ pub fn config(seed: u64) -> Result<ShellConfig> {
         axis: Axis::Vertical,
         fraction: 0.75,
         first: Box::new(top),
-        second: Box::new(tabs(&[COMMAND_LINE, DIAGNOSTICS, SETTINGS])),
+        second: Box::new(tabs(&[COMMAND_LINE, DIAGNOSTICS, SETTINGS, LOG])),
     };
     let binding = |keys: &str, command: &str| Binding {
         keys: keys.into(),
@@ -231,11 +242,19 @@ pub fn config(seed: u64) -> Result<ShellConfig> {
     })
 }
 
-/// The message catalogs the shell formats with: the crates' English catalogs.
+/// The message catalogs the shell formats with, for the requested languages.
 ///
 /// # Errors
 /// `app.locale.catalog_invalid` when a catalog does not parse.
 pub fn localizer(requested: &[String]) -> Result<arc_app::locale::Localizer> {
+    arc_app::locale::Localizer::new(catalogs()?, requested)
+}
+
+/// The crates' English catalogs, to which callers may add other languages.
+///
+/// # Errors
+/// `app.locale.catalog_invalid` when a catalog does not parse.
+pub fn catalogs() -> Result<arc_app::locale::Catalogs> {
     let mut catalogs = arc_app::locale::Catalogs::new();
     let english = [
         include_str!("../../../locales/en-US/arc-app.ftl"),
@@ -248,7 +267,7 @@ pub fn localizer(requested: &[String]) -> Result<arc_app::locale::Localizer> {
     ]
     .concat();
     catalogs.add("en-US", &english)?;
-    arc_app::locale::Localizer::new(catalogs, requested)
+    Ok(catalogs)
 }
 
 /// A message of the shell.

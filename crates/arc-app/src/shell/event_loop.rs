@@ -1,7 +1,9 @@
-//! The `winit` event loop of the windowed shell: one main window presenting
-//! [`Shell::frame`] through `egui-winit` and `egui-wgpu` on the shared [`Gpu`] device, with
-//! viewport frames registered as textures, native menus and dialogs, and the window placement
-//! restored from and saved to the window-state file.
+//! The `winit` event loop of the windowed shell: a main window presenting [`Shell::frame`]
+//! and one secondary window per floating dock tree presenting [`Shell::frame_window`], each
+//! through `egui-winit` and `egui-wgpu` on the shared [`Gpu`] device, with viewport frames
+//! registered as textures, native menus and dialogs, and every window's placement restored
+//! from and saved to the window-state file. At start the shell loads the user files
+//! ([`Shell::start`]) and the language setting is applied; a settings change applies it again.
 //!
 //! This module is compiled and linted on every platform but never runs in the tests: it needs
 //! a display. Everything it calls besides `winit`, the surface and the egui renderer is tested
@@ -16,13 +18,13 @@ use arc_base::{Error, Result};
 use arc_gpu::{Gpu, wgpu};
 use arc_ui::egui;
 use winit::application::ApplicationHandler;
-use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 use super::platform::{self, Done, FileDialogs, NativeDialogs, NativeMenu};
-use super::{FrameInput, Request, Shell, ShellConfig};
+use super::{FrameInput, Request, Shell, ShellConfig, UserFiles, WindowModel, prefs};
 use crate::application::{Application, TabId};
 use crate::codes;
 use crate::locale::Localizer;
@@ -45,6 +47,13 @@ pub struct Startup {
     pub title: String,
     /// The window-state file; `None` keeps placements in memory only.
     pub window_states: Option<PathBuf>,
+    /// The user settings and recent-files files; `None` keeps both in memory only.
+    pub files: Option<UserFiles>,
+    /// The operating system's locale list, for `ui.language` = `system`.
+    pub os_locales: Vec<String>,
+    /// The log directory: the subscriber is installed from the log settings once the user
+    /// settings are loaded. `None` installs none.
+    pub log_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for Startup {
@@ -70,11 +79,23 @@ pub fn run(startup: Startup) -> Result<()> {
         Some(path) => WindowStates::load(path)?,
         None => (WindowStates::new(), None),
     };
-    let shell = Shell::new(&startup.app, startup.config, Some(startup.gpu.clone()));
+    let mut app = startup.app;
+    let mut shell = Shell::new(&app, startup.config, Some(startup.gpu.clone()));
+    shell.start(&mut app, startup.files);
+    if let Some(dir) = startup.log_dir {
+        match super::install_logging(&app, dir) {
+            Ok(ring) => shell.set_log_ring(ring),
+            // The shell runs without a log rather than not at all.
+            Err(e) => shell.error(e),
+        }
+    }
+    let mut localizer = startup.localizer;
+    prefs::apply_language(&app, &mut localizer, &startup.os_locales);
     let mut handler = Handler {
-        app: startup.app,
+        app,
         shell,
-        localizer: startup.localizer,
+        localizer,
+        os_locales: startup.os_locales,
         gpu: startup.gpu,
         title: startup.title,
         states,
@@ -82,6 +103,7 @@ pub fn run(startup: Startup) -> Result<()> {
         menu: platform::native_menu(),
         native_menu: false,
         window: None,
+        floating: Vec::new(),
         failure: None,
         started: Instant::now(),
     };
@@ -97,6 +119,8 @@ struct Registered {
 }
 
 struct Open {
+    /// The window identifier: [`MAIN_WINDOW`] or a [`WindowModel::id`].
+    key: String,
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
@@ -111,6 +135,7 @@ struct Handler {
     app: Application,
     shell: Shell,
     localizer: Localizer,
+    os_locales: Vec<String>,
     gpu: Gpu,
     title: String,
     states: WindowStates,
@@ -118,6 +143,8 @@ struct Handler {
     menu: Box<dyn NativeMenu>,
     native_menu: bool,
     window: Option<Open>,
+    /// The secondary windows of the floating dock trees.
+    floating: Vec<Open>,
     failure: Option<Error>,
     started: Instant,
 }
@@ -145,14 +172,25 @@ impl Handler {
         event_loop.exit();
     }
 
-    fn open_window(&mut self, event_loop: &ActiveEventLoop) -> Result<Open> {
+    /// Opens the main window (`model` is `None`) or the window of a floating tree.
+    fn open_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        model: Option<&WindowModel>,
+    ) -> Result<Open> {
         let (list, primary) = monitors(event_loop);
+        let key = model.map_or(MAIN_WINDOW, |m| m.id.as_str()).to_owned();
         let mut attributes = Window::default_attributes().with_title(self.title.clone());
-        if let Some(p) = self.states.restore(&list, primary, MAIN_WINDOW) {
+        if let Some(p) = self.states.restore(&list, primary, &key) {
             attributes = attributes
                 .with_position(PhysicalPosition::new(p.position[0], p.position[1]))
                 .with_inner_size(PhysicalSize::new(p.size[0], p.size[1]))
                 .with_maximized(p.maximized);
+        } else if let Some(m) = model {
+            let [x, y, w, h] = m.rect;
+            attributes = attributes
+                .with_position(LogicalPosition::new(x, y))
+                .with_inner_size(LogicalSize::new(w, h));
         }
         let window = Arc::new(event_loop.create_window(attributes).map_err(window_error)?);
         let surface_error =
@@ -197,10 +235,13 @@ impl Handler {
             format,
             egui_wgpu::RendererOptions::default(),
         );
-        let entries = self.shell.menu_entries(&self.app, &self.localizer);
-        self.native_menu = self.menu.install(&entries);
+        if model.is_none() {
+            let entries = self.shell.menu_entries(&self.app, &self.localizer);
+            self.native_menu = self.menu.install(&entries);
+        }
         let scale = window.scale_factor();
         Ok(Open {
+            key,
             window,
             surface,
             config,
@@ -211,22 +252,55 @@ impl Handler {
         })
     }
 
-    fn save_placement(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(w) = &self.window else {
-            return;
-        };
+    /// Saves the placement of window `id`, or of every window with `None`.
+    fn save_placement(&mut self, event_loop: &ActiveEventLoop, id: Option<WindowId>) {
         let (list, _) = monitors(event_loop);
-        let position = w.window.outer_position().unwrap_or_default();
-        let size = w.window.inner_size();
-        self.states.save(
-            &list,
-            MAIN_WINDOW,
-            Placement {
-                position: [position.x, position.y],
-                size: [size.width, size.height],
-                maximized: w.window.is_maximized(),
-            },
-        );
+        let windows = self.window.iter().chain(&self.floating);
+        for w in windows.filter(|w| id.is_none_or(|id| w.window.id() == id)) {
+            let position = w.window.outer_position().unwrap_or_default();
+            let size = w.window.inner_size();
+            self.states.save(
+                &list,
+                &w.key,
+                Placement {
+                    position: [position.x, position.y],
+                    size: [size.width, size.height],
+                    maximized: w.window.is_maximized(),
+                },
+            );
+        }
+    }
+
+    /// The open window `id`: the main one or a secondary one.
+    fn open_mut(&mut self, id: WindowId) -> Option<&mut Open> {
+        if self.window.as_ref().is_some_and(|w| w.window.id() == id) {
+            return self.window.as_mut();
+        }
+        self.floating.iter_mut().find(|w| w.window.id() == id)
+    }
+
+    /// Opens a window for every floating tree that has none and closes the windows of trees
+    /// that are gone.
+    fn sync_windows(&mut self, event_loop: &ActiveEventLoop) {
+        let models = self.shell.windows();
+        self.floating
+            .retain(|w| models.iter().any(|m| m.id == w.key));
+        for model in &models {
+            if self.floating.iter().any(|w| w.key == model.id) {
+                continue;
+            }
+            match self.open_window(event_loop, Some(model)) {
+                Ok(w) => {
+                    w.window.request_redraw();
+                    self.floating.push(w);
+                }
+                Err(e) => {
+                    // The tree goes back into the main window rather than staying invisible.
+                    self.shell.dock_window(&model.id);
+                    self.shell.error(e);
+                }
+            }
+        }
     }
 
     fn write_states(&self) {
@@ -236,13 +310,10 @@ impl Handler {
         }
     }
 
-    /// Copies new viewport frames into textures the egui renderer samples.
-    fn register_frames(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        let Some(w) = self.window.as_mut() else {
-            return;
-        };
-        let device = self.gpu.device();
-        let frames = self.shell.viewport_frames();
+    /// Copies new viewport frames into textures the egui renderer of window `w` samples.
+    fn register_frames(gpu: &Gpu, shell: &Shell, w: &mut Open, encoder: &mut wgpu::CommandEncoder) {
+        let device = gpu.device();
+        let frames = shell.viewport_frames();
         w.textures
             .retain(|tab, _| frames.iter().any(|(t, _)| t == tab));
         for (tab, frame) in frames {
@@ -303,16 +374,22 @@ impl Handler {
         }
     }
 
-    fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+    fn redraw(&mut self, event_loop: &ActiveEventLoop, id: WindowId) {
         let device = self.gpu.device().clone();
         let queue = self.gpu.queue().clone();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("arc-app frame"),
         });
-        self.register_frames(&mut encoder);
-        let Some(w) = self.window.as_mut() else {
+        let main = self.window.as_ref().is_some_and(|w| w.window.id() == id);
+        let (gpu, shell) = (self.gpu.clone(), &self.shell);
+        let Some(w) = (if main {
+            self.window.as_mut()
+        } else {
+            self.floating.iter_mut().find(|w| w.window.id() == id)
+        }) else {
             return;
         };
+        Self::register_frames(&gpu, shell, w, &mut encoder);
         let raw = w.egui.take_egui_input(&w.window);
         let ctx = w.egui.egui_ctx().clone();
         let textures: BTreeMap<TabId, egui::TextureId> =
@@ -322,10 +399,15 @@ impl Handler {
             time: self.started.elapsed().as_secs_f64(),
             localize: &self.localizer,
             textures: &textures,
-            menu_intents: self.menu.poll(),
+            menu_intents: if main { self.menu.poll() } else { Vec::new() },
             native_menu: self.native_menu,
         };
-        let out = self.shell.frame(&mut self.app, &ctx, input);
+        let out = if main {
+            self.shell.frame(&mut self.app, &ctx, input)
+        } else {
+            let key = w.key.clone();
+            self.shell.frame_window(&mut self.app, &ctx, input, &key)
+        };
         let mut full = out.full;
         w.egui
             .handle_platform_output(&w.window, full.platform_output);
@@ -389,8 +471,30 @@ impl Handler {
         {
             w.window.request_redraw();
         }
-        for request in out.requests {
-            self.carry_out(event_loop, &request);
+        self.after_frame(event_loop, out.settings_changed, &out.requests);
+    }
+
+    /// Applies a changed language, carries out the frame's requests and opens or closes the
+    /// windows of floating trees.
+    fn after_frame(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        settings_changed: bool,
+        requests: &[Request],
+    ) {
+        if settings_changed {
+            prefs::apply_language(&self.app, &mut self.localizer, &self.os_locales);
+            self.request_redraw_all();
+        }
+        for request in requests {
+            self.carry_out(event_loop, request);
+        }
+        self.sync_windows(event_loop);
+    }
+
+    fn request_redraw_all(&self) {
+        for w in self.window.iter().chain(&self.floating) {
+            w.window.request_redraw();
         }
     }
 
@@ -401,13 +505,15 @@ impl Handler {
         let dialogs: &mut dyn FileDialogs = &mut dialogs;
         match platform::carry_out(&mut self.app, dialogs, request) {
             Ok(Done::Quit) => {
-                self.save_placement(event_loop);
+                self.save_placement(event_loop, None);
                 self.write_states();
+                self.shell.save_recent(&self.app);
                 event_loop.exit();
             }
             Ok(_) => {}
             Err(e) => self.shell.error(e),
         }
+        self.shell.save_recent(&self.app);
         if let Some(w) = &self.window {
             w.window.request_redraw();
         }
@@ -419,30 +525,41 @@ impl ApplicationHandler for Handler {
         if self.window.is_some() {
             return;
         }
-        match self.open_window(event_loop) {
+        match self.open_window(event_loop, None) {
             Ok(w) => {
                 w.window.request_redraw();
                 self.window = Some(w);
             }
             Err(e) => self.fail(event_loop, e),
         }
+        self.sync_windows(event_loop);
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-        let Some(w) = self.window.as_mut() else {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let main = self.window.as_ref().is_some_and(|w| w.window.id() == id);
+        let device = self.gpu.device().clone();
+        let Some(w) = self.open_mut(id) else {
             return;
         };
         let response = w.egui.on_window_event(&w.window, &event);
         match event {
-            WindowEvent::CloseRequested => self.carry_out(event_loop, &Request::Quit),
+            WindowEvent::CloseRequested if main => self.carry_out(event_loop, &Request::Quit),
+            WindowEvent::CloseRequested => {
+                // Closing a floating window docks its panels back into the main window.
+                let key = w.key.clone();
+                self.save_placement(event_loop, Some(id));
+                self.shell.dock_window(&key);
+                self.sync_windows(event_loop);
+                self.request_redraw_all();
+            }
             WindowEvent::Resized(size) => {
                 w.config.width = size.width.max(1);
                 w.config.height = size.height.max(1);
-                w.surface.configure(self.gpu.device(), &w.config);
+                w.surface.configure(&device, &w.config);
                 w.window.request_redraw();
-                self.save_placement(event_loop);
+                self.save_placement(event_loop, Some(id));
             }
-            WindowEvent::Moved(_) => self.save_placement(event_loop),
+            WindowEvent::Moved(_) => self.save_placement(event_loop, Some(id)),
             WindowEvent::ScaleFactorChanged {
                 scale_factor,
                 mut inner_size_writer,
@@ -452,7 +569,7 @@ impl ApplicationHandler for Handler {
                 w.scale = scale_factor;
                 let _ = inner_size_writer.request_inner_size(PhysicalSize::new(width, height));
             }
-            WindowEvent::RedrawRequested => self.redraw(event_loop),
+            WindowEvent::RedrawRequested => self.redraw(event_loop, id),
             _ => {
                 if response.repaint {
                     w.window.request_redraw();
@@ -463,9 +580,7 @@ impl ApplicationHandler for Handler {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.shell.busy() {
-            if let Some(w) = &self.window {
-                w.window.request_redraw();
-            }
+            self.request_redraw_all();
             event_loop.set_control_flow(ControlFlow::Poll);
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);

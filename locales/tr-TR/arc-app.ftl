@@ -69,3 +69,29 @@ app-window-surface-failed = Grafik aygıtı uygulama penceresine çizim yapamıy
 
 app-menu-file = Dosya
 app-menu-edit = Düzenle
+
+app-banner-take-over = Kilidi devral
+
+app-setting-ui-theme = Renk teması: light, dark, high_contrast_light veya high_contrast_dark.
+app-setting-ui-density = Kullanıcı arayüzünün aralıkları: compact, standard veya comfortable.
+app-setting-ui-scale = Kullanıcı arayüzünün yüzde olarak boyutu, 75 ile 300 arasında.
+
+app-settings-search = Ayarlarda ara
+app-settings-reset = Sıfırla
+
+app-log-empty = Henüz günlük kaydı yok.
+
+app-recovery-title = Önceki oturumdan kaydedilmemiş değişiklikler
+app-recovery-entry = { $name }: { $records } kaydedilmemiş değişiklik
+app-recovery-untitled = Adsız belge
+app-recovery-unreadable = Bu değişiklikler okunamıyor.
+app-recovery-recover = Kurtar
+app-recovery-compare = Karşılaştır
+app-recovery-discard = Sil
+app-recovery-later = Sonra karar ver
+app-recovery-compare-base = Kaydedilmiş dosya: { $path }
+app-recovery-compare-no-base = Belge hiç kaydedilmedi.
+app-recovery-compare-unchanged = Kaydedilmiş dosya, bu değişiklikler yapıldığından beri değişmedi.
+app-recovery-compare-changed = Kaydedilmiş dosya değişti veya yok; değişiklikler yeni bir belge olarak kurtarılır.
+app-recovery-compare-objects = Kaydedilmiş dosyada { $objects } nesne var.
+app-recovery-compare-records = { $records } değişiklik yeniden uygulanır.

@@ -35,12 +35,36 @@ app-banner-locked-unknown = Another application is editing this file. It is open
 app-banner-stale-lock = This file was left locked by { $user } on { $host } with { $application }, which is no longer running. It is open read-only until you take over the lock.
 app-banner-newer-format = This file was saved in format { $version }, which is newer than this application supports. It is open read-only.
 app-banner-recovered-copy = The file changed after these changes were made. They were recovered onto the earlier version as a new document.
+app-banner-take-over = Take over the lock
 
 app-setting-ui-language = The language of the user interface, or "system" to follow the operating system.
 app-setting-log-level = The most detailed level written to the log files.
 app-setting-log-max-file-bytes = The size at which a log file is replaced by a new one, in bytes.
 app-setting-log-max-files = The number of log files kept.
 app-setting-recent-max-entries = The number of unpinned files kept in the recent files list.
+app-setting-ui-theme = The color theme: light, dark, high_contrast_light or high_contrast_dark.
+app-setting-ui-density = The spacing of the user interface: compact, standard or comfortable.
+app-setting-ui-scale = The size of the user interface in percent, from 75 to 300.
+
+app-settings-search = Search settings
+app-settings-reset = Reset
+
+app-log-empty = No log records yet.
+
+app-recovery-title = Unsaved changes from an earlier session
+app-recovery-entry = { $name }: { $records } unsaved changes
+app-recovery-untitled = Untitled document
+app-recovery-unreadable = These changes cannot be read.
+app-recovery-recover = Recover
+app-recovery-compare = Compare
+app-recovery-discard = Discard
+app-recovery-later = Decide later
+app-recovery-compare-base = Saved file: { $path }
+app-recovery-compare-no-base = The document was never saved.
+app-recovery-compare-unchanged = The saved file is unchanged since these changes were made.
+app-recovery-compare-changed = The saved file changed or is missing; the changes would be recovered as a new document.
+app-recovery-compare-objects = The saved file holds { $objects } objects.
+app-recovery-compare-records = { $records } changes would be replayed.
 
 app-command-file-new = New
 app-command-file-new-description = Opens a new, empty document.

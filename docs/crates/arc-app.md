@@ -387,9 +387,17 @@ needs no window:
   factory of another type is reported with `app.product.invalid_id` and left out. The standard
   panels are `ViewportPanel`, `PropertiesPanel` (with the product's edit command),
   `OutlinerPanel` (every object, flat, labelled by its `name` text field or type and
-  identifier), `CommandLinePanel`, `DiagnosticsPanelView` and `SettingsPanel` (effective value
-  and source of every setting with a search text; it does not change values). Extractors are
-  product `Extractor`s whose factory returns an `arc_gpu` extractor (`shell::extractor`).
+  identifier), `CommandLinePanel`, `DiagnosticsPanelView`, `SettingsPanel` and `LogPanel`.
+  Extractors are product `Extractor`s whose factory returns an `arc_gpu` extractor
+  (`shell::extractor`).
+- `SettingsPanel` (CORE-APP-011) lists every setting with a search text over keys and
+  localized descriptions. A setting whose highest allowed scope is the user scope or above is
+  edited there: a check box for a truth value, a choice list for a choice, otherwise a text field
+  committed when it loses focus (text that does not parse as the type is reported with
+  `app.settings.type_mismatch`); a value the user scope supplies has a reset button. Edits are
+  `Action::Setting`s; the shell carries them out with `settings_editor::set` and `reset` in the
+  user scope, writing the user settings file.
+- `LogPanel` (CORE-APP-015) shows the records of the platform's `LogRing`, newest at the bottom.
 - Every tab has a view: selection, camera (initially looking down the z axis at the origin,
   20 m high, orthographic), the viewport widget, an `arc_gpu::Viewport` created on the first
   frame that shows the tab when the shell has a GPU, an extraction driver with two workers, a
@@ -408,7 +416,56 @@ needs no window:
   document whose revisions repeat earlier ones; the reference shell seeds it from the clock and
   the process. Errors are kept in `errors()` (at most 64).
 - The frame returns the egui output, the `Request`s for the platform (`OpenDialog`,
-  `SaveDialog(tab)`, `AskClose(tab)`, `Quit`) and whether more frames are on their way.
+  `SaveDialog(tab)`, `AskClose(tab)`, `Quit`), whether more frames are on their way and whether
+  a setting changed.
+
+### Start-up, prompts and settings in the shell (CORE-APP-004, 005, 006, 010, 011, 012, 015)
+
+- `Shell::start(app, files)` runs once before the first frame. With `UserFiles` (the user
+  settings file and the recent-files file) it loads the settings file into the user scope
+  (`settings_file::load`; a malformed or oversized file is set aside and its error shown as a
+  warning notification) and keeps both paths for writing. It applies the appearance settings and
+  lists `Application::recoverable()` in the recovery prompt; a failure to list is an error
+  notification.
+- Notifications (`arc_ui::Notifications`) are drawn at the top of the main window.
+- The recovery prompt is a modal over the main window while sessions are listed. Each entry
+  shows its file name (or "untitled") and record count, with recover, compare and discard; an
+  entry that cannot be read offers discard only. Compare shows what `Application::compare`
+  reports (base path, whether the base is unchanged, its object count, the records to replay)
+  and changes nothing. Recover and discard call `Application::recover` and
+  `discard_recovery` and remove the entry; "decide later" closes the prompt and leaves the
+  sessions for the next start. Nothing is recovered or discarded without one of these choices.
+- The active tab's banners are drawn in a strip above the dock, formatted through the catalog
+  with their arguments; the stale-lock banner has a take-over button that calls
+  `Application::take_over`. Banners of other tabs show when their tab is active.
+- `shell::prefs::register_settings` registers `ui.theme` (`light`, `dark`,
+  `high_contrast_light`, `high_contrast_dark`), `ui.density` (`compact`, `standard`,
+  `comfortable`) and `ui.scale` (75 to 300 percent), each up to the user scope. A value of one of
+  them set in any scope overrides the appearance of `ShellConfig`; the shell applies it at start
+  and after each settings edit, without a restart. `ui.language` is applied by the localizer's
+  owner with `prefs::apply_language` (at start and when a frame reports `settings_changed`),
+  so labels change from the next frame on.
+- Files dropped on a window (egui's `dropped_files`, at most 64 per frame) open through
+  `Application::open`; a refused file is an error in `errors()`. After every frame and after the
+  platform carried out a request, `Shell::save_recent` writes the recent files when they changed
+  since the last write; the event loop also writes them at quit.
+- `shell::install_logging(app, dir)` installs the process-wide subscriber from `log.level`,
+  `log.max_file_bytes` and `log.max_files` (read once; a change applies at the next start) with
+  the file `shell.log` under `dir`, and returns the `LogRing` the subscriber also fills:
+  `logging::subscriber_with_ring` keeps the latest 1000 records, each cut to 4096 bytes. The ring
+  holds the same formatted text as the files, so a value logged as `Redacted` is `[redacted]`
+  there too; the shell logs dropped file paths only that way.
+
+### Floating dock trees as windows (CORE-APP-002, CORE-UI-001)
+
+- `Shell::windows()` models one secondary window per floating tree of the layout: its
+  identifier (`float.` and the tree's first panel in lowercase, or `float-<n>` when that is not
+  a valid window identifier or repeats), its rectangle and its panels. `Shell::frame_window(app,
+  ctx, input, id)` composes that window in its own egui context: its tree with the same panels,
+  actions and requests as the main window, without menu bar, notifications, banners or prompt.
+  Changes its dock makes are written back into the layout; a tree whose last panel closes is
+  removed, and moving a panel from it into the main tree is dropped. `dock_window(id)` docks a
+  window's panels back into the main tree. `layout()` and `layout_mut()` expose the layout.
 
 ### Menus, dialogs and the event loop (CORE-APP-002, CORE-APP-009)
 
@@ -421,11 +478,17 @@ needs no window:
   through `zenity`), the system dialogs on Windows and macOS; the question's answers map to
   save (yes), discard (no) and cancel (anything else). `native_menu()` is a `muda` menu bar on macOS, item identifiers being command
   identifiers; on Windows and Linux there is none and the shell draws the egui menu bar.
-- `event_loop::run` opens one main window with `winit`, restores its placement from the
-  window-state file, presents through a surface of the `arc-gpu` device (`Gpu::instance`,
-  `Gpu::adapter`; a non-sRGB surface format), copies each new viewport frame into an
-  `Rgba8Unorm` texture registered with the `egui-wgpu` renderer, saves the placement on moves and
-  resizes, keeps the logical size on scale changes and writes the file on quit. The text font is
+- `event_loop::run` starts the shell (`Shell::start` with `Startup::files`, the log subscriber
+  under `Startup::log_dir`, the language from `Startup::os_locales`), opens the main window with
+  `winit`, restores its placement from the window-state file, presents through a surface of the
+  `arc-gpu` device (`Gpu::instance`, `Gpu::adapter`; a non-sRGB surface format), copies each new
+  viewport frame into an `Rgba8Unorm` texture registered with the `egui-wgpu` renderer, saves the
+  placement on moves and resizes, keeps the logical size on scale changes and writes the file on
+  quit. After each frame it opens a window for every floating tree without one (placement from
+  the window-state file under the window's identifier, else the tree's rectangle) and closes
+  the windows of trees that are gone; each secondary window has its own surface, egui state,
+  renderer and textures, and closing it docks its panels back. Dropped files reach the frame
+  through `egui-winit`. The text font is
   loaded at start from a short list of system font files (DejaVu Sans, Noto Sans or Liberation
   Sans on Linux, Segoe UI or Arial on Windows, Helvetica or Arial on macOS), at most 32 MiB.
 
@@ -433,15 +496,22 @@ needs no window:
 
 - Tested headless: the window-state model with a property test; the shell commands; menus
   through a fake native menu and the egui menu bar; the open, save, close and quit flows
-  through fake dialogs; and, in `apps/arc-shell`, a scripted session on the software adapter
-  (create a layer, a point and a line on the command line, select the point by a click in the
-  viewport, set its x coordinate to `1200 mm + 3 in` in the property grid, undo, save through
-  the save dialog, close and reopen through the open dialog, with every edit in
-  `invocations()`) and a panic-hunt property test of hostile event streams, command lines and
-  intents.
-- Compiled and linted but never run here: the `winit` event loop, the window surface and its
-  presentation, the `egui-wgpu` renderer and texture registration, `NativeDialogs` and the
-  `muda` menu bar (built on macOS only), and font loading from the system.
+  through fake dialogs; the log ring's bounds and redaction; and, in `apps/arc-shell`, a
+  scripted session on the software adapter (create a layer, a point and a line on the command
+  line, select the point by a click in the viewport, set its x coordinate to `1200 mm + 3 in` in
+  the property grid, undo, save through the save dialog, close and reopen through the open
+  dialog, with every edit in `invocations()`), a panic-hunt property test of hostile event
+  streams, command lines and intents, and frames that drive: the recovery prompt after a dropped
+  application (compare, recover, discard); the lock banner of a second instance and the
+  stale-lock banner with take-over; settings edits written to the file, effective at once
+  (scale, and a language switch that changes a panel title) and after a restart, and reset; a
+  malformed settings file set aside with a notification; a dropped file opened, the recent
+  files written and the log viewer showing the record with its path redacted; and a floating
+  tree composed as a second window and docked back.
+- Compiled and linted but never run here: the `winit` event loop with its secondary windows,
+  their placement and `DroppedFile` events, the window surfaces and their presentation, the
+  `egui-wgpu` renderer and texture registration, `NativeDialogs` and the `muda` menu bar (built
+  on macOS only), and font loading from the system.
 
 ### Owner decisions
 
@@ -450,8 +520,14 @@ needs no window:
 - No bundled font: egui's fonts are under a license outside the allowlist. Without one of the
   listed system fonts, text shows as boxes; a font under an allowed license, or a font
   lookup crate, would remove this.
-- The egui clipboard integration, the AccessKit platform adapter (screen readers) and Wayland
-  window title text are off: each brings dependency trees not reviewed for this change.
+- The egui clipboard integration and Wayland window title text are off: each brings dependency
+  trees not reviewed for this change.
+- The AccessKit platform adapter (`egui-winit` feature `accesskit`, screen readers) is off. It
+  adds `accesskit_winit` 0.34.2 with about 50 crates (`accesskit_unix`, `atspi`, `zbus` 5,
+  `zvariant` 5, `async-io` and others); their licenses pass `cargo deny`, but the advisories
+  check fails: RUSTSEC-2026-0370, -0371 and -0372 mark `zvariant`, `zbus_names` and
+  `zvariant_derive` unmaintained. The AccessKit tree itself is built in every frame and is what
+  the headless tests read.
 - The window surface is created from the `arc-gpu` device's instance, which has no display
   handle, so presenting works on Vulkan, Metal and DirectX 12 and not on the OpenGL fallback.
 

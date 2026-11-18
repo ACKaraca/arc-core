@@ -3,8 +3,11 @@
 //! [`subscriber`] builds a `tracing` subscriber that writes one text record per event, with its
 //! fields as `key=value`, to a [`RotatingWriter`]. Document content and credentials must not be
 //! logged: wrap any such value in [`Redacted`], whose formatting never touches the wrapped value.
-//! This crate has no log viewer.
+//! [`subscriber_with_ring`] also keeps the most recent records in a bounded [`LogRing`] for the
+//! shell's log viewer; the ring holds the same formatted text as the files, so a redacted value
+//! is redacted there too.
 
+use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -224,6 +227,122 @@ pub fn subscriber(config: &LogConfig) -> Result<impl tracing::Subscriber + Send 
         .finish())
 }
 
+/// The most records a [`LogRing`] keeps.
+pub const MAX_RING_RECORDS: usize = 1000;
+/// The most bytes of one record a [`LogRing`] keeps; the rest is cut at a character boundary.
+pub const MAX_RING_RECORD_BYTES: usize = 4096;
+
+/// The most recent log records as formatted text, oldest first, at most [`MAX_RING_RECORDS`] of
+/// at most [`MAX_RING_RECORD_BYTES`] each. Clones share the records.
+#[derive(Clone, Default)]
+pub struct LogRing {
+    records: Arc<Mutex<VecDeque<String>>>,
+}
+
+impl std::fmt::Debug for LogRing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogRing").finish_non_exhaustive()
+    }
+}
+
+impl LogRing {
+    /// An empty ring.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds one record, dropping the oldest beyond [`MAX_RING_RECORDS`]. Invalid UTF-8 is
+    /// replaced and a trailing line break removed.
+    pub fn push(&self, record: &[u8]) {
+        let text = String::from_utf8_lossy(record);
+        let mut text = text.trim_end_matches(['\n', '\r']).to_owned();
+        if text.len() > MAX_RING_RECORD_BYTES {
+            let mut end = MAX_RING_RECORD_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        let mut records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
+        if records.len() >= MAX_RING_RECORDS {
+            records.pop_front();
+        }
+        records.push_back(text);
+    }
+
+    /// The kept records, oldest first.
+    #[must_use]
+    pub fn records(&self) -> Vec<String> {
+        self.range(0..usize::MAX)
+    }
+
+    /// The kept records at positions `range` (oldest is 0), clipped to the records kept.
+    #[must_use]
+    pub fn range(&self, range: std::ops::Range<usize>) -> Vec<String> {
+        let records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
+        let len = range.end.saturating_sub(range.start);
+        records
+            .iter()
+            .skip(range.start)
+            .take(len)
+            .cloned()
+            .collect()
+    }
+
+    /// The number of kept records.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.records
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    /// True when no record is kept.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Writes each record to the rotating files and to the ring.
+#[derive(Clone)]
+struct Tee {
+    file: RotatingWriter,
+    ring: LogRing,
+}
+
+impl Write for Tee {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.ring.push(buf);
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
+/// As [`subscriber`], and every record is also kept in `ring` for the log viewer.
+///
+/// # Errors
+/// As [`RotatingWriter::open`].
+pub fn subscriber_with_ring(
+    config: &LogConfig,
+    ring: LogRing,
+) -> Result<impl tracing::Subscriber + Send + Sync + 'static> {
+    let tee = Tee {
+        file: RotatingWriter::open(config)?,
+        ring,
+    };
+    Ok(tracing_subscriber::fmt()
+        .with_max_level(config.level)
+        .with_ansi(false)
+        .with_writer(move || tee.clone())
+        .finish())
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -319,6 +438,29 @@ mod tests {
             text.contains("token=[redacted]") && text.contains("content=[redacted]"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_ring_keeps_recent_redacted_records_within_bounds() {
+        let d = dir("ring");
+        let ring = LogRing::new();
+        let sub = subscriber_with_ring(&config(d.clone(), 1 << 20, 2), ring.clone()).unwrap();
+        tracing::subscriber::with_default(sub, || {
+            tracing::info!(content = ?Redacted("SECRET body"), "opened");
+            for i in 0..MAX_RING_RECORDS + 5 {
+                tracing::info!(index = i, "filler");
+            }
+        });
+        let records = ring.records();
+        assert_eq!(records.len(), MAX_RING_RECORDS);
+        assert!(
+            records
+                .iter()
+                .all(|r| !r.contains("SECRET") && !r.ends_with('\n'))
+        );
+        assert!(records.last().unwrap().contains("index=1004"));
+        ring.push("é".repeat(MAX_RING_RECORD_BYTES).as_bytes());
+        assert!(ring.records().last().unwrap().len() <= MAX_RING_RECORD_BYTES);
     }
 
     #[test]

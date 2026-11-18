@@ -147,3 +147,268 @@ fn create_select_edit_undo_save_and_reopen() {
     );
     assert!(h.shell.errors().is_empty(), "{:?}", h.shell.errors());
 }
+
+/// A package with no objects at `path`.
+fn new_package(path: &std::path::Path) {
+    let owner = arc_doc::package::LockOwner {
+        user: "creator".into(),
+        host: "elsewhere".into(),
+        application: "test".into(),
+        time_unix_ms: 0,
+    };
+    drop(
+        arc_doc::package::Package::create(path, &arc_doc::package::Metadata::default(), &owner)
+            .unwrap(),
+    );
+}
+
+fn point_count(h: &Harness, tab: TabId) -> usize {
+    let snapshot = h.app.tab(tab).unwrap().document().snapshot();
+    snapshot.iter_type(arc_shell_sample::POINT).unwrap().count()
+}
+
+#[test]
+fn recovery_prompt_lists_a_dropped_session_and_acts_only_on_choice() {
+    let dir = TempDir::new("recovery");
+    let data = dir.join("data");
+    let file = dir.join("doc.arc");
+    new_package(&file);
+
+    // An application with unsaved changes in a file and in a new document is dropped.
+    let mut crashed = Harness::new(&data, None);
+    crashed.app.open(&file).unwrap();
+    crashed.command("shell.point.create position=[1, 2, 0]");
+    crashed.menu(commands::FILE_NEW);
+    crashed.command("shell.point.create position=[3, 4, 0]");
+    assert_eq!(
+        crashed.shell.invocations().len(),
+        2,
+        "{:?}",
+        crashed.shell.errors()
+    );
+    drop(crashed);
+
+    // The next start lists both sessions and changes nothing on its own.
+    let mut h = Harness::new(&data, None);
+    // The modal is measured in its first frame and shown from the second.
+    h.frame(Vec::new());
+    let pass = h.frame(Vec::new());
+    assert_eq!(h.shell.recovery().len(), 2);
+    assert_eq!(pass.all(accesskit::Role::Button, "Recover").len(), 2);
+    // Fluent isolates arguments with direction marks, so fragments are matched.
+    assert!(pass.shows("unsaved changes") && pass.shows("doc.arc"));
+    assert!(h.app.tabs().is_empty());
+    assert_eq!(h.app.recoverable().unwrap().len(), 2);
+    let based = h
+        .shell
+        .recovery()
+        .iter()
+        .position(|e| e.orphan.base.is_some())
+        .unwrap();
+
+    // Compare shows the model's data and recovers nothing.
+    let compare = center(pass.all(accesskit::Role::Button, "Compare")[based]);
+    h.frame(click(compare));
+    h.frame(Vec::new());
+    let pass = h.frame(Vec::new());
+    assert!(pass.shows("Saved file:") && pass.shows("The saved file is unchanged"));
+    assert!(pass.shows("The saved file holds") && pass.shows("changes would be replayed."));
+    assert!(h.app.tabs().is_empty());
+
+    // Recover replays the session into a dirty tab of the file.
+    let recover = center(pass.all(accesskit::Role::Button, "Recover")[based]);
+    h.frame(click(recover));
+    let tab = h.app.active().unwrap();
+    assert_eq!(h.app.tab(tab).unwrap().path(), Some(file.as_path()));
+    assert!(h.app.tab(tab).unwrap().is_dirty());
+    assert_eq!(point_count(&h, tab), 1);
+    assert_eq!(h.shell.recovery().len(), 1);
+
+    // Discard deletes the other session; the prompt closes.
+    h.press("Discard");
+    assert!(h.shell.recovery().is_empty());
+    assert_eq!(h.app.tabs().len(), 1);
+    assert!(h.app.recoverable().unwrap().is_empty());
+    let pass = h.frame(Vec::new());
+    assert!(pass.find(accesskit::Role::Button, "Recover").is_none());
+    assert!(h.shell.errors().is_empty(), "{:?}", h.shell.errors());
+}
+
+#[test]
+fn banners_name_the_lock_holder_and_a_stale_lock_is_taken_over_on_request() {
+    let dir = TempDir::new("banners");
+    let file = dir.join("shared.arc");
+    new_package(&file);
+
+    // A second instance opens the file read-only with the holder in the banner.
+    let mut first = Harness::new(&dir.join("data1"), None);
+    first.app.open(&file).unwrap();
+    let mut second = Harness::new(&dir.join("data2"), None);
+    second.app.open(&file).unwrap();
+    let pass = second.frame(Vec::new());
+    assert!(
+        pass.shows("is editing this file with") && pass.shows("tester"),
+        "banner missing"
+    );
+    assert!(pass.find(accesskit::Role::Button, "Take over").is_none());
+    // The banner belongs to its tab: a new document has none.
+    second.menu(commands::FILE_NEW);
+    assert!(!second.frame(Vec::new()).shows("is editing this file"));
+    drop((first, second));
+
+    // A lock left by a process of this host that no longer runs.
+    let stale = dir.join("stale.arc");
+    new_package(&stale);
+    std::fs::write(
+        arc_doc::package::lock_path(&stale),
+        "{\"format\":1,\"user\":\"ghost\",\"host\":\"test-host\",\"pid\":4000000,\
+         \"application\":\"old app 0\",\"time_unix_ms\":5}",
+    )
+    .unwrap();
+    let mut h = Harness::new(&dir.join("data3"), None);
+    let tab = h.app.open(&stale).unwrap();
+    assert!(h.app.tab(tab).unwrap().is_read_only());
+    let pass = h.frame(Vec::new());
+    assert!(pass.shows("This file was left locked by") && pass.shows("ghost"));
+    // Nothing changes until the user takes over.
+    assert!(h.app.tab(tab).unwrap().is_read_only());
+    h.press("Take over the lock");
+    assert!(
+        !h.app.tab(tab).unwrap().is_read_only(),
+        "{:?}",
+        h.shell.errors()
+    );
+    assert!(h.app.tab(tab).unwrap().banners().is_empty());
+    assert!(!h.frame(Vec::new()).shows("left locked"));
+}
+
+#[test]
+fn settings_edits_are_written_effective_at_once_and_after_a_restart() {
+    let dir = TempDir::new("settings");
+    let data = dir.join("data");
+    let mut h = Harness::new(&data, None);
+    h.shell.layout_mut().activate(arc_shell::SETTINGS).unwrap();
+    assert!(h.frame(Vec::new()).shows("Settings"));
+
+    // Scale and language through the settings panel, found by searching.
+    h.type_into("Search settings", "ui.scale");
+    h.type_into("ui.scale", "150");
+    assert_eq!(
+        h.shell.appearance().scale.percent(),
+        150,
+        "{:?}",
+        h.shell.errors()
+    );
+    h.type_into("Search settings", "ui.language");
+    h.type_into("ui.language", common::TEST_LANGUAGE);
+    let table = arc_app::settings_file::load(&data.join("settings.toml"))
+        .unwrap()
+        .table;
+    assert_eq!(table["ui"]["scale"].as_integer(), Some(150), "{table:?}");
+    assert_eq!(
+        table["ui"]["language"].as_str(),
+        Some(common::TEST_LANGUAGE),
+        "{table:?}"
+    );
+    // The language applies within the same run: the panel title changes.
+    let pass = h.frame(Vec::new());
+    assert!(
+        pass.shows(common::TEST_SETTINGS_TITLE),
+        "title not switched"
+    );
+    assert!(h.shell.errors().is_empty(), "{:?}", h.shell.errors());
+    drop(h);
+
+    // After a restart the file gives the same effective values.
+    let mut h = Harness::new(&data, None);
+    assert_eq!(h.shell.appearance().scale.percent(), 150);
+    assert!(h.frame(Vec::new()).shows(common::TEST_SETTINGS_TITLE));
+
+    // Reset removes the user value from the file.
+    h.shell.layout_mut().activate(arc_shell::SETTINGS).unwrap();
+    h.type_into("Search settings", "ui.");
+    let pass = h.frame(Vec::new());
+    let resets = pass.all(accesskit::Role::Button, "Reset");
+    assert_eq!(resets.len(), 2);
+    // The first is the language's; resetting it switches the labels back.
+    let first = center(resets[0]);
+    h.frame(click(first));
+    let table = arc_app::settings_file::load(&data.join("settings.toml"))
+        .unwrap()
+        .table;
+    assert_eq!(
+        table["ui"].as_table().map(|t| t.len()),
+        Some(1),
+        "{table:?}"
+    );
+    assert_eq!(table["ui"]["scale"].as_integer(), Some(150));
+    assert!(!h.frame(Vec::new()).shows(common::TEST_SETTINGS_TITLE));
+}
+
+#[test]
+fn a_malformed_settings_file_is_set_aside_and_reported() {
+    let dir = TempDir::new("malformed");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("settings.toml"), "ui = [unclosed").unwrap();
+    let mut h = Harness::new(&data, None);
+    assert!(data.join("settings.toml.malformed-1").exists());
+    assert!(!data.join("settings.toml").exists());
+    let pass = h.frame(Vec::new());
+    assert!(pass.shows("is damaged. It was renamed"), "no notification");
+}
+
+#[test]
+fn dropped_files_open_and_recent_files_are_written() {
+    let dir = TempDir::new("drop");
+    let data = dir.join("data");
+    let file = dir.join("dropped.arc");
+    new_package(&file);
+    let mut h = Harness::new(&data, None);
+    let ring = arc_app::shell::install_logging(&h.app, data.join("logs")).unwrap();
+    h.shell.set_log_ring(ring);
+
+    h.drop_files(&[file.clone(), dir.join("notes.txt")]);
+    let tab = h.app.active().unwrap();
+    assert_eq!(h.app.tab(tab).unwrap().path(), Some(file.as_path()));
+    assert_eq!(h.shell.errors()[0].code(), "app.file.unsupported_type");
+    let recent = arc_app::recent::RecentFiles::load(&data.join("recent.toml"), 20)
+        .unwrap()
+        .0;
+    assert_eq!(recent.iter().next().unwrap().path, file);
+
+    // The log viewer shows the record and never the redacted path.
+    h.shell.layout_mut().activate(arc_shell::LOG).unwrap();
+    let pass = h.frame(Vec::new());
+    assert!(pass.shows("dropped file opened"), "record missing");
+    assert!(pass.shows("path=[redacted]"));
+    assert!(!pass.shows("dropped.arc"));
+}
+
+#[test]
+fn a_floating_tree_is_laid_out_as_a_second_window() {
+    let dir = TempDir::new("floating");
+    let mut h = Harness::new(&dir.join("data"), None);
+    h.shell
+        .layout_mut()
+        .float(arc_shell::LOG, [40.0, 30.0, 400.0, 300.0])
+        .unwrap();
+    let windows = h.shell.windows();
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].id, "float.shell.log");
+    assert_eq!(windows[0].panels, [arc_shell::LOG]);
+    assert_eq!(windows[0].rect, [40.0, 30.0, 400.0, 300.0]);
+
+    // The panel is drawn in its window, not in the main one.
+    let empty = h.text("app-log-empty");
+    assert!(!h.frame(Vec::new()).shows(&empty));
+    let pass = h.window_frame("float.shell.log", Vec::new());
+    assert!(pass.shows(&empty) && pass.shows("Log"));
+
+    // Closing the window docks the panel back into the main tree.
+    assert!(h.shell.dock_window("float.shell.log"));
+    assert!(h.shell.windows().is_empty());
+    h.shell.layout_mut().activate(arc_shell::LOG).unwrap();
+    assert!(h.frame(Vec::new()).shows(&empty));
+    assert!(!h.window_frame("float.shell.log", Vec::new()).shows(&empty));
+}
