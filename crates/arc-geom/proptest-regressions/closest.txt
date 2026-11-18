@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc bf740cb790c4754238f843303b2760701f440ab2f2d0589fb15997991a0cd22b # shrinks to c = Polyline(Polyline2 { vertices: [PolylineVertex { point: [0.0, 0.0], bulge: 0.0, start_width: 0.0, end_width: 0.0 }, PolylineVertex { point: [0.0, 89.65665480688881], bulge: 0.0, start_width: 0.0, end_width: 0.0 }, PolylineVertex { point: [0.0, 0.0], bulge: 0.0, start_width: 0.0, end_width: 0.0 }, PolylineVertex { point: [0.0, -31.02404701156868], bulge: 0.0, start_width: 0.0, end_width: 0.0 }, PolylineVertex { point: [0.0, 0.0], bulge: 0.0, start_width: 0.0, end_width: 0.0 }], closed: false }), q = [0.0, 0.0]
+cc c9c909c808411e67daf2c745c1979bd60be43840cff78e3e1dcee434b05ca3de # shrinks to c = Arc(Arc2 { center: [1.0, 1.0], radius: 7.261763998415378e-7, start_angle: 0.0, sweep: -5.823765216791438, chord: None }), f = 0.5105150318801515

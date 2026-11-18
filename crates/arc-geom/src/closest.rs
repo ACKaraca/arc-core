@@ -485,11 +485,24 @@ fn merge(
     out
 }
 
+/// The number of parts an interval foot point is sampled in when the closest point is chosen.
+const INTERVAL_SAMPLES: u32 = 64;
+
 fn closest(shape: &Shape<'_>, query: Point2, tolerance: &Tolerance) -> Result<CurvePoint> {
-    let mut candidates: Vec<f64> = feet(shape, query, tolerance)?
-        .iter()
-        .map(FootPoint::parameter)
-        .collect();
+    let feet = feet(shape, query, tolerance)?;
+    let mut candidates: Vec<f64> = feet.iter().map(FootPoint::parameter).collect();
+    // Along an interval every point is a foot point within the tolerance, but their distances
+    // still differ by up to twice the offset of the query from the center, which exceeds the
+    // tolerance on an arc smaller than it. Samples of the interval keep the result within the
+    // tolerance of the true closest distance.
+    for foot in &feet {
+        if let FootPoint::Interval { start, end, .. } = foot {
+            candidates.extend(
+                (1..INTERVAL_SAMPLES)
+                    .map(|i| start + (end - start) * f64::from(i) / f64::from(INTERVAL_SAMPLES)),
+            );
+        }
+    }
     let (lo, hi) = shape.range();
     match shape {
         Shape::Polyline(polyline) => {
