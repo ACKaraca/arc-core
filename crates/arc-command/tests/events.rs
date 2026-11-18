@@ -388,7 +388,7 @@ impl Write for Stalled {
 }
 
 #[test]
-fn a_slow_client_loses_the_oldest_events_and_is_told() {
+fn a_stalled_client_gets_bounded_ordered_events_and_every_loss_is_told() {
     let (registry, documents) = (registry(), documents());
     let server = Server::new(
         &registry,
@@ -433,8 +433,8 @@ fn a_slow_client_loses_the_oldest_events_and_is_told() {
                 .unwrap();
         }
         let final_revision = documents["main"].snapshot().revision();
-        // The pump moves what it can into the bounded queue; give it time to see everything.
-        std::thread::sleep(Duration::from_millis(300));
+        // No wait for the pump: whatever it has not moved yet is moved by the flush that
+        // precedes the shutdown, which is after the gate opens.
         {
             let (open, wake) = &*stalled.gate;
             *open.lock().unwrap() = true;
@@ -463,13 +463,22 @@ fn a_slow_client_loses_the_oldest_events_and_is_told() {
         .iter()
         .filter(|e| e["event"] == "document.changed")
         .collect();
+    // How many events reach the session's queue depends on how fast its pump thread runs: a
+    // pump that falls behind lets the document's own subscription merge commits into one event
+    // (its `commits`), which is also a bounded outcome. So the drop notice is required exactly
+    // when commits are unaccounted for.
+    let covered: u64 = changes.iter().map(|e| e["commits"].as_u64().unwrap()).sum();
+    if dropped.is_empty() {
+        assert_eq!(
+            covered,
+            u64::try_from(bursts).unwrap(),
+            "commits lost silently"
+        );
+    }
+    // The session queue, the output queue, the line in the writer and the document
+    // subscription (64 events and one merged) are the most that can be waiting.
     assert!(
-        !dropped.is_empty(),
-        "no drop notice among {} events",
-        events.len()
-    );
-    assert!(
-        changes.len() <= 2 * EVENT_QUEUE + 8,
+        changes.len() <= 2 * EVENT_QUEUE + 64 + 8,
         "{} events delivered",
         changes.len()
     );
@@ -486,12 +495,10 @@ fn a_slow_client_loses_the_oldest_events_and_is_told() {
         revisions.last().copied(),
         Some(u64::try_from(bursts).unwrap())
     );
-    let delivered = u64::try_from(changes.len()).unwrap();
-    assert!(delivered + dropped.iter().sum::<u64>() <= u64::try_from(bursts).unwrap());
-    // The notice precedes the events that follow the loss.
-    let first_notice = events
-        .iter()
-        .position(|e| e["event"] == "events.dropped")
-        .unwrap();
-    assert!(first_notice > 0 && first_notice < events.len() - 1);
+    assert!(covered <= u64::try_from(bursts).unwrap());
+    // A notice precedes the events that follow the loss.
+    if let Some(first_notice) = events.iter().position(|e| e["event"] == "events.dropped") {
+        assert!(first_notice < events.len() - 1);
+        assert!(dropped.iter().all(|n| *n > 0));
+    }
 }

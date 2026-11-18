@@ -483,3 +483,69 @@ fn document_changed(document: &str, event: &CommittedEvent) -> Value {
         "changes": Summary::of_changes(&event.changes).json(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::sync_channel;
+
+    use super::*;
+
+    fn event(hub: &Hub, n: usize) {
+        hub.notify(&json!({"event": "test", "n": n}));
+    }
+
+    fn parsed(line: &str) -> Value {
+        serde_json::from_str::<Value>(line).unwrap()["params"].clone()
+    }
+
+    /// The bound and the drop rule, without threads or clocks: the output is full exactly
+    /// when the test says so.
+    #[test]
+    fn a_full_output_loses_the_oldest_and_the_notice_goes_first() {
+        let total = EVENT_QUEUE + 44;
+        // A rendezvous channel with nobody receiving is always full.
+        let (out, lines) = sync_channel(0);
+        let hub = Hub::new(out);
+        for n in 0..total {
+            event(&hub, n);
+        }
+        assert!(!hub.flush(false));
+        {
+            let queue = lock(&hub.queue);
+            assert_eq!((queue.items.len(), queue.dropped), (EVENT_QUEUE, 44));
+        }
+        drop(hub);
+        assert!(lines.try_recv().is_err());
+
+        let (out, lines) = sync_channel(total + 1);
+        let hub = Hub::new(out);
+        for n in 0..total {
+            event(&hub, n);
+        }
+        assert!(hub.flush(false));
+        drop(hub);
+        let got: Vec<Value> = lines.try_iter().map(|l| parsed(&l)).collect();
+        assert_eq!(got.len(), EVENT_QUEUE + 1);
+        assert_eq!(got[0], json!({"event": "events.dropped", "dropped": 44}));
+        assert_eq!(got[1]["n"], 44);
+        assert_eq!(got[EVENT_QUEUE]["n"], total - 1);
+    }
+
+    #[test]
+    fn what_does_not_fit_stays_queued_in_order() {
+        let (out, lines) = sync_channel(2);
+        let hub = Hub::new(out);
+        for n in 0..EVENT_QUEUE + 5 {
+            event(&hub, n);
+        }
+        assert!(hub.flush(false));
+        let first: Vec<Value> = lines.try_iter().map(|l| parsed(&l)).collect();
+        assert_eq!(first[0]["dropped"], 5);
+        assert_eq!(first[1]["n"], 5);
+        // The rest is still queued, the next one first.
+        let queue = lock(&hub.queue);
+        assert_eq!(queue.items.len(), EVENT_QUEUE - 1);
+        assert_eq!(queue.dropped, 0);
+        assert!(queue.items.front().unwrap().line.contains("\"n\":6"));
+    }
+}
