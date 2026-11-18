@@ -40,6 +40,7 @@ use arc_base::math::{Point2, Point3, Vector2, Vector3};
 use arc_base::{Error, Limits, Result};
 
 use crate::error::codes;
+use crate::nurbs::Nurbs2;
 use crate::{
     Aabb2, Aabb3, Arc2, Circle2, Curve2, Ellipse2, EllipticalArc2, Line2, Loop2, Polyline2,
     PolylineSegment, PolylineVertex, Projection, Ray2, Region, RegionPart, Segment2, TriangleMesh2,
@@ -56,17 +57,25 @@ pub struct GeomEncoding {
 }
 
 impl GeomEncoding {
-    /// The encoding this crate writes and reads.
+    /// Version 1, in which this crate writes every value that holds no NURBS curve.
     pub const CURRENT: Self = Self {
         name: "arc.geom",
         version: 1,
+    };
+
+    /// Version 2: version 1 and the NURBS curve kind. This crate writes a value in it exactly
+    /// when the value holds a NURBS curve, and reads both versions.
+    pub const VERSION_2: Self = Self {
+        name: "arc.geom",
+        version: 2,
     };
 
     /// The four bytes every encoded value starts with.
     pub const MAGIC: [u8; 4] = *b"ARCG";
 }
 
-// Kind tags. 0x19-0x1F are reserved for further 2D curve kinds (NURBS, spirals, composites),
+// Kind tags. 0x19 is the NURBS curve of version 2; 0x1A-0x1F are reserved for further 2D curve
+// kinds (spirals, composites),
 // 0x60-0x6F for 3D curves, 0x70-0x7F for surfaces; every unassigned tag is rejected.
 const SEGMENT: u8 = 0x10;
 const RAY: u8 = 0x11;
@@ -77,6 +86,7 @@ const ELLIPSE: u8 = 0x15;
 const ELLIPTICAL_ARC: u8 = 0x16;
 const POLYLINE: u8 = 0x17;
 const CHORD_ARC: u8 = 0x18;
+const NURBS: u8 = 0x19;
 const LOOP: u8 = 0x20;
 const REGION: u8 = 0x21;
 const AABB2: u8 = 0x30;
@@ -121,7 +131,7 @@ pub trait GeomCodec: sealed::Value {
     #[must_use]
     fn encode(&self) -> Vec<u8> {
         let mut writer = Writer::new(self.encoded_len());
-        writer.header();
+        writer.header(self.version());
         self.write(&mut writer);
         writer.bytes
     }
@@ -130,9 +140,20 @@ pub trait GeomCodec: sealed::Value {
     #[must_use]
     fn encoded_len(&self) -> usize {
         let mut writer = Writer::counter();
-        writer.header();
+        writer.header(self.version());
         self.write(&mut writer);
         writer.len
+    }
+
+    /// The encoding [`Self::encode`] writes: [`GeomEncoding::VERSION_2`] for a value that holds a
+    /// NURBS curve, [`GeomEncoding::CURRENT`] (version 1) otherwise.
+    #[must_use]
+    fn encoding(&self) -> GeomEncoding {
+        if self.version() == GeomEncoding::VERSION_2.version {
+            GeomEncoding::VERSION_2
+        } else {
+            GeomEncoding::CURRENT
+        }
     }
 
     /// Decodes a value that fills `bytes` exactly.
@@ -171,13 +192,16 @@ pub trait GeomCodec: sealed::Value {
             limits,
             depth: 0,
             limited: window.is_some(),
+            version: 0,
         };
         if reader.take::<4>()? != GeomEncoding::MAGIC {
             return Err(invalid(0, "not a geometry encoding"));
         }
-        if u16::from_le_bytes(reader.take()?) != GeomEncoding::CURRENT.version {
+        let version = u16::from_le_bytes(reader.take()?);
+        if version != GeomEncoding::CURRENT.version && version != GeomEncoding::VERSION_2.version {
             return Err(invalid(4, "unsupported encoding version"));
         }
+        reader.version = version;
         let value = reader.nested::<Self>()?;
         let (consumed, rest) = bytes.split_at_checked(reader.pos).unwrap_or((bytes, &[]));
         let canonical = value.encode();
@@ -217,6 +241,8 @@ mod sealed {
         pub(super) depth: u32,
         /// Whether `bytes` was cut at the input byte limit.
         pub(super) limited: bool,
+        /// The version in the header.
+        pub(super) version: u16,
     }
 
     /// A value with a kind tag and a body; not implementable outside this crate.
@@ -225,6 +251,10 @@ mod sealed {
         fn write(&self, writer: &mut Writer);
         /// Reads the tag and the body.
         fn read(reader: &mut Reader<'_>) -> Result<Self>;
+        /// The lowest encoding version that can hold the value.
+        fn version(&self) -> u16 {
+            1
+        }
     }
 
     /// A value of one kind tag.
@@ -232,6 +262,9 @@ mod sealed {
         const TAG: u8;
         fn write_body(&self, writer: &mut Writer);
         fn read_body(reader: &mut Reader<'_>) -> Result<Self>;
+        fn body_version(&self) -> u16 {
+            1
+        }
     }
 
     impl<T: Body> Value for T {
@@ -246,6 +279,10 @@ mod sealed {
                 return Err(super::invalid(at, "unexpected kind tag"));
             }
             T::read_body(reader)
+        }
+
+        fn version(&self) -> u16 {
+            self.body_version()
         }
     }
 }
@@ -276,9 +313,9 @@ impl Writer {
         }
     }
 
-    fn header(&mut self) {
+    fn header(&mut self, version: u16) {
         self.put(&GeomEncoding::MAGIC);
-        self.put(&GeomEncoding::CURRENT.version.to_le_bytes());
+        self.put(&version.to_le_bytes());
     }
 
     fn u8(&mut self, value: u8) {
@@ -639,6 +676,73 @@ impl Body for Polyline2 {
     }
 }
 
+/// The smallest encoding of a control point: point and weight.
+const MIN_CONTROL_POINT: u64 = 24;
+
+impl Body for Nurbs2 {
+    const TAG: u8 = NURBS;
+
+    fn write_body(&self, w: &mut Writer) {
+        w.count(self.degree());
+        w.count(self.control_points().len());
+        for (p, weight) in self.control_points().iter().zip(self.weights()) {
+            w.point2(p);
+            w.f64(*weight);
+        }
+        for knot in self.knots() {
+            w.f64(*knot);
+        }
+    }
+
+    fn read_body(r: &mut Reader<'_>) -> Result<Self> {
+        let at = r.pos;
+        if r.version < GeomEncoding::VERSION_2.version {
+            return Err(invalid(
+                at.saturating_sub(1),
+                "kind tag not in this encoding version",
+            ));
+        }
+        let degree = u64::from_le_bytes(r.take()?);
+        let degree = usize::try_from(degree)
+            .ok()
+            .filter(|d| (1..=Nurbs2::MAX_DEGREE).contains(d))
+            .ok_or_else(|| invalid(at, "degree out of range"))?;
+        let (count, mut points) = r.counted::<Point2>(MIN_CONTROL_POINT)?;
+        let mut weights = Vec::new();
+        weights
+            .try_reserve_exact(count)
+            .map_err(|_| invalid(at, "count exceeds the available memory"))?;
+        for _ in 0..count {
+            points.push(r.point2()?);
+            weights.push(r.f64()?);
+        }
+        let knot_count = count + degree + 1;
+        let knots_at = r.pos;
+        let remaining = r.bytes.len() - r.pos;
+        if knot_count
+            .checked_mul(8)
+            .is_none_or(|needed| needed > remaining)
+        {
+            return Err(r.ended(knots_at, "count exceeds the remaining input"));
+        }
+        let mut knots = Vec::new();
+        knots
+            .try_reserve_exact(knot_count)
+            .map_err(|_| invalid(knots_at, "count exceeds the available memory"))?;
+        for _ in 0..knot_count {
+            knots.push(r.f64()?);
+        }
+        constructed(
+            at,
+            Nurbs2::with_limits(degree, knots, points, weights, r.limits),
+        )
+    }
+
+    fn body_version(&self) -> u16 {
+        GeomEncoding::VERSION_2.version
+    }
+}
+
 impl Value for Curve2 {
     fn write(&self, w: &mut Writer) {
         match self {
@@ -650,6 +754,14 @@ impl Value for Curve2 {
             Self::Ellipse(c) => c.write(w),
             Self::EllipticalArc(c) => c.write(w),
             Self::Polyline(c) => c.write(w),
+            Self::Nurbs(c) => c.write(w),
+        }
+    }
+
+    fn version(&self) -> u16 {
+        match self {
+            Self::Nurbs(c) => c.version(),
+            _ => 1,
         }
     }
 
@@ -663,6 +775,7 @@ impl Value for Curve2 {
             ELLIPSE => Self::Ellipse(Ellipse2::read(r)?),
             ELLIPTICAL_ARC => Self::EllipticalArc(EllipticalArc2::read(r)?),
             POLYLINE => Self::Polyline(Polyline2::read(r)?),
+            NURBS => Self::Nurbs(Nurbs2::read(r)?),
             _ => return Err(invalid(r.pos, "unknown curve kind tag")),
         })
     }
@@ -843,6 +956,7 @@ codec!(
     Ellipse2,
     EllipticalArc2,
     Polyline2,
+    Nurbs2,
     Curve2,
     Loop2,
     Region,
@@ -1014,6 +1128,15 @@ mod tests {
                     .collect();
                 Curve2::Polyline(Polyline2::new(vertices, c.is_closed()).unwrap())
             }
+            Curve2::Nurbs(c) => Curve2::Nurbs(
+                Nurbs2::new(
+                    c.degree(),
+                    c.knots().iter().map(|k| neg_zero(*k)).collect(),
+                    c.control_points().iter().map(|p| neg_point(*p)).collect(),
+                    c.weights().to_vec(),
+                )
+                .unwrap(),
+            ),
         }
     }
 
@@ -1033,6 +1156,7 @@ mod tests {
             Curve2::Ellipse(c) => round(c),
             Curve2::EllipticalArc(c) => round(c),
             Curve2::Polyline(c) => round(c),
+            Curve2::Nurbs(c) => round(c),
         }
     }
 
@@ -1266,10 +1390,20 @@ mod tests {
             copy
         };
         assert_eq!(decode(&with(0, b"ARCH")), "not a geometry encoding");
-        assert_eq!(decode(&with(4, &[2, 0])), "unsupported encoding version");
+        assert_eq!(decode(&with(4, &[3, 0])), "unsupported encoding version");
         assert_eq!(decode(&with(4, &[0, 0])), "unsupported encoding version");
+        // A value without a NURBS curve is written in version 1 only.
+        assert_eq!(
+            decode(&with(4, &[2, 0])),
+            "not the canonical encoding of the value"
+        );
         assert_eq!(decode(&with(6, &[RAY])), "unexpected kind tag");
-        for tag in [0x00, 0x19, 0x1F, 0x60, 0x70, 0xFF] {
+        // The NURBS tag belongs to version 2.
+        assert_eq!(
+            reason(&Curve2::decode(&with(6, &[NURBS]), &Limits::STRICT).unwrap_err()),
+            "kind tag not in this encoding version"
+        );
+        for tag in [0x00, 0x1A, 0x1F, 0x60, 0x70, 0xFF] {
             assert_eq!(
                 reason(&Curve2::decode(&with(6, &[tag]), &Limits::STRICT).unwrap_err()),
                 "unknown curve kind tag"

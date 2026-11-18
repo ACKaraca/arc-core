@@ -47,6 +47,7 @@ use crate::eval::{
     Conic, MAX_ROOT_ITERATIONS, Piece, Shape, Shaped, ensure_tolerance, global_parameter, norm,
     segment_piece, unit,
 };
+use crate::nurbs::{Nurbs2, NurbsFoot};
 use crate::polyline::{Chord, Polyline2, SMALL_HALF_ANGLE};
 use crate::primitives::{Arc2, Circle2, Ellipse2, EllipticalArc2, Line2, Ray2, Segment2, perp};
 
@@ -130,6 +131,7 @@ impl CurveProject for Arc2 {}
 impl CurveProject for Ellipse2 {}
 impl CurveProject for EllipticalArc2 {}
 impl CurveProject for Polyline2 {}
+impl CurveProject for Nurbs2 {}
 impl CurveProject for Curve2 {}
 
 fn insufficient() -> Error {
@@ -391,6 +393,7 @@ fn raw_feet(shape: &Shape<'_>, query: Point2, tolerance: &Tolerance) -> Result<V
     match shape {
         Shape::Piece(piece) => piece_feet(piece, query, tolerance),
         Shape::Polyline(polyline) => polyline_feet(polyline, query, tolerance),
+        Shape::Nurbs(nurbs) => nurbs_feet(nurbs, query),
     }
 }
 
@@ -399,6 +402,7 @@ fn feet(shape: &Shape<'_>, query: Point2, tolerance: &Tolerance) -> Result<Vec<F
     let closed = match shape {
         Shape::Piece(piece) => piece.conic().is_some_and(|c| c.span() == TAU),
         Shape::Polyline(polyline) => polyline.is_closed(),
+        Shape::Nurbs(nurbs) => nurbs.is_closed(),
     };
     Ok(merge(shape, raw, closed, tolerance))
 }
@@ -430,6 +434,23 @@ fn polyline_feet(
         }
     }
     Ok(out)
+}
+
+/// The foot points of a NURBS curve from the roots of its foot polynomial.
+fn nurbs_feet(nurbs: &Nurbs2, query: Point2) -> Result<Vec<FootPoint>> {
+    let shape = Shape::Nurbs(nurbs);
+    Ok(nurbs
+        .feet(query)?
+        .into_iter()
+        .map(|foot| match foot {
+            NurbsFoot::Point(t) => FootPoint::Point(curve_point(&shape, t, query)),
+            NurbsFoot::Interval(start, end) => FootPoint::Interval {
+                start,
+                end,
+                distance: norm(query - nurbs.point_at(start)),
+            },
+        })
+        .collect())
 }
 
 /// Sorts foot points, joins touching intervals and drops points within the tolerance (or the
@@ -516,6 +537,9 @@ fn closest(shape: &Shape<'_>, query: Point2, tolerance: &Tolerance) -> Result<Cu
             candidates.extend((0..=polyline.segment_count()).map(|k| k as f64));
         }
         Shape::Piece(_) => candidates.extend([lo, hi].into_iter().filter(|t| t.is_finite())),
+        // Every distinct knot, ends included, where a corner can make a nearest point that is
+        // not a foot point.
+        Shape::Nurbs(nurbs) => candidates.extend(nurbs.breakpoints()),
     }
     candidates.sort_by(f64::total_cmp);
     let mut best: Option<CurvePoint> = None;

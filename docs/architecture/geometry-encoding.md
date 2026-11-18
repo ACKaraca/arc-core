@@ -1,7 +1,8 @@
 # Geometry encoding
 
 The byte form in which `arc-geom` stores geometry values (CORE-GEOM-032): encoding `arc.geom`,
-version 1. Package descriptors name this encoding and its version for every geometry field
+versions 1 and 2. Version 2 is version 1 with the NURBS curve kind added; a value is written in
+version 2 exactly when it holds a NURBS curve, and in version 1 otherwise. Package descriptors name this encoding and its version for every geometry field
 ([ADR-0005](../adr/0005-payload-encoding-with-embedded-descriptors.md)); the decision for a
 hand-written layout is recorded in [ADR-0013](../adr/0013-geometry-encoding.md). The API is
 `arc_geom::encoding` ([arc-geom](../crates/arc-geom.md#geometry-encoding)).
@@ -30,7 +31,7 @@ also when values are stored one after another.
 | Offset | Field | Type | Content |
 |---|---|---|---|
 | 0 | magic | 4 bytes | `41 52 43 47` (ASCII `ARCG`) |
-| 4 | version | `u16` | `1` |
+| 4 | version | `u16` | `1`, or `2` for a value that holds a NURBS curve |
 | 6 | value | | A kind tag and the fields of that kind |
 
 A value is its kind tag followed by its fields in the order of the tables below. A value inside
@@ -48,9 +49,10 @@ without a header. A curve stored as `Curve2` has exactly the bytes of the curve 
 | `0x16` | Elliptical arc | | |
 | `0x17` | Polyline | | |
 | `0x18` | Chord arc | | |
+| `0x19` | NURBS curve (version 2) | | |
 
-The curve kinds are `0x10`–`0x18`. Reserved: `0x19`–`0x1F` for further 2D curve kinds (NURBS, transition spirals, composite
-curves), `0x60`–`0x6F` for 3D curves, `0x70`–`0x7F` for surfaces. Every tag not assigned by the
+The curve kinds are `0x10`–`0x18`, and `0x19` in version 2. Reserved: `0x1A`–`0x1F` for further 2D curve kinds (transition
+spirals, composite curves), `0x60`–`0x6F` for 3D curves, `0x70`–`0x7F` for surfaces. Every tag not assigned by the
 version being read, including `0x00` and the reserved ranges, is rejected.
 
 ## Kinds
@@ -68,6 +70,7 @@ Every kind's fields follow its tag, in this order.
 | Elliptical arc | the ellipse's `center`, `major_axis`, `ratio`, then `start_parameter: f64` in [0, 2π), `sweep: f64` |
 | Chord arc | `start: point2`, `end: point2`, `bulge: f64` (not 0): the arc of a polyline segment between two vertices |
 | Polyline | `closed: flag`, `count: u64`, then `count` vertices of `point: point2`, `bulge: f64`, `start_width: f64`, `end_width: f64` (40 bytes each) |
+| NURBS curve | `degree: u64` in 1..=24, `count: u64` control points, then `count` × (`point: point2`, `weight: f64`) (24 bytes each), then `count + degree + 1` knots as `f64` |
 | Loop | `count: u64`, then `count` curve values |
 | Region | `parts: u64`, then per part: the outer loop value, `holes: u64`, then `holes` loop values |
 | 2D bounding box | `nonempty: flag`; when 1, `min: point2`, `max: point2` |
@@ -107,7 +110,9 @@ The contract of the bytes is structural. A byte string is a well-formed encoding
   segment ends, a nonzero direction, a positive radius, a sweep that is not 0 and at most 2π in
   magnitude, a ratio in (0, 1], at least two polyline vertices with no two consecutive ones equal
   and no negative width, a nonzero bulge of a chord arc, minimum corner not above the maximum,
-  triangle indices inside the vertex list;
+  triangle indices inside the vertex list; for a NURBS curve a degree below the control point
+  count, positive weights, a non-decreasing clamped knot vector (first and last values exactly
+  `degree + 1` times, interior values at most `degree` times) and control points not all equal;
 - every value is in its normalized form: an arc start angle or elliptical arc start parameter in
   [0, 2π), bulge and widths 0 on the last vertex of an open polyline, and the orientation of
   region loops as stored (outer loops counterclockwise, holes clockwise).
@@ -151,7 +156,7 @@ and rejected by another. A writer stays clear of the boundary when it:
 - The bytes of the value must not exceed `input_bytes`. Bytes after the value that
   `decode_prefix` returns do not count.
 - Every count must not exceed `array_length`, and the count times the smallest encoded size of an
-  element (40 bytes for a polyline vertex, 16 for a mesh vertex, 12 for a triangle, 25 for a curve,
+  element (24 bytes for a NURBS control point, 8 for a knot, 40 bytes for a polyline vertex, 16 for a mesh vertex, 12 for a triangle, 25 for a curve,
   34 for a loop, 42 for a region part) must fit in the remaining input. Both are checked before
   memory for the array is reserved, so one reservation is at most 3.6 times the remaining input
   (a curve takes 88 bytes in memory and at least 25 encoded; every other element takes at most
@@ -185,11 +190,19 @@ Values have no length prefix, so a reader cannot skip a value of a kind it does 
 unknown tag inside a loop or region makes the whole value unreadable for that reader
 ([ADR-0013](../adr/0013-geometry-encoding.md)). That is why a new kind needs a new version.
 
+Version 2 adds the NURBS curve kind and changes nothing else: every value that version 1 can hold
+has the same bytes in both, and the writer uses version 1 for it, so the canonical form stays
+unique (a value without a NURBS curve under a version 2 header is rejected as not canonical). A
+reader of version 1 only rejects version 2 values as a whole, as it would any newer version.
+Loops and regions hold no NURBS curve yet, so only a curve value is ever written in version 2.
+A writer names the version of each stored value in the descriptor of its field
+(`GeomCodec::encoding`).
+
 The version names the whole layout. Any change that alters the bytes of a value that version 1
 can hold, or the meaning of those bytes, needs a new version: a new kind tag, a new field, a
 changed field order or width, or a new canonical rule. A decoder accepts only the versions it
-implements and rejects every other version with `geom.decode.invalid`; a decoder of version 1
-rejects every tag it does not know. A new version comes with its own golden vectors
+implements and rejects every other version with `geom.decode.invalid`; a decoder of a version
+rejects every tag that version does not assign. A new version comes with its own golden vectors
 (`crates/arc-geom/tests/encoding_golden.rs`) beside those of the versions still read, and with a
 migration of stored values when version 1 is no longer written.
 
@@ -215,6 +228,7 @@ zero) give equal bytes, that a change of the byte at every position, every trunc
 extension of a valid encoding is rejected or decodes to a value that encodes to exactly the
 changed bytes, and that arbitrary bytes never panic. The values include chord arcs alone, in
 loops and in reversed loops, and regions whose loops of arcs of a radius up to 1e12 the region
-constructor turned. Golden vectors fix the bytes of one value of each kind. The fuzz target
+constructor turned. NURBS curves of degrees 1 to 5 with rational weights are checked to round-trip.
+Golden vectors fix the bytes of one value of each kind, the NURBS curve in version 2. The fuzz target
 `decode` in `crates/arc-geom/fuzz` decodes arbitrary input as every kind, whole and as a prefix,
 with the strict profile and a profile of small limits, and checks the same re-encoding property.

@@ -36,18 +36,19 @@ use arc_base::{Error, Result, Tolerance};
 use crate::curve::Curve2;
 use crate::ensure_finite;
 use crate::error::codes;
+use crate::nurbs::Nurbs2;
 use crate::polyline::{Chord, Polyline2, PolylineSegment};
 use crate::primitives::{Arc2, Circle2, Ellipse2, EllipticalArc2, Line2, Ray2, Segment2, perp};
 
 /// The positive nodes of the 8-point Gauss–Legendre rule on [−1, 1]; the rule is symmetric.
-const GAUSS_NODES: [f64; 4] = [
+pub(crate) const GAUSS_NODES: [f64; 4] = [
     0.183_434_642_495_649_78,
     0.525_532_409_916_329,
     0.796_666_477_413_626_7,
     0.960_289_856_497_536_2,
 ];
 /// The weights belonging to [`GAUSS_NODES`].
-const GAUSS_WEIGHTS: [f64; 4] = [
+pub(crate) const GAUSS_WEIGHTS: [f64; 4] = [
     0.362_683_783_378_361_66,
     0.313_706_645_877_886_9,
     0.222_381_034_453_374_43,
@@ -276,7 +277,7 @@ fn clamp_length(s: f64, total: f64, tolerance: &Tolerance) -> Result<f64> {
 /// The machinery behind the public curve traits; not nameable outside the crate, so the traits
 /// cannot be implemented elsewhere.
 pub(crate) mod sealed {
-    use super::{Arc2, Conic, EllipticalArc2, Line2, Polyline2, Ray2, Segment2};
+    use super::{Arc2, Conic, EllipticalArc2, Line2, Nurbs2, Polyline2, Ray2, Segment2};
 
     /// One smooth curve with its own parameterization.
     #[derive(Debug, Clone, Copy)]
@@ -300,6 +301,8 @@ pub(crate) mod sealed {
         Piece(Piece),
         /// A polyline.
         Polyline(&'a Polyline2),
+        /// A NURBS curve.
+        Nurbs(&'a Nurbs2),
     }
 
     /// Gives the shape of a curve.
@@ -444,6 +447,7 @@ impl Shape<'_> {
         match self {
             Self::Piece(piece) => piece.range(),
             Self::Polyline(p) => (0.0, p.segment_count() as f64),
+            Self::Nurbs(n) => n.parameter_range(),
         }
     }
 
@@ -452,6 +456,7 @@ impl Shape<'_> {
         match self {
             Self::Piece(piece) => piece.point(t),
             Self::Polyline(p) => p.point_at(t),
+            Self::Nurbs(n) => n.point_at(t),
         }
     }
 
@@ -467,6 +472,10 @@ impl Shape<'_> {
                     (d1 * scale, d2 * scale * scale)
                 })
             }
+            Self::Nurbs(n) => {
+                let (_, d1, d2) = n.derivatives(t);
+                (d1, d2)
+            }
         }
     }
 
@@ -475,6 +484,7 @@ impl Shape<'_> {
         ensure_tolerance("linear", tolerance.linear)?;
         let p = match self {
             Self::Piece(piece) => return piece.length_between(t0, t1, tolerance),
+            Self::Nurbs(n) => return n.length_between(t0, t1, tolerance),
             Self::Polyline(p) => p,
         };
         let (a, b) = (t0.min(t1), t0.max(t1));
@@ -499,6 +509,10 @@ impl Shape<'_> {
         ensure_tolerance("linear", tolerance.linear)?;
         match self {
             Self::Piece(piece) => piece.length(tolerance),
+            Self::Nurbs(n) => {
+                let (lo, hi) = n.parameter_range();
+                n.length_between(lo, hi, tolerance)
+            }
             Self::Polyline(p) => p
                 .segments()
                 .map(|s| segment_piece(s).length(tolerance))
@@ -510,6 +524,11 @@ impl Shape<'_> {
         ensure_tolerance("linear", tolerance.linear)?;
         let p = match self {
             Self::Piece(piece) => return piece.parameter_at_length(s, tolerance),
+            Self::Nurbs(n) => {
+                let total = self.length(tolerance)?;
+                let s = clamp_length(s, total, tolerance)?;
+                return n.parameter_at_length(s, total, tolerance);
+            }
             Self::Polyline(p) => p,
         };
         let s = clamp_length(s, self.length(tolerance)?, tolerance)?;
@@ -640,6 +659,13 @@ impl Shaped for Polyline2 {
 }
 impl CurveEval for Polyline2 {}
 
+impl Shaped for Nurbs2 {
+    fn shape(&self) -> Shape<'_> {
+        Shape::Nurbs(self)
+    }
+}
+impl CurveEval for Nurbs2 {}
+
 impl Shaped for Curve2 {
     fn shape(&self) -> Shape<'_> {
         match self {
@@ -651,6 +677,7 @@ impl Shaped for Curve2 {
             Self::Ellipse(c) => c.shape(),
             Self::EllipticalArc(c) => c.shape(),
             Self::Polyline(c) => c.shape(),
+            Self::Nurbs(c) => c.shape(),
         }
     }
 }

@@ -14,12 +14,16 @@
 pub mod bbox;
 pub mod closest;
 pub mod curve;
+pub mod edit;
 pub mod encoding;
 pub mod error;
 pub mod eval;
 pub mod flatten;
 pub mod index;
 pub mod intersect;
+pub mod kdtree;
+pub mod nurbs;
+pub mod offset;
 pub mod polyline;
 pub mod predicates;
 pub mod primitives;
@@ -31,11 +35,17 @@ pub mod view;
 pub use bbox::{Aabb2, Aabb3};
 pub use closest::{CurvePoint, CurveProject, FootPoint};
 pub use curve::Curve2;
+pub use edit::{
+    Composite2, CurveEnd, JoinGap, Joined, extend, join, split_at_parameters, split_at_points, trim,
+};
 pub use encoding::{GeomCodec, GeomEncoding};
 pub use eval::CurveEval;
 pub use flatten::CurveFlatten;
 pub use index::{SpatialIndex2, SpatialIndex3};
 pub use intersect::{Contact, Intersection, Orientation, intersect, intersect_with_limits};
+pub use kdtree::{KdTree2, KdTree3};
+pub use nurbs::Nurbs2;
+pub use offset::{JoinStyle, offset, offset_composite};
 pub use polyline::{Polyline2, PolylineSegment, PolylineVertex};
 pub use predicates::{Sign, incircle, orient2d};
 pub use primitives::{Arc2, Circle2, Ellipse2, EllipticalArc2, Line2, Ray2, Segment2};

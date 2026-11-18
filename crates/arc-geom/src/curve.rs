@@ -6,6 +6,7 @@ use arc_base::math::Point2;
 use serde::{Deserialize, Serialize};
 
 use crate::bbox::Aabb2;
+use crate::nurbs::Nurbs2;
 use crate::polyline::Polyline2;
 use crate::primitives::{Arc2, Circle2, Ellipse2, EllipticalArc2, Line2, Ray2, Segment2};
 
@@ -23,6 +24,7 @@ use crate::primitives::{Arc2, Circle2, Ellipse2, EllipticalArc2, Line2, Ray2, Se
 /// | Ellipse | [0, 2π] | Eccentric angle from the major axis, counterclockwise |
 /// | Elliptical arc | [0, \|sweep\|] | Eccentric angle traveled from the start |
 /// | Polyline | [0, n] | Segment index plus the fraction along that segment |
+/// | NURBS | [u_p, u_n] | The knot parameter, from the first to the last knot |
 ///
 /// Serialized with a `kind` tag in snake case beside the fields of the kind.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,6 +46,8 @@ pub enum Curve2 {
     EllipticalArc(EllipticalArc2),
     /// A bulge polyline.
     Polyline(Polyline2),
+    /// A NURBS curve.
+    Nurbs(Nurbs2),
 }
 
 impl Curve2 {
@@ -58,6 +62,7 @@ impl Curve2 {
             Self::Arc(arc) => (0.0, arc.sweep().abs()),
             Self::EllipticalArc(arc) => (0.0, arc.sweep().abs()),
             Self::Polyline(polyline) => (0.0, polyline.segment_count() as f64),
+            Self::Nurbs(nurbs) => nurbs.parameter_range(),
         }
     }
 
@@ -73,6 +78,7 @@ impl Curve2 {
             Self::Ellipse(c) => c.point_at(t),
             Self::EllipticalArc(c) => c.point_at(t),
             Self::Polyline(c) => c.point_at(t),
+            Self::Nurbs(c) => c.point_at(t),
         }
     }
 
@@ -98,8 +104,8 @@ impl Curve2 {
         }
     }
 
-    /// Whether the curve ends where it starts: circles, ellipses, arcs of a full turn and closed
-    /// polylines.
+    /// Whether the curve ends where it starts: circles, ellipses, arcs of a full turn, closed
+    /// polylines and NURBS curves whose first and last control points are equal.
     #[must_use]
     pub fn is_closed(&self) -> bool {
         match self {
@@ -107,14 +113,16 @@ impl Curve2 {
             Self::Arc(arc) => arc.sweep().abs() == TAU,
             Self::EllipticalArc(arc) => arc.sweep().abs() == TAU,
             Self::Polyline(polyline) => polyline.is_closed(),
+            Self::Nurbs(nurbs) => nurbs.is_closed(),
             Self::Segment(_) | Self::Ray(_) | Self::Line(_) => false,
         }
     }
 
     /// The same point set traversed in the opposite direction, with
     /// `reversed.point_at(a + b − t) = point_at(t)` for range (a, b); a line maps `t` to `−t`.
-    /// A circle or ellipse becomes a clockwise full arc. `None` for a ray, which has no end to
-    /// start from.
+    /// A circle or ellipse becomes a clockwise full arc. A NURBS curve maps `t` to `−t`: its
+    /// knots are negated, which keeps them exact. `None` for a ray, which has no end to start
+    /// from.
     #[must_use]
     pub fn reversed(&self) -> Option<Self> {
         Some(match self {
@@ -126,6 +134,7 @@ impl Curve2 {
             Self::Ellipse(c) => Self::EllipticalArc(c.to_arc().reversed()),
             Self::EllipticalArc(c) => Self::EllipticalArc(c.reversed()),
             Self::Polyline(c) => Self::Polyline(c.reversed()),
+            Self::Nurbs(c) => Self::Nurbs(c.reversed()),
         })
     }
 
@@ -140,6 +149,7 @@ impl Curve2 {
             Self::Ellipse(c) => Some(c.bounding_box()),
             Self::EllipticalArc(c) => Some(c.bounding_box()),
             Self::Polyline(c) => Some(c.bounding_box()),
+            Self::Nurbs(c) => Some(c.bounding_box()),
         }
     }
 }
@@ -305,7 +315,7 @@ pub(crate) mod tests {
             };
             let t = parameter(&c, f);
             let (a, b) = c.parameter_range();
-            let mirrored = if a.is_finite() { a + b - t } else { -t };
+            let mirrored = if a.is_finite() && !matches!(c, Curve2::Nurbs(_)) { a + b - t } else { -t };
             prop_assert!((r.point_at(mirrored) - c.point_at(t)).norm() < 1e-9);
             if let (Some(start), Some(end)) = (r.start_point(), c.end_point()) {
                 prop_assert!((start - end).norm() < 1e-9);

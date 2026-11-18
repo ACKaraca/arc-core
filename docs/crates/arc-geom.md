@@ -26,7 +26,7 @@ appears.
 |---|---|
 | `Curve2`, `Curve3` | Closed sum of curve kinds with a common evaluation interface (point, derivatives, length, parameter range) |
 | `Polyline2` | Vertices with bulge factors and optional widths; arcs stay exact |
-| `Nurbs` | Degree, knots, weighted control points; rational and non-rational |
+| `Nurbs2` | Degree, knots, weighted control points; rational and non-rational |
 | `Spiral` | Clothoid and other transition curves defined by start and end curvature and length |
 | `Surface` | Plane, cylinder, cone, sphere, torus, extrusion, revolution, NURBS |
 | `Region` | Set of outer loops with holes, each loop a closed composite of exact curves, with orientation invariants |
@@ -148,8 +148,10 @@ formats store it.
 | Ellipse | [0, 2π] | Eccentric angle from the major axis, counterclockwise |
 | Elliptical arc | [0, \|sweep\|] | Eccentric angle traveled from the start, in the sweep direction |
 | Polyline | [0, n] for n segments | Segment index plus the fraction along it; arcs proportionally to angle |
+| NURBS | [u_p, u_n], the first and last knots | The knot parameter |
 
-Reversing a curve maps parameter `t` to `a + b − t` for range [a, b] (`−t` for a line); a circle
+Reversing a curve maps parameter `t` to `a + b − t` for range [a, b] (`−t` for a line, and for a
+NURBS curve, whose reversal negates its knots so that they stay exact); a circle
 or ellipse reverses into a clockwise full arc, and a ray has no reverse. Rays and lines have no
 bounding box; every other kind has an exact tight one that includes the axis extrema inside an
 arc's sweep.
@@ -177,6 +179,8 @@ effect:
   must differ by at most the linear tolerance divided by its largest width or arc extent (half the
   chord times one plus the absolute bulge); otherwise the transform fails with
   `geom.transform.not_similarity`. A polyline without bulges or widths accepts any affine map.
+- A NURBS curve maps control point by control point with the same knots and weights, which is
+  exact for every affine map.
 - A transform is singular when its linear 2×2 block, divided by its largest entry magnitude, is
   zero or has an exactly zero determinant; it then fails with `geom.transform.singular`.
   Invertible transforms with very large or very small entries are accepted.
@@ -364,7 +368,8 @@ error. Consequences of the bound, with the default tolerance:
   `linear` fails.
 
 A tolerance whose `linear` is not positive and finite, or whose `angular` is negative, not finite
-or above a quarter turn, fails with `geom.tolerance.invalid`. Pairs of pieces are found with a
+or above a quarter turn, fails with `geom.tolerance.invalid`. Intersections with a NURBS curve
+are not implemented yet and fail with `geom.curve.kind_unsupported`. Pairs of pieces are found with a
 spatial index when the curves have many pieces. More than `limits.array_length` results fail
 with `geom.intersect.too_many_results`; the work before that check is bounded by four found
 points or overlaps per allowed result.
@@ -375,6 +380,8 @@ points or overlaps per allowed result.
 single full circle, full ellipse or closed polyline); `Region` is one or more `RegionPart`s, each
 an outer loop with holes (CORE-GEOM-021).
 
+- A loop holds no NURBS curve yet (its area and containment are not implemented for them);
+  `Loop2::new` fails with `geom.curve.kind_unsupported`.
 - `Loop2::new(curves, tolerance)` accepts consecutive end and start points that differ by at most
   `linear` (the last curve joins the first) and closes each nonzero gap with a straight segment
   stored in the chain. Reversing or transforming a loop can leave gaps of a few units in the last
@@ -469,9 +476,11 @@ larger under a generous time bound), and hostile meshes.
 
 `GeomCodec` encodes and decodes every stored value (`Segment2`, `Ray2`, `Line2`, `Circle2`,
 `Arc2`, `Ellipse2`, `EllipticalArc2`, `Polyline2`, `Curve2`, `Loop2`, `Region`, `Aabb2`, `Aabb3`,
-`ViewFrame`, `TriangleMesh2`) in the byte form `GeomEncoding::CURRENT` (`arc.geom`, version 1)
-specified in [geometry-encoding.md](../architecture/geometry-encoding.md) (CORE-GEOM-032).
+`ViewFrame`, `TriangleMesh2`, `Nurbs2`) in the byte form `arc.geom` specified in [geometry-encoding.md](../architecture/geometry-encoding.md) (CORE-GEOM-032).
 
+- A value is written in version 1 (`GeomEncoding::CURRENT`) unless it holds a NURBS curve, which
+  is written in version 2 (`GeomEncoding::VERSION_2`); `encoding` names the version of a value,
+  for the descriptor of the field that stores it. The decoder reads both versions.
 - `encode` returns the canonical bytes and `encoded_len` their length; equal values give equal
   bytes, and −0.0 is written as +0.0. Decoding an encoding returns the value. The one value that
   encodes and does not decode is a bounding box with an infinite corner, which `from_corners`
@@ -530,6 +539,25 @@ The codes `arc-geom` owns. A code is never reused for a different meaning; messa
 | `geom.curve.unbounded` | `unsupported` | A ray or line is given to an operation that needs a bounded curve, such as flattening |
 | `geom.flatten.too_many_vertices` | `limit_exceeded` | Flattening a curve needs more vertices than the caller's limit |
 | `geom.intersect.too_many_results` | `limit_exceeded` | Two curves have more intersections than the caller's limit |
+| `geom.nurbs.degree_invalid` | `invalid_input` | The degree of a NURBS curve is 0, above the largest supported degree, or not below the number of control points |
+| `geom.nurbs.knots_invalid` | `invalid_input` | The knot vector of a NURBS curve has the wrong length, decreases, is not clamped, repeats a value too often or has an empty range |
+| `geom.nurbs.weights_invalid` | `invalid_input` | The weights of a NURBS curve do not match its control points in number, or one is not positive |
+| `geom.nurbs.degenerate` | `invalid_input` | All control points of a NURBS curve are equal |
+| `geom.nurbs.too_many_control_points` | `limit_exceeded` | A NURBS curve has more control points than the limit allows |
+| `geom.nurbs.knot_not_removable` | `failed_operation` | A knot cannot be removed as often as asked without moving the curve by more than the tolerance |
+| `geom.fit.points_invalid` | `invalid_input` | The points to fit are too few for the degree, or two consecutive ones are equal |
+| `geom.parameter.out_of_range` | `invalid_input` | A parameter lies outside the range an operation accepts, or is NaN |
+| `geom.curve.kind_unsupported` | `unsupported` | An operation does not support the kind of a curve it was given yet |
+| `geom.edit.point_off_curve` | `invalid_input` | A point given to split a curve is farther than the linear tolerance from it |
+| `geom.edit.no_intersection` | `failed_operation` | The boundary curves do not meet the curve, or its extension, where a trim or extension needs them |
+| `geom.edit.curve_closed` | `invalid_input` | A closed curve was given to an operation that needs an open one |
+| `geom.composite.empty` | `invalid_input` | A composite curve has no curves |
+| `geom.composite.not_connected` | `invalid_input` | The end of a curve of a composite is farther than the linear tolerance from the start of the next |
+| `geom.offset.collapsed` | `failed_operation` | An offset of a circle or arc reaches or passes its center, or nothing of an offset remains |
+| `geom.offset.degenerate` | `invalid_input` | A curve to offset has a point without a tangent direction |
+| `geom.offset.join_invalid` | `invalid_input` | A miter limit is not a finite number of at least 1 |
+| `geom.offset.too_many_pieces` | `limit_exceeded` | An offset needs more pieces or samples than the limit allows |
+| `geom.index.too_many_points` | `limit_exceeded` | A point index is built from more points than the limit allows |
 
 ### Spatial index (CORE-GEOM-027)
 
@@ -565,3 +593,169 @@ The property tests compare every query with a brute-force scan after random sequ
 remove and update, in 2D and 3D, on integer-grid boxes that force touching and exact ties. The
 nearest and ray results are also compared with exact integer and rational references that share
 no code with the index, on the grid scaled by powers of two from 2^-1000 to 2^1020.
+
+### NURBS curves (CORE-GEOM-008)
+
+`Nurbs2` is a rational B-spline curve of degree `p` with `n` control points, `n` positive weights
+and a clamped knot vector of `n + p + 1` values: non-decreasing, its first and last values exactly
+`p + 1` times, every interior value at most `p` times, and a nonempty range. Its parameter range
+is `[u_p, u_n]`; it starts at the first control point and ends at the last. It is the `Nurbs` kind
+of `Curve2`.
+
+- `Nurbs2::new` checks the control point count against `Limits::DEFAULT.array_length` and
+  `with_limits` against a caller's limits, before anything else; the degree is at most
+  `Nurbs2::MAX_DEGREE` (24). Invalid input fails with `geom.nurbs.too_many_control_points`,
+  `geom.nurbs.degree_invalid`, `geom.nurbs.weights_invalid`, `geom.nurbs.knots_invalid`,
+  `geom.input.not_finite` or `geom.nurbs.degenerate` (all control points equal). A curve whose
+  weights span more than the normal range of `f64`, or for which a bound on the first and second
+  derivatives (control point extent times `2p · w_max / w_min` over the shortest nonempty knot
+  span, and its square) overflows, fails with `geom.precision.insufficient`, so every accepted
+  curve evaluates to finite points and derivatives.
+- Points are evaluated with the de Boor algorithm on homogeneous points whose weights are divided
+  by the largest weight of the span, so every step is a convex combination; the ends are the
+  first and last control points exactly. First and second derivatives come from the derivative
+  control points of the homogeneous points taken relative to the evaluated point, which avoids
+  cancellation far from the origin. The property tests compare evaluation with the recursive
+  Cox–de Boor definition, with coordinates up to 1e±100.
+- `insert_knot(u, times)` and `split_at(t)` use Boehm's insertion: each new control point is a
+  convex combination of two old ones and the others are kept exactly. The parameter must lie strictly inside the range
+  (`geom.parameter.out_of_range`) and a multiplicity above `p` fails with
+  `geom.nurbs.knots_invalid`. The two pieces of a split keep their parameters and meet exactly.
+- `remove_knot(u, times, tolerance)` solves the insertion equations from both ends; the change of
+  the curve from one removal is at most the inconsistency left in the middle equation, converted
+  to a distance with the smallest weight and the extent of the affected control points. Removals
+  are accepted while the sum of these bounds stays within `tolerance.linear`; otherwise the call
+  fails with `geom.nurbs.knot_not_removable`, whose detail `removable` is the number of removals
+  that would have stayed within it.
+- `elevate_degree(times, tolerance)` elevates the Bézier segments with the binomial formula and
+  then removes each interior knot as often as the original continuity allows, within
+  `tolerance.linear`; a knot that rounding keeps from being removed stays, which changes the
+  representation and not the curve.
+- `reversed` negates and reverses the knots, so the range becomes `[−u_n, −u_p]`, the reversed
+  point at `−t` is the point at `t` exactly, and reversing twice gives the original curve.
+- `from_control_points(degree, points, weights)` uses the clamped uniform knot vector on [0, 1].
+  `interpolate(points, degree, tolerance)` passes a non-rational curve through the points at
+  chord-length parameters on [0, 1], with knots averaged from the parameters, by solving the
+  banded system without pivoting (stable for this totally positive matrix). Every point lies
+  within `tolerance.linear` of the curve at its parameter, or the fit fails with
+  `geom.precision.insufficient`; fewer points than `degree + 1` or two consecutive equal points
+  fail with `geom.fit.points_invalid`.
+- The bounding box consists of the ends of the Bézier segments and their extrema in x and y,
+  which are the roots of the numerators of the derivatives in Bernstein form. Foot points are
+  the roots of `W·(A·A′) − W′·|A|²` per Bézier segment (`A` the homogeneous points relative to
+  the query, `W` the weight). Roots are isolated by subdivision with the variation-diminishing
+  property of the Bernstein form, with a rounding allowance per coefficient of 64 machine epsilons
+  times the degree and the magnitude of the terms of that coefficient (subdivided with it), and refined by bisection; a stretch where the
+  polynomial vanishes within the allowance is an interval foot point. The closest point also
+  considers every distinct knot, where a corner can be nearest. More than 4096 subdivision nodes
+  per degree fail with `geom.precision.insufficient`.
+- Lengths are integrated per knot span with the adaptive Gauss–Legendre rule of elliptical arcs.
+  Flattening subdivides each Bézier segment until its control polygon lies within half the
+  chord tolerance of its chord and its legs turn by at most the angle tolerance, since the curve lies
+  in the hull of its control points and its tangents in the cone of the legs; the vertex count is
+  not minimal.
+
+Through `Curve2`, NURBS curves support evaluation, length, closest point and foot points,
+flattening, bounding boxes, transforms, reversal, splitting and the geometry encoding. Not yet
+supported, with `geom.curve.kind_unsupported`: intersections, loops and regions, and extension.
+
+### Split, trim, extend and join (CORE-GEOM-006)
+
+- `split_at_parameters(curve, parameters, tolerance)` returns the pieces between the parameters
+  in the curve's direction; a piece keeps the kind of its curve where the kind allows (a piece of
+  a circle is an arc, of a ray a segment or ray, of a polyline a polyline with the bulges and
+  widths of its parts). The first piece of a split line is the ray from the first cut backward.
+  Cuts closer than `tolerance.linear` of curve length to the previous cut or to an end are
+  dropped. On a closed curve the piece across the seam is one curve, except for a NURBS curve,
+  where it is the two pieces on either side of the seam. A parameter outside the range or NaN
+  fails with `geom.parameter.out_of_range`.
+- `split_at_points` projects each point and fails with `geom.edit.point_off_curve` when a point
+  is farther than `tolerance.linear` from the curve.
+- `trim(curve, boundaries, pick, tolerance)` removes the stretch around the parameter `pick`
+  between the nearest intersections with the boundaries on either side, or to the curve's end
+  where an open curve has none on that side, and returns the remaining parts. A closed curve
+  needs two distinct intersections. No intersection fails with `geom.edit.no_intersection`.
+- `extend(curve, end, boundaries, tolerance)` lengthens one end of an open curve to the nearest
+  intersection beyond it farther than `tolerance.linear`: a segment along its line, an arc along
+  its circle, an elliptical arc along its ellipse (at most to a full turn) and a polyline by its
+  end segment. Closed curves fail with `geom.edit.curve_closed`, rays and lines with
+  `geom.curve.unbounded`, NURBS curves with `geom.curve.kind_unsupported`.
+- `join(curves, tolerance)` grows chains greedily from the lowest-indexed unused curve, forward
+  and then backward, continuing at each end with the lowest-indexed unused curve that has an end
+  within `tolerance.linear`, reversed when needed. It returns each chain as a `Composite2` with
+  the input indices, and for every free end the nearest other free end and their distance
+  (`JoinGap`), each pair once and sorted by distance. Where more than two ends meet, the curves
+  left over start chains of their own.
+- `Composite2::new(curves, tolerance)` holds bounded curves whose consecutive ends are within
+  `tolerance.linear` (`geom.composite.empty`, `geom.composite.not_connected`,
+  `geom.curve.unbounded` otherwise); it is closed when its last end is that close to its first
+  start. `to_polyline` converts a chain of segments, arcs and open polylines into one polyline.
+  A composite is not a `Curve2` kind and has no stored form yet.
+
+The property tests split curves of every kind, including bulges from 1e-300 to 1e15 and
+ellipses with ratios down to 1e-12, check that every point of the curve is within the tolerance
+of a piece and every piece on the curve, that consecutive pieces meet and that joining the pieces
+gives one chain, closed exactly when the curve is; separated pieces are reported as a gap.
+
+### Curve offsets (CORE-GEOM-007)
+
+`offset(curve, distance, join, tolerance, limits)` and `offset_composite` return the curves at a
+signed distance, positive to the left of the direction of travel, as a list of composites
+(removing loops can leave several chains). `Line2::offset` and `Ray2::offset` give the parallel
+line and ray; `offset` rejects rays and lines with `geom.curve.unbounded`.
+
+- The curve is split into smooth elements (segments, arcs, elliptical arcs, NURBS pieces between
+  knots of multiplicity `p`). A segment offsets to the parallel segment and an arc to the
+  concentric arc (a polyline arc to the chord arc with the same bulge between its offset ends);
+  an arc whose offset passes its center has the arc turned a half turn about the center, which is removed with the loops but cuts its neighbors, and an offset exactly at the center has none. An elliptical arc or NURBS piece offsets to a
+  cubic NURBS curve interpolating `P(t) + d·N(t)` at uniformly spaced parameters, the sample
+  count doubled from 16 until the fit is within a quarter of `tolerance.linear` of the exact
+  offset at the midpoints and quarter points of every sample interval. A circle offsets to a
+  circle.
+- Where consecutive offsets do not meet within `tolerance.linear`, a join is inserted: at a
+  convex corner (the offset side outside the turn) a circular arc of radius `|d|` about the
+  corner, elsewhere a straight connector, which is removed with the loops.
+- Loops are removed by splitting the raw chain at its intersections with itself and with the
+  rest of the boundary of the region within `|d|` of the curve (the offsets of the elements by
+  `−d` and the circles of radius `|d|` about the vertices and ends) (exact
+  intersections between line and conic pieces; crossings of flattened polylines refined by
+  Newton iteration where a NURBS piece is involved) and keeping the parts whose samples (ends and
+  seven interior points) are at least `|d| − tolerance.linear` from the curve; a part whose
+  samples disagree is split where the validity changes, found by bisection; parts at most twice
+  `tolerance.linear` long are dropped. Kept parts are chained end to start within four times
+  `tolerance.linear`.
+- What remains of each round join is then shaped by the join style: kept (`JoinStyle::Round`),
+  replaced by its chord (`JoinStyle::Bevel`), or by the tangent lines at its ends up to their
+  intersection when that lies within `limit·|d|` of the corner and by its chord otherwise
+  (`JoinStyle::Miter { limit }`, `limit ≥ 1`). A chord lies inside the circle of radius `|d|`
+  about the corner, which no kept part enters, so it crosses nothing; the lines of a miter lie
+  outside that circle and are not checked against other parts.
+- `d = 0` returns the curve. A collapsed circle or arc, or an offset of which nothing remains,
+  fails with `geom.offset.collapsed`; a NURBS point of zero derivative with
+  `geom.offset.degenerate`; a miter limit below 1 or not finite with `geom.offset.join_invalid`;
+  more pieces than `limits.array_length` or a fit above 65,536 samples with
+  `geom.offset.too_many_pieces`.
+
+The property tests sample every result curve of offsets of open and closed bulge polylines, of
+ellipses and of random NURBS curves, at distances from 1e-3 to 20, and check with round joins
+that every point lies at the offset distance from the curve within 1e-5 (miter and bevel joins:
+at least the distance and at most `limit` times it), which also shows that no loop remains.
+
+### Point k-d tree (CORE-GEOM-028)
+
+`KdTree2<K>` and `KdTree3<K>` index keyed points (`K: Copy + Ord`, keys need not be distinct) in
+one array arranged as an implicit balanced tree, built once in `O(n log n)` time without
+recursion; at most `limits.array_length` points (`geom.index.too_many_points`), all finite
+(`geom.input.not_finite`).
+
+- `nearest(query, k)` returns the `k` nearest points and `within(query, radius)` every point in
+  the closed ball, each with its distance, sorted by distance, then key, then input order.
+- Distances are ranked with the extended exponent range of the R*-tree, so the ranking is exact
+  where squares overflow or underflow. A subtree is skipped only when the distance to its
+  splitting planes is strictly larger than the distance to beat, so ties are always seen and the
+  results equal a brute-force scan. A query costs `O(log n)` for well-spread points and at most
+  `O(n)`. A negative radius finds nothing; a non-finite query or radius fails with
+  `geom.input.not_finite`.
+
+The property tests compare both queries with a brute-force scan on integer-grid points with many
+exact ties, in 2D scaled by powers of two from 2^-1000 to 2^1000 and in 3D, and on random points.

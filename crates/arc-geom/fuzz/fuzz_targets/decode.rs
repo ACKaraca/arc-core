@@ -8,7 +8,7 @@ use std::fmt::Debug;
 use arc_base::Limits;
 use arc_geom::{
     Aabb2, Aabb3, Arc2, Circle2, Curve2, Ellipse2, EllipticalArc2, GeomCodec, Line2, Loop2,
-    Polyline2, Ray2, Region, Segment2, TriangleMesh2, ViewFrame,
+    Nurbs2, Polyline2, Ray2, Region, Segment2, TriangleMesh2, ViewFrame,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -53,6 +53,7 @@ fuzz_target!(|data: &[u8]| {
     check::<Ellipse2>(data);
     check::<EllipticalArc2>(data);
     check::<Polyline2>(data);
+    check::<Nurbs2>(data);
     check::<Loop2>(data);
     check::<Region>(data);
     check::<Aabb2>(data);

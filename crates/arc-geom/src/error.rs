@@ -215,6 +215,120 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "geom-mesh-invalid",
     };
+    /// The degree of a NURBS curve is 0, above the largest supported degree, or not below the number of control points.
+    pub const NURBS_DEGREE_INVALID: ErrorCode = ErrorCode {
+        code: "geom.nurbs.degree_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-nurbs-degree-invalid",
+    };
+    /// The knot vector of a NURBS curve has the wrong length, decreases, is not clamped, repeats a value too often or has an empty range.
+    pub const NURBS_KNOTS_INVALID: ErrorCode = ErrorCode {
+        code: "geom.nurbs.knots_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-nurbs-knots-invalid",
+    };
+    /// The weights of a NURBS curve do not match its control points in number, or one is not positive.
+    pub const NURBS_WEIGHTS_INVALID: ErrorCode = ErrorCode {
+        code: "geom.nurbs.weights_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-nurbs-weights-invalid",
+    };
+    /// All control points of a NURBS curve are equal.
+    pub const NURBS_DEGENERATE: ErrorCode = ErrorCode {
+        code: "geom.nurbs.degenerate",
+        category: Category::InvalidInput,
+        message_id: "geom-nurbs-degenerate",
+    };
+    /// A NURBS curve has more control points than the limit allows.
+    pub const NURBS_TOO_MANY_CONTROL_POINTS: ErrorCode = ErrorCode {
+        code: "geom.nurbs.too_many_control_points",
+        category: Category::LimitExceeded,
+        message_id: "geom-nurbs-too-many-control-points",
+    };
+    /// A knot cannot be removed as often as asked without moving the curve by more than the tolerance.
+    pub const NURBS_KNOT_NOT_REMOVABLE: ErrorCode = ErrorCode {
+        code: "geom.nurbs.knot_not_removable",
+        category: Category::FailedOperation,
+        message_id: "geom-nurbs-knot-not-removable",
+    };
+    /// The points to fit are too few for the degree, or two consecutive ones are equal.
+    pub const FIT_POINTS_INVALID: ErrorCode = ErrorCode {
+        code: "geom.fit.points_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-fit-points-invalid",
+    };
+    /// A parameter lies outside the range an operation accepts, or is NaN.
+    pub const PARAMETER_OUT_OF_RANGE: ErrorCode = ErrorCode {
+        code: "geom.parameter.out_of_range",
+        category: Category::InvalidInput,
+        message_id: "geom-parameter-out-of-range",
+    };
+    /// An operation does not support the kind of a curve it was given yet.
+    pub const CURVE_KIND_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "geom.curve.kind_unsupported",
+        category: Category::Unsupported,
+        message_id: "geom-curve-kind-unsupported",
+    };
+    /// A point given to split a curve is farther than the linear tolerance from it.
+    pub const EDIT_POINT_OFF_CURVE: ErrorCode = ErrorCode {
+        code: "geom.edit.point_off_curve",
+        category: Category::InvalidInput,
+        message_id: "geom-edit-point-off-curve",
+    };
+    /// The boundary curves do not meet the curve, or its extension, where a trim or extension needs them.
+    pub const EDIT_NO_INTERSECTION: ErrorCode = ErrorCode {
+        code: "geom.edit.no_intersection",
+        category: Category::FailedOperation,
+        message_id: "geom-edit-no-intersection",
+    };
+    /// A closed curve was given to an operation that needs an open one.
+    pub const EDIT_CURVE_CLOSED: ErrorCode = ErrorCode {
+        code: "geom.edit.curve_closed",
+        category: Category::InvalidInput,
+        message_id: "geom-edit-curve-closed",
+    };
+    /// A composite curve has no curves.
+    pub const COMPOSITE_EMPTY: ErrorCode = ErrorCode {
+        code: "geom.composite.empty",
+        category: Category::InvalidInput,
+        message_id: "geom-composite-empty",
+    };
+    /// The end of a curve of a composite is farther than the linear tolerance from the start of the next.
+    pub const COMPOSITE_NOT_CONNECTED: ErrorCode = ErrorCode {
+        code: "geom.composite.not_connected",
+        category: Category::InvalidInput,
+        message_id: "geom-composite-not-connected",
+    };
+    /// An offset of a circle or arc reaches or passes its center, or nothing of an offset remains.
+    pub const OFFSET_COLLAPSED: ErrorCode = ErrorCode {
+        code: "geom.offset.collapsed",
+        category: Category::FailedOperation,
+        message_id: "geom-offset-collapsed",
+    };
+    /// A curve to offset has a point without a tangent direction.
+    pub const OFFSET_DEGENERATE: ErrorCode = ErrorCode {
+        code: "geom.offset.degenerate",
+        category: Category::InvalidInput,
+        message_id: "geom-offset-degenerate",
+    };
+    /// A miter limit is not a finite number of at least 1.
+    pub const OFFSET_JOIN_INVALID: ErrorCode = ErrorCode {
+        code: "geom.offset.join_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-offset-join-invalid",
+    };
+    /// An offset needs more pieces or samples than the limit allows.
+    pub const OFFSET_TOO_MANY_PIECES: ErrorCode = ErrorCode {
+        code: "geom.offset.too_many_pieces",
+        category: Category::LimitExceeded,
+        message_id: "geom-offset-too-many-pieces",
+    };
+    /// A point index is built from more points than the limit allows.
+    pub const INDEX_TOO_MANY_POINTS: ErrorCode = ErrorCode {
+        code: "geom.index.too_many_points",
+        category: Category::LimitExceeded,
+        message_id: "geom-index-too-many-points",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -252,6 +366,25 @@ pub mod codes {
         TRIANGULATE_NESTING_INVALID,
         MESH_INVALID,
         INTERSECT_TOO_MANY_RESULTS,
+        NURBS_DEGREE_INVALID,
+        NURBS_KNOTS_INVALID,
+        NURBS_WEIGHTS_INVALID,
+        NURBS_DEGENERATE,
+        NURBS_TOO_MANY_CONTROL_POINTS,
+        NURBS_KNOT_NOT_REMOVABLE,
+        FIT_POINTS_INVALID,
+        PARAMETER_OUT_OF_RANGE,
+        CURVE_KIND_UNSUPPORTED,
+        EDIT_POINT_OFF_CURVE,
+        EDIT_NO_INTERSECTION,
+        EDIT_CURVE_CLOSED,
+        COMPOSITE_EMPTY,
+        COMPOSITE_NOT_CONNECTED,
+        OFFSET_COLLAPSED,
+        OFFSET_DEGENERATE,
+        OFFSET_JOIN_INVALID,
+        OFFSET_TOO_MANY_PIECES,
+        INDEX_TOO_MANY_POINTS,
     ];
 }
 

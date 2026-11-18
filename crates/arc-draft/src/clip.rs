@@ -104,6 +104,17 @@ pub fn piece(curve: &Curve2, a: f64, b: f64) -> Result<Piece> {
             )?)
         }
         Curve2::Polyline(p) => sub_polyline(p, a, b)?,
+        Curve2::Nurbs(n) => {
+            let (lo, hi) = n.parameter_range();
+            let mut part = n.clone();
+            if b < hi {
+                part = part.split_at(b)?.0;
+            }
+            if a > lo {
+                part = part.split_at(a)?.1;
+            }
+            Curve2::Nurbs(part)
+        }
     };
     Ok(Piece::Curve(c))
 }

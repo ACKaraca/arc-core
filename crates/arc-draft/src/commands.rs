@@ -923,6 +923,8 @@ fn create_entity_command(ctx: &mut Context<'_>, p: CreateEntity) -> Result<Creat
         Curve2::Ellipse(_) => types::ELLIPSE,
         Curve2::EllipticalArc(_) => types::ELLIPTICAL_ARC,
         Curve2::Polyline(_) => types::POLYLINE,
+        // No spline entity type exists yet.
+        Curve2::Nurbs(_) => return Err(invalid()),
     };
     let bytes = Value::Geometry(GeometryBytes(curve.encode()));
     create_entity(ctx, key, p.owner.0, p.layer, vec![(entity::KIND, bytes)])

@@ -151,7 +151,8 @@ pub fn intersect(a: &Curve2, b: &Curve2, tolerance: &Tolerance) -> Result<Vec<In
 /// tolerance is negative, not finite or above a quarter turn; `geom.precision.insufficient`
 /// when coordinates are so large, or a construction so ill-conditioned, that the error bound of
 /// a result exceeds the linear tolerance; `geom.intersect.too_many_results` when there are more
-/// than `limits.array_length` results.
+/// than `limits.array_length` results; `geom.curve.kind_unsupported` when either curve is a
+/// NURBS curve, whose intersections are not implemented yet.
 pub fn intersect_with_limits(
     a: &Curve2,
     b: &Curve2,
@@ -165,6 +166,11 @@ pub fn intersect_with_limits(
         && tolerance.angular <= FRAC_PI_2;
     if !valid {
         return Err(Error::new(codes::TOLERANCE_INVALID));
+    }
+    if let Some(index) = [a, b].iter().position(|c| matches!(c, Curve2::Nurbs(_))) {
+        return Err(Error::new(codes::CURVE_KIND_UNSUPPORTED)
+            .with_detail("operation", "intersect")
+            .with_detail("curve", if index == 0 { "a" } else { "b" }));
     }
     let max_results = usize::try_from(limits.array_length).unwrap_or(usize::MAX);
     if canonical_order(a, b) == Ordering::Greater {
@@ -233,6 +239,18 @@ fn canonical_key(curve: &Curve2) -> (u8, Vec<f64>) {
                     c.vertices()
                         .iter()
                         .flat_map(|v| [v.point.x, v.point.y, v.bulge, v.start_width, v.end_width]),
+                )
+                .collect(),
+        ),
+        Curve2::Nurbs(c) => (
+            8,
+            std::iter::once(c.degree() as f64)
+                .chain(c.knots().iter().copied())
+                .chain(
+                    c.control_points()
+                        .iter()
+                        .zip(c.weights())
+                        .flat_map(|(p, w)| [p.x, p.y, *w]),
                 )
                 .collect(),
         ),

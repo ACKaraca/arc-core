@@ -348,6 +348,7 @@ impl Curve2 {
                 .map(Self::EllipticalArc)
             }
             Self::Polyline(c) => map.polyline(c, tolerance).map(Self::Polyline),
+            Self::Nurbs(c) => representable(c.mapped(|p| map.point(p))).map(Self::Nurbs),
         }
     }
 }

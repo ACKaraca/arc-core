@@ -43,6 +43,7 @@ use crate::eval::{
     Conic, Piece, Shape, Shaped, cross, ensure_tolerance, global_parameter, is_full_turn, norm,
     segment_piece,
 };
+use crate::nurbs::Nurbs2;
 use crate::polyline::Polyline2;
 use crate::primitives::{Arc2, Circle2, Ellipse2, EllipticalArc2, Line2, Ray2, Segment2};
 
@@ -97,6 +98,7 @@ impl CurveFlatten for Arc2 {}
 impl CurveFlatten for Ellipse2 {}
 impl CurveFlatten for EllipticalArc2 {}
 impl CurveFlatten for Polyline2 {}
+impl CurveFlatten for Nurbs2 {}
 impl CurveFlatten for Curve2 {}
 
 /// The vertices with their parameters, bounded by a vertex limit.
@@ -302,6 +304,11 @@ pub(crate) fn flatten_shape(
             interior(piece, chord, angle, None, &mut sink)?;
             let closed = piece.conic().is_some_and(|c| is_full_turn(c.span()));
             sink.push(hi, if closed { start } else { piece.point(hi) })?;
+        }
+        Shape::Nurbs(nurbs) => {
+            for (t, point) in nurbs.flatten(chord, angle, max_vertices)? {
+                sink.push(t, point)?;
+            }
         }
         Shape::Polyline(polyline) => {
             let vertices = polyline.vertices();

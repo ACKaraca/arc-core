@@ -445,6 +445,8 @@ pub(super) fn pieces(curve: &Curve2, linear: f64) -> Vec<Piece> {
             Some(e.bounding_box()),
         )],
         Curve2::Polyline(p) => polyline_pieces(p, linear),
+        // Rejected before pieces are formed.
+        Curve2::Nurbs(_) => Vec::new(),
     }
 }
 

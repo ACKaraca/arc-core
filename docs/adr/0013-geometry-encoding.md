@@ -79,6 +79,29 @@ number stays 1:
   the rules on the header version, mixed streams, nesting depth, clockwise full circles and
   boxes with infinite corners are stated.
 
+## Amendment: NURBS curves in version 2
+
+The NURBS curve kind (CORE-GEOM-008) is added under the rules above, as a new version:
+
+- Version 2 is version 1 plus the kind tag `0x19` from the range reserved for 2D curves, with
+  the layout in [geometry-encoding.md](../architecture/geometry-encoding.md). Nothing else
+  changes; the bytes of every value version 1 can hold are the same in both versions.
+- The writer uses the lowest version that holds the value: version 1 for every value without a
+  NURBS curve, so no existing byte form and no version 1 golden vector changes, and version 2
+  for a value that holds one. A version 2 header around a value without a NURBS curve is not
+  canonical and is rejected, so each value still has exactly one byte form. A version 1 header
+  with the NURBS tag is rejected.
+- The decoder reads versions 1 and 2. A reader of version 1 only rejects version 2 values as a
+  whole, which is the consequence recorded above for any new kind.
+- Because the version depends on the value, the codec reports it (`GeomCodec::encoding`) for the
+  descriptor of the field. Loops and regions do not hold NURBS curves yet, so only curve values
+  are written in version 2.
+- Golden vectors fix the bytes of a NURBS curve in version 2 beside the version 1 vectors, and
+  the fuzz target decodes NURBS curves.
+
+The change is additive in the sense of these rules: it adds a version and a tag, and leaves the
+meaning and the bytes of every version 1 value unchanged; no stored value needs a migration.
+
 ## Reopen when
 
 A third-party reader cannot implement the layout from the documentation, or decoding geometry

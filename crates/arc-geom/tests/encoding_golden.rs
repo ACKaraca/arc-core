@@ -13,9 +13,9 @@ use std::fmt::Debug;
 use arc_base::math::{Point2, Point3, Vector2, Vector3};
 use arc_base::{Limits, Tolerance};
 use arc_geom::{
-    Aabb2, Aabb3, Arc2, Circle2, Curve2, Ellipse2, EllipticalArc2, GeomCodec, Line2, Loop2,
-    Polyline2, PolylineSegment, PolylineVertex, Projection, Ray2, Region, RegionPart, Segment2,
-    TriangleMesh2, ViewFrame,
+    Aabb2, Aabb3, Arc2, Circle2, Curve2, Ellipse2, EllipticalArc2, GeomCodec, GeomEncoding, Line2,
+    Loop2, Nurbs2, Polyline2, PolylineSegment, PolylineVertex, Projection, Ray2, Region,
+    RegionPart, Segment2, TriangleMesh2, ViewFrame,
 };
 
 fn hex(bytes: &[u8]) -> String {
@@ -120,6 +120,30 @@ fn curves() {
         00000000000000000000000000e03f";
     golden(&chord_arc, chord_form);
     golden(&Curve2::Arc(chord_arc), chord_form);
+}
+
+#[test]
+fn nurbs_curves_are_version_2() {
+    // A rational quadratic: degree 2, three control points with weights, six knots.
+    let nurbs = Nurbs2::new(
+        2,
+        vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        vec![p(1.0, 0.0), p(1.0, 1.0), p(0.0, 1.0)],
+        vec![1.0, 0.5, 1.0],
+    )
+    .unwrap();
+    let bytes = "4152434702001902000000000000000300000000000000000000000000f03f00\
+        00000000000000000000000000f03f000000000000f03f000000000000f03f00\
+        0000000000e03f0000000000000000000000000000f03f000000000000f03f00\
+        0000000000000000000000000000000000000000000000000000000000f03f00\
+        0000000000f03f000000000000f03f";
+    golden(&nurbs, bytes);
+    golden(&Curve2::Nurbs(nurbs.clone()), bytes);
+    assert_eq!(nurbs.encoding(), GeomEncoding::VERSION_2);
+    assert_eq!(
+        Segment2::new(p(0.0, 0.0), p(1.0, 0.0)).unwrap().encoding(),
+        GeomEncoding::CURRENT
+    );
 }
 
 #[test]

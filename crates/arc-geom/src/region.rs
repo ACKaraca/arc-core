@@ -112,7 +112,7 @@ impl Loop2 {
     ///
     /// `geom.tolerance.invalid` for a linear or angular tolerance that is NaN, infinite or
     /// negative; `geom.region.loop_empty` for no curves; `geom.curve.unbounded` for a ray or
-    /// line; `geom.region.loop_open` when the end of a curve is farther than `tolerance.linear`
+    /// line; `geom.curve.kind_unsupported` for a NURBS curve; `geom.region.loop_open` when the end of a curve is farther than `tolerance.linear`
     /// from the start of the next; `geom.region.loop_zero_area` when the enclosed signed area is
     /// exactly zero; `geom.precision.insufficient` when the area is not finite in `f64`, or is zero
     /// because the loop is so small that the square of its size underflows.
@@ -127,6 +127,11 @@ impl Loop2 {
         }
         if let Some(index) = curves.iter().position(|c| c.bounding_box().is_none()) {
             return Err(Error::new(codes::CURVE_UNBOUNDED)
+                .with_detail("curve", i64::try_from(index).unwrap_or(i64::MAX)));
+        }
+        if let Some(index) = curves.iter().position(|c| matches!(c, Curve2::Nurbs(_))) {
+            return Err(Error::new(codes::CURVE_KIND_UNSUPPORTED)
+                .with_detail("operation", "loop")
                 .with_detail("curve", i64::try_from(index).unwrap_or(i64::MAX)));
         }
         // The joints that close gaps, each with the index of the curve it follows.
@@ -331,6 +336,8 @@ impl Loop2 {
             };
             match curve.shape() {
                 Shape::Piece(piece) => out.push(Element { piece, start, end }),
+                // Loops reject NURBS curves on construction.
+                Shape::Nurbs(_) => {}
                 Shape::Polyline(polyline) => {
                     let vertices = polyline.vertices();
                     out.extend((0..polyline.segment_count()).filter_map(|k| {

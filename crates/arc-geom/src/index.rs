@@ -92,14 +92,22 @@ fn times_power_of_two(mut x: f64, mut exponent: i32) -> f64 {
 /// The distance from a point to a box, ranked without overflow or underflow: the squared
 /// distance is `mantissa · 2^exponent` with `mantissa` in [1, 2), or zero with the smallest
 /// exponent. Where the plain sum of squared gaps is a normal number it is exactly that sum.
-struct Ranked {
+#[derive(Clone, Copy)]
+pub(crate) struct Ranked {
     exponent: i32,
     mantissa: f64,
-    distance: f64,
+    pub(crate) distance: f64,
 }
 
 impl Ranked {
-    fn new<const N: usize>(lo: &[f64; N], hi: &[f64; N], point: &[f64; N]) -> Self {
+    /// Orders by the true squared distance.
+    pub(crate) fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.exponent
+            .cmp(&other.exponent)
+            .then(self.mantissa.total_cmp(&other.mantissa))
+    }
+
+    pub(crate) fn new<const N: usize>(lo: &[f64; N], hi: &[f64; N], point: &[f64; N]) -> Self {
         let gap = |scale: f64| {
             std::array::from_fn::<f64, N, _>(|i| {
                 (lo[i] * scale - point[i] * scale)
