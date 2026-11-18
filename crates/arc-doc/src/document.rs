@@ -15,8 +15,8 @@
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockWriteGuard};
 use std::time::Duration;
 
-use arc_base::id::IdGenerator;
-use arc_base::{Limits, Result, SessionId};
+use arc_base::id::{IdGenerator, Identifier};
+use arc_base::{Limits, Result, SessionId, TransactionId};
 
 use crate::commit::JournalSink;
 use crate::diagnostic::{Diagnostic, DiagnosticSink};
@@ -29,7 +29,7 @@ use crate::executor::{
 };
 use crate::graph::{Evaluators, Graph, NodeKey, NodeView};
 use crate::journal::Journal;
-use crate::load::{LoadCounts, Loaded, LoadedRows};
+use crate::load::{LoadCounts, Loaded, LoadedRows, StoredRecord};
 #[cfg(feature = "package")]
 use crate::record::TxnRecord;
 use crate::registry::TypeRegistry;
@@ -53,8 +53,9 @@ pub struct DocumentConfig {
     pub txn_limits: TxnLimits,
     /// The limits of the deletion rules at commit (`record_count` bounds cascades).
     pub limits: Limits,
-    /// The worker threads of the regeneration scheduler; with none, regeneration runs when
-    /// pumped ([`Scheduler::pump`]). Ignored on `wasm32`, which has none.
+    /// The most regeneration jobs of this document the process-wide worker pool runs at once
+    /// (the pool grows to it, within its bound); with none, regeneration runs when pumped
+    /// ([`Scheduler::pump`]). Ignored on `wasm32`, which has none.
     pub workers: usize,
     /// The most diagnostics the diagnostics list holds.
     pub diagnostics_capacity: usize,
@@ -174,6 +175,10 @@ pub struct Document {
     /// Where the document was last loaded from or saved to (see `crate::package`).
     #[cfg(feature = "package")]
     pub(crate) saved: Mutex<Option<crate::package::Baseline>>,
+    /// The journal records the package holds as far as the document knows (loaded, then as
+    /// each save retained them), and the revision of the last save: the journal's records of
+    /// later revisions are not stored yet.
+    pub(crate) stored: Mutex<(Vec<StoredRecord>, u64)>,
 }
 
 impl std::fmt::Debug for Document {
@@ -201,6 +206,17 @@ impl Document {
         evaluators: Arc<Evaluators>,
         config: DocumentConfig,
     ) -> Result<Self> {
+        Self::open_after(snapshot, evaluators, config, None)
+    }
+
+    /// [`Document::open`] whose first transaction names `last` as its parent.
+    fn open_after(
+        snapshot: Snapshot,
+        evaluators: Arc<Evaluators>,
+        config: DocumentConfig,
+        last: Option<TransactionId>,
+    ) -> Result<Self> {
+        let revision = snapshot.revision();
         let shared = Arc::new(Shared::new(snapshot, evaluators));
         *lock(&shared.history) = History {
             journal: Journal::new(config.limits),
@@ -242,7 +258,7 @@ impl Document {
             shared: Arc::clone(&shared),
             ids: config.ids,
             session: config.session,
-            last: None,
+            last,
             txn_limits: config.txn_limits,
             limits: config.limits,
         })?;
@@ -255,6 +271,7 @@ impl Document {
             loaded: base,
             #[cfg(feature = "package")]
             saved: Mutex::new(None),
+            stored: Mutex::new((Vec::new(), revision)),
         })
     }
 
@@ -277,7 +294,15 @@ impl Document {
             rows,
             counts,
         } = loaded;
-        let mut document = Self::open(snapshot, evaluators, config)?;
+        // The first transaction of the session is applied on the last stored one.
+        let last = rows
+            .journal()
+            .last()
+            .and_then(|record| <[u8; 16]>::try_from(record.txn_id.as_slice()).ok())
+            .map(|bytes| TransactionId::from_u128(u128::from_be_bytes(bytes)))
+            .filter(|id| id.as_u128() != 0);
+        let mut document = Self::open_after(snapshot, evaluators, config, last)?;
+        lock(&document.stored).0 = rows.journal().to_vec();
         document.load_diagnostics = diagnostics.into_iter().map(Diagnostic::from).collect();
         document
             .diagnostics
@@ -601,6 +626,15 @@ impl Document {
     #[must_use]
     pub fn load_diagnostics(&self) -> &[Diagnostic] {
         &self.load_diagnostics
+    }
+
+    /// The journal records the package holds as far as this document knows, in `seq` order:
+    /// those it was loaded with, then those each save retained (CORE-DOC-040). They are kept
+    /// for inspection, history and compaction; undo and redo reach only the transactions of
+    /// this session ([`Document::with_journal`]).
+    #[must_use]
+    pub fn stored_journal(&self) -> Vec<StoredRecord> {
+        lock(&self.stored).0.clone()
     }
 
     /// The original rows of the load this document came from, which a save needs.

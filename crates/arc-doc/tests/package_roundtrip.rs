@@ -111,6 +111,8 @@ proptest! {
             touched: &touched,
             metadata: &meta,
             previews: &[],
+            journal: &[],
+            diagnostics: &[],
             limits: Limits::DEFAULT,
         };
         let written = save_as(&second, &save, &mut no_progress()).unwrap();
@@ -243,6 +245,8 @@ fn previews_are_stored_and_read_back_and_a_save_without_them_succeeds() {
         touched: &touched,
         metadata: &meta,
         previews: &previews,
+        journal: &[],
+        diagnostics: &[],
         limits: Limits::DEFAULT,
     };
     let with = dir.path("with.arc");
@@ -297,6 +301,8 @@ fn a_document_never_loaded_needs_the_transaction_of_every_object() {
         touched: &touched,
         metadata: &meta,
         previews: &[],
+        journal: &[],
+        diagnostics: &[],
         limits: Limits::DEFAULT,
     };
     let target = dir.path("fresh.arc");
@@ -340,6 +346,8 @@ fn equal_saves_are_byte_identical_and_derived_indexes_are_filled() {
         touched: &touched,
         metadata: &meta,
         previews: &previews,
+        journal: &[],
+        diagnostics: &[],
         limits: Limits::DEFAULT,
     };
     let (a, b) = (dir.path("a.arc"), dir.path("b.arc"));

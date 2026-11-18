@@ -111,3 +111,23 @@ the schema) fixes what the package document left open; the details are in
 - opening a package for editing rolls back a hot journal left by an interrupted save; a
   read-only open does not write and fails on such a file.
 
+## Amendment: journal, foreign data and diagnostics rows
+
+The first implementation that writes and reads `arc_journal`, `arc_foreign` and
+`arc_diagnostic` fixes what the package document left open, without changing the schema of
+format 1.0; the details are in
+[document-package.md](../architecture/document-package.md#format-10-schema) and the
+[arc-doc specification](../crates/arc-doc.md#journal-foreign-data-and-diagnostics-in-the-package-core-doc-040):
+
+- `arc_journal.seq` carries the save counter of the save that first stored a record in its high
+  32 bits, which lets the retention `saves:<n>` work without another table;
+- the text forms of `history_retention` are `none`, `saves:<n>` and `full`; an absent or
+  unknown value keeps every record, so no reader drops history it does not understand;
+- the stored records form one parent chain; a save keeps the newest unbroken run;
+- `arc_diagnostic.origin` also takes `executor` (faults of the document executor);
+- foreign data rows are written back unchanged by every save.
+
+Packages written before this amendment have empty tables and open unchanged; the existing
+fixtures stay valid and no fixture is regenerated. Older readers ignore the rows; a full
+rewrite by an older reader drops them, which loses history but no document content.
+

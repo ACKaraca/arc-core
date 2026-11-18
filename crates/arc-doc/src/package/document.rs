@@ -9,6 +9,7 @@ use std::sync::Arc;
 use arc_base::id::Identifier;
 use arc_base::{ObjectId, Result, TransactionId};
 
+use super::history::{Retention, retained};
 use super::incremental::typed;
 use super::recovery::{BaseFile, RecoveryJournal};
 use super::{Package, Preview, Save, SaveProgress, Saved, Strategy, Touch};
@@ -16,7 +17,7 @@ use crate::document::{Document, DocumentConfig};
 use crate::executor::lock;
 use crate::graph::Evaluators;
 use crate::journal::Journal;
-use crate::load::LoadOptions;
+use crate::load::{LoadOptions, StoredRecord};
 use crate::op::Op;
 use crate::registry::TypeRegistry;
 use crate::snapshot::Snapshot;
@@ -39,6 +40,8 @@ struct State {
     changes: Option<BTreeMap<ObjectId, Touch>>,
     /// The last transaction of the saved state.
     last: Option<TransactionId>,
+    /// The journal's records of revisions after the last save, not stored yet.
+    fresh: Vec<StoredRecord>,
 }
 
 impl Package {
@@ -63,7 +66,9 @@ impl Package {
     }
 
     /// Saves the latest snapshot of `document` into this package in place and returns what
-    /// [`Package::save`] returned.
+    /// [`Package::save`] returned. The journal records the package holds
+    /// ([`Document::stored_journal`]) and the journal's records since the last save are kept
+    /// as the retention allows, and the document's diagnostics are recorded.
     ///
     /// The state saved and the journal are read together between two commits; the save then
     /// runs on the calling thread while editing continues. `Save::touched` maps every object
@@ -95,9 +100,18 @@ impl Package {
         let baseline = lock(&document.saved)
             .clone()
             .filter(|b| b.path == self.path && b.save_counter == self.metadata.save_counter);
+        let (stored, stored_revision) = lock(&document.stored).clone();
         let state = document.read_state(move |snapshot, journal| {
-            state(snapshot, journal, baseline.as_ref().map(|b| b.revision))
+            state(
+                snapshot,
+                journal,
+                baseline.as_ref().map(|b| b.revision),
+                stored_revision,
+            )
         })?;
+        let mut records = stored;
+        records.extend(state.fresh.iter().cloned());
+        let diagnostics = document.diagnostics_snapshot().diagnostics;
         let strategy = state
             .changes
             .map_or(Strategy::Rewrite, Strategy::Incremental);
@@ -108,9 +122,21 @@ impl Package {
             touched: &state.touched,
             metadata: &metadata,
             previews,
+            journal: &records,
+            diagnostics: &diagnostics,
             limits: self.limits,
         };
         let saved = self.save(&save, &strategy, progress)?;
+        let retention = Retention::parse(metadata.history_retention.as_deref());
+        *lock(&document.stored) = (
+            retained(
+                &records,
+                retention,
+                saved.metadata.save_counter,
+                &self.limits,
+            ),
+            state.snapshot.revision(),
+        );
         *lock(&document.saved) = Some(Baseline {
             path: self.path.clone(),
             save_counter: saved.metadata.save_counter,
@@ -125,7 +151,16 @@ impl Package {
 }
 
 /// Reads the save state of `snapshot` from `journal`; `since` is the revision of the last save.
-fn state(snapshot: &Snapshot, journal: &Journal, since: Option<u64>) -> State {
+fn state(snapshot: &Snapshot, journal: &Journal, since: Option<u64>, stored: u64) -> State {
+    let fresh = journal
+        .iter()
+        .filter(|entry| entry.revision() > stored)
+        .map(|entry| StoredRecord {
+            seq: None,
+            txn_id: entry.record().txn_id.as_u128().to_be_bytes().to_vec(),
+            record: entry.bytes().to_vec(),
+        })
+        .collect();
     let mut touched = BTreeMap::new();
     for entry in journal.iter() {
         let bytes = entry.record().txn_id.as_u128().to_be_bytes().to_vec();
@@ -176,5 +211,6 @@ fn state(snapshot: &Snapshot, journal: &Journal, since: Option<u64>) -> State {
         touched,
         changes,
         last,
+        fresh,
     }
 }

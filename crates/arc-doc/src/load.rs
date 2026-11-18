@@ -20,9 +20,9 @@ use arc_base::{Error, Limits, ObjectId, Result};
 use crate::error::codes;
 use crate::migrate::decode_current;
 use crate::payload::{self, Decoded, Encoding};
-use crate::preserved::{HeldKind, HeldObject};
+use crate::preserved::{HeldKind, HeldObject, HeldReference};
 use crate::registry::TypeRegistry;
-use crate::relationship::references;
+use crate::relationship::{Reference, field_references, references};
 use crate::schema::{Schema, SchemaVersion, Severity, TypeDecl, TypeKey};
 use crate::snapshot::{BulkLoad, Flags, Header, Object, Snapshot};
 use crate::version::{self, NewerMajor};
@@ -96,6 +96,58 @@ pub struct StoredType {
     pub minor: i64,
     /// `descriptor`.
     pub descriptor: String,
+}
+
+/// One `arc_journal` row: a retained journal record of the document
+/// (`docs/architecture/journal-record.md`), carried as stored.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredRecord {
+    /// `seq`: the record's position in commit order; `None` for a record no save has stored
+    /// yet, to which the next save assigns one.
+    pub seq: Option<i64>,
+    /// `txn_id`: the 16 bytes of the transaction identifier in UUID byte order.
+    pub txn_id: Vec<u8>,
+    /// `record`: the encoded journal record.
+    pub record: Vec<u8>,
+}
+
+/// One `arc_foreign` row: data an importer preserved from a foreign format, carried unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredForeign {
+    /// `id`.
+    pub id: i64,
+    /// `source_format`.
+    pub source_format: String,
+    /// `source_version`.
+    pub source_version: Option<String>,
+    /// `source_id`.
+    pub source_id: Option<String>,
+    /// `object`: the 16 identifier bytes of the owning object, or `None` for document-level data.
+    pub object: Option<Vec<u8>>,
+    /// `record_kind`.
+    pub record_kind: String,
+    /// `data`.
+    pub data: Vec<u8>,
+    /// `asset`: the 32-byte hash of an asset, or `None`.
+    pub asset: Option<Vec<u8>>,
+}
+
+/// One `arc_diagnostic` row: a diagnostic present at the save that wrote the package.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredDiagnostic {
+    /// `id`: the position in the diagnostics list at save, from 1.
+    pub id: i64,
+    /// `severity`: `error` or `warning`.
+    pub severity: String,
+    /// `code`: the stable error code.
+    pub code: String,
+    /// `object`: the 16 identifier bytes of the first object it names that the package
+    /// stores, or `None`.
+    pub object: Option<Vec<u8>>,
+    /// `origin`: `validator`, `node`, `load` or `executor`.
+    pub origin: String,
+    /// `arguments`: the JSON object of the error's arguments.
+    pub arguments: String,
 }
 
 impl StoredObject {
@@ -231,6 +283,9 @@ pub struct LoadedRows {
     rows: BTreeMap<ObjectId, LoadedRow>,
     unaddressable: Vec<StoredObject>,
     last_txn: LastTxns,
+    pub(crate) journal: Vec<StoredRecord>,
+    pub(crate) foreign: Vec<StoredForeign>,
+    pub(crate) diagnostics: Vec<StoredDiagnostic>,
 }
 
 impl LoadedRows {
@@ -269,6 +324,27 @@ impl LoadedRows {
     #[must_use]
     pub fn unaddressable(&self) -> &[StoredObject] {
         &self.unaddressable
+    }
+
+    /// The journal records the package retained, in `seq` order; empty unless the package
+    /// read them. They are kept as stored: undo history does not survive reopening.
+    #[must_use]
+    pub fn journal(&self) -> &[StoredRecord] {
+        &self.journal
+    }
+
+    /// The preserved foreign data of the package, in `id` order; a save writes it back
+    /// unchanged.
+    #[must_use]
+    pub fn foreign(&self) -> &[StoredForeign] {
+        &self.foreign
+    }
+
+    /// The diagnostics the package recorded at its last save, in `id` order, for inspection;
+    /// the document's diagnostics list is rebuilt by loading and regeneration instead.
+    #[must_use]
+    pub fn diagnostics(&self) -> &[StoredDiagnostic] {
+        &self.diagnostics
     }
 }
 
@@ -370,6 +446,8 @@ pub fn load_checked(
         rows: LoadedRows::default(),
         txns: HashMap::new(),
         counts: LoadCounts::default(),
+        types,
+        schemas: HashMap::new(),
     };
     let charge = |memory: &mut u64, cost: u64| {
         *memory = memory.saturating_add(cost);
@@ -448,6 +526,10 @@ struct Loader<'a> {
     /// The distinct `last_txn` values and their indexes.
     txns: HashMap<Box<[u8]>, u32>,
     counts: LoadCounts,
+    /// The type rows, whose descriptors decode the references of preserved objects.
+    types: &'a [StoredType],
+    /// The schemas parsed from those descriptors so far; `None` when one does not parse.
+    schemas: HashMap<(String, i64, i64), Option<Arc<Schema>>>,
 }
 
 impl Loader<'_> {
@@ -501,26 +583,26 @@ impl Loader<'_> {
                     header,
                     Vec::new(),
                 );
-                self.hold(HeldKind::Quarantined, key.ok(), held, row, error)?;
+                self.hold(
+                    HeldKind::Quarantined,
+                    key.ok(),
+                    held,
+                    row,
+                    error,
+                    Vec::new(),
+                )?;
                 return Ok(held_cost);
             }
         };
         let object = |values| Object::new(id, version, header.clone(), values);
         let Some(decl) = decl else {
-            let error = Error::new(codes::TYPE_UNKNOWN).with_arg("type", key.as_str());
-            self.hold(
-                HeldKind::Preserved,
-                Some(key),
-                object(Vec::new()),
-                row,
-                error,
-            )?;
+            self.preserve(key, object(Vec::new()), row)?;
             return Ok(held_cost);
         };
         let (decoded, warnings) = match self.decode(decl, version, &row) {
             Ok(decoded) => decoded,
             Err((kind, error)) => {
-                self.hold(kind, Some(key), object(Vec::new()), row, error)?;
+                self.hold(kind, Some(key), object(Vec::new()), row, error, Vec::new())?;
                 return Ok(held_cost);
             }
         };
@@ -635,6 +717,7 @@ impl Loader<'_> {
         object: Object,
         row: StoredObject,
         reason: Error,
+        references: Vec<HeldReference>,
     ) -> Result<()> {
         let id = object.id;
         let (diagnostic, count) = match kind {
@@ -644,7 +727,62 @@ impl Loader<'_> {
         *count += 1;
         self.diagnose(diagnostic, Some(id), copy(&reason));
         self.bulk
-            .hold(HeldObject::new(kind, key, object, row, reason))
+            .hold(HeldObject::new(kind, key, object, row, reason).with_references(references))
+    }
+
+    /// Holds the row of the unregistered type `key` as a preserved object with the field
+    /// references its stored descriptor decodes.
+    fn preserve(&mut self, key: TypeKey, object: Object, row: StoredObject) -> Result<()> {
+        let error = Error::new(codes::TYPE_UNKNOWN).with_arg("type", key.as_str());
+        let references = self.held_references(&key, object.version, &row);
+        self.hold(
+            HeldKind::Preserved,
+            Some(key),
+            object,
+            row,
+            error,
+            references,
+        )
+    }
+
+    /// The field references of a row of the unregistered type `key`, decoded with the
+    /// descriptor stored for its version; none when the descriptor or the payload does not
+    /// decode. The payload is only read.
+    fn held_references(
+        &mut self,
+        key: &TypeKey,
+        version: SchemaVersion,
+        row: &StoredObject,
+    ) -> Vec<HeldReference> {
+        let id = (key.as_str().to_owned(), row.major, row.minor);
+        let limits = self.limits;
+        let types = self.types;
+        let schema = self.schemas.entry(id).or_insert_with(|| {
+            let stored = types.iter().find(|t| {
+                (t.type_key.as_str(), t.major, t.minor) == (key.as_str(), row.major, row.minor)
+            })?;
+            let (parsed, schema) = Schema::from_descriptor(&stored.descriptor, limits).ok()?;
+            (parsed == *key && schema.version == version).then(|| Arc::new(schema))
+        });
+        let Some(schema) = schema.as_ref() else {
+            return Vec::new();
+        };
+        let decoded = u8::try_from(row.encoding)
+            .ok()
+            .and_then(Encoding::from_code)
+            .and_then(|encoding| {
+                payload::decode(schema, version.minor, encoding, &row.payload, limits).ok()
+            });
+        decoded.map_or_else(Vec::new, |decoded| {
+            field_references(&schema.fields, &decoded.values)
+                .into_iter()
+                .map(|reference| HeldReference {
+                    field: reference.field,
+                    target: reference.target,
+                    spec: reference.spec.clone(),
+                })
+                .collect()
+        })
     }
 
     fn unaddressable(&mut self, id: Option<ObjectId>, error: Error, row: StoredObject) {
@@ -743,13 +881,20 @@ pub(crate) fn parse_header(row: &StoredObject, limits: &Limits) -> (Header, Opti
 /// loaded object or one of a type its field does not allow.
 fn dangling(snapshot: &Snapshot, diagnostics: &mut Vec<LoadDiagnostic>, counts: &mut LoadCounts) {
     let registry = snapshot.registry();
-    for (handle, object) in snapshot.iter().chain(
-        snapshot
-            .held()
-            .map(|(handle, held)| (handle, held.object())),
-    ) {
+    let held = snapshot.held().map(|(handle, held)| {
+        let decoded = held.references().iter().map(|reference| Reference {
+            field: reference.field.clone(),
+            target: reference.target,
+            spec: &reference.spec,
+        });
+        (handle, held.object(), decoded.collect::<Vec<_>>())
+    });
+    let typed = snapshot
+        .iter()
+        .map(|(handle, object)| (handle, object, Vec::new()));
+    for (handle, object, decoded) in typed.chain(held) {
         let key = snapshot.type_key(handle).map_or("", TypeKey::as_str);
-        for reference in references(registry, key, object) {
+        for reference in references(registry, key, object).into_iter().chain(decoded) {
             let allowed = snapshot.resolve(reference.target).is_ok_and(|target| {
                 reference.spec.targets.is_empty()
                     || snapshot

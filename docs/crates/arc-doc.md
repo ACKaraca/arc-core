@@ -668,10 +668,20 @@ data; loading writes none.
   `held` lists them in load order and `held_len` counts them, while `iter` and `len` cover the
   typed stores only. Every write of a working set to a held object fails with
   `doc.object.not_modifiable`; working sets, savepoints and publication share them unchanged. A
-  reference to a held object is not dangling, and its type check uses the row's type key. Of a
-  held object's own references only the header owner is kept for integrity and indexed; its
-  field references stay in its undecoded payload, since building a schema from a stored
-  descriptor is not provided yet. Preserved and quarantined objects survive every save, so
+  reference to a held object is not dangling, and its type check uses the row's type key. A
+  held object's header owner is kept for integrity and indexed. A preserved object of an
+  unregistered type also has its field references (`HeldObject::references`, each with its
+  field path, target and the relationship rule of the descriptor): its payload is decoded,
+  never rewritten, with the schema `Schema::from_descriptor` parses from the stored type row
+  of its type and version (a descriptor naming another type or version does not count). They
+  enter the reverse reference index and the dangling check of the load, and the deletion rules
+  of the descriptor apply to their targets: deleting a target a `block` reference names fails
+  with `doc.reference.delete_blocked`, and one a `cascade` or `clear` reference names fails with
+  `doc.object.not_modifiable`, since the held object can be neither deleted nor rewritten; an
+  owning reference of a held object counts in the owner-conflict check. A held object whose
+  descriptor does not parse or whose payload does not decode with it, a quarantined object and
+  a preserved object of a newer major version hold their owner only; the package indexes only
+  the owner of every held row (`arc_reference`), as before. Preserved and quarantined objects survive every save, so
   nothing deletes them: deleting the owner of a held object, or the source of an owning
   reference to one, fails with `doc.object.not_modifiable`, because the cascade would delete
   it; the argument `id` names the held object and the detail `kind` says `preserved` or
@@ -1047,9 +1057,10 @@ save may replace the file it was opened from on every platform.
   and at read as the format requires (`doc.package.preview_invalid`, argument `kind`, detail
   `reason`). Previews are read with `Package::previews`; a save without previews leaves
   `arc_preview` empty.
-- **Not yet.** The journal table of the package, foreign data and the `arc_diagnostic` rows
-  are not written or read by this version; the sections below describe the
-  incremental and background saves, assets and the recovery journal.
+- **History.** The journal, foreign data and diagnostics tables are written and read as
+  [the subsection on them](#journal-foreign-data-and-diagnostics-in-the-package-core-doc-040)
+  describes; the sections below describe the incremental and background saves, assets and the
+  recovery journal.
 
 The `package_kill` test kills a child process saving 400 objects at random points 50 times in
 the default suite (1,000 times in the ignored `kill_during_save_1000`) and checks that the
@@ -1058,12 +1069,18 @@ write-back contract through the file against an in-memory load.
 ### Regeneration scheduler and diagnostics list (CORE-DOC-031, CORE-DOC-032, CORE-DOC-035)
 
 - **Pool.** `Scheduler` (`arc_doc::scheduler`) evaluates the dirty nodes of one document's graph
-  on a fixed set of `std::thread` workers, `DocumentConfig::workers` of them (default: logical
-  cores minus one, at least one). Each document starts its own pool; one pool shared by all
-  documents of a process, as the [overview](../architecture/overview.md#threading-model)
-  describes, is not implemented yet. The pool is a priority queue, not a work-stealing pool: a
-  node demanded from inside a job is evaluated inline by that job, so workers never wait for
-  each other.
+  on the `std::thread` workers of one pool that every document of the process shares, as the
+  [overview](../architecture/overview.md#threading-model) describes. `DocumentConfig::workers`
+  (default: logical cores minus one, at least one) is the most jobs of the document the pool
+  runs at once; with 0 the document's jobs run only when pumped. The pool starts threads lazily
+  up to the largest `workers` a document asked for, at most the logical cores minus one and at
+  least two, and keeps them for the life of the process (`pool_threads` counts them); a document
+  starts no thread of its own. A pool thread takes the highest priority any document has
+  queued; among the documents with work of that priority it starts at the one after the
+  document it served last, so documents take turns and each makes progress. The pool is a
+  priority queue, not a work-stealing pool: a node demanded from inside a job is evaluated
+  inline by that job, so workers never wait for each other. The lock order is pool, then
+  scheduler, then graph; a scheduler wakes the pool only after releasing its own lock.
 - **Priorities.** `Priority` is `Blocking`, `Interactive`, `Visible` or `Background`. The
   application pins nodes to a priority (`Document::regenerate`, `Scheduler::prioritize`, undone
   by `unpin`) or sets one predicate per priority (`set_rule`); a node takes its pin, else the
@@ -1091,8 +1108,10 @@ write-back contract through the file against an in-memory load.
   a yield point has its outdated result discarded.
 - **Idle and shutdown.** `is_idle` and `wait_idle(timeout)` tell when no job is queued or
   running and every dirty node was looked at; a save waits for it. `shutdown`, called by
-  `Document::close` and on drop, removes the observer, cancels running jobs, empties the queue
-  and joins the workers. On `wasm32` the pool has no worker: jobs run on the calling thread
+  `Document::close` and on drop, removes the observer, cancels the document's running jobs,
+  empties its queue, leaves the pool and waits until the pool's threads have ended the
+  document's jobs (not when called from one of them); it never waits for another document's
+  work. On `wasm32` the pool has no worker: jobs run on the calling thread
   when `pump` or `wait_idle` is called.
 - **Events.** After each job and each commit the scheduler drains the graph's transitions and
   emits one `Regenerated` event with the nodes that became clean and those that became failed,
@@ -1197,8 +1216,9 @@ hostile databases (truncations and byte mutations recover a prefix or fail with 
   every stored type key end as the full rewrite writes them (the registry's current row while a
   typed object of the type exists, else the row as loaded while a held or unaddressable row of
   that version exists, and no row of a version no object is stored at); changed previews are
-  written and removed kinds deleted. Untouched object and index rows are never written. The
-  steps reported are `Prepare`, `Metadata`, `Objects`, `Types`, `Previews` and `Commit`.
+  written and removed kinds deleted; the journal and diagnostics rows end as the full rewrite
+  writes them. Untouched object and index rows are never written. The steps reported are
+  `Prepare`, `Metadata`, `Objects`, `Types`, `Previews`, `History` and `Commit`.
 - **Refusal and fallback.** The incremental save is refused with
   `doc.package.incremental_refused` (argument `reason`) for a package not open for editing
   (`read_only_package`), a format other than the one this version writes (`format_upgrade`), a
@@ -1254,8 +1274,9 @@ hostile databases (truncations and byte mutations recover a prefix or fail with 
   the referenced assets with their chunks. An asset is referenced when an `asset` value of a
   typed object of the saved snapshot names it (`asset_values` walks values, lists, maps and
   records), or when its 32 bytes occur in the payload of a held or unaddressable row, whose
-  values are not decoded; a row of another encoding keeps every asset. Journal records and
-  preserved foreign data are not stored yet and refer to nothing. The free function `save_as`
+  values are not decoded; a row of another encoding keeps every asset. The journal records the
+  save retains refer to an asset whose 32 bytes occur in them, and a foreign data row to the
+  asset its `asset` column names. The free function `save_as`
   has no package to copy from and writes no assets.
 
 The `package_incremental` test compares a chain of incremental saves of random documents with
@@ -1331,6 +1352,67 @@ flipped in the file, hostile asset tables and compaction.
   second wrote only the rows of the objects changed since the first (marked rows keep their
   marker), that the reopened file equals the document, and that a clean close then leaves no
   recovery database.
+
+### Journal, foreign data and diagnostics in the package (CORE-DOC-040)
+
+The tables `arc_journal`, `arc_foreign` and `arc_diagnostic` of format 1.0
+([document-package.md](../architecture/document-package.md#format-10-schema)) are written by
+every save and read by every load; the schema is unchanged and a package written before they
+were filled reads as one with empty tables.
+
+- **Journal rows.** `Save::journal` lists the journal records of the saved state in commit
+  order (`StoredRecord`: `seq`, the 16 `txn_id` bytes and the encoded
+  [journal record](../architecture/journal-record.md)): the stored ones with their `seq`, then
+  the new ones without. The save numbers each new record `max(previous seq + 1, c × 2^32)`, `c`
+  the save counter it writes (capped at 2^31 − 1), so `seq` keeps commit order and its high 32
+  bits name the save that first stored the record. It then keeps, by the `arc_meta` key
+  `history_retention`: `none` no record, `saves:<n>` (n ≥ 1) the records whose save is one of
+  the last n, this one included, and `full`, an absent key or any other value every record; of
+  those at most `record_count` of the newest; and of those the longest newest run in which every
+  record's header decodes, names its `txn_id`, names the record before it as its parent and has
+  an identifier not seen later in the run. The incremental save deletes the rows not kept and
+  inserts the new ones; the full rewrite writes the kept ones; both write the same rows.
+  `Package::save_document` passes `Document::stored_journal` (the records the file holds as far
+  as the document knows) and the journal's records of revisions after the last save, and then
+  remembers what was kept. A record a save dropped never returns.
+- **Restored at load.** `LoadedRows::journal`, `foreign` and `diagnostics` hold the rows as
+  stored, in key order; `Document::stored_journal` starts with them. The first transaction of
+  the session names the last stored record as its parent, so the chain continues across
+  reopening. The stored records are history for inspection, history queries and compaction; undo
+  and redo reach only the transactions of the current session, so undo history does not survive
+  reopening. A load fails with `doc.package.value_invalid` for a value of the wrong storage class
+  and `doc.load.limit_exceeded` beyond `record_count` rows per table or, with `memory_bytes`
+  set, beyond that many bytes of the three tables together (64 bytes per row plus its record,
+  foreign data or diagnostic arguments); a record that does not decode does not block the load, and a later save drops it and
+  the records before it.
+- **Foreign data.** `arc_foreign` rows come from importers; the package keeps them unchanged
+  (`StoredForeign`, with its `id`), as the compatibility promise requires: the incremental save
+  does not touch them and the full rewrite writes the loaded rows as they are, also after the
+  object they name was deleted. Their `asset` keeps that asset through compaction.
+- **Diagnostics.** `Save::diagnostics` is written as one row per diagnostic, `id` counting from
+  1 in list order: `severity` `error` or `warning`, the stable `code`, `object` the first object
+  the diagnostic names that the saved state holds (typed or held) or NULL, `origin`
+  `validator`, `node`, `load` or `executor`, and `arguments` the JSON object of the error's
+  arguments. Each save replaces the rows. They record what the document showed at save for
+  readers without Arc; a load does not put them back into the diagnostics list, which loading
+  and regeneration rebuild (`LoadedRows::diagnostics` keeps them for display).
+- **Inspect and check.** `inspect` adds `journal` (each row's `seq`, `txn_id`, `bytes` and the
+  header `TxnRecord::decode_header` decodes without a registry, or `error`), `foreign` and
+  `diagnostics`, and counts foreign rows and diagnostics in `statistics`. `check` reports a
+  record whose header does not decode (its code, detail `seq`) or names another identifier
+  (`doc.journal.record_invalid`, reason `txn_id`), a record that does not name the one before
+  it in `seq` order as its parent (`doc.journal.parent_mismatch`), a foreign `object` that is
+  not 16 identifier bytes or a diagnostic with an unknown severity or origin or arguments that
+  are not a JSON object (`doc.package.value_invalid`, detail `row`), a foreign asset that is not
+  stored (`doc.package.asset_not_found`) and a diagnostic object that is not stored
+  (`doc.reference.dangling`, argument `field` = `object`). Record operations are not decoded,
+  since that needs the type registry.
+
+The `package_history` test runs random edits over several sessions with random retention
+settings, compares each incremental save with a full rewrite of the same state table by table,
+checks reopening against a reference model of retention and seeds corruptions for `check`;
+`package_fixtures` opens a fixture written before the tables were filled and saves history
+into it.
 
 ### Error codes
 

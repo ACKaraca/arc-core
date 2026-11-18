@@ -68,16 +68,16 @@ pub use integrity::{
 pub use journal::{Journal, JournalEntry};
 pub use load::{
     DiagnosticKind, LoadCounts, LoadDiagnostic, LoadOptions, Loaded, LoadedRow, LoadedRows,
-    StoredObject, StoredType, load, load_checked,
+    StoredDiagnostic, StoredForeign, StoredObject, StoredRecord, StoredType, load, load_checked,
 };
 pub use op::{Op, Properties};
 pub use payload::{Decoded, Encoding, Payload};
-pub use preserved::{HeldKind, HeldObject};
-pub use record::{RECORD_FORMAT, TxnRecord};
+pub use preserved::{HeldKind, HeldObject, HeldReference};
+pub use record::{RECORD_FORMAT, RecordHeader, TxnRecord};
 pub use registry::TypeRegistry;
 pub use relationship::{Reference, ReferenceField};
 pub use reverse_index::{Referrer, Referrers};
-pub use scheduler::{Priority, Scheduler};
+pub use scheduler::{Priority, Scheduler, pool_threads};
 pub use schema::{
     AssetHash, Bound, Cardinality, ColorSource, ColorValue, EnumVariant, ExternalRef, FieldDecl,
     Finding, GeometryBytes, GeometryEncoding, MigrateFn, Migration, OnCopy, OnDelete,

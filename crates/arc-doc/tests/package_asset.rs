@@ -352,6 +352,8 @@ fn save_with(package: &mut Package, snapshot: &Snapshot, strategy: &Strategy) {
         touched: &touched,
         metadata: &metadata,
         previews: &[],
+        journal: &[],
+        diagnostics: &[],
         limits: Limits::DEFAULT,
     };
     package

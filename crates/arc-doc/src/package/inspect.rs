@@ -34,13 +34,15 @@ type Schemas = BTreeMap<(String, i64, i64), Result<Schema>>;
 ///
 /// The result is an object with `format_version`, `metadata` (every `arc_meta` entry: text,
 /// numbers and `null` as they are, a blob as lowercase hexadecimal), `statistics` (`file_bytes`,
-/// counts of objects, type rows, references, properties, journal records, assets, chunks and
-/// previews, the bytes of payloads, assets and chunks, and per type key its `objects` and
+/// counts of objects, type rows, references, properties, journal records, assets, chunks,
+/// previews, foreign records and diagnostics, the bytes of payloads, assets and chunks, and per type key its `objects` and
 /// `payload_bytes`), `types` (each type row with its descriptor as JSON, or `error`) and
 /// `objects` in identifier order: `id`, `type_key`, `version`, `owner`, `name`, `partition`,
 /// `flags`, `encoding`, `payload_bytes`, `hash_matches`, `last_txn`, and either `values` (field
 /// name to the canonical JSON form of the value, `null` when absent) or `error` (`code` and
-/// `arguments`) when the row does not decode with its descriptor.
+/// `arguments`) when the row does not decode with its descriptor; then `journal` (each row's
+/// `seq`, `txn_id`, `bytes` and its decoded `header` or `error`), `foreign` and `diagnostics`
+/// (each row's columns, bytes as hexadecimal, diagnostic arguments as JSON).
 ///
 /// The file is opened as [`super::Package::open`] opens it read-only, with its failures
 /// (`doc.package.not_a_package`, `doc.package.newer_format`, `doc.package.schema_invalid`,
@@ -103,17 +105,23 @@ pub fn inspect(path: &Path, limits: &Limits) -> Result<Json> {
         "chunks": count("SELECT count(*) FROM arc_chunk")?,
         "chunk_bytes": count("SELECT coalesce(sum(length(bytes)), 0) FROM arc_chunk")?,
         "previews": count("SELECT count(*) FROM arc_preview")?,
+        "foreign_records": count("SELECT count(*) FROM arc_foreign")?,
+        "diagnostics": count("SELECT count(*) FROM arc_diagnostic")?,
         "per_type": per_type
             .into_iter()
             .map(|(key, (objects, bytes))| (key, json!({ "objects": objects, "payload_bytes": bytes })))
             .collect::<Map<String, Json>>(),
     });
+    let (journal, foreign, diagnostics) = super::history::inspect(&conn, &name, limits)?;
     Ok(json!({
         "format_version": format.to_string(),
         "metadata": metadata,
         "statistics": statistics,
         "types": types,
         "objects": objects,
+        "journal": journal,
+        "foreign": foreign,
+        "diagnostics": diagnostics,
     }))
 }
 
@@ -138,6 +146,11 @@ pub fn inspect(path: &Path, limits: &Limits) -> Result<Json> {
 ///   object.
 /// - Every asset must read back with matching chunk and asset hashes (`doc.package.asset_corrupt`,
 ///   or the code its reader fails with).
+/// - The journal, foreign data and diagnostics rows must be well formed and consistent, as
+///   `docs/crates/arc-doc.md` ("Journal, foreign data and diagnostics in the package") lists:
+///   record headers that decode and name their `txn_id`, each record the parent of the next,
+///   foreign assets that exist, and diagnostics with known severities and origins whose
+///   object is stored.
 ///
 /// Fails, without findings, as [`inspect`] fails to open the file, and with
 /// `doc.package.io_failed`, `doc.package.corrupt` or `doc.load.limit_exceeded` when reading
@@ -214,6 +227,9 @@ pub fn check(path: &Path, limits: &Limits) -> Result<Vec<Error>> {
         )?;
         findings.extend(orphans.into_iter().map(|id| index_mismatch(table, id)));
     }
+    findings.extend(super::history::check(&conn, &name, limits, &|id| {
+        types.contains_key(id)
+    })?);
     let assets = rows(
         &conn,
         "SELECT hash FROM arc_asset ORDER BY hash",

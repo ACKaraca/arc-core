@@ -291,6 +291,7 @@ pub(crate) fn run(
                 _ if pending.recreated && !header_owner => {}
                 OnDelete::Cascade => run.delete(set, referrer.source)?,
                 OnDelete::Clear => {
+                    not_held(set.current(), referrer.source)?;
                     clears.insert(referrer.source);
                 }
             }
@@ -341,6 +342,19 @@ pub(crate) fn run(
     Ok(report)
 }
 
+/// Fails with `doc.object.not_modifiable` when `source` is a held object: its payload is never
+/// rewritten, so a reference it holds cannot be cleared.
+fn not_held(snapshot: &Snapshot, source: ObjectId) -> Result<()> {
+    match snapshot
+        .resolve(source)
+        .ok()
+        .and_then(|handle| snapshot.held_object(handle))
+    {
+        Some(held) => Err(held.not_modifiable()),
+        None => Ok(()),
+    }
+}
+
 /// True when a live object holds an owning reference to `target`.
 fn owned_by_live(snapshot: &Snapshot, target: ObjectId) -> bool {
     owners(snapshot, target).next().is_some()
@@ -362,6 +376,13 @@ fn live_spec<'a>(
     field: &ReferenceField,
 ) -> Option<&'a ReferenceSpec> {
     let handle = snapshot.resolve(source).ok()?;
+    if let (Some(held), ReferenceField::Field(_)) = (snapshot.held_object(handle), field) {
+        return held
+            .references()
+            .iter()
+            .find(|reference| reference.field == *field)
+            .map(|reference| &reference.spec);
+    }
     let object = snapshot.get(handle).ok()?;
     let type_key = snapshot.type_key(handle)?;
     spec_of(snapshot.registry(), type_key.as_str(), object, field)

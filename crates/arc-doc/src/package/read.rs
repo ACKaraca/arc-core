@@ -408,7 +408,14 @@ pub(crate) fn load(
     if let Some(error) = failure {
         return Err(error);
     }
-    loaded
+    let mut loaded = loaded?;
+    drop(cursor);
+    drop(statement);
+    let (journal, foreign, diagnostics) = super::history::read(&conn, &name, limits)?;
+    loaded.rows.journal = journal;
+    loaded.rows.foreign = foreign;
+    loaded.rows.diagnostics = diagnostics;
+    Ok(loaded)
 }
 
 /// Reads the previews (see [`super::Package::previews`]).

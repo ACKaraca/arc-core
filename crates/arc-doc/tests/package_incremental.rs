@@ -202,6 +202,8 @@ proptest! {
             touched: &BTreeMap::new(),
             metadata: &base,
             previews: &[],
+            journal: &[],
+            diagnostics: &[],
             limits: Limits::DEFAULT,
         };
         save_as(&path, &base_save, &mut |_| Ok(())).unwrap();
@@ -230,6 +232,8 @@ proptest! {
                     touched: &touched,
                     metadata: &last_metadata,
                     previews: &previews,
+                    journal: &[],
+                    diagnostics: &[],
                     limits: Limits::DEFAULT,
                 };
                 // As the journal would: an object changed and changed back since the last
@@ -259,6 +263,8 @@ proptest! {
             touched: &touched,
             metadata: &last_metadata,
             previews: &previews,
+            journal: &[],
+            diagnostics: &[],
             limits: Limits::DEFAULT,
         };
         save_as(&full, &save, &mut |_| Ok(())).unwrap();
@@ -329,6 +335,8 @@ fn write_state(path: &Path, n: u64) {
         touched: &touched,
         metadata: &metadata,
         previews: &[],
+        journal: &[],
+        diagnostics: &[],
         limits: Limits::DEFAULT,
     };
     save_as(path, &save, &mut |_| Ok(())).unwrap();
@@ -388,6 +396,8 @@ fn save_next(path: &Path, n: u64) -> arc_doc::package::Saved {
         touched: &touched,
         metadata: &metadata,
         previews: &[],
+        journal: &[],
+        diagnostics: &[],
         limits: Limits::DEFAULT,
     };
     let changes = touched_between(&loaded.snapshot, &snapshot);
@@ -509,6 +519,8 @@ fn refusals_fall_back_to_the_full_rewrite() {
             touched: &touched,
             metadata,
             previews: &[],
+            journal: &[],
+            diagnostics: &[],
             limits: Limits::DEFAULT,
         };
         // A refusal leaves the file as it was before the fallback writes it.
@@ -547,6 +559,8 @@ fn refusals_fall_back_to_the_full_rewrite() {
         touched: &touched,
         metadata: &metadata,
         previews: &[],
+        journal: &[],
+        diagnostics: &[],
         limits: Limits::DEFAULT,
     };
     let error = read_only
@@ -574,6 +588,8 @@ fn an_error_at_any_step_leaves_the_file_unchanged() {
         touched: &touched,
         metadata: &metadata,
         previews: &[],
+        journal: &[],
+        diagnostics: &[],
         limits: Limits::DEFAULT,
     };
     let mut events = Vec::new();

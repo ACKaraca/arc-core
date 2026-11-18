@@ -21,7 +21,7 @@ use arc_swap::ArcSwap;
 
 use crate::error::codes;
 use crate::index::IdIndex;
-use crate::preserved::{HeldKind, HeldObject};
+use crate::preserved::HeldObject;
 use crate::registry::TypeRegistry;
 use crate::reverse_index::ReverseIndex;
 use crate::schema::{SchemaVersion, TypeKey, Value};
@@ -602,13 +602,7 @@ impl WorkingSet {
         if let Some(held) = self.current.held_object(handle) {
             // Preserved and quarantined objects survive every save; `id` names the held object,
             // also when the write is the cascade of deleting its owner.
-            let kind = match held.kind() {
-                HeldKind::Preserved => "preserved",
-                HeldKind::Quarantined => "quarantined",
-            };
-            return Err(Error::new(codes::OBJECT_NOT_MODIFIABLE)
-                .with_arg("id", held.object().id.to_string())
-                .with_detail("kind", kind));
+            return Err(held.not_modifiable());
         }
         let roots = Arc::make_mut(&mut self.current.0);
         Arc::make_mut(&mut roots.stores)
@@ -684,9 +678,9 @@ impl BulkLoad {
         Ok(object)
     }
 
-    /// Adds a held object. Its header owner enters the reverse reference index; its fields hold
-    /// no values and so no references. Fails with `doc.object.duplicate_id` for a loaded
-    /// identifier.
+    /// Adds a held object. Its header owner and its decoded field references
+    /// ([`HeldObject::references`]) enter the reverse reference index. Fails with
+    /// `doc.object.duplicate_id` for a loaded identifier.
     pub(crate) fn hold(&mut self, held: HeldObject) -> Result<()> {
         let id = held.object().id;
         if self.contains(id) {
@@ -706,6 +700,11 @@ impl BulkLoad {
         self.roots
             .reverse
             .update(&self.roots.registry, key, None, Some(held.object()));
+        for reference in held.references() {
+            self.roots
+                .reverse
+                .insert(reference.target, id, reference.field.clone());
+        }
         self.held.push(held);
         Ok(())
     }

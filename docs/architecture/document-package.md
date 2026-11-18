@@ -195,8 +195,17 @@ CREATE INDEX arc_asset_chunk_chunk ON arc_asset_chunk (chunk);
   1,024 and `sheet:<id>` (an identifier of 1 to 256 bytes without control characters) a longest
   side of at most 1,024; each image is at most 16 MiB.
 - **`arc_diagnostic`.** `severity` (`error`, `warning`), `code` (a stable error code), `object`
-  (16 identifier bytes or NULL), `origin` (`validator`, `node`, `load`) and `arguments` (a JSON
-  object).
+  (16 identifier bytes of a stored object, or NULL), `origin` (`validator`, `node`, `load`,
+  `executor`) and `arguments` (a JSON object). `id` counts from 1 in the order of the
+  document's diagnostics list; every save replaces the rows.
+- **`arc_journal`.** `record` is a [journal record](journal-record.md) and `txn_id` its
+  identifier. A save numbers the records it adds `max(previous seq + 1, c × 2^32)`, `c` its
+  save counter (at most 2^31 − 1), so the high 32 bits of `seq` name the save that first stored
+  a record. `history_retention` in `arc_meta` decides what a save keeps: `none` nothing,
+  `saves:<n>` (n ≥ 1) the records of the last n saves, `full`, absent or any other value every
+  record. The rows form one parent chain: each record names the one before it as its parent.
+- **`arc_foreign`.** Rows are kept unchanged by every save, also after the object they name
+  was deleted; `asset` names a stored asset.
 
 ## Payload encoding
 

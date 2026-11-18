@@ -77,6 +77,8 @@ fn prepare(path: &Path) -> (Package, Arc<Loaded>) {
         touched: &touched,
         metadata: &metadata,
         previews: &[],
+        journal: &[],
+        diagnostics: &[],
         limits: Limits::DEFAULT,
     };
     save_as(path, &save, &mut |_| Ok(())).unwrap();
@@ -112,6 +114,8 @@ fn request(
         touched,
         metadata,
         previews: Vec::new(),
+        journal: Vec::new(),
+        diagnostics: Vec::new(),
         limits: Limits::DEFAULT,
         strategy,
     }

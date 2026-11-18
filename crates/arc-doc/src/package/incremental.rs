@@ -240,6 +240,10 @@ pub(super) fn save(
     progress(SaveProgress::Step(SaveStep::Previews))?;
     write_previews(&tx, save.previews).map_err(sql)?;
 
+    progress(SaveProgress::Step(SaveStep::History))?;
+    let history = super::history::rows_of(save, metadata.save_counter);
+    super::history::write_incremental(&tx, &history).map_err(sql)?;
+
     progress(SaveProgress::Step(SaveStep::Commit))?;
     tx.commit().map_err(sql)?;
     conn.close().map_err(|(_, e)| sql(e))?;

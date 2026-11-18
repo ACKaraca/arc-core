@@ -30,7 +30,7 @@ use arc_doc::{
     ReferenceSpec, RelationshipRule, Schema, SchemaVersion, Snapshot, StoredObject, StoredType,
     Strength, TypeDecl, TypeKey, TypeRegistry, Value, ValueType, WorkingSet, descriptor, payload,
 };
-use package_support::{TempDir, blake3_of, preview, raw_types};
+use package_support::{TempDir, blake3_of, owner, preview, raw_types};
 use serde_json::json;
 
 fn fixtures() -> PathBuf {
@@ -161,6 +161,8 @@ fn write_minimal(path: &Path) {
         touched: &touched,
         metadata: &meta,
         previews: &[],
+        journal: &[],
+        diagnostics: &[],
         limits: Limits::DEFAULT,
     };
     save_as(path, &save, &mut |_| Ok(())).unwrap();
@@ -275,6 +277,8 @@ fn write_typical(path: &Path, scratch: &Path) {
         touched: &touched,
         metadata: &meta,
         previews: &previews,
+        journal: &[],
+        diagnostics: &[],
         limits: Limits::DEFAULT,
     };
     save_as(path, &save, &mut |_| Ok(())).unwrap();
@@ -427,6 +431,8 @@ fn the_typical_fixture_survives_another_save() {
         touched: &touched,
         metadata: package.metadata(),
         previews: &previews,
+        journal: &[],
+        diagnostics: &[],
         limits: Limits::DEFAULT,
     };
     let copy = dir.path("copy.arc");
@@ -457,4 +463,68 @@ fn the_newer_major_fixture_is_refused_untouched() {
     );
     assert!(!lock_path(&path).exists());
     assert_eq!(dir.files(), vec!["newer-major.arc".to_owned()]);
+}
+
+#[test]
+fn a_fixture_written_before_the_stored_history_opens_and_gains_one() {
+    let dir = TempDir::new("fixture-history");
+    let path = dir.path("model.arc");
+    std::fs::copy(fixtures().join("v1-typical.arc"), &path).unwrap();
+    // The fixture keeps no history; keep all of it from now on.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE arc_meta SET value = 'full' WHERE key = 'history_retention'",
+            [],
+        )
+        .unwrap();
+    let mut package = Package::open(&path, Mode::Edit(&owner("u", "h")), &Limits::DEFAULT).unwrap();
+    let document = package
+        .open_document(
+            registry(),
+            Arc::new(arc_doc::graph::Evaluators::new()),
+            &LoadOptions::default(),
+            arc_doc::DocumentConfig::default(),
+        )
+        .unwrap();
+    assert!(document.stored_journal().is_empty());
+    assert!(document.loaded_rows().foreign().is_empty());
+    assert!(document.loaded_rows().diagnostics().is_empty());
+    let point = point_object(900, 2.0, None);
+    document
+        .submit(move |txn| {
+            txn.create(
+                "fx.point",
+                point.id,
+                point.header.clone(),
+                point.values.clone(),
+            )
+            .map(drop)
+        })
+        .wait()
+        .unwrap();
+    let saved = package
+        .save_document(&document, &[], None, &mut |_| Ok(()))
+        .unwrap();
+    assert!(saved.incremental, "{:?}", saved.refused);
+    assert_eq!(document.stored_journal().len(), 1);
+    // The fixture's own findings (it holds invalid rows on purpose) stay the only ones.
+    let codes_of = |path: &Path| -> Vec<&'static str> {
+        arc_doc::package::check(path, &Limits::DEFAULT)
+            .unwrap()
+            .iter()
+            .map(arc_base::Error::code)
+            .collect()
+    };
+    assert_eq!(
+        codes_of(&path),
+        codes_of(&fixtures().join("v1-typical.arc"))
+    );
+    drop(document);
+    drop(package);
+    let loaded = Package::open(&path, Mode::ReadOnly, &Limits::DEFAULT)
+        .unwrap()
+        .load(registry(), &LoadOptions::default())
+        .unwrap();
+    assert_eq!(loaded.rows.journal().len(), 1);
 }

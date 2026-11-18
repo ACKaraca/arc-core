@@ -14,6 +14,7 @@ use arc_base::id::Identifier;
 use arc_base::{Error, Limits, ObjectId, Result};
 
 use super::asset::Carry;
+use super::history::{self, HistoryRows};
 use super::preview::{self, Preview, THUMBNAIL};
 use super::read::{
     KEY_CREATED_BY, KEY_CRS, KEY_DOCUMENT_ID, KEY_FORMAT, KEY_PARTITIONS, KEY_RETENTION,
@@ -22,8 +23,9 @@ use super::read::{
 };
 use super::{APPLICATION_ID, FORMAT, MetaValue, Metadata, display, schema};
 use crate::descriptor::descriptor;
+use crate::diagnostic::Diagnostic;
 use crate::error::codes;
-use crate::load::{Loaded, StoredObject, StoredType};
+use crate::load::{Loaded, StoredObject, StoredRecord, StoredType};
 use crate::registry::TypeRegistry;
 use crate::relationship::references;
 use crate::schema::{RelationshipRule, TypeKey, Value};
@@ -48,6 +50,9 @@ pub enum SaveStep {
     Indexes,
     /// Writing `arc_preview`.
     Previews,
+    /// Writing the journal, preserved foreign data and diagnostics (`arc_journal`,
+    /// `arc_foreign`, `arc_diagnostic`).
+    History,
     /// Copying the assets and chunks of the package saved from (a full rewrite through
     /// [`super::Package::save`] or [`super::Package::save_to`]); nothing otherwise.
     Assets,
@@ -63,7 +68,7 @@ pub enum SaveStep {
 
 impl SaveStep {
     /// Every step, in order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Prepare,
         Self::Schema,
         Self::Metadata,
@@ -71,6 +76,7 @@ impl SaveStep {
         Self::Objects,
         Self::Indexes,
         Self::Previews,
+        Self::History,
         Self::Assets,
         Self::Commit,
         Self::Verify,
@@ -140,6 +146,12 @@ pub struct Save<'a> {
     pub metadata: &'a Metadata,
     /// The previews the application rendered; empty when none are available.
     pub previews: &'a [Preview],
+    /// The journal records of the saved state in commit order: the stored ones the save
+    /// keeps (with their `seq`), then the new ones (without). The save numbers the new ones and
+    /// keeps what the retention allows (see `docs/crates/arc-doc.md`); empty stores none.
+    pub journal: &'a [StoredRecord],
+    /// The document's diagnostics, written to `arc_diagnostic`.
+    pub diagnostics: &'a [Diagnostic],
     /// The limits payloads are encoded under.
     pub limits: Limits,
 }
@@ -182,6 +194,7 @@ pub(super) fn save_full(
 ) -> Result<Metadata> {
     let (types, objects) = rows(save, progress)?;
     let metadata = next_metadata(save);
+    let history = history::rows_of(save, metadata.save_counter);
     let contents = Contents {
         metadata: &metadata,
         types: &types,
@@ -189,7 +202,7 @@ pub(super) fn save_full(
         previews: save.previews,
         snapshot: Some(save.snapshot),
     };
-    write_with(target, &contents, carry, progress)?;
+    write_with(target, &contents, Some(&history), carry, progress)?;
     Ok(metadata)
 }
 
@@ -325,7 +338,7 @@ pub fn write(
     contents: &Contents<'_>,
     progress: &mut dyn FnMut(SaveStep) -> Result<()>,
 ) -> Result<()> {
-    write_with(target, contents, None, &mut steps_only(progress))
+    write_with(target, contents, None, None, &mut steps_only(progress))
 }
 
 /// Checks every preview and that no kind repeats (`doc.package.preview_invalid`).
@@ -346,6 +359,7 @@ pub(super) fn check_previews(previews: &[Preview]) -> Result<()> {
 fn write_with(
     target: &Path,
     contents: &Contents<'_>,
+    history: Option<&HistoryRows<'_>>,
     carry: Option<&Carry<'_>>,
     progress: Progress<'_>,
 ) -> Result<()> {
@@ -364,7 +378,7 @@ fn write_with(
     File::create_new(&temp).map_err(|e| io_error(e, &temp))?;
     // Removes the temporary file on every exit before the rename, an unwinding one included.
     let mut guard = Temporary(Some(temp.clone()));
-    build(&temp, contents, &objects, carry, progress)?;
+    build(&temp, contents, &objects, history, carry, progress)?;
     progress(SaveProgress::Step(SaveStep::Verify))?;
     verify(&temp, contents, &objects)?;
     progress(SaveProgress::Step(SaveStep::Flush))?;
@@ -564,6 +578,7 @@ fn build(
     temp: &Path,
     contents: &Contents<'_>,
     objects: &[&StoredObject],
+    history: Option<&HistoryRows<'_>>,
     carry: Option<&Carry<'_>>,
     progress: Progress<'_>,
 ) -> Result<()> {
@@ -645,6 +660,10 @@ fn build(
     }
     progress(SaveProgress::Step(SaveStep::Previews))?;
     super::incremental::write_previews(&tx, contents.previews).map_err(sql)?;
+    progress(SaveProgress::Step(SaveStep::History))?;
+    if let Some(history) = history {
+        history::write_full(&tx, history).map_err(sql)?;
+    }
     progress(SaveProgress::Step(SaveStep::Assets))?;
     if let Some(carry) = carry {
         super::asset::copy(carry, &tx, progress)?;

@@ -11,6 +11,7 @@
 mod asset;
 mod background;
 mod document;
+mod history;
 mod incremental;
 mod inspect;
 mod lock;

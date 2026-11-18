@@ -14,8 +14,9 @@ use super::incremental::{Saved, Strategy};
 use super::preview::Preview;
 use super::write::{Save, SaveProgress};
 use super::{Metadata, Package};
+use crate::diagnostic::Diagnostic;
 use crate::error::codes;
-use crate::load::Loaded;
+use crate::load::{Loaded, StoredRecord};
 use crate::snapshot::Snapshot;
 
 /// What a [`BackgroundSave`] saves: the owned form of [`Save`] and the [`Strategy`].
@@ -31,6 +32,10 @@ pub struct SaveRequest {
     pub metadata: Metadata,
     /// The previews the application rendered.
     pub previews: Vec<Preview>,
+    /// The journal records of the saved state ([`Save::journal`]).
+    pub journal: Vec<StoredRecord>,
+    /// The document's diagnostics ([`Save::diagnostics`]).
+    pub diagnostics: Vec<Diagnostic>,
     /// The limits payloads are encoded under.
     pub limits: Limits,
     /// How to save.
@@ -159,6 +164,8 @@ fn run(
         touched: &request.touched,
         metadata: &request.metadata,
         previews: &request.previews,
+        journal: &request.journal,
+        diagnostics: &request.diagnostics,
         limits: request.limits,
     };
     let cancelled = || {

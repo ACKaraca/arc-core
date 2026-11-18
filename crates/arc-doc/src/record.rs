@@ -217,6 +217,53 @@ impl TxnRecord {
     }
 }
 
+/// The fields of an encoded record before its operations, decoded without a type registry
+/// ([`TxnRecord::decode_header`]): what a history list or a package check reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordHeader {
+    /// The transaction identifier.
+    pub txn_id: TransactionId,
+    /// The transaction it was applied on.
+    pub parent: Option<TransactionId>,
+    /// The session that ran it.
+    pub session: SessionId,
+    /// The user identity.
+    pub author: String,
+    /// The UTC time in milliseconds since the Unix epoch.
+    pub time_unix_millis: u64,
+    /// The kind.
+    pub kind: TxnKind,
+    /// The command (opaque).
+    pub command: String,
+    /// The label (opaque).
+    pub label: String,
+    /// The group (opaque).
+    pub group: Option<String>,
+    /// The selection to restore (opaque).
+    pub selection_after: Option<String>,
+    /// The type keys of the objects the operations change, in order of first use.
+    pub type_keys: Vec<TypeKey>,
+    /// The number of operations that follow.
+    pub ops: usize,
+}
+
+impl TxnRecord {
+    /// Decodes the fields of an encoded record before its operations, which need no type
+    /// registry; the operations are not read. Fails like [`TxnRecord::decode`] on the bytes it
+    /// reads (`doc.journal.record_invalid`, `doc.journal.record_limit_exceeded`).
+    pub fn decode_header(bytes: &[u8], limits: &Limits) -> Result<RecordHeader> {
+        if u64::try_from(bytes.len()).map_or(true, |n| n > limits.input_bytes) {
+            return Err(limit("input_bytes", limits.input_bytes));
+        }
+        Reader {
+            bytes,
+            at: 0,
+            limits,
+        }
+        .header()
+    }
+}
+
 fn invalid(reason: &'static str) -> Error {
     Error::new(codes::JOURNAL_RECORD_INVALID).with_detail("reason", reason)
 }
@@ -677,7 +724,7 @@ impl<'a> Reader<'a> {
         })
     }
 
-    fn record(&mut self, registry: &TypeRegistry) -> Result<TxnRecord> {
+    fn header(&mut self) -> Result<RecordHeader> {
         if self.varint()? != RECORD_FORMAT {
             return Err(invalid("unknown format version"));
         }
@@ -692,14 +739,45 @@ impl<'a> Reader<'a> {
         let group = self.option(Self::text)?;
         let selection_after = self.option(Self::text)?;
         let n = self.count(self.limits.record_count, "record_count")?;
-        let mut keys = Vec::with_capacity(n.min(PREALLOCATE));
+        let mut type_keys = Vec::with_capacity(n.min(PREALLOCATE));
         for _ in 0..n {
-            keys.push(
+            type_keys.push(
                 TypeKey::new(self.text()?)
                     .map_err(|error| invalid("type key").with_source(error))?,
             );
         }
-        let n = self.count(self.limits.record_count, "record_count")?;
+        let ops = self.count(self.limits.record_count, "record_count")?;
+        Ok(RecordHeader {
+            txn_id,
+            parent,
+            session,
+            author,
+            time_unix_millis,
+            kind,
+            command,
+            label,
+            group,
+            selection_after,
+            type_keys,
+            ops,
+        })
+    }
+
+    fn record(&mut self, registry: &TypeRegistry) -> Result<TxnRecord> {
+        let RecordHeader {
+            txn_id,
+            parent,
+            session,
+            author,
+            time_unix_millis,
+            kind,
+            command,
+            label,
+            group,
+            selection_after,
+            type_keys: keys,
+            ops: n,
+        } = self.header()?;
         let mut ops = Vec::with_capacity(n.min(PREALLOCATE));
         let mut type_keys = Vec::with_capacity(n.min(PREALLOCATE));
         for _ in 0..n {

@@ -1,8 +1,12 @@
 //! The regeneration scheduler (CORE-DOC-031) and the cancellation of running jobs
 //! (CORE-DOC-032).
 //!
-//! A [`Scheduler`] evaluates the dirty nodes of one document's [`Graph`] on a fixed pool of
-//! worker threads, highest [`Priority`] first and first in, first out within a priority.
+//! A [`Scheduler`] evaluates the dirty nodes of one document's [`Graph`] on the worker threads
+//! of one pool that every document of the process shares, highest [`Priority`] first and first
+//! in, first out within a priority. The pool's threads take the highest priority any document
+//! has queued and, among documents with work of that priority, turn to them in rotation, so
+//! every document makes progress; each document runs at most its configured number of jobs at
+//! once. Stopping one document cancels its jobs and waits for them only.
 //! Independent nodes run in parallel, one job per node: the scheduler never runs two jobs of
 //! one node at once, and a node demanded from inside a job is evaluated inline by that job
 //! ([`crate::graph::EvalContext::node`]), so no worker waits for another.
@@ -24,10 +28,12 @@
 //! jobs run on the calling thread when [`Scheduler::pump`] or [`Scheduler::wait_idle`] is
 //! called, and [`Scheduler::ensure`] evaluates inline as everywhere.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
 use arc_base::{Cancel, Error, ObjectId, Result};
@@ -90,6 +96,155 @@ pub fn default_workers() -> usize {
     }
 }
 
+/// The most threads the shared pool starts: the logical cores minus one, at least two, so two
+/// jobs can always run at once.
+fn pool_cap() -> usize {
+    std::thread::available_parallelism()
+        .map_or(2, |n| n.get().saturating_sub(1))
+        .max(2)
+}
+
+/// The number of threads the process-wide worker pool has started. It grows to the largest
+/// number of workers a document asked for, at most the logical cores minus one (at least two),
+/// and never shrinks; the threads live as long as the process.
+#[must_use]
+pub fn pool_threads() -> usize {
+    pool().lock().threads
+}
+
+/// The worker pool every scheduler of the process shares.
+struct Pool {
+    state: Mutex<PoolState>,
+    /// Wakes the pool's threads: work was queued, a scan is due, or a job ended.
+    work: Condvar,
+}
+
+#[derive(Default)]
+struct PoolState {
+    /// The schedulers with workers, in the order they started.
+    members: Vec<Weak<Inner>>,
+    /// The member the next search for work starts at.
+    cursor: usize,
+    threads: usize,
+}
+
+fn pool() -> &'static Pool {
+    static POOL: OnceLock<Pool> = OnceLock::new();
+    POOL.get_or_init(|| Pool {
+        state: Mutex::new(PoolState::default()),
+        work: Condvar::new(),
+    })
+}
+
+/// Distinguishes the schedulers of the process; 0 is none.
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    /// The scheduler whose job the current pool thread runs, or 0.
+    static CURRENT: Cell<u64> = const { Cell::new(0) };
+}
+
+impl Pool {
+    fn lock(&self) -> MutexGuard<'_, PoolState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Wakes the pool's threads. Taking the pool's lock first means a thread that just found
+    /// no work is already waiting, so the wake-up is not lost. Never called with a scheduler's
+    /// lock held: the lock order is pool, then scheduler.
+    fn wake(&self) {
+        drop(self.lock());
+        self.work.notify_all();
+    }
+
+    /// Adds `inner` to the members and starts threads up to its workers, within the cap.
+    fn join(&'static self, inner: &Arc<Inner>) -> Result<()> {
+        let mut state = self.lock();
+        state.members.push(Arc::downgrade(inner));
+        let wanted = inner.workers.min(pool_cap());
+        while state.threads < wanted {
+            let n = state.threads;
+            std::thread::Builder::new()
+                .name(format!("arc-doc-regen-{n}"))
+                .spawn(move || self.worker())
+                .map_err(|error| stopped().with_detail("reason", error.to_string()))?;
+            state.threads += 1;
+        }
+        Ok(())
+    }
+
+    /// Removes `inner` (and members already dropped) from the members.
+    fn leave(&self, inner: &Inner) {
+        self.lock()
+            .members
+            .retain(|member| member.upgrade().is_some_and(|m| m.id != inner.id));
+    }
+
+    /// The loop of a pool thread: takes the next job of any member and runs it.
+    fn worker(&self) {
+        loop {
+            let (inner, key, priority) = {
+                let mut state = self.lock();
+                loop {
+                    match Self::pick(&mut state) {
+                        (Some(job), _) => break job,
+                        // Another thread took the work found between looking and taking.
+                        (None, true) => {}
+                        (None, false) => {
+                            state = self
+                                .work
+                                .wait(state)
+                                .unwrap_or_else(PoisonError::into_inner);
+                        }
+                    }
+                }
+            };
+            CURRENT.with(|current| current.set(inner.id));
+            // Errors are kept in the node's state or the diagnostics list.
+            drop(inner.run(&key, priority, true));
+            CURRENT.with(|current| current.set(0));
+            {
+                let mut state = inner.lock();
+                state.pooled = state.pooled.saturating_sub(1);
+            }
+            inner.done.notify_all();
+            drop(inner);
+            self.wake();
+        }
+    }
+
+    /// The next job: the highest priority any member has queued, from the first member with
+    /// work of that priority at or after the cursor. The flag is true when some member had work
+    /// that could not be taken.
+    fn pick(state: &mut PoolState) -> (Option<(Arc<Inner>, NodeKey, Priority)>, bool) {
+        state.members.retain(|member| member.strong_count() > 0);
+        let n = state.members.len();
+        let mut best: Option<(usize, Priority)> = None;
+        for step in 0..n {
+            let at = state.cursor.saturating_add(step) % n;
+            let Some(inner) = state.members.get(at).and_then(Weak::upgrade) else {
+                continue;
+            };
+            if let Some(priority) = inner.peek()
+                && best.is_none_or(|(_, b)| priority < b)
+            {
+                best = Some((at, priority));
+            }
+        }
+        let Some((at, _)) = best else {
+            return (None, false);
+        };
+        let Some(inner) = state.members.get(at).and_then(Weak::upgrade) else {
+            return (None, true);
+        };
+        let Some((key, priority)) = inner.take() else {
+            return (None, true);
+        };
+        state.cursor = at.saturating_add(1);
+        (Some((inner, key, priority)), true)
+    }
+}
+
 struct Running {
     /// The job's token, once it began.
     cancel: Option<Cancel>,
@@ -112,6 +267,8 @@ struct State {
     /// The graph's dirty nodes must be compared with the queue once it is empty.
     scan: bool,
     stopped: bool,
+    /// The jobs of this scheduler that pool threads run.
+    pooled: usize,
 }
 
 impl State {
@@ -183,17 +340,32 @@ impl State {
         None
     }
 
+    /// The priority of the next valid queue entry, dropping stale entries in front of it.
+    fn front(&mut self) -> Option<Priority> {
+        for priority in Priority::ALL {
+            let queue = self.queues.get_mut(priority.index())?;
+            while let Some(key) = queue.front() {
+                if self.queued.get(key) == Some(&priority) {
+                    return Some(priority);
+                }
+                queue.pop_front();
+            }
+        }
+        None
+    }
+
     fn idle(&self) -> bool {
         self.queued.is_empty() && self.running.is_empty() && !self.scan
     }
 }
 
 struct Inner {
+    /// Distinguishes this scheduler in the pool.
+    id: u64,
     graph: Graph,
+    /// The most jobs of this scheduler pool threads run at once; none: jobs run when pumped.
     workers: usize,
     state: Mutex<State>,
-    /// Wakes workers: work was queued, a scan is due, or the scheduler stopped.
-    work: Condvar,
     /// Wakes waiters: a job ended or the queue ran dry.
     done: Condvar,
     /// Serializes draining transitions, so events and diagnostics follow the drain order.
@@ -207,45 +379,74 @@ impl Inner {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The next job, marked running; waits for one when `wait`. `None` once stopped, or when
-    /// there is nothing to do and `wait` is false.
-    fn next_job(&self, wait: bool) -> Option<(NodeKey, Priority)> {
-        let mut state = self.lock();
-        loop {
-            if state.stopped {
-                return None;
-            }
-            if let Some((key, priority)) = state.pop() {
-                state.running.insert(
-                    key.clone(),
-                    Running {
-                        cancel: None,
-                        checked: 0,
-                    },
-                );
-                return Some((key, priority));
-            }
-            if state.scan {
-                state.scan = false;
-                for key in self.graph.dirty_keys() {
-                    if !state.skipped.contains(&key) {
-                        let priority = state.priority_of(&key);
-                        state.enqueue(key, priority, false);
-                    }
-                }
-                if state.queued.is_empty() {
-                    self.done.notify_all();
-                }
-                continue;
-            }
-            if !wait {
-                return None;
-            }
-            state = self
-                .work
-                .wait(state)
-                .unwrap_or_else(PoisonError::into_inner);
+    /// Wakes the pool's threads when this scheduler uses them. Never called with the
+    /// scheduler's lock held.
+    fn wake(&self) {
+        if self.workers > 0 {
+            pool().wake();
         }
+    }
+
+    /// Queues the graph's dirty nodes when a scan is due and the queue is empty.
+    fn scan(&self, state: &mut State) {
+        if !state.scan || state.front().is_some() {
+            return;
+        }
+        state.scan = false;
+        for key in self.graph.dirty_keys() {
+            if !state.skipped.contains(&key) {
+                let priority = state.priority_of(&key);
+                state.enqueue(key, priority, false);
+            }
+        }
+        if state.queued.is_empty() {
+            self.done.notify_all();
+        }
+    }
+
+    /// The priority of the job a pool thread could take next: `None` when stopped, at the
+    /// limit of running jobs, or without queued work.
+    fn peek(&self) -> Option<Priority> {
+        let mut state = self.lock();
+        if state.stopped || state.pooled >= self.workers {
+            return None;
+        }
+        self.scan(&mut state);
+        state.front()
+    }
+
+    /// Takes the next job for a pool thread, marked running.
+    fn take(&self) -> Option<(NodeKey, Priority)> {
+        let mut state = self.lock();
+        if state.stopped || state.pooled >= self.workers {
+            return None;
+        }
+        let job = Self::start_next(&mut state)?;
+        state.pooled += 1;
+        Some(job)
+    }
+
+    fn start_next(state: &mut State) -> Option<(NodeKey, Priority)> {
+        let (key, priority) = state.pop()?;
+        state.running.insert(
+            key.clone(),
+            Running {
+                cancel: None,
+                checked: 0,
+            },
+        );
+        Some((key, priority))
+    }
+
+    /// The next job for the calling thread, marked running; `None` once stopped or when there
+    /// is nothing to do.
+    fn next_job(&self) -> Option<(NodeKey, Priority)> {
+        let mut state = self.lock();
+        if state.stopped {
+            return None;
+        }
+        self.scan(&mut state);
+        Self::start_next(&mut state)
     }
 
     /// Runs one job of `key`, which `next_job` or `ensure` marked running. A stale outcome is
@@ -316,8 +517,8 @@ impl Inner {
             }
         }
         drop(state);
-        self.work.notify_all();
         self.done.notify_all();
+        self.wake();
         result
     }
 
@@ -340,7 +541,7 @@ impl Inner {
                 }
             }
         }
-        self.work.notify_all();
+        self.wake();
         let problem = |kind: Option<StateKind>| {
             matches!(
                 kind,
@@ -400,7 +601,7 @@ impl Inner {
             state.skipped.clear();
             state.scan = true;
         }
-        self.work.notify_all();
+        self.wake();
         self.settle();
     }
 }
@@ -421,11 +622,10 @@ fn stopped() -> Error {
 }
 
 /// The regeneration scheduler of one document. It is `Send + Sync`. Dropping it, or
-/// [`Scheduler::shutdown`], cancels every running job and joins the workers.
+/// [`Scheduler::shutdown`], cancels its running jobs and waits for them, never for the jobs of
+/// another document.
 pub struct Scheduler {
     inner: Arc<Inner>,
-    #[cfg(not(target_arch = "wasm32"))]
-    threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 impl fmt::Debug for Scheduler {
@@ -440,8 +640,11 @@ impl fmt::Debug for Scheduler {
 }
 
 impl Scheduler {
-    /// Starts `workers` worker threads on `graph` (none on `wasm32`; with none, jobs run when
-    /// pumped) and becomes the graph's observer. Node diagnostics go to `diagnostics`, which
+    /// Starts the scheduler of `graph`, which runs up to `workers` jobs at once on the threads
+    /// of the process-wide pool (none on `wasm32`; with none, jobs run when pumped), and
+    /// becomes the graph's observer. The pool starts threads up to `workers`, at most the
+    /// logical cores minus one and at least two ([`pool_threads`]); they are shared by every
+    /// document. Node diagnostics go to `diagnostics`, which
     /// also receives each change set; `regenerated` events go to `emitter`. The graph's dirty
     /// nodes are queued at background priority.
     ///
@@ -458,13 +661,13 @@ impl Scheduler {
             workers
         };
         let inner = Arc::new(Inner {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             graph: graph.clone(),
             workers,
             state: Mutex::new(State {
                 scan: true,
                 ..State::default()
             }),
-            work: Condvar::new(),
             done: Condvar::new(),
             settle: Mutex::new(()),
             diagnostics,
@@ -472,26 +675,9 @@ impl Scheduler {
         });
         let scheduler = Self {
             inner: Arc::clone(&inner),
-            #[cfg(not(target_arch = "wasm32"))]
-            threads: Mutex::new(Vec::new()),
         };
-        #[cfg(not(target_arch = "wasm32"))]
-        for n in 0..workers {
-            let worker = Arc::clone(&inner);
-            let handle = std::thread::Builder::new()
-                .name(format!("arc-doc-regen-{n}"))
-                .spawn(move || {
-                    while let Some((key, priority)) = worker.next_job(true) {
-                        // Errors are kept in the node's state or the diagnostics list.
-                        drop(worker.run(&key, priority, true));
-                    }
-                })
-                .map_err(|error| stopped().with_detail("reason", error.to_string()))?;
-            scheduler
-                .threads
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(handle);
+        if workers > 0 {
+            pool().join(&inner)?;
         }
         let weak: Weak<Inner> = Arc::downgrade(&inner);
         graph.set_observer(Some(Arc::new(move |changes: &ChangeSet| {
@@ -499,10 +685,11 @@ impl Scheduler {
                 inner.on_commit(changes);
             }
         })));
+        inner.wake();
         Ok(scheduler)
     }
 
-    /// The number of worker threads.
+    /// The most jobs of this document the pool runs at once; 0 when jobs run only when pumped.
     #[must_use]
     pub fn workers(&self) -> usize {
         self.inner.workers
@@ -547,7 +734,7 @@ impl Scheduler {
             state.enqueue(key, priority, false);
         }
         drop(state);
-        self.inner.work.notify_all();
+        self.inner.wake();
     }
 
     /// Removes the priority [`Scheduler::prioritize`] gave `keys`; they fall back to the rules
@@ -592,7 +779,7 @@ impl Scheduler {
             state.enqueue(key, priority, false);
         }
         drop(state);
-        self.inner.work.notify_all();
+        self.inner.wake();
     }
 
     /// The priority `key` is scheduled with when it is dirty.
@@ -653,7 +840,7 @@ impl Scheduler {
     /// how many ran. On `wasm32`, and with no workers, this is how jobs run.
     pub fn pump(&self) -> usize {
         let mut count = 0usize;
-        while let Some((key, priority)) = self.inner.next_job(false) {
+        while let Some((key, priority)) = self.inner.next_job() {
             // Errors are kept in the node's state or the diagnostics list.
             drop(self.inner.run(&key, priority, true));
             count = count.saturating_add(1);
@@ -685,9 +872,10 @@ impl Scheduler {
         state.idle()
     }
 
-    /// Stops the scheduler: removes it as the graph's observer, cancels every running job,
-    /// empties the queue and joins the workers (unless called from one). Calling it twice
-    /// does nothing more.
+    /// Stops the scheduler: removes it as the graph's observer, cancels its running jobs,
+    /// empties its queue, leaves the shared pool and waits until the pool's threads have ended
+    /// its jobs (unless called from one of them); the jobs of other documents go on and are
+    /// never waited for. Calling it twice does nothing more.
     pub fn shutdown(&self) {
         self.inner.graph.set_observer(None);
         {
@@ -703,24 +891,22 @@ impl Scheduler {
                 queue.clear();
             }
         }
-        self.inner.work.notify_all();
         self.inner.done.notify_all();
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let handles: Vec<_> = self
-                .threads
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .drain(..)
-                .collect();
-            let current = std::thread::current().id();
-            for handle in handles {
-                if handle.thread().id() != current {
-                    // Jobs contain their unwinds, so a worker does not end in a panic.
-                    drop(handle.join());
-                }
-            }
+        if self.inner.workers == 0 {
+            return;
         }
+        pool().leave(&self.inner);
+        if CURRENT.with(Cell::get) == self.inner.id {
+            return;
+        }
+        let state = self.inner.lock();
+        // Jobs contain their unwinds and were cancelled: they end at their next yield point.
+        drop(
+            self.inner
+                .done
+                .wait_while(state, |s| s.pooled > 0)
+                .unwrap_or_else(PoisonError::into_inner),
+        );
     }
 }
 

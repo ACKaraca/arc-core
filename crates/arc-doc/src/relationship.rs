@@ -111,7 +111,6 @@ pub(crate) fn references_and_cardinality<'a>(
 /// The references held in `values`, field values of `fields`, without the header owner: what
 /// [`references`] lists after the owner, for a field list that does not come from a registry
 /// (the schema of a stored descriptor).
-#[cfg(feature = "package")]
 pub(crate) fn field_references<'a>(
     fields: &'a [FieldDecl],
     values: &[Option<Value>],

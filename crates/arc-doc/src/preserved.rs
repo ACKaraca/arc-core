@@ -17,17 +17,33 @@
 //!   objects unchanged.
 //! - It takes part in reference integrity as a target: a reference to it is not dangling, and the
 //!   type check of the reference uses the type key of its row. Its own header owner is a
-//!   reference ("references kept for integrity"): it enters the reverse reference index. Its
-//!   field references are not indexed, since its payload is not decoded.
+//!   reference ("references kept for integrity"): it enters the reverse reference index. The
+//!   field references of a preserved object of an unregistered type are decoded with the
+//!   descriptor its document stores for its type and version ([`HeldObject::references`]) and
+//!   enter the index too, with the relationship rules of that descriptor; its payload is never
+//!   rewritten. Other held objects hold their owner only.
 //! - Its stored row is written back unchanged on every save ([`HeldObject::row`]).
 
 use std::sync::Arc;
 
-use arc_base::Error;
+use arc_base::{Error, ObjectId};
 
+use crate::error::codes;
 use crate::load::StoredObject;
-use crate::schema::TypeKey;
+use crate::relationship::ReferenceField;
+use crate::schema::{ReferenceSpec, TypeKey};
 use crate::snapshot::Object;
+
+/// A field reference of a preserved object, decoded with the stored descriptor of its type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldReference {
+    /// The field path that holds it.
+    pub field: ReferenceField,
+    /// The target identifier.
+    pub target: ObjectId,
+    /// The allowed target types and the relationship rule the descriptor states.
+    pub spec: ReferenceSpec,
+}
 
 /// Why a stored object is held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -47,6 +63,7 @@ pub struct HeldObject {
     object: Arc<Object>,
     row: StoredObject,
     reason: Error,
+    references: Vec<HeldReference>,
 }
 
 impl HeldObject {
@@ -63,7 +80,34 @@ impl HeldObject {
             object: Arc::new(object),
             row,
             reason,
+            references: Vec::new(),
         }
+    }
+
+    /// The object with the field references decoded from its payload.
+    pub(crate) fn with_references(mut self, references: Vec<HeldReference>) -> Self {
+        self.references = references;
+        self
+    }
+
+    /// The field references decoded with the stored descriptor of its type, in field order;
+    /// empty for a quarantined object and for a preserved object whose descriptor or payload
+    /// does not decode. The header owner is not among them.
+    #[must_use]
+    pub fn references(&self) -> &[HeldReference] {
+        &self.references
+    }
+
+    /// The error of a write to this object: `doc.object.not_modifiable` (argument `id`, detail
+    /// `kind`).
+    pub(crate) fn not_modifiable(&self) -> Error {
+        let kind = match self.kind {
+            HeldKind::Preserved => "preserved",
+            HeldKind::Quarantined => "quarantined",
+        };
+        Error::new(codes::OBJECT_NOT_MODIFIABLE)
+            .with_arg("id", self.object.id.to_string())
+            .with_detail("kind", kind)
     }
 
     /// Whether the object is preserved or quarantined.

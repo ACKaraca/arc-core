@@ -94,6 +94,8 @@ fn save_state(
         touched: &touched,
         metadata: &metadata,
         previews: &previews,
+        journal: &[],
+        diagnostics: &[],
         limits: Limits::DEFAULT,
     };
     save_as(target, &save, progress).map(|_| ())

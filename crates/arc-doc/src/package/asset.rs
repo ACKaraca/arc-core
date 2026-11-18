@@ -574,6 +574,13 @@ fn referenced(save: &Save<'_>, stored: &[Vec<u8>]) -> BTreeSet<Vec<u8>> {
         .map(|hash| hash.0.to_vec())
         .collect();
     let candidates: HashSet<&[u8]> = stored.iter().map(Vec::as_slice).collect();
+    let mut scan = |bytes: &[u8]| {
+        for window in bytes.windows(32) {
+            if candidates.contains(window) {
+                keep.insert(window.to_vec());
+            }
+        }
+    };
     let held = save.snapshot.held().map(|(_, held)| held.row());
     let unaddressable = save
         .loaded
@@ -583,10 +590,20 @@ fn referenced(save: &Save<'_>, stored: &[Vec<u8>]) -> BTreeSet<Vec<u8>> {
         if row.encoding != 0 {
             return stored.iter().cloned().collect();
         }
-        for window in row.payload.windows(32) {
-            if candidates.contains(window) {
-                keep.insert(window.to_vec());
-            }
+        scan(&row.payload);
+    }
+    // The retained journal records and the foreign data refer to assets too.
+    let history = super::history::rows_of(save, save.metadata.save_counter.saturating_add(1));
+    for record in &history.journal {
+        scan(&record.record);
+    }
+    for row in history.foreign {
+        if let Some(hash) = row
+            .asset
+            .as_ref()
+            .filter(|h| candidates.contains(h.as_slice()))
+        {
+            keep.insert(hash.clone());
         }
     }
     keep

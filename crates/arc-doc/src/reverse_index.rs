@@ -121,7 +121,7 @@ impl ReverseIndex {
         }
     }
 
-    fn insert(&mut self, target: ObjectId, source: ObjectId, field: ReferenceField) {
+    pub(crate) fn insert(&mut self, target: ObjectId, source: ObjectId, field: ReferenceField) {
         let key = Key {
             target,
             referrer: Referrer { source, field },

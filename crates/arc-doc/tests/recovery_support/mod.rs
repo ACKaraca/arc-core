@@ -82,6 +82,8 @@ pub fn write_base(path: &Path, state: &State, counter: u64) {
         touched: &touched,
         metadata: &metadata,
         previews: &[],
+        journal: &[],
+        diagnostics: &[],
         limits: Limits::DEFAULT,
     };
     save_as(path, &save, &mut |_| Ok(())).unwrap();
