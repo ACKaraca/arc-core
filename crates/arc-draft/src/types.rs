@@ -44,6 +44,9 @@ pub const ELLIPTICAL_ARC: &str = "core.draft.elliptical_arc";
 /// A bulge polyline with per-vertex widths: common fields, then `geometry` and
 /// `continuous_pattern`.
 pub const POLYLINE: &str = "core.draft.polyline";
+/// A spline: common fields, then `geometry` (a NURBS curve, encoding version 2) and
+/// `fit_points`.
+pub const SPLINE: &str = "core.draft.spline";
 /// A block reference: common fields, then `block`, `position`, `scale`, `rotation`,
 /// `attributes`.
 pub const BLOCK_REF: &str = "core.draft.block_ref";
@@ -63,6 +66,7 @@ pub const ENTITIES: &[&str] = &[
     ELLIPSE,
     ELLIPTICAL_ARC,
     POLYLINE,
+    SPLINE,
     BLOCK_REF,
     WIPEOUT,
     crate::text::TEXT,
@@ -126,6 +130,8 @@ pub mod entity {
     pub const CONTINUOUS_PATTERN: usize = 17;
     /// `frame` of a wipeout: whether its boundary is drawn.
     pub const WIPEOUT_FRAME: usize = 17;
+    /// `fit_points` of a spline.
+    pub const SPLINE_FIT_POINTS: usize = 17;
     /// `position` of a block reference.
     pub const REF_POSITION: usize = 17;
     /// `scale` of a block reference: per-axis factors, none zero.
@@ -631,7 +637,7 @@ fn block_ref_fields() -> Vec<FieldDecl> {
 /// Every drafting type declaration.
 fn declarations() -> arc_base::Result<Vec<TypeDecl>> {
     let curve = || with_kind(vec![geometry()]);
-    let table: [(&str, Vec<FieldDecl>, Vec<TypeValidator>); 15] = [
+    let table: [(&str, Vec<FieldDecl>, Vec<TypeValidator>); 16] = [
         (SPACE, space_fields(), vec![space_findings]),
         (LAYER, layer_fields(), vec![]),
         (LINETYPE, linetype_fields(), vec![linetype_findings]),
@@ -657,6 +663,11 @@ fn declarations() -> arc_base::Result<Vec<TypeDecl>> {
             with_kind(vec![geometry(), flag("continuous_pattern", false)]),
             vec![curve_entity::<Polyline2>],
         ),
+        (
+            SPLINE,
+            with_kind(crate::spline::fields()),
+            vec![crate::spline::findings],
+        ),
         (BLOCK_REF, block_ref_fields(), vec![block_ref_entity]),
         (
             WIPEOUT,
@@ -672,6 +683,7 @@ fn declarations() -> arc_base::Result<Vec<TypeDecl>> {
         .chain(crate::text::declarations())
         .chain(crate::dimension::declarations())
         .chain(crate::leader::declarations())
+        .chain(crate::plot_style::declarations())
         .map(|(key, fields, validators)| {
             let mut decl = TypeDecl::new(TypeKey::new(key)?, Schema::new(version, fields));
             decl.validators = validators;
@@ -751,7 +763,7 @@ mod tests {
     fn every_type_registers_and_field_indices_match_names() {
         let mut registry = TypeRegistry::new();
         register_types(&mut registry).unwrap();
-        assert_eq!(registry.len(), 28);
+        assert_eq!(registry.len(), 30);
         let name = |key: &str, i: usize| registry.get(key).unwrap().schema.fields[i].name.clone();
         assert_eq!(name(LINE, entity::EXTRUSION), "extrusion");
         assert_eq!(name(LINE, entity::KIND), "geometry");

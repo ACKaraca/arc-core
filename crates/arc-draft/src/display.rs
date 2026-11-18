@@ -511,7 +511,11 @@ fn transform_curve(curve: &Curve2, t: &Transform2, tol: &Tolerance) -> Result<Cu
     curve.transformed(t, tol)
 }
 
-fn transform_polyline(p: &Polyline2, t: &Transform2, tol: &Tolerance) -> Result<Polyline2> {
+pub(crate) fn transform_polyline(
+    p: &Polyline2,
+    t: &Transform2,
+    tol: &Tolerance,
+) -> Result<Polyline2> {
     match Curve2::Polyline(p.clone()).transformed(t, tol)? {
         Curve2::Polyline(q) => Ok(q),
         _ => Err(Error::new(codes::GEOMETRY_INVALID)),
@@ -525,7 +529,7 @@ fn transform_piece(p: &Piece, t: &Transform2, tol: &Tolerance) -> Result<Piece> 
     })
 }
 
-fn transform_shape(shape: &Shape, t: &Transform2, tol: &Tolerance) -> Result<Shape> {
+pub(crate) fn transform_shape(shape: &Shape, t: &Transform2, tol: &Tolerance) -> Result<Shape> {
     Ok(match shape {
         Shape::Point(p) => Shape::Point(t * p),
         Shape::Stroke { curve, drawn } => Shape::Stroke {

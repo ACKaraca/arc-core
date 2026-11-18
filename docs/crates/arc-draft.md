@@ -127,7 +127,7 @@ cycle rejection.
 ## Model core as implemented
 
 The first part of the crate implements CORE-DRAFT-001, 002, 005, 009, 016, 017, 018, 022 and
-023. Splines (part of CORE-DRAFT-002) wait for the NURBS curves of `arc-geom`.
+023. Splines, the last kind of CORE-DRAFT-002, are stored as NURBS curves (see "Splines" below).
 
 ### Object types
 
@@ -142,6 +142,7 @@ The first part of the crate implements CORE-DRAFT-001, 002, 005, 009, 016, 017, 
 | `core.draft.point` | common fields; `position` |
 | `core.draft.line`, `core.draft.ray`, `core.draft.construction_line`, `core.draft.circle`, `core.draft.arc`, `core.draft.ellipse`, `core.draft.elliptical_arc` | common fields; `geometry`: a segment, ray, line, circle, arc, ellipse or elliptical arc in the `arc.geom` encoding, version 1 |
 | `core.draft.polyline` | common fields; `geometry`: a polyline with bulges and per-vertex widths; `continuous_pattern` |
+| `core.draft.spline` | common fields; `geometry`: a NURBS curve in the `arc.geom` encoding, version 2; `fit_points`: a list of points (default empty) |
 | `core.draft.block_ref` | common fields; `block`; `position`; `scale` (per axis); `rotation` in radians; `attributes`: a map from tag to value |
 
 The common fields of every entity, in order: `layer`; `color_by` and `color`; `linetype_by` and
@@ -169,6 +170,27 @@ Rules:
   with a positive sum (`draft.linetype.pattern_empty`).
 - **Elevation and extrusion (CORE-DRAFT-009).** `elevation`, `thickness` and `extrusion` are
   stored and returned unchanged; no operation of this part interprets them.
+
+### Splines
+
+A spline is an entity whose `geometry` is an `arc-geom` NURBS curve (CORE-GEOM-008). The field
+descriptor names the encoding `arc.geom` at version 2, the version `GeomCodec::encoding` reports
+for a NURBS curve ([ADR-0013](../adr/0013-geometry-encoding.md), amendment); the type validator
+requires the bytes to decode as a NURBS curve (`draft.geometry.invalid`).
+
+- **Control points.** `core.draft.spline.create` with `control_points` builds the curve of
+  `degree` on the clamped uniform knot vector over [0, 1] (`Nurbs2::from_control_points`); the
+  weights default to 1. `fit_points` is empty.
+- **Fit points.** With `fit_points` the curve is `Nurbs2::interpolate` of the points at the
+  degree, under the default tolerance, and `fit_points` keeps the points as given. The fit points
+  are data: they are not read back to rebuild the curve, and editing the field alone leaves the
+  geometry as it is. `core.draft.spline.set` replaces both fields together.
+- **Descriptions.** Exactly one of `control_points` and `fit_points` is given, and `weights` only
+  with control points (`draft.field.invalid`); the construction errors of `arc-geom` are passed
+  on (degree not below the number of points, coincident consecutive fit points, non-finite
+  numbers). Point counts are bounded by the invocation's `array_length`.
+- **Display.** A spline contributes one `Stroke` with the exact curve and, for a linetype,
+  dashes by arc length (`linetype::dashes`), like every curve entity.
 
 ### Document validators
 
@@ -248,7 +270,9 @@ family.
 |---|---|
 | `core.draft.space.create` | Creates a space with `name`, `kind` and optional `unit` |
 | `core.draft.space.modify` | Sets a field of spaces |
-| `core.draft.entity.create` | Creates a point (`{"kind": "point", "position": [x, y]}`) or a curve entity, chosen by the curve's kind, in `owner`, optionally on `layer` |
+| `core.draft.entity.create` | Creates a point (`{"kind": "point", "position": [x, y]}`) or a curve entity, chosen by the curve's kind (a NURBS curve gives a spline with no fit points), in `owner`, optionally on `layer` |
+| `core.draft.spline.create` | Creates a spline in `owner` from `degree` (default 3) and either `control_points` with optional `weights`, or `fit_points`; optionally on `layer` |
+| `core.draft.spline.set` | Replaces the curve and the fit points of splines from the same description |
 | `core.draft.entity.modify` | Sets a field of entities, block references included |
 | `core.draft.entity.delete` | Deletes entities |
 | `core.draft.layer.create` | Creates a layer with `name` and optional `color`, `linetype` and `lineweight` |
@@ -777,6 +801,129 @@ so a change of any of these regenerates it.
 
 Other fields change through `core.draft.entity.modify`.
 
+## Plotting as implemented
+
+The fifth part of the crate implements CORE-DRAFT-030, 031 and 032: plot style tables
+(`plot_style`), plot streams (`plot`) and raster output (feature `raster`, `raster`). The plot pipeline of the architecture is in
+[drafting-and-views.md](../architecture/drafting-and-views.md). PDF and SVG writers and TIFF output
+are not part of it.
+
+### Plot style tables (CORE-DRAFT-030)
+
+`register_types` adds `core.draft.plot_style_table`, version 1.0:
+
+| Field | Meaning |
+|---|---|
+| `name` | Unique among plot style tables (`draft.name.taken`) |
+| `kind` | `color_mapped` or `named` |
+| `description` | Optional text |
+| `styles` | Up to 4096 records of the fields below |
+
+A style record holds `name` (the key in a named table), `index` (the key in a color-mapped table,
+an integer from 0 to 255), `color` (absent: use the object's color), `lineweight` (millimeters,
+0 to 10; absent: use the object's lineweight), `screening` (percent of ink, 0 to 100, default 100),
+`linetype` (a reference that blocks deletion of the linetype; absent: use the object's), `end`
+(`butt`, `square`, `round`; default `butt`) and `join` (`miter`, `bevel`, `round`; default
+`miter`). A style of a color-mapped table needs an `index`, a style of a named table a non-empty
+`name` (`draft.plot_style.entry_invalid`), and no key occurs twice
+(`draft.plot_style.duplicate`).
+
+A layout selects a table by name through its `plot_style_table` field; the entity field
+`plot_style` (absent: the layer's) selects a style of a named table. Commands:
+
+| Command | Effect |
+|---|---|
+| `core.draft.plot_style_table.create` | Creates a table from `name`, `kind` and optional `styles` (records with the field names above; `color` is linear RGBA, `linetype` an identifier) |
+| `core.draft.plot_style_table.modify` | Sets a field of tables |
+| `core.draft.plot_style_table.delete` | Deletes tables |
+
+`plot_style::resolve_pen` maps a table (or none) and an appearance (resolved color with its
+source, lineweight, linetype, transparency, plot style name) to a pen:
+
+- **Style lookup.** In a color-mapped table the style is the one whose `index` equals the index of
+  the color's source `Indexed(i)`; a color without an indexed source has no style. In a named
+  table it is the one whose `name` equals the plot style name byte for byte. No table, or no
+  matching style, gives the object's values with 100 percent ink, end `butt` and join `miter`.
+- **Values.** Color: the style's, else the object's. Width: the style's lineweight, else the
+  object's, else 0.25 millimeter. Linetype: the style's, else the object's; the pen records
+  whether the style replaced it.
+- **Not provided.** Grayscale and monochrome color modes and fill styles.
+- **Screening.** With ink `s` = percent / 100, each linear red, green and blue component `c`
+  becomes `c·s + (1 − s)`: the screen mixes the color with white in linear light. The alpha of
+  the chosen color is kept and multiplied by `1 − transparency`.
+
+### Plot streams (CORE-DRAFT-031)
+
+`plot::layout_stream` plots a layout space and `plot::model_stream` a window of a model space on a
+`Paper`. The result, a `PlotStream`, is in millimeters from the lower left corner of the page;
+`area` is the part of the page that may be drawn on. Each `Item` has its source entity, part and
+layer, an optional index into `clips` (a closed polyline on the page) and one of: a point, a
+stroke (the exact curve and, when it is not drawn whole, its pieces), a fill, a wipeout mask, or a
+glyph run (family, face, size, glyph positions and the map to the page), with a `Pen` (color, width
+in millimeters, end style, join style, linetype) for everything but masks.
+
+- **Content and order.** A layout stream holds, in this order, the display list of each viewport
+  in ascending identifier order (`display::viewport_list`; every item has the viewport's clip) and
+  then the layout's own entities (`display::space_list`), each list in draw order. A model stream
+  holds the space's list. Text is the stroke or glyph primitives of the shared text layout. A
+  wipeout is a mask item after what it hides; the stream paints nothing itself, a consumer fills
+  masks in the paper color. Entities that cannot be listed, mapped or cut are left out and listed
+  in `failed`.
+- **Options.** `PlotOptions` has the plot area (`Layout`, `Extents` or a `Window` in source
+  coordinates), the scale (`Fit` or `Ratio`), the offset (`Origin` in millimeters from the lower
+  left of the printable area, or `Center`), rotation in quarter turns counterclockwise (reduced
+  modulo 4), lineweights on or off, plot styles on or off, the plot style table name, the paper
+  color and the most items (`draft.plot.too_large`). `PlotOptions::from_layout` reads the layout's
+  `plot_area` with its window, `plot_scale` as a ratio, `origin` as the offset and
+  `plot_style_table`.
+- **Page.** For a layout the page is the sheet in millimeters (the layout's unit converted);
+  `Layout` area is the printable area, the sheet less the margins. A model stream's paper gives the
+  page and margins in millimeters; there `Layout` means `Extents`. `Extents` is the bounding box of
+  what is drawn (masks and unbounded curves do not count); an area without extent fails with
+  `draft.plot.option_invalid` (argument `option`), as does a non-positive or non-finite scale,
+  a window whose corners are not ascending, an offset that is not finite and margins that leave no
+  printable area.
+- **Placement.** A `Ratio` is paper length per source length in one unit (1:100 is 0.01 whatever
+  the units; an unitless space counts in millimeters), so source coordinates map to millimeters by
+  that ratio times the unit's factor to millimeters. `Fit` is the largest scale at which the area,
+  turned by `rotation`, fits in the printable area. The area is turned about its lower left
+  corner, then placed with its lower left corner at the offset (or centered). Everything is cut
+  to `area`, the plotted area cut to the printable area; a consumer clips to it.
+- **Pens.** Each primitive's resolved color, lineweight, linetype and transparency go through
+  `resolve_pen` with the plot style table named by the options when styles are on, and the style
+  name of the drawing entity, else of its layer. With lineweights off every pen is 0.25
+  millimeter wide.
+- **Dashes.** Dashes are those of the display list, mapped to the page. A style that replaces the
+  linetype generates them again on the mapped curve with the entity's scale times the scale of
+  the viewport map (1 outside viewports), so a pattern keeps its length in the space it is drawn
+  in: model units inside a viewport, layout units on the sheet.
+- **Unbounded curves.** Rays and construction lines outside viewports are cut to the plot area
+  and carry the result as pieces.
+- **Determinism.** The stream is built from sorted identifiers and ordered vectors; `encode`
+  writes a header, every number as its bit pattern and every curve in the `arc.geom` encoding,
+  so identical input gives identical bytes. The result depends on the platform's trigonometric
+  functions only where the display lists do.
+
+### Raster output (CORE-DRAFT-032)
+
+With the feature `raster` (off by default; it adds `tiny-skia` and the `png` feature of `image`),
+`raster::render` draws a stream at `RasterOptions::dpi` (1 to 10000, `draft.raster.invalid`
+otherwise; at most `max_pixels` pixels, `draft.raster.too_large`) and `Raster::png` encodes it.
+
+- **Image.** One pixel is 25.4 / dpi millimeters; the image is the page rounded up to whole
+  pixels, opaque, filled with the paper color, row 0 at the top of the page.
+- **Strokes.** Curves are flattened with a chord tolerance of a tenth of a pixel and a turning
+  angle of 15 degrees, and drawn with anti-aliasing. A pen is `width · dpi / 25.4` pixels wide,
+  at least one, with its end and join styles (miter limit 4). Each drawn piece is a subpath, so
+  dashes have the lengths of the stream; a dot piece is a disc of the pen's width.
+- **Polyline widths.** A polyline with widths is stroked with the larger of the pen width and
+  the mean vertex width; its taper is not drawn.
+- **Fills and masks.** Fills use the pen color; masks the paper color, opaque.
+- **Clips.** Everything is clipped to `area`, and viewport items also to their clip region, as
+  anti-aliased masks.
+- **Not drawn.** Outline glyph runs, and curves that cannot be flattened within one million
+  vertices, are skipped and counted in `Raster::skipped`. TIFF is not written.
+
 ## Error codes
 
 The codes of every part of the crate:
@@ -828,3 +975,11 @@ The codes of every part of the crate:
 | `draft.chain.member_invalid` | `invalid_input` | A chain member is not a linear or aligned dimension, or is listed twice |
 | `draft.annotation.scale_invalid` | `invalid_input` | An annotation scale is not a positive number or is listed twice |
 | `draft.leader.points_invalid` | `invalid_input` | A leader or a leader line has too few points |
+| `draft.plot_style.entry_invalid` | `invalid_input` | A plot style lacks the key its table kind needs: an index or a name |
+| `draft.plot_style.duplicate` | `conflict` | Two styles of a plot style table have the same key |
+| `draft.plot.option_invalid` | `invalid_input` | A plot option is out of range, or the plot area has no extent |
+| `draft.plot.source_invalid` | `invalid_input` | The object to plot is not a layout space with settings, or not a space |
+| `draft.plot.too_large` | `limit_exceeded` | A plot stream would hold more items than the bound |
+| `draft.raster.invalid` | `invalid_input` | A raster resolution or size is out of range |
+| `draft.raster.too_large` | `limit_exceeded` | A raster image would have more pixels than the bound |
+| `draft.raster.encode_failed` | `internal` | The PNG encoder failed |

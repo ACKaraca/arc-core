@@ -121,6 +121,18 @@ fn every_entity_kind_survives_save_and_reopen() {
     for curve in every_curve() {
         f.entity(space, curve_json(&curve));
     }
+    for description in [
+        json!({"control_points": [[0.0, 0.0], [1.0, 2.0], [3.0, 2.0], [4.0, 0.0]]}),
+        json!({"fit_points": [[0.0, 0.0], [1.0, 2.0], [3.0, 3.0], [5.0, 1.0]]}),
+    ] {
+        let mut params = description;
+        params["owner"] = json!(space.to_string());
+        f.run("core.draft.spline.create", params).unwrap();
+    }
+    f.create(
+        "core.draft.plot_style_table.create",
+        json!({"name": "mono", "kind": "color_mapped", "styles": [{"index": 1, "screening": 50.0}]}),
+    );
     let point = f.entity(space, json!({"kind": "point", "position": [1.0, 2.0]}));
     f.run(
         "core.draft.entity.modify",
@@ -140,7 +152,7 @@ fn every_entity_kind_survives_save_and_reopen() {
     .unwrap();
     add_sheet_objects(&mut f, space, layer, dashed);
     let before = f.document.snapshot();
-    assert_eq!(before.len(), 24);
+    assert_eq!(before.len(), 27);
 
     let dir = std::env::temp_dir().join(format!("arc-draft-roundtrip-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

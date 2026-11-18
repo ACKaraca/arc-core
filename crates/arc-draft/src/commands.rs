@@ -71,6 +71,41 @@ const NAMES: &[Names] = &[
         },
     },
     Names {
+        id: "core.draft.spline.create",
+        message_id: "draft-command-spline-create",
+        description: Description {
+            message_id: "draft-command-spline-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.spline.set",
+        message_id: "draft-command-spline-set",
+        description: Description {
+            message_id: "draft-command-spline-set-description",
+        },
+    },
+    Names {
+        id: "core.draft.plot_style_table.create",
+        message_id: "draft-command-plot-style-table-create",
+        description: Description {
+            message_id: "draft-command-plot-style-table-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.plot_style_table.modify",
+        message_id: "draft-command-plot-style-table-modify",
+        description: Description {
+            message_id: "draft-command-plot-style-table-modify-description",
+        },
+    },
+    Names {
+        id: "core.draft.plot_style_table.delete",
+        message_id: "draft-command-plot-style-table-delete",
+        description: Description {
+            message_id: "draft-command-plot-style-table-delete-description",
+        },
+    },
+    Names {
         id: "core.draft.entity.modify",
         message_id: "draft-command-entity-modify",
         description: Description {
@@ -359,7 +394,7 @@ pub struct CreateEntity {
     /// The space or block definition the entity belongs to.
     pub owner: IdParam,
     /// The geometry: an `arc-geom` curve in its JSON form (`kind` `segment`, `ray`, `line`,
-    /// `circle`, `arc`, `ellipse`, `elliptical_arc` or `polyline`), or
+    /// `circle`, `arc`, `ellipse`, `elliptical_arc`, `polyline` or `nurbs`), or
     /// `{"kind": "point", "position": [x, y]}`.
     pub geometry: serde_json::Value,
     /// The layer, if any.
@@ -885,21 +920,21 @@ pub(crate) fn point2([x, y]: [f64; 2]) -> Value {
     Value::Point2(Point2::new(x, y))
 }
 
-fn color([r, g, b, a]: [f32; 4]) -> Value {
+pub(crate) fn color([r, g, b, a]: [f32; 4]) -> Value {
     Value::Color(Box::new(ColorValue {
         rgba: Color::new(r, g, b, a),
         source: None,
     }))
 }
 
-fn set(values: &mut [Option<Value>], index: usize, value: Option<Value>) {
+pub(crate) fn set(values: &mut [Option<Value>], index: usize, value: Option<Value>) {
     if let Some(slot) = values.get_mut(index) {
         *slot = value;
     }
 }
 
 /// Creates an object of `key` owned by `owner` from `values` and selects it.
-fn create(
+pub(crate) fn create(
     ctx: &mut Context<'_>,
     key: &str,
     owner: Option<ObjectId>,
@@ -980,8 +1015,10 @@ fn create_entity_command(ctx: &mut Context<'_>, p: CreateEntity) -> Result<Creat
         Curve2::Ellipse(_) => types::ELLIPSE,
         Curve2::EllipticalArc(_) => types::ELLIPTICAL_ARC,
         Curve2::Polyline(_) => types::POLYLINE,
-        // No spline entity type exists yet.
-        Curve2::Nurbs(_) => return Err(invalid()),
+        Curve2::Nurbs(curve) => {
+            let values = crate::spline::values(curve, &[]);
+            return create_entity(ctx, types::SPLINE, p.owner.0, p.layer, values);
+        }
     };
     let bytes = Value::Geometry(GeometryBytes(curve.encode()));
     create_entity(ctx, key, p.owner.0, p.layer, vec![(entity::KIND, bytes)])
@@ -1104,7 +1141,7 @@ fn modify(ctx: &mut Context<'_>, p: SetField, family: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn delete(ctx: &mut Context<'_>, p: Delete, family: &[&str]) -> Result<()> {
+pub(crate) fn delete(ctx: &mut Context<'_>, p: Delete, family: &[&str]) -> Result<()> {
     let limits = *ctx.limits();
     let txn = ctx.txn()?;
     let snapshot = txn.snapshot().clone();
@@ -1548,7 +1585,7 @@ where
         .with_permissions([Permission::Edit])
 }
 
-fn family(id: &'static str, keys: &'static [&'static str]) -> CommandSpec {
+pub(crate) fn family(id: &'static str, keys: &'static [&'static str]) -> CommandSpec {
     spec(id, move |ctx, p: SetField| modify(ctx, p, keys))
 }
 
@@ -1624,7 +1661,12 @@ pub fn register_commands(registry: &mut Registry) -> Result<()> {
             serde_json::json!({"requested": "Old Drafting", "substitute": "Arc Stroke"}),
         ),
     ];
-    for spec in specs.into_iter().chain(crate::annotation_commands::specs()) {
+    for spec in specs
+        .into_iter()
+        .chain(crate::annotation_commands::specs())
+        .chain(crate::spline::specs())
+        .chain(crate::plot_style::specs())
+    {
         registry.register(spec)?;
     }
     Ok(())

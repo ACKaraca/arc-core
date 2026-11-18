@@ -19,7 +19,7 @@
 //!
 //! The search stops below the limit, so a cycle longer than the limit is reported as too deep.
 //!
-//! **Names.** A layer, linetype, block definition or style that a transaction creates or
+//! **Names.** A layer, linetype, block definition, plot style table or style that a transaction creates or
 //! modifies must not have the exact name (byte for byte) of another live object of its type:
 //! `draft.name.taken` with the argument `name`.
 //!
@@ -47,6 +47,7 @@ use arc_doc::{
 
 use crate::error::codes;
 use crate::layout::{LAYOUT, VIEWPORT};
+use crate::plot_style::PLOT_STYLE_TABLE;
 use crate::style::{DIM_STYLE, STYLES, dim};
 use crate::types::{
     BLOCK, BLOCK_REF, LAYER, LINETYPE, SPACE, SpaceKind, entity, reference_at, table, text_at,
@@ -235,7 +236,9 @@ fn names(candidate: &Snapshot, touched: &BTreeMap<ObjectId, Change>) -> Vec<Find
         let Some(key) = type_of(candidate, id).map(|k| k.as_str().to_owned()) else {
             continue;
         };
-        if ![LAYER, LINETYPE, BLOCK].contains(&key.as_str()) && !STYLES.contains(&key.as_str()) {
+        if ![LAYER, LINETYPE, BLOCK, PLOT_STYLE_TABLE].contains(&key.as_str())
+            && !STYLES.contains(&key.as_str())
+        {
             continue;
         }
         let Some(object) = candidate

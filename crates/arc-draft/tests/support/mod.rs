@@ -218,3 +218,116 @@ pub fn round_trip(f: &Fixture) {
     drop(package);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Makes the entity use its own color, lineweight and linetype.
+pub fn pen(
+    f: &mut Fixture,
+    id: ObjectId,
+    color: [f64; 4],
+    lineweight: f64,
+    linetype: Option<ObjectId>,
+) {
+    f.set(
+        "core.draft.entity.modify",
+        &[id],
+        "color_by",
+        json!("object"),
+    );
+    f.set("core.draft.entity.modify", &[id], "color", json!(color));
+    f.set(
+        "core.draft.entity.modify",
+        &[id],
+        "lineweight_by",
+        json!("object"),
+    );
+    f.set(
+        "core.draft.entity.modify",
+        &[id],
+        "lineweight",
+        json!(lineweight),
+    );
+    if let Some(l) = linetype {
+        f.set(
+            "core.draft.entity.modify",
+            &[id],
+            "linetype_by",
+            json!("object"),
+        );
+        f.set(
+            "core.draft.entity.modify",
+            &[id],
+            "linetype",
+            json!(l.to_string()),
+        );
+    }
+}
+
+pub fn segment_json(x0: f64, y0: f64, x1: f64, y1: f64) -> Value {
+    curve_json(&Curve2::Segment(
+        Segment2::new(Point2::new(x0, y0), Point2::new(x1, y1)).unwrap(),
+    ))
+}
+
+pub const BLACK: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
+
+/// A model space in meters, a landscape A4 layout in millimeters (sheet 297 x 210) and one
+/// viewport at 1:100 showing the model.
+///
+/// The viewport is 200 x 100 mm about (150, 100) and shows the model point (5, 0) at its
+/// center, so a model meter is 10 sheet millimeters: `model_line` from (0, 0) to (10, 0) meters
+/// is the sheet segment (100, 100)-(200, 100), dashed with a pattern of 0.5 m dash and 0.25 m
+/// gap (5 mm and 2.5 mm on the sheet); `far_line` from (0, 2) to (30, 2) leaves the viewport at
+/// x = 250; `sheet_line` is a solid 1 mm line from (10, 10) to (60, 10) on the sheet.
+pub struct Scene {
+    pub f: Fixture,
+    pub model: ObjectId,
+    pub sheet: ObjectId,
+    pub settings: ObjectId,
+    pub viewport: ObjectId,
+    pub dashed: ObjectId,
+    pub model_line: ObjectId,
+    pub far_line: ObjectId,
+    pub sheet_line: ObjectId,
+}
+
+pub fn plot_scene(mut f: Fixture) -> Scene {
+    let model = f.create(
+        "core.draft.space.create",
+        json!({"name": "model", "kind": "model", "unit": "meter"}),
+    );
+    let dashed = f.create(
+        "core.draft.linetype.load",
+        json!({"name": "dashed", "elements": [
+            {"kind": "dash", "length": 0.5}, {"kind": "gap", "length": 0.25}]}),
+    );
+    let created = f
+        .run(
+            "core.draft.layout.create",
+            json!({"name": "sheet", "paper_width": 210.0, "paper_height": 297.0, "orientation": "landscape"}),
+        )
+        .unwrap();
+    let sheet: ObjectId = created["space"].as_str().unwrap().parse().unwrap();
+    let settings: ObjectId = created["layout"].as_str().unwrap().parse().unwrap();
+    let viewport = f.create(
+        "core.draft.viewport.create",
+        json!({"layout": sheet.to_string(), "model": model.to_string(), "center": [150.0, 100.0],
+               "width": 200.0, "height": 100.0, "view_center": [5.0, 0.0], "scale": 0.01}),
+    );
+    let model_line = f.entity(model, segment_json(0.0, 0.0, 10.0, 0.0));
+    pen(&mut f, model_line, BLACK, 0.5, Some(dashed));
+    let far_line = f.entity(model, segment_json(0.0, 2.0, 30.0, 2.0));
+    pen(&mut f, far_line, BLACK, 0.5, None);
+    let sheet_line = f.entity(sheet, segment_json(10.0, 10.0, 60.0, 10.0));
+    pen(&mut f, sheet_line, BLACK, 1.0, None);
+    Scene {
+        f,
+        model,
+        sheet,
+        settings,
+        viewport,
+        dashed,
+        model_line,
+        far_line,
+        sheet_line,
+    }
+}

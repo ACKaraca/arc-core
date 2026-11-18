@@ -58,6 +58,7 @@ third_party = [
   "serde_json",
   "spade",
   "thiserror",
+  "tiny-skia",
   "toml",
   "tracing",
   "tracing-subscriber",

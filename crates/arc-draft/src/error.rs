@@ -281,6 +281,57 @@ pub mod codes {
         message_id: "draft-leader-points-invalid",
     };
 
+    /// A style of a plot style table lacks the key its table kind needs: an index in a
+    /// color-mapped table, a name in a named one.
+    pub const PLOT_STYLE_ENTRY_INVALID: ErrorCode = ErrorCode {
+        code: "draft.plot_style.entry_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-plot-style-entry-invalid",
+    };
+    /// Two styles of a plot style table have the same key; the argument `key` names it.
+    pub const PLOT_STYLE_DUPLICATE: ErrorCode = ErrorCode {
+        code: "draft.plot_style.duplicate",
+        category: Category::Conflict,
+        message_id: "draft-plot-style-duplicate",
+    };
+    /// A plot option is out of range, or the plot area has no extent; the argument `option`
+    /// names it.
+    pub const PLOT_OPTION_INVALID: ErrorCode = ErrorCode {
+        code: "draft.plot.option_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-plot-option-invalid",
+    };
+    /// The object to plot is not a layout space with layout settings, or not a space.
+    pub const PLOT_SOURCE_INVALID: ErrorCode = ErrorCode {
+        code: "draft.plot.source_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-plot-source-invalid",
+    };
+    /// A plot stream would hold more items than the bound.
+    pub const PLOT_TOO_LARGE: ErrorCode = ErrorCode {
+        code: "draft.plot.too_large",
+        category: Category::LimitExceeded,
+        message_id: "draft-plot-too-large",
+    };
+    /// A raster resolution or size is out of range, or the pixmap cannot be allocated.
+    pub const RASTER_INVALID: ErrorCode = ErrorCode {
+        code: "draft.raster.invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-raster-invalid",
+    };
+    /// A raster output would have more pixels than the bound; the argument `limit` names it.
+    pub const RASTER_TOO_LARGE: ErrorCode = ErrorCode {
+        code: "draft.raster.too_large",
+        category: Category::LimitExceeded,
+        message_id: "draft-raster-too-large",
+    };
+    /// The PNG encoder failed.
+    pub const RASTER_ENCODE_FAILED: ErrorCode = ErrorCode {
+        code: "draft.raster.encode_failed",
+        category: Category::Internal,
+        message_id: "draft-raster-encode-failed",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         GEOMETRY_INVALID,
@@ -328,6 +379,14 @@ pub mod codes {
         CHAIN_MEMBER_INVALID,
         ANNOTATION_SCALE_INVALID,
         LEADER_POINTS_INVALID,
+        PLOT_STYLE_ENTRY_INVALID,
+        PLOT_STYLE_DUPLICATE,
+        PLOT_OPTION_INVALID,
+        PLOT_SOURCE_INVALID,
+        PLOT_TOO_LARGE,
+        RASTER_INVALID,
+        RASTER_TOO_LARGE,
+        RASTER_ENCODE_FAILED,
     ];
 }
 

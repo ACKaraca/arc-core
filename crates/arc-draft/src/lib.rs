@@ -26,9 +26,12 @@
 //!   dimension chains (CORE-DRAFT-010 to 012, [`dimension`], [`format`]), leaders and
 //!   multi-leaders (CORE-DRAFT-013, [`leader`]) and annotation scaling (CORE-DRAFT-014,
 //!   [`annotation`]);
+//! - spline entities (CORE-DRAFT-002, [`spline`]);
+//! - plot style tables (CORE-DRAFT-030, [`plot_style`]), plot streams (CORE-DRAFT-031, [`plot`])
+//!   and, with the feature `raster`, raster output (CORE-DRAFT-032, `raster`);
 //! - the `core.draft.*` commands ([`register_commands`]).
 //!
-//! Splines wait for the NURBS curves of `arc-geom`. No function in this crate panics.
+//! No function in this crate panics.
 
 pub mod annotation;
 mod annotation_commands;
@@ -47,7 +50,12 @@ pub mod linetype;
 pub mod order;
 #[cfg(feature = "outline-text")]
 mod outline;
+pub mod plot;
+pub mod plot_style;
 pub mod purge;
+#[cfg(feature = "raster")]
+pub mod raster;
+pub mod spline;
 pub mod stroke_font;
 pub mod style;
 pub mod text;

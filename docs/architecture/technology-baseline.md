@@ -74,8 +74,8 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `egui-wgpu` | The egui renderer on the shared `wgpu` device in `arc-app` (feature `window`; no default features) | MIT or Apache-2.0 |
 | `muda` | Native menu bar of the windowed shell in `arc-app` (feature `window`), macOS only, no default features | MIT or Apache-2.0 |
 | `rfd` | Native file and question dialogs of the windowed shell in `arc-app` (feature `window`; feature `xdg-portal` only: the desktop portal on Linux, no GTK) | MIT |
-| `image` | Image decoding and encoding; in use as a development dependency of `arc-gpu` (PNG reference images) and a dependency of `apps/arc-shell-cli` (PNG output of `render`), feature `png` only | MIT or Apache-2.0 |
-| `tiny-skia` | CPU rasterization for plot raster output and reference images | BSD-3-Clause |
+| `image` | Image decoding and encoding; in use as a development dependency of `arc-gpu` (PNG reference images) and a dependency of `apps/arc-shell-cli` (PNG output of `render`) and of `arc-draft` (feature `raster`, PNG output of plot raster), feature `png` only | MIT or Apache-2.0 |
+| `tiny-skia` | CPU rasterization for plot raster output and reference images; in use in `arc-draft` (feature `raster`; no default features, `std` only) | BSD-3-Clause |
 | `cxx` | C++ binding in `arc-brep-occt` | MIT or Apache-2.0 |
 | `egui_table`, `egui-snarl` | Bases for virtualized tables and the node editor in `arc-ui`; not in use yet | MIT or Apache-2.0 |
 | `minidumper`, `crash-handler`, `sentry` | Out-of-process crash capture and opt-in reporting | MIT or Apache-2.0 |
