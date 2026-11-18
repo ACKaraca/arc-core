@@ -37,13 +37,17 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::Duration;
 
-use arc_base::id::IdGenerator;
+use arc_base::id::{IdGenerator, Identifier};
 use arc_base::{Error, Limits, Result, SessionId, TransactionId};
 
-use crate::commit::{CommitHooks, Committed, JournalSink, commit, fault, fault_diagnostic};
+use crate::commit::{
+    CommitHooks, Committed, JournalSink, commit, fault, fault_diagnostic, validate_txn,
+};
 use crate::diagnostic::{Diagnostic, DiagnosticSink};
 use crate::document::{History, Shared};
 use crate::error::codes;
+use crate::events::Changes;
+use crate::op::Op;
 use crate::snapshot::Snapshot;
 use crate::txn::{Txn, TxnKind, TxnLimits, TxnMeta};
 use crate::undo::UndoManager;
@@ -60,6 +64,18 @@ pub struct Completed<T> {
     pub txn_id: Option<TransactionId>,
     /// The validator warnings, and faults of steps after publication.
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// What a dry run ([`crate::Document::dry_run`]) would have committed.
+#[derive(Debug)]
+pub struct DryRun<T> {
+    /// What the job returned.
+    pub value: T,
+    /// The operations the commit would have journaled, in order, deletion-rule cascades
+    /// included.
+    pub ops: Vec<Op>,
+    /// The identifiers the commit would have changed, as the `committed` event would list them.
+    pub changes: Changes,
 }
 
 /// The handle of a submitted job: wait for its outcome, poll it, or drop it.
@@ -229,6 +245,43 @@ impl Core {
             Box::new(|_, base, meta, limits| Ok(Some(Txn::new(base, meta, limits))));
         let completed = self.transact(Report::Undo(options.coalesce), false, open, job)?;
         completed.ok_or_else(|| Error::new(codes::EXECUTOR_FAULT))
+    }
+
+    /// Runs `job` in a transaction on the latest snapshot and validates it like a commit does,
+    /// then drops it: nothing is published, journaled, reported or delivered. The completed
+    /// value names the would-be change set; its diagnostics are the validators' warnings.
+    pub(crate) fn dry_run<T>(
+        &mut self,
+        job: impl FnOnce(&mut Txn) -> Result<T>,
+    ) -> Result<Completed<DryRun<T>>> {
+        let base = self.shared.cell.load();
+        let meta = TxnMeta::new(TransactionId::from_u128(0), self.session);
+        let validators = self
+            .shared
+            .hooks
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .validators
+            .clone();
+        let (limits, txn_limits) = (&self.limits, self.txn_limits);
+        let body = catch_unwind(AssertUnwindSafe(|| {
+            let mut txn = Txn::new(&base, meta, txn_limits);
+            let value = job(&mut txn)?;
+            let checked = validate_txn(txn, limits, &validators)?;
+            let set = &checked.parts.set;
+            let changes = Changes::of_commit(set.base(), set.current(), set.touched());
+            Ok(Completed {
+                value: DryRun {
+                    value,
+                    ops: checked.parts.ops,
+                    changes,
+                },
+                snapshot: base.clone(),
+                txn_id: None,
+                diagnostics: checked.diagnostics,
+            })
+        }));
+        body.unwrap_or_else(|payload| Err(fault(payload.as_ref())))
     }
 
     /// The outcome of work that published nothing.
@@ -569,8 +622,7 @@ mod inline {
 mod tests {
     use std::sync::Arc;
 
-    use arc_base::id::IdGenerator;
-    use arc_base::id::Identifier;
+    use arc_base::id::{IdGenerator, Identifier};
     use arc_base::{Limits, SessionId};
 
     use super::{Core, inline, task};

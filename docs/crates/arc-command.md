@@ -718,7 +718,7 @@ gives `validate <file>` the package check, so parameter validation is the separa
 | `cmd.document.unknown` | `not_found` | The session has no document of that identifier |
 | `cmd.revision.mismatch` | `conflict` | The expected revision is not the document's current revision |
 | `cmd.preview.unsupported` | `unsupported` | The command controls undo (undo, redo, groups) and cannot run as a preview |
-| `cmd.preview.rollback_failed` | `internal` | A preview ran but its changes could not be rolled back; they remain as an undoable step |
+| `cmd.preview.rollback_failed` | `internal` | Reserved: previews are dry runs and no longer roll back, so it is not produced |
 | `cmd.query.cursor_invalid` | `invalid_input` | The cursor is not one this server issued for these parameters |
 | `cmd.query.cursor_stale` | `conflict` | The document is at another revision than the one the cursor was issued for; the details `expected` and `current` name them |
 | `cmd.selection.unknown` | `not_found` | A selected identifier names no object of the document; the detail `unknown` lists them |
@@ -757,33 +757,29 @@ and created again counts as modified. A run that changed nothing has empty lists
 
 ### Preview
 
-`command.run` with `preview: true` runs the command and rolls it back. The server opens an undo
-group on the document, runs the command in it and closes the group with
-`Document::fail_group`, which commits the inverse of the run. Afterwards the document's objects
-are equal to those before, the open groups and the undo steps are as before, and the result
-has `preview: true`, `summary`, `baseRevision` (the revision the command ran on) and `revision`
-(the document's revision after the rollback, which is the value to pass as `expectedRevision`
-to the real run).
+`command.run` with `preview: true` runs the command as a dry run of the document
+(`Invoker::dry_run`, which calls `Document::dry_run`): the command runs on the document
+executor against the current snapshot and its transaction is validated exactly like a commit
+(field schemas, relationship and deletion rules, type and document validators), then discarded.
+The result has `preview: true`, `summary` (the net effect of the operations the commit would
+have journaled, cascades included), `baseRevision` and `revision`, which are both the document's
+revision, the value to pass as `expectedRevision` to the real run.
 
-- The rollback is a transaction, so the revision advances by two (the run and its rollback;
-  not at all when the command changed nothing) and both transactions stay in the journal
-  (`query.history` lists them). An undoable command that changed the document clears the redo
-  stack, like any change.
-- The identifiers a command generates are seeded with the revision, so a later real run
-  creates other identifiers than its preview did; the summary of the preview names the
-  identifiers of the preview.
-- `expectedRevision`, permissions, the predicate and parameter validation apply as for a run.
-  A command that fails or faults leaves nothing to roll back. A command with undo behavior
-  `undo_control` cannot run inside a group: `cmd.preview.unsupported` (-32001).
-- If the rollback does not commit, the group is closed so that later changes do not join it,
-  the previewed changes remain as one undoable step, and the answer is -32012
-  (`cmd.preview.rollback_failed`).
-- Runs through one server are mutually exclusive per document: a preview's group takes in
-  every transaction committed while it is open. A transaction committed by code that does not
-  go through the server while a preview runs joins the group and is rolled back with it; the
-  host must not change a document that has a preview in flight.
-- Subscribers to `document.changed` do not receive the preview's two transactions as long as
-  their events arrive uncoalesced.
+- A preview changes nothing: the snapshot is the same one, the revision, the journal, the undo
+  and redo stacks and any open group are as before, and no `document.changed` event or
+  diagnostic is produced. A changing preview does not clear the redo stack.
+- The identifiers a command generates are seeded with the revision. Because a preview does not
+  advance it, the identifiers in its summary and value are those a real run at that revision
+  creates.
+- `expectedRevision`, permissions, the predicate and parameter validation apply as for a run,
+  and a command that fails validation or faults returns the error a real run returns. A command
+  with undo behavior `undo_control` cannot be previewed: `cmd.preview.unsupported` (-32001).
+  `cmd.preview.rollback_failed` is no longer produced.
+- Runs and previews through one server stay mutually exclusive per document. A preview no
+  longer needs it; real runs do, so that the revision recorded with a macro step and the
+  selection read back from a run's own journal record are those of that run and not of another
+  session's commit in between.
+- A preview is not recorded in macros and does not change the selection.
 
 ### Queries
 

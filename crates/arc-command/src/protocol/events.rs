@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use arc_base::{Error, ObjectId};
 use arc_doc::events::CommittedEvent;
@@ -19,7 +19,6 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::encode::Summary;
-use super::run::DocState;
 use super::{Answer, Failure, Server, decode, invalid_params, limit, text};
 use crate::error::codes;
 use crate::spec::Permission;
@@ -37,7 +36,7 @@ const MAX_KEY_BYTES: usize = 256;
 /// The most unknown identifiers `selection.set` names in its error.
 const MAX_UNKNOWN_LISTED: usize = 1000;
 
-/// The most document events read ahead per document while a preview holds them back.
+/// The most document events read ahead per document in one pump.
 const MAX_BACKLOG: usize = 1024;
 
 /// The event names a session can subscribe to.
@@ -56,7 +55,6 @@ struct Queue {
 }
 
 struct DocSub {
-    state: Arc<DocState>,
     changes: Option<Subscription>,
     backlog: VecDeque<Event>,
     selection: bool,
@@ -217,8 +215,7 @@ impl Hub {
         }
     }
 
-    /// Moves the document events of the subscriptions into the queue (those of a document
-    /// with a preview in flight wait) and flushes. Returns whether anything happened. A
+    /// Moves the document events of the subscriptions into the queue and flushes. Returns whether anything happened. A
     /// non-blocking pump gives way when another pump is flushing.
     pub(super) fn pump(&self, blocking: bool) -> bool {
         let _gate = if blocking {
@@ -245,14 +242,8 @@ impl Hub {
             }
             while let Some(event) = sub.backlog.front() {
                 if let Event::Committed(committed) = event {
-                    if sub.state.previewing() {
-                        break;
-                    }
-                    // A coalesced event cannot be told apart from its previews' share.
-                    if committed.commits > 1 || !sub.state.is_hidden(committed.txn_id) {
-                        self.notify(&document_changed(document, committed));
-                        moved = true;
-                    }
+                    self.notify(&document_changed(document, committed));
+                    moved = true;
                 }
                 sub.backlog.pop_front();
             }
@@ -362,11 +353,7 @@ impl Hub {
                 kind => {
                     let mut subs = lock(&self.subs);
                     for (id, document) in &documents {
-                        let Some(state) = server.states.get(*id) else {
-                            continue;
-                        };
                         let sub = subs.entry((*id).clone()).or_insert_with(|| DocSub {
-                            state: Arc::clone(state),
                             changes: None,
                             backlog: VecDeque::new(),
                             selection: false,

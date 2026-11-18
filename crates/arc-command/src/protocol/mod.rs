@@ -39,7 +39,7 @@ pub use query::MAX_PAGE;
 
 use crate::context::{Clock, FixedClock, Probe, ProgressSink, Session};
 use crate::error::codes;
-use crate::invoke::{Invocation, Invoker, Outcome};
+use crate::invoke::{Invocation, Invoker, Outcome, Preview};
 use crate::macros::Recorder;
 use crate::registry::Registry;
 use crate::roots::Roots;
@@ -718,14 +718,29 @@ impl<'a> Server<'a> {
                 }
                 Ok(outcome)
             }
-            Err(error) => {
-                if let Some(panic) = error.details().get("panic") {
-                    self.log
-                        .log(LogLevel::Error, "command.fault", &format!("{panic:?}"));
-                }
-                Err(Failure::from(error))
-            }
+            Err(error) => Err(self.failed(error)),
         }
+    }
+
+    /// Runs `invocation` as a dry run: nothing is recorded and the document is unchanged.
+    fn dry_run(
+        &self,
+        document: &Document,
+        session: &Session,
+        invocation: Invocation,
+    ) -> Result<Preview, Failure> {
+        Invoker::new(self.registry)
+            .dry_run(document, session, invocation)
+            .map_err(|error| self.failed(error))
+    }
+
+    /// Logs the panic of a faulted command and turns `error` into a failure.
+    fn failed(&self, error: Error) -> Failure {
+        if let Some(panic) = error.details().get("panic") {
+            self.log
+                .log(LogLevel::Error, "command.fault", &format!("{panic:?}"));
+        }
+        Failure::from(error)
     }
 
     fn document_state(&self, id: &str) -> Result<(&'a Document, Arc<DocState>), Failure> {

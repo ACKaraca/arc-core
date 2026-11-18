@@ -437,8 +437,8 @@ fn conformance(c: &mut Client) {
             json!({"document": document, "command": command, "params": params}),
         )
     };
-    // A preview runs the command and rolls it back: the empty document stays empty (the
-    // disabled predicate below still holds), but the revision moved by the run and the rollback.
+    // A preview is a dry run: the empty document stays empty (the disabled predicate below
+    // still holds) and its revision does not move.
     let mut preview = create(33, None);
     preview["params"]["document"] = json!("empty");
     preview["params"]["preview"] = json!(true);
@@ -449,7 +449,7 @@ fn conformance(c: &mut Client) {
             r["result"]["baseRevision"].clone(),
             r["result"]["revision"].clone()
         ),
-        (json!(0), json!(2))
+        (json!(0), json!(0))
     );
     assert_eq!(r["result"]["summary"]["counts"]["created"], 1);
     assert_eq!(

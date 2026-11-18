@@ -280,7 +280,7 @@ pub mod codes {
         category: Category::Unsupported,
         message_id: "cmd-preview-unsupported",
     };
-    /// A preview ran but its changes could not be rolled back; they remain as an undoable step.
+    /// Reserved: previews are dry runs and no longer roll back, so nothing produces it.
     pub const PREVIEW_ROLLBACK_FAILED: ErrorCode = ErrorCode {
         code: "cmd.preview.rollback_failed",
         category: Category::Internal,

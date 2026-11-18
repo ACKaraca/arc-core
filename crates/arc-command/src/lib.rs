@@ -76,7 +76,7 @@ pub use context::{
     Clock, Context, FixedClock, IdParam, PROGRESS_DELAY_MILLIS, Probe, ProgressSink, QuantityParam,
     Session,
 };
-pub use invoke::{Invocation, Invoker, Outcome};
+pub use invoke::{Invocation, Invoker, Outcome, Preview};
 pub use line::{
     Candidate, CandidateKind, Completion, ParsedLine, Span, complete, format_line, parse_line,
 };

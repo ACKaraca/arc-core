@@ -96,6 +96,42 @@ pub struct CommitOutcome {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// A transaction that passed every validation stage and is ready to publish.
+pub(crate) struct Validated {
+    /// The working set, operations (deletion-rule cascades included) and metadata.
+    pub(crate) parts: TxnParts,
+    /// The warnings of the validators.
+    pub(crate) diagnostics: Vec<Diagnostic>,
+}
+
+/// The validation stages of [`commit`], up to but excluding publication: shared with the dry
+/// run ([`crate::Document::dry_run`]). A transaction without operations passes unchecked.
+pub(crate) fn validate_txn(
+    mut txn: Txn,
+    limits: &Limits,
+    validators: &[DocumentValidator],
+) -> Result<Validated> {
+    let mut diagnostics = Vec::new();
+    if txn.ops().is_empty() {
+        return Ok(Validated {
+            parts: txn.into_parts(),
+            diagnostics,
+        });
+    }
+    if let Some(reason) = txn.base().read_only().first() {
+        return Err(reason.error());
+    }
+    validate::check_fields(txn.snapshot(), txn.touched())?;
+    txn.apply_delete_rules(limits)?;
+    let parts = txn.into_parts();
+    let (base, candidate, touched) = (parts.set.base(), parts.set.current(), parts.set.touched());
+    validate::check_read_only_objects(base, candidate, touched)?;
+    integrity::check_references(&parts.set)?;
+    validate::run_type_validators(candidate, touched, &mut diagnostics)?;
+    validate::run_document_validators(validators, base, candidate, touched, &mut diagnostics)?;
+    Ok(Validated { parts, diagnostics })
+}
+
 /// Validates `txn`, publishes it and informs the hooks.
 ///
 /// A transaction without operations publishes nothing and returns its base. A transaction on a
@@ -104,32 +140,19 @@ pub struct CommitOutcome {
 /// the transaction's base; in every failure the published snapshot is untouched and the
 /// transaction is dropped. Costs time proportional to the touched objects, the references they
 /// hold and their referrers, plus what document validators read.
-pub fn commit(mut txn: Txn, hooks: &CommitHooks<'_>) -> Result<CommitOutcome> {
-    if txn.ops().is_empty() {
+pub fn commit(txn: Txn, hooks: &CommitHooks<'_>) -> Result<CommitOutcome> {
+    let Validated {
+        parts: TxnParts { set, ops, meta, .. },
+        mut diagnostics,
+    } = validate_txn(txn, hooks.limits, hooks.validators)?;
+    let (base, candidate, touched) = (set.base(), set.current(), set.touched());
+    if ops.is_empty() {
         return Ok(CommitOutcome {
-            snapshot: txn.base().clone(),
+            snapshot: base.clone(),
             txn_id: None,
-            diagnostics: Vec::new(),
+            diagnostics,
         });
     }
-    if let Some(reason) = txn.base().read_only().first() {
-        return Err(reason.error());
-    }
-    validate::check_fields(txn.snapshot(), txn.touched())?;
-    txn.apply_delete_rules(hooks.limits)?;
-    let TxnParts { set, ops, meta, .. } = txn.into_parts();
-    let (base, candidate, touched) = (set.base(), set.current(), set.touched());
-    validate::check_read_only_objects(base, candidate, touched)?;
-    integrity::check_references(&set)?;
-    let mut diagnostics = Vec::new();
-    validate::run_type_validators(candidate, touched, &mut diagnostics)?;
-    validate::run_document_validators(
-        hooks.validators,
-        base,
-        candidate,
-        touched,
-        &mut diagnostics,
-    )?;
     hooks.cell.publish(&set)?;
 
     let after = candidate.clone();

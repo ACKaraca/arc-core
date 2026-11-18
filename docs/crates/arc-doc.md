@@ -893,6 +893,24 @@ row.
   waits for a subscriber; a dropped subscription is removed at the next emission. Handlers
   receive immutable snapshots and change the document only by submitting jobs.
 
+#### Dry run
+
+`Document::dry_run(job)` runs `job` on the executor in a transaction on the latest snapshot, like
+`submit`, and then validates it with the same function the commit uses (`validate_txn`: the
+field schema check, the deletion rules, the read-only check, `check_references`, the type
+validators and the document validators, in that order, and the same errors). `commit` is that
+function followed by publication; the dry run stops before it. The `Pending` value is a
+`Completed<DryRun<T>>`: `value.value` is the job's result, `value.ops` the operations the commit
+would have journaled (cascades included), `value.changes` the identifiers it would have
+announced in its `committed` event, `diagnostics` the validators' warnings, and `snapshot` the
+unchanged latest snapshot. Nothing is published, journaled, reported to the undo manager,
+delivered or emitted; the snapshot is the same one afterwards (`Snapshot::ptr_eq`), the revision,
+the journal and both undo stacks are as before, and the graph is not updated. A job that fails,
+a validation error or an unwind is returned as for `submit` (`doc.executor.fault` for the
+unwind, without a diagnostic). The job runs between two commits, so a commit made afterwards may
+differ from the dry run when another job changed the document in between. The transaction has
+the placeholder identifier zero, and a job's group is not applied.
+
 The `commit_scale` test (ignored by default; run it in a release build) fills one store with one
 million objects and measures submit-to-result of 10,000 single-field modifications through the
 executor, including validation, publication, the graph change set and the event. On a shared

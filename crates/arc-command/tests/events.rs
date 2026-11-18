@@ -214,16 +214,16 @@ fn other_sessions_changes_arrive_and_previews_stay_hidden() {
                 &json!({"events": ["document.changed"], "document": "main"}),
             );
             // B previews and then makes a real change: A sees only the real one, whose revision
-            // shows that the preview's run and rollback came first.
+            // shows that the preview left the revision alone.
             let (_, preview) = b.call(
                 "command.run",
                 &json!({"document": "main", "command": "test.item.create", "preview": true,
                     "params": {"name": "p", "length": 1}}),
             );
-            assert_eq!(preview["result"]["revision"], 2);
+            assert_eq!(preview["result"]["revision"], 0);
             let (_, real) = create(&mut b, "r");
             let note = a.note();
-            assert_eq!(note["revision"], 3);
+            assert_eq!(note["revision"], 1);
             assert_eq!(
                 note["changes"]["created"],
                 json!([real["result"]["value"]["id"]])

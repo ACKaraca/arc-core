@@ -57,7 +57,7 @@ pub use diagnostic::{CollectingSink, Diagnostic, DiagnosticSink, Origin};
 pub use diagnostics::{DiagnosticsList, DiagnosticsSnapshot};
 pub use document::{Document, DocumentConfig};
 pub use events::{Event, EventBus, EventKind, Subscription};
-pub use executor::{Completed, Pending, SubmitOptions};
+pub use executor::{Completed, DryRun, Pending, SubmitOptions};
 pub use graph::{
     ChangeSet, Derived, DerivedKey, DerivedValue, EvalContext, Evaluators, Graph, NodeKey,
     NodeState, NodeView, StateKind,

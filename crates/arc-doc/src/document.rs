@@ -25,7 +25,7 @@ use crate::diagnostics::{
 };
 use crate::events::{Event, EventBus, Subscription};
 use crate::executor::{
-    Completed, Core, Executor, Open, Pending, Report, SubmitOptions, lock, task_on,
+    Completed, Core, DryRun, Executor, Open, Pending, Report, SubmitOptions, lock, task_on,
 };
 use crate::graph::{Evaluators, Graph, NodeKey, NodeView};
 use crate::journal::Journal;
@@ -378,6 +378,23 @@ impl Document {
         F: FnOnce(&mut Txn) -> Result<T> + Send + 'static,
     {
         self.on_executor(move |core| core.run(options, job))
+    }
+
+    /// Runs `job` like [`Document::submit`] and validates its transaction exactly as a commit
+    /// does (field schemas, deletion and relationship rules, references, type and document
+    /// validators), then discards it. The value is the job's result with the operations and
+    /// changed identifiers the commit would have produced; the diagnostics are the validators'
+    /// warnings, which are returned and not delivered. Nothing else happens: no publication,
+    /// revision change, journal record, undo or redo effect, event or graph update, and the
+    /// snapshot is the very same afterwards. The job runs on the executor between two commits,
+    /// so it sees the snapshot the next commit would apply to. Fails with the error of the job
+    /// or of the validation, `doc.executor.fault` when it unwound, or `doc.executor.stopped`.
+    pub fn dry_run<T, F>(&self, job: F) -> Pending<DryRun<T>>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Txn) -> Result<T> + Send + 'static,
+    {
+        self.on_executor(move |core| core.dry_run(job))
     }
 
     fn on_executor<T, F>(&self, work: F) -> Pending<T>

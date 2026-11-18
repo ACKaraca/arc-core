@@ -1,5 +1,6 @@
-//! Preview runs (CORE-CMD-006) and the change summary of every run: a preview leaves the
-//! document's objects and undo stack as they were and reports what a real run changes.
+//! Preview runs (CORE-CMD-006) and the change summary of every run: a preview is a dry run that
+//! leaves the document's objects, revision, journal and undo state as they were and reports
+//! what a real run at that revision changes, identifiers included.
 
 #![allow(clippy::unwrap_used, clippy::too_many_lines, reason = "tests")]
 
@@ -41,15 +42,18 @@ fn run(server: &Server<'_>, command: &str, params: &Value, preview: bool) -> Res
     )
 }
 
-/// What identifies a document for the property: its objects, undo steps and open group.
-fn state(document: &Document) -> (usize, usize, Option<String>) {
-    document.with_undo(|undo| {
+/// What a preview must not move: revision, journal length, undo depth, redo depth and the open
+/// group.
+fn state(document: &Document) -> (u64, usize, usize, usize, Option<String>) {
+    let (undo, redo, group) = document.with_undo(|undo| {
         (
             undo.undo_steps().count(),
             undo.redo_steps().count(),
             undo.group().map(str::to_owned),
         )
-    })
+    });
+    let journal = document.with_journal(|journal| journal.len());
+    (document.snapshot().revision(), journal, undo, redo, group)
 }
 
 #[derive(Debug, Clone)]
@@ -109,46 +113,42 @@ fn command(step: &Step, ids: &[String]) -> (&'static str, Value) {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 40, ..ProptestConfig::default() })]
 
-    /// A preview changes nothing visible and reports what the same run changes on an identical
-    /// document: objects, undo stack and open group as before, and the summary, the value and
-    /// the errors equal those of the real run.
+    /// A preview changes nothing: objects, revision, journal, undo and redo stacks and the
+    /// open group are as before, also for failing commands. The real run made right after
+    /// reports the same summary (created identifiers included), value and error.
     #[test]
-    fn a_preview_leaves_the_document_unchanged_and_reports_the_real_run(
+    fn a_preview_leaves_the_document_unchanged_and_the_real_run_equals_it(
         setup in prop::collection::vec(step(), 0..8),
         probe in step(),
+        undo_first in any::<bool>(),
     ) {
         let registry = registry();
         let documents = BTreeMap::from([("d".to_owned(), document())]);
-        let twins = BTreeMap::from([("d".to_owned(), document())]);
-        let (previewed, real) = (
-            Server::new(&registry, &documents, config(), &NoLog),
-            Server::new(&registry, &twins, config(), &NoLog),
-        );
-        // The same steps on both documents: equal identifiers, since the seed and revisions are.
+        let server = Server::new(&registry, &documents, config(), &NoLog);
+        let doc = &documents["d"];
         let mut ids: Vec<String> = Vec::new();
         for step in &setup {
             let (name, params) = command(step, &ids);
-            let a = run(&previewed, name, &params, false);
-            let b = run(&real, name, &params, false);
-            prop_assert_eq!(a.is_ok(), b.is_ok());
-            if let (Ok(a), Ok(b)) = (a, b) {
-                prop_assert_eq!(&a["summary"], &b["summary"]);
+            if let Ok(a) = run(&server, name, &params, false) {
                 ids.extend(a["summary"]["created"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()));
                 for gone in a["summary"]["deleted"].as_array().unwrap() {
                     ids.retain(|id| id != gone.as_str().unwrap());
                 }
             }
         }
+        if undo_first {
+            // Leave something on the redo stack, which a preview must keep.
+            doc.undo().wait().unwrap();
+        }
         let (name, params) = command(&probe, &ids);
-        let (doc, twin) = (&documents["d"], &twins["d"]);
         let before = doc.snapshot();
         let steps = state(doc);
-        let preview = run(&previewed, name, &params, true);
-        let actual = run(&real, name, &params, false);
+        let preview = run(&server, name, &params, true);
         let after = doc.snapshot();
         prop_assert_eq!(differences(&before, &after), vec![], "objects changed");
+        prop_assert!(before.ptr_eq(&after));
         prop_assert_eq!(state(doc), steps.clone());
-        prop_assert!(after.revision() >= before.revision());
+        let actual = run(&server, name, &params, false);
         match (preview, actual) {
             (Ok(p), Ok(a)) => {
                 prop_assert_eq!(&p["preview"], &json!(true));
@@ -156,10 +156,11 @@ proptest! {
                 prop_assert_eq!(&p["summary"], &a["summary"]);
                 prop_assert_eq!(&p["value"], &a["value"]);
                 prop_assert_eq!(&p["command"], &a["command"]);
+                prop_assert_eq!(&p["diagnostics"], &a["diagnostics"]);
                 prop_assert_eq!(&p["baseRevision"], &json!(before.revision()));
-                prop_assert_eq!(&p["revision"], &json!(after.revision()));
+                prop_assert_eq!(&p["revision"], &json!(before.revision()));
                 // The summary is what the real run changed.
-                let changed = differences(&before, &twin.snapshot());
+                let changed = differences(&before, &doc.snapshot());
                 let mut named: Vec<String> = ["created", "modified", "deleted"]
                     .iter()
                     .flat_map(|k| a["summary"][*k].as_array().unwrap().clone())
@@ -170,12 +171,8 @@ proptest! {
                 changed.sort();
                 prop_assert_eq!(named, changed);
             }
-            (Err(p), Err(a)) => prop_assert_eq!(&p["data"]["code"], &a["data"]["code"]),
+            (Err(p), Err(a)) => prop_assert_eq!(p, a),
             (p, a) => prop_assert!(false, "preview {p:?} but run {a:?}"),
-        }
-        // The undo stack still undoes the last real step, not the preview.
-        if steps.0 > 0 && steps.2.is_none() {
-            prop_assert!(doc.undo().wait().unwrap().value);
         }
     }
 }
@@ -188,7 +185,7 @@ fn undo_control_commands_cannot_be_previewed_and_leave_no_group_open() {
     let error = run(&server, "test.undo.control", &json!({}), true).unwrap_err();
     assert_eq!(error["data"]["code"], "cmd.preview.unsupported");
     assert_eq!(error["code"], -32001);
-    assert_eq!(state(&documents["d"]), (0, 0, None));
+    assert_eq!(state(&documents["d"]), (0, 0, 0, 0, None));
     let real = run(&server, "test.undo.control", &json!({}), false).unwrap();
     assert_eq!(
         real["summary"]["counts"],
@@ -207,11 +204,11 @@ fn a_preview_inside_a_clients_group_keeps_the_group_and_its_members() {
     run(&server, "test.item.create", &create, false).unwrap();
     let preview = run(&server, "test.item.create", &create, true).unwrap();
     assert_eq!(preview["summary"]["counts"]["created"], 1);
-    assert_eq!(state(doc).2.as_deref(), Some("client"));
+    assert_eq!(state(doc).4.as_deref(), Some("client"));
     run(&server, "test.item.create", &create, false).unwrap();
     doc.end_group().wait().unwrap();
     // One step with the two real runs; the preview left nothing in it.
-    assert_eq!(state(doc), (1, 0, None));
+    assert_eq!(state(doc), (2, 2, 1, 0, None));
     assert_eq!(doc.snapshot().len(), 2);
     assert!(doc.undo().wait().unwrap().value);
     assert_eq!(doc.snapshot().len(), 0);
@@ -236,7 +233,7 @@ fn a_preview_honors_the_expected_revision_and_failures_change_nothing() {
     assert_eq!(fault["data"]["code"], "cmd.fault");
     assert_eq!(
         (documents["d"].snapshot().len(), state(&documents["d"])),
-        (0, (0, 0, None))
+        (0, (0, 0, 0, 0, None))
     );
     // A preview of a read-only command reports no change and the unchanged revision.
     let read = run(&server, "test.item.summary", &json!({}), true).unwrap();
@@ -292,9 +289,7 @@ fn every_run_reports_what_it_created_modified_and_deleted() {
 }
 
 #[test]
-fn a_preview_that_changes_the_document_clears_the_redo_stack() {
-    // The group mechanism records the previewed transaction like any change, and a change
-    // clears redo; the documentation names this limit.
+fn a_preview_keeps_the_redo_stack_and_the_identifiers_of_the_real_run() {
     let registry = registry();
     let documents = BTreeMap::from([("d".to_owned(), document())]);
     let server = Server::new(&registry, &documents, config(), &NoLog);
@@ -302,11 +297,19 @@ fn a_preview_that_changes_the_document_clears_the_redo_stack() {
     let create = json!({"name": "a", "length": 1});
     run(&server, "test.item.create", &create, false).unwrap();
     assert!(doc.undo().wait().unwrap().value);
-    assert_eq!(state(doc), (0, 1, None));
+    let redo = state(doc);
+    assert_eq!((redo.2, redo.3), (0, 1));
     run(&server, "test.item.summary", &json!({}), true).unwrap();
-    assert_eq!(state(doc), (0, 1, None), "a read-only preview keeps redo");
-    run(&server, "test.item.create", &create, true).unwrap();
-    assert_eq!(state(doc), (0, 0, None));
+    assert_eq!(state(doc), redo);
+    let preview = run(&server, "test.item.create", &create, true).unwrap();
+    assert_eq!(state(doc), redo, "a changing preview keeps redo");
+    let real = run(&server, "test.item.create", &create, false).unwrap();
+    assert_eq!(preview["summary"]["created"], real["summary"]["created"]);
+    assert_eq!(preview["value"], real["value"]);
+    assert_eq!(
+        preview["revision"].as_u64().unwrap() + 1,
+        real["revision"].as_u64().unwrap()
+    );
 }
 
 #[test]

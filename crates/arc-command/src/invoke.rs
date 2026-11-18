@@ -21,7 +21,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use arc_base::{Cancel, Category, Error, ObjectId, Result, TransactionId};
-use arc_doc::{Diagnostic, Document, Snapshot};
+use arc_doc::{Diagnostic, Document, Op, Snapshot, Txn};
 use serde_json::{Value, json};
 
 use crate::context::{Context, ProgressSink, Session};
@@ -95,6 +95,17 @@ pub struct Outcome {
     pub coalesce: Option<String>,
     /// The commit's diagnostics, and a deprecation warning when an alias was deprecated.
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// What a dry run returns: the outcome as a run on the same snapshot would give it, and the
+/// operations the run would have committed.
+#[derive(Debug)]
+pub struct Preview {
+    /// The outcome; `revision` is the revision the command ran on, `txn_id` is `None`.
+    pub outcome: Outcome,
+    /// The operations of the would-be transaction, deletion-rule cascades included; empty for a
+    /// command that is not `undoable` or changed nothing.
+    pub ops: Vec<Op>,
 }
 
 /// Runs commands of a registry.
@@ -176,7 +187,31 @@ impl<'r> Invoker<'r> {
         invocation: Invocation,
     ) -> Result<Outcome> {
         catch_unwind(AssertUnwindSafe(|| {
-            self.guarded(document, session, invocation)
+            self.guarded(document, session, invocation, false)
+        }))
+        .unwrap_or_else(|payload| Err(fault(payload.as_ref())))
+        .map(|preview| preview.outcome)
+    }
+
+    /// Runs `invocation` through the same resolution, exposure, permission, parameter,
+    /// revision and enabled checks as [`Invoker::invoke`], and an `undoable` command in a
+    /// dry run of the document ([`Document::dry_run`]) that validates like a commit and
+    /// discards the result: the document, its journal and its undo state stay as they were.
+    /// The identifiers the command generates are those a real run on the same revision
+    /// generates.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Invoker::invoke`], and `cmd.preview.unsupported` for an `undo_control`
+    /// command.
+    pub fn dry_run(
+        &self,
+        document: &Document,
+        session: &Session,
+        invocation: Invocation,
+    ) -> Result<Preview> {
+        catch_unwind(AssertUnwindSafe(|| {
+            self.guarded(document, session, invocation, true)
         }))
         .unwrap_or_else(|payload| Err(fault(payload.as_ref())))
     }
@@ -186,7 +221,8 @@ impl<'r> Invoker<'r> {
         document: &Document,
         session: &Session,
         invocation: Invocation,
-    ) -> Result<Outcome> {
+        dry: bool,
+    ) -> Result<Preview> {
         let resolved = self
             .registry
             .resolve(&invocation.command, &std::collections::BTreeMap::new())?;
@@ -215,24 +251,30 @@ impl<'r> Invoker<'r> {
         if !violations.is_empty() {
             return Err(schema::invalid(&violations));
         }
+        if dry && spec.undo() == UndoBehavior::UndoControl {
+            return Err(Error::new(codes::PREVIEW_UNSUPPORTED).with_arg("command", spec.id()));
+        }
         let coalesce = spec.coalesce().map(str::to_owned);
         let command = spec.id().to_owned();
-        let (value, revision, txn_id, more) = match spec.undo() {
-            UndoBehavior::Undoable => run_in_txn(document, session, invocation, spec)?,
+        let (value, revision, txn_id, more, ops) = match spec.undo() {
+            UndoBehavior::Undoable => run_in_txn(document, session, invocation, spec, dry)?,
             UndoBehavior::NotUndoable | UndoBehavior::UndoControl => {
                 let snapshot = document.snapshot();
                 let value = run_on_snapshot(&snapshot, session, &invocation, &spec)?;
-                (value, snapshot.revision(), None, Vec::new())
+                (value, snapshot.revision(), None, Vec::new(), Vec::new())
             }
         };
         diagnostics.extend(more);
-        Ok(Outcome {
-            command,
-            value,
-            revision,
-            txn_id,
-            coalesce,
-            diagnostics,
+        Ok(Preview {
+            outcome: Outcome {
+                command,
+                value,
+                revision,
+                txn_id,
+                coalesce,
+                diagnostics,
+            },
+            ops,
         })
     }
 }
@@ -264,13 +306,14 @@ fn run_on_snapshot(
     value.map_err(map_error)
 }
 
-type Ran = (Value, u64, Option<TransactionId>, Vec<Diagnostic>);
+type Ran = (Value, u64, Option<TransactionId>, Vec<Diagnostic>, Vec<Op>);
 
 fn run_in_txn(
     document: &Document,
     session: &Session,
     invocation: Invocation,
     spec: Arc<CommandSpec>,
+    dry: bool,
 ) -> Result<Ran> {
     let session = session.clone();
     let canonical = serde_json::to_string(&json!({
@@ -279,7 +322,7 @@ fn run_in_txn(
     }))
     .unwrap_or_default();
     let label = serde_json::to_string(&json!({ "message_id": spec.label() })).unwrap_or_default();
-    let pending = document.submit(move |txn| {
+    let job = move |txn: &mut Txn| {
         let base = txn.base().clone();
         let probe = crate::context::Probe {
             snapshot: &base,
@@ -311,12 +354,23 @@ fn run_in_txn(
             txn.meta_mut().selection_after = serde_json::to_string(&ids).ok();
         }
         Ok(value)
-    });
-    let completed = pending.wait().map_err(map_error)?;
+    };
+    if dry {
+        let done = document.dry_run(job).wait().map_err(map_error)?;
+        return Ok((
+            done.value.value,
+            done.snapshot.revision(),
+            None,
+            done.diagnostics,
+            done.value.ops,
+        ));
+    }
+    let completed = document.submit(job).wait().map_err(map_error)?;
     Ok((
         completed.value,
         completed.snapshot.revision(),
         completed.txn_id,
         completed.diagnostics,
+        Vec::new(),
     ))
 }

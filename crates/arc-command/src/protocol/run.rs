@@ -1,14 +1,13 @@
 //! Running commands for the protocol: mutual exclusion per document, the change summary of a
 //! run and preview runs (CORE-CMD-006).
 //!
-//! A preview opens an undo group on the document, runs the command in it and rolls the group
-//! back with [`Document::fail_group`]. The document's objects are identical afterwards, the undo
-//! stack is as before, and the transactions of the run and of the rollback stay in the journal;
-//! the revision advances by the two. Because an open group takes in every transaction committed
-//! meanwhile, all runs through one server serialize per document ([`DocState::run`]).
+//! A preview is a dry run of the document ([`Invoker::dry_run`]): the command runs on the
+//! executor against the current snapshot and is validated like a commit, then discarded. The
+//! document, its journal and its undo state are untouched and no event is emitted. Real runs
+//! still serialize per document ([`DocState::run`]): the macro recorder reads the revision a
+//! run starts on, and the selection a run leaves is read back from the run's own record, both
+//! of which another session's commit in between would disturb.
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use arc_base::{Error, ObjectId, TransactionId};
@@ -17,66 +16,16 @@ use serde_json::{Value, json};
 
 use super::encode::{Summary, diagnostic_json};
 use super::events::Hub;
-use super::{Answer, LogLevel, Server};
+use super::{Answer, Server};
 use crate::context::Session;
 use crate::error::codes;
 use crate::invoke::{Invocation, Outcome};
-use crate::spec::UndoBehavior;
-
-/// The identifier of the undo group a preview runs in.
-const PREVIEW_GROUP: &str = "arc.preview";
-
-/// How many preview transactions a document remembers, to keep them out of change events.
-const HIDDEN: usize = 256;
 
 /// What the server shares between sessions about one document.
 #[derive(Debug, Default)]
 pub(super) struct DocState {
-    /// Held for the whole of every run, so a preview's group never takes in another run.
+    /// Held for the whole of every run.
     run: Mutex<()>,
-    /// The previews in flight.
-    previews: AtomicUsize,
-    /// The transactions of finished previews (the run and its rollback), newest last.
-    hidden: Mutex<VecDeque<TransactionId>>,
-}
-
-impl DocState {
-    /// True while a preview runs: its change events are not yet known.
-    pub(super) fn previewing(&self) -> bool {
-        self.previews.load(Ordering::SeqCst) > 0
-    }
-
-    /// True when `txn` belongs to a finished preview.
-    pub(super) fn is_hidden(&self, txn: TransactionId) -> bool {
-        self.hidden
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(&txn)
-    }
-
-    fn hide(&self, txns: impl IntoIterator<Item = TransactionId>) {
-        let mut hidden = self.hidden.lock().unwrap_or_else(PoisonError::into_inner);
-        hidden.extend(txns);
-        while hidden.len() > HIDDEN {
-            hidden.pop_front();
-        }
-    }
-}
-
-/// Counts a preview in flight until dropped.
-struct InFlight<'a>(&'a DocState);
-
-impl<'a> InFlight<'a> {
-    fn new(state: &'a DocState) -> Self {
-        state.previews.fetch_add(1, Ordering::SeqCst);
-        Self(state)
-    }
-}
-
-impl Drop for InFlight<'_> {
-    fn drop(&mut self) {
-        self.0.previews.fetch_sub(1, Ordering::SeqCst);
-    }
 }
 
 /// What a run answers with besides the outcome.
@@ -151,7 +100,7 @@ impl Server<'_> {
             invocation.selection = hub.selection_ids(doc_id, &document.snapshot());
         }
         if preview {
-            return self.preview(document, state, session, invocation);
+            return self.preview(document, session, invocation);
         }
         let outcome = self.invoke(document, session, invocation, true)?;
         if let (Some(hub), Some(ids)) = (hub, selection_after(document, outcome.txn_id)) {
@@ -165,54 +114,15 @@ impl Server<'_> {
         Ok(run_result(&outcome, &extra))
     }
 
-    fn preview(
-        &self,
-        document: &Document,
-        state: &DocState,
-        session: &Session,
-        invocation: Invocation,
-    ) -> Answer {
-        let spec = self
-            .registry
-            .resolve(&invocation.command, &std::collections::BTreeMap::new())?
-            .spec;
-        if spec.undo() == UndoBehavior::UndoControl {
-            return Err(Error::new(codes::PREVIEW_UNSUPPORTED)
-                .with_arg("command", spec.id())
-                .into());
-        }
-        let _in_flight = InFlight::new(state);
-        let base_revision = document.snapshot().revision();
-        document.begin_group(PREVIEW_GROUP).wait()?;
-        let ran = self.invoke(document, session, invocation, false);
-        let rolled = document.fail_group().wait();
-        let revision = document.snapshot().revision();
-        let outcome = match rolled {
-            Ok(done) => {
-                let rollback = done.value.then(|| {
-                    document
-                        .with_journal(|journal| journal.last().map(|entry| entry.record().txn_id))
-                });
-                let run = ran.as_ref().ok().and_then(|outcome| outcome.txn_id);
-                state.hide(run.into_iter().chain(rollback.flatten()));
-                ran?
-            }
-            Err(error) => {
-                // Close the group so that later commands do not join it; the previewed
-                // changes then stay as an undoable step.
-                let _ = document.end_group().wait();
-                self.log
-                    .log(LogLevel::Error, "preview.rollback", error.code());
-                return Err(Error::new(codes::PREVIEW_ROLLBACK_FAILED)
-                    .with_detail("rollback", error.code())
-                    .into());
-            }
-        };
+    /// Runs `invocation` as a dry run and answers with the would-be change summary. The
+    /// document is not changed; `revision` is the revision the command ran on.
+    fn preview(&self, document: &Document, session: &Session, invocation: Invocation) -> Answer {
+        let preview = self.dry_run(document, session, invocation)?;
         let extra = Extra {
-            summary: Summary::of_transaction(document, outcome.txn_id),
-            base_revision: Some(base_revision),
-            revision,
+            summary: Summary::of_ops(&preview.ops),
+            base_revision: Some(preview.outcome.revision),
+            revision: preview.outcome.revision,
         };
-        Ok(run_result(&outcome, &extra))
+        Ok(run_result(&preview.outcome, &extra))
     }
 }
