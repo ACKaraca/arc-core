@@ -482,7 +482,9 @@ The codes `arc-gpu` owns. A code is never reused for a different meaning; messag
 
 The fourth part implements CORE-GPU-009, CORE-GPU-010 and CORE-GPU-013 for the drafting
 primitives that exist in `arc-draft` (points, curves, polylines with widths, fills, wipeout
-masks and block references). Text and hatches wait for their `arc-draft` units.
+masks and block references). The fifth part adds hatches (CORE-GPU-011) and outline text
+(CORE-GPU-012), described in [Hatches and fills](#hatches-and-fills-core-gpu-011) and
+[Outline text](#outline-text-core-gpu-012).
 
 ### Curve items (CORE-GPU-010)
 
@@ -594,3 +596,71 @@ by clips and wipeouts.
   pair of triangles is clipped with the Sutherland–Hodgman algorithm against the convex clip
   triangle. For a clip that is not a rectangle, the half width of a line that reaches the
   boundary is not clipped.
+
+### Hatches and fills (CORE-GPU-011)
+
+- **Pattern hatches stay CPU strokes.** `arc-draft` generates the lines and dots of a pattern
+  hatch in document coordinates from the hatch's pattern lines, scale, angle and origin, clipped
+  to its region, so the lattice is fixed in the document and a pan or zoom never regenerates it.
+  The extractor draws them as paths of one curve item: all strokes and dots of one hatch share
+  one item (one draw and one range of line segments), whatever their number, so
+  `max_items_per_object` does not limit the lines of a hatch. A GPU pattern path was not
+  built: it would have to clip patterns to regions with holes in the shader, and the strokes are
+  exact. The cost is one path per line.
+- **The generation bound.** A hatch takes `DisplayOptions::max_dashes` as the bound of the lines
+  and marks it generates and falls back to a solid fill (part 1) beyond it. Extraction builds
+  lists with `max_dashes` 0 (dashes are left to the GPU), which would turn every pattern hatch
+  into that fill. A list that holds such a fill is therefore built a second time with the
+  configured `max_dashes`, and the strokes of each hatch from that list replace its fill. A hatch
+  that still exceeds the bound, or a second list that fails, keeps the solid fill. A separate bound for hatches
+  in `arc-draft` would remove the second build.
+- **Solid fills** (`Shape::Region`, `Shape::Fill`) are triangulated meshes; a region with holes
+  is filled by nesting parity, so a ring is filled and its hole is not. Their instances carry the
+  flag `DRAFT_FILL`, which moves their depth back by half the allowance of masks: strokes drawn
+  on a fill win without relying on equal depths in the two shaders, and masks stay behind fills
+  as before.
+- **Gradient fills** are drawn as the flat color the display list carries (the first gradient
+  color). The gradient kind, angle and second color are not in the display list, so no gradient is
+  drawn; this is a gap until `arc-draft` puts them in a primitive.
+- **Updates.** An edited hatch is extracted alone and replaces its own items: only its line
+  segments (a pattern hatch) or its vertices, indices and mesh instances (a solid hatch) are
+  written; the buffers of every other object are untouched.
+- **Picking and highlight** resolve to the hatch object: its strokes are path elements of its
+  curve item, its fill is a mesh item of the hatch. Picking a pixel between pattern lines
+  returns nothing.
+
+### Outline text (CORE-GPU-012)
+
+- **Stroke text** arrives from `arc-draft` as strokes and is drawn as curve items at the layout
+  positions with the entity's color and lineweight; it needed no change.
+- **Outline text** (`Shape::Glyphs`) is drawn as triangulated glyph meshes, not from an atlas:
+  the row's atlas needs cache management and rasterization at every size and zoom, while a mesh
+  is crisp at any zoom, is positioned by an exact `f64` transform, and picks and highlights as
+  geometry. The cost is the triangle count of the glyphs, which grows with the glyph's detail
+  and not with the size on the screen.
+- **The glyph cache** (`arc_gpu::glyph::GlyphCache`, held by `DraftOptions::glyphs`; clones
+  share it) maps a font (its bytes and face index) and a glyph identifier to a triangle mesh in
+  em units. Outlines are read with `skrifa` from the bytes of the font that
+  `FontProvider::outline_font` returns for the primitive's family, at the font's default
+  location. Quadratic and cubic segments are flattened once, in em units, with the chord
+  tolerance `GLYPH_CHORD_EM` (1/2048 em), not by the zoom rule of curve items: one mesh serves
+  every size and view, so the flattening error in pixels is the em size in pixels over 2048
+  (0.5 px at an em of 1024 px, more beyond). The contours become a region with
+  `arc_geom::build_region` (nesting parity) and are triangulated with `arc_geom::triangulate`.
+  A glyph with contours that overlap or touch, an unreadable outline or more than 65,536
+  flattened points is not drawn and is counted in `DraftExtraction::skipped_glyphs`, as is every
+  glyph of a family the provider does not have; a space or a glyph without contours is not
+  counted. The cache holds at most 65,536 glyphs and is emptied when full.
+- **Items.** A glyph run becomes one mesh item for each distinct glyph of the run, whose
+  instances are its occurrences: the transform maps em units to the list through the run's
+  placement, the em size and the pen position (relative to the item origin in `f32`, the
+  rest in `f64`), the color is the primitive's. Items of one extraction share the geometry of a
+  glyph. The instance flag `DRAFT_TEXT` moves the depth of a glyph toward the eye by the edge
+  allowance, so text wins over the fills it lies on in every backend. `sub_objects` of such an item has one
+  entry per instance, which is the element of a picked hit. Text items keep the source object
+  and sub-object key of the primitive, so picking and highlights resolve to the text.
+- **Updates.** An edited text replaces its own items: its vertices, indices and instances are
+  written and nothing else.
+- **Gaps.** Glyphs are not clipped to a viewport boundary (a run is drawn whole); glyphs with
+  overlapping contours are skipped; color fonts, hinting and variation coordinates other than
+  the default are not used.

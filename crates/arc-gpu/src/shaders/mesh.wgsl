@@ -27,6 +27,8 @@ struct View {
 // Edges are moved toward the eye by this relative depth offset so they are not hidden by the
 // faces they bound.
 const EDGE_DEPTH_SCALE: f32 = 1.000244140625;
+// Half of the edge allowance, on the logarithmic scale (its square is about the edge scale).
+const FILL_DEPTH_SCALE: f32 = 1.0001220703125;
 
 struct VertexIn {
     @builtin(instance_index) instance: u32,
@@ -78,9 +80,15 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.instance = in.instance;
     // Painted masks and paper lie in the plane of the drawing. Their depth is moved back by the
     // edge allowance so that coplanar lines drawn over them win on every backend: mesh and line
-    // positions are computed by different shaders and need not agree to the last bit.
+    // positions are computed by different shaders and need not agree to the last bit. Fills of
+    // drawings are moved back by half of it (lines win, masks stay behind), and glyphs of
+    // outline text toward the eye by all of it, so text wins over the fills it lies on.
     if ((in.misc.y & (PAINT_BACKGROUND | PAINT_PAPER)) != 0u) {
         out.clip.z = out.clip.z / EDGE_DEPTH_SCALE;
+    } else if ((in.misc.y & DRAFT_FILL) != 0u) {
+        out.clip.z = out.clip.z / FILL_DEPTH_SCALE;
+    } else if ((in.misc.y & DRAFT_TEXT) != 0u) {
+        out.clip.z = min(out.clip.z * EDGE_DEPTH_SCALE, out.clip.w);
     }
     return out;
 }
@@ -107,6 +115,9 @@ fn shade(base: vec4<f32>, normal: vec3<f32>) -> vec4<f32> {
 // (wipeout masks and sheet backgrounds).
 const PAINT_BACKGROUND: u32 = 1u;
 const PAINT_PAPER: u32 = 2u;
+// Bit 2 marks a fill of a drawing and bit 3 a glyph of outline text; they only move the depth.
+const DRAFT_FILL: u32 = 4u;
+const DRAFT_TEXT: u32 = 8u;
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {

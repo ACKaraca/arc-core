@@ -18,6 +18,12 @@
 //!   start on the whole curve. Patterns with at most [`crate::MAX_DASH_INTERVALS`] drawn
 //!   elements are evaluated on the GPU; longer ones are generated on the CPU with
 //!   `arc_draft::linetype::dashes`, intersected with the drawn pieces, and drawn solid.
+//! - **Pattern hatch**: its strokes and dots, in one item per hatch; a hatch that the bounded
+//!   list generation turned into a solid fill is generated again with the real bound
+//!   (`restore_hatches`). Solid hatches are fills; a gradient is drawn as its flat color.
+//! - **Outline text**: a [`Shape::Glyphs`] run is drawn from the glyph meshes of
+//!   [`crate::glyph::GlyphCache`], one item per distinct glyph, instanced with the run's
+//!   transform (CORE-GPU-012).
 //! - **Fill or wipeout mask**: a mesh triangulated from the boundary, in the primitive's color
 //!   for a fill, and painted in the background color (model) or the paper color (sheet) for a
 //!   mask. Masks and fills of a viewport list that need a clip are intersected with the clip
@@ -41,8 +47,10 @@ use arc_draft::clip::{Piece, piece};
 use arc_draft::display::{
     DisplayList, DisplayOptions, Lists, Primitive, Shape, entity_list, space_list, viewport_list,
 };
+use arc_draft::hatch::HATCH;
 use arc_draft::layout::{LAYOUT, VIEWPORT, settings, sheet_size};
 use arc_draft::linetype::{DashOptions, Dashes, Pattern, dashes};
+use arc_draft::text_layout::PositionedGlyph;
 use arc_draft::types::{ENTITIES, ElementKind, SPACE, SpaceUnit, layer, table};
 use arc_geom::encoding::GeomCodec;
 use arc_geom::region::{Loop2, Region, RegionPart};
@@ -52,12 +60,21 @@ use arc_mesh::TriMesh;
 use crate::curve::{CurveItem, CurvePath, CurveShape, DashPattern, MAX_DASH_INTERVALS};
 use crate::error::codes;
 use crate::extract::{ApplyReport, Extraction, ExtractionResult, ExtractorRegistry, Outcome};
-use crate::scene::{LineStyle, LineWidth, MeshInstance, MeshItem, RenderItem, Scene, SceneLimits};
+use crate::glyph::{Glyph, GlyphCache};
+use crate::scene::{
+    GeometryId, LineStyle, LineWidth, MeshInstance, MeshItem, RenderItem, Scene, SceneLimits,
+};
 
 /// Mesh instance flag: paint in the background color (wipeout masks of model spaces).
 pub const PAINT_BACKGROUND: u32 = 1;
 /// Mesh instance flag: paint in the paper color (sheet backgrounds and masks on sheets).
 pub const PAINT_PAPER: u32 = 2;
+/// Mesh instance flag: a fill of a drawing. Its depth is moved back by half the allowance of
+/// masks, so strokes drawn over it win and masks stay behind it.
+pub const DRAFT_FILL: u32 = 4;
+/// Mesh instance flag: a glyph of outline text. Its depth is moved toward the eye by the edge
+/// allowance, so it wins over the fills it is drawn on.
+pub const DRAFT_TEXT: u32 = 8;
 /// The color of the printable-area outline on sheets.
 pub const MARGIN_COLOR: Color = Color::new(0.5, 0.5, 0.5, 1.0);
 
@@ -72,6 +89,9 @@ pub struct DraftOptions {
     pub lineweight_px_per_mm: f32,
     /// The scene limits that bound item, triangle and segment counts.
     pub limits: SceneLimits,
+    /// The glyph meshes of outline text, shared by the extractions that use clones of these
+    /// options.
+    pub glyphs: GlyphCache,
 }
 
 impl Default for DraftOptions {
@@ -81,6 +101,7 @@ impl Default for DraftOptions {
             default_lineweight_mm: 0.25,
             lineweight_px_per_mm: 96.0 / 25.4,
             limits: SceneLimits::DEFAULT,
+            glyphs: GlyphCache::new(),
         }
     }
 }
@@ -122,6 +143,9 @@ pub struct DraftExtraction {
     pub extraction: Extraction,
     /// For every item, the sub-object of each of its paths (one for a mesh item).
     pub sub_objects: Vec<Vec<SubObject>>,
+    /// The glyphs of outline text that were not drawn: the font is not registered or the
+    /// glyph's outline is unreadable or has overlapping contours.
+    pub skipped_glyphs: usize,
 }
 
 /// A sheet: its objects and how to render it.
@@ -581,6 +605,8 @@ struct Builder<'a> {
     mask: u32,
     clip: Option<&'a Clip>,
     out: DraftExtraction,
+    /// The geometry of each glyph of this extraction: (family, face, glyph).
+    glyph_geometries: BTreeMap<(String, u32, u32), GeometryId>,
 }
 
 impl Builder<'_> {
@@ -591,9 +617,13 @@ impl Builder<'_> {
             part: p.part,
         };
         match &p.shape {
-            // Outline glyph runs are drawn by the text pipeline (CORE-GPU-012), which does not
-            // exist yet; stroke text arrives as strokes and is drawn.
-            Shape::Glyphs { .. } => Ok(()),
+            Shape::Glyphs {
+                family,
+                index,
+                size,
+                glyphs,
+                placement,
+            } => self.glyphs(p, (family, *index), *size, glyphs, placement, &sub),
             Shape::Fill(boundary) | Shape::Mask(boundary) => {
                 let tris = triangles(boundary, self.options)?;
                 self.region_primitive(p, tris, sub)
@@ -620,6 +650,88 @@ impl Builder<'_> {
         }
     }
 
+    /// An outline text run: one item per distinct glyph, whose instances are the occurrences of
+    /// the glyph with the run's transform and color.
+    fn glyphs(
+        &mut self,
+        p: &Primitive,
+        (family, index): (&String, u32),
+        size: f64,
+        glyphs: &[PositionedGlyph],
+        placement: &Transform2,
+        sub: &SubObject,
+    ) -> Result<()> {
+        let provider = &self.options.display.fonts.provider;
+        let Some(font) = provider.outline_font(family) else {
+            self.out.skipped_glyphs += glyphs.len();
+            return Ok(());
+        };
+        let mut groups: Vec<(u32, Vec<Point2>)> = Vec::new();
+        for g in glyphs {
+            let at = placement * g.position;
+            match groups.iter_mut().find(|(id, _)| *id == g.id) {
+                Some((_, positions)) => positions.push(at),
+                None => groups.push((g.id, vec![at])),
+            }
+        }
+        let m = placement.matrix();
+        let linear = [
+            narrow(m[(0, 0)] * size),
+            narrow(m[(0, 1)] * size),
+            narrow(m[(1, 0)] * size),
+            narrow(m[(1, 1)] * size),
+        ];
+        let color = color_of(p);
+        for (id, positions) in groups {
+            let mesh = match self.options.glyphs.glyph(&font, index, id) {
+                Glyph::Empty => continue,
+                Glyph::Skipped => {
+                    self.out.skipped_glyphs += positions.len();
+                    continue;
+                }
+                Glyph::Mesh(mesh) => mesh,
+            };
+            let key = (family.clone(), index, id);
+            let geometry = match self.glyph_geometries.get(&key) {
+                Some(g) => *g,
+                None => {
+                    let g = self
+                        .out
+                        .extraction
+                        .add_geometry((*mesh).clone(), Point3::origin());
+                    self.glyph_geometries.insert(key, g);
+                    g
+                }
+            };
+            let Some(first) = positions.first().copied() else {
+                continue;
+            };
+            let instances: Vec<MeshInstance> = positions
+                .iter()
+                .map(|at| {
+                    let mut instance = MeshInstance::new(color);
+                    instance.transform = [
+                        [linear[0], linear[1], 0.0, narrow(at.x - first.x)],
+                        [linear[2], linear[3], 0.0, narrow(at.y - first.y)],
+                        [0.0, 0.0, 1.0, 0.0],
+                    ];
+                    instance.flags = DRAFT_TEXT;
+                    instance
+                })
+                .collect();
+            // One sub-object per instance: a picked instance is the element of its hit.
+            self.out
+                .sub_objects
+                .push(vec![sub.clone(); instances.len()]);
+            self.out.extraction.items.push(RenderItem::Mesh(MeshItem {
+                geometry,
+                origin: Point3::new(first.x, first.y, 0.0),
+                instances,
+            }));
+        }
+        Ok(())
+    }
+
     fn region_primitive(
         &mut self,
         p: &Primitive,
@@ -627,9 +739,11 @@ impl Builder<'_> {
         sub: SubObject,
     ) -> Result<()> {
         let mut instance = MeshInstance::new(color_of(p));
-        if matches!(p.shape, Shape::Mask(_)) {
-            instance.flags = self.mask;
-        }
+        instance.flags = if matches!(p.shape, Shape::Mask(_)) {
+            self.mask
+        } else {
+            DRAFT_FILL
+        };
         let clip = self.clip.map(|c| c.triangles.as_slice());
         if let Some(item) =
             region_item(&mut self.out.extraction, tris, clip, instance, self.options)?
@@ -712,6 +826,7 @@ fn group(
         mask,
         clip,
         out: DraftExtraction::default(),
+        glyph_geometries: BTreeMap::new(),
     };
     for p in primitives {
         builder.primitive(p)?;
@@ -721,6 +836,55 @@ fn group(
         return Err(Error::new(codes::LIMIT_EXCEEDED).with_detail("limit", "max_items_per_object"));
     }
     Ok(builder.out)
+}
+
+/// The entity a primitive's appearance comes from: the drawing entity.
+fn drawing_entity(p: &Primitive) -> ObjectId {
+    p.path.last().copied().unwrap_or(p.source)
+}
+
+/// Replaces the solid fallbacks of pattern hatches with their pattern strokes.
+///
+/// Lists are built without dash generation (`max_dashes` 0), and a hatch takes that number as
+/// its bound of generated lines and marks, so every pattern hatch arrives as the solid fill
+/// its bound falls back to (part 1). When a list holds such a fill, `rebuild` builds the list
+/// again with the real bound, and the primitives of each of those hatches replace the fill;
+/// a hatch that still falls back, or a failed rebuild, keeps the fill.
+fn restore_hatches(
+    snapshot: &Snapshot,
+    primitives: Vec<Primitive>,
+    options: &DraftOptions,
+    rebuild: impl FnOnce(&DisplayOptions) -> Result<Vec<Primitive>>,
+) -> Vec<Primitive> {
+    let fallback = |p: &Primitive| {
+        p.part == 1
+            && matches!(p.shape, Shape::Region(_))
+            && type_of(snapshot, drawing_entity(p)) == Some(HATCH)
+    };
+    if !primitives.iter().any(fallback) {
+        return primitives;
+    }
+    let Ok(full) = rebuild(&options.display) else {
+        return primitives;
+    };
+    let mut marks: BTreeMap<(ObjectId, Vec<ObjectId>), Vec<Primitive>> = BTreeMap::new();
+    for p in full {
+        let is_hatch = type_of(snapshot, drawing_entity(&p)) == Some(HATCH);
+        if is_hatch && !matches!(p.shape, Shape::Region(_)) {
+            marks.entry((p.source, p.path.clone())).or_default().push(p);
+        }
+    }
+    let mut out = Vec::with_capacity(primitives.len());
+    for p in primitives {
+        match fallback(&p)
+            .then(|| marks.remove(&(p.source, p.path.clone())))
+            .flatten()
+        {
+            Some(strokes) => out.extend(strokes),
+            None => out.push(p),
+        }
+    }
+    out
 }
 
 /// The extraction of the primitives of one object of a list: masks painted with `mask`
@@ -762,8 +926,10 @@ pub fn extract_entity(
         return Ok(DraftExtraction::default());
     };
     let list = entity_list(snapshot, entity, &display_options(options))?;
-    let visible: Vec<Primitive> = list
-        .primitives
+    let primitives = restore_hatches(snapshot, list.primitives, options, |d| {
+        Ok(entity_list(snapshot, entity, d)?.primitives)
+    });
+    let visible: Vec<Primitive> = primitives
         .into_iter()
         .filter(|p| !p.layers.iter().any(|l| layer_hidden(snapshot, *l)))
         .collect();
@@ -818,7 +984,10 @@ pub fn space_extractions(
     space: ObjectId,
     options: &DraftOptions,
 ) -> Result<Vec<(ObjectId, DraftExtraction)>> {
-    let list = space_list(snapshot, Lists::Direct, space, &display_options(options))?;
+    let mut list = space_list(snapshot, Lists::Direct, space, &display_options(options))?;
+    list.primitives = restore_hatches(snapshot, list.primitives, options, |d| {
+        Ok(space_list(snapshot, Lists::Direct, space, d)?.primitives)
+    });
     let (widths, mask) = if is_layout(snapshot, space) {
         (Widths::Paper, PAINT_PAPER)
     } else {
@@ -914,9 +1083,12 @@ pub fn sheet_extractions(
     }
     let display = display_options(options);
     for viewport in owned(snapshot, space, VIEWPORT) {
-        let Ok(list) = viewport_list(snapshot, Lists::Direct, viewport, &display) else {
+        let Ok(mut list) = viewport_list(snapshot, Lists::Direct, viewport, &display) else {
             continue;
         };
+        list.primitives = restore_hatches(snapshot, list.primitives, options, |d| {
+            Ok(viewport_list(snapshot, Lists::Direct, viewport, d)?.primitives)
+        });
         let clip = list.clip.clone();
         let extraction = extract_primitives(
             snapshot,

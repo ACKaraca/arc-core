@@ -14,14 +14,18 @@ arc-doc = { workspace = true }
 arc-draft = { workspace = true, optional = true }
 arc-geom = { workspace = true }
 arc-mesh = { workspace = true }
+skrifa = { workspace = true, optional = true }
 wgpu = { workspace = true }
 
 [features]
-# The shared extractor of `arc-draft` display lists (CORE-GPU-013).
-draft = ["dep:arc-draft"]
+# The shared extractor of `arc-draft` display lists (CORE-GPU-013), with hatches and outline text
+# (CORE-GPU-011, CORE-GPU-012).
+draft = ["dep:arc-draft", "dep:skrifa"]
 
 [dev-dependencies]
 arc-command = { workspace = true }
+# Outline text layout for the text tests of the feature `draft`.
+arc-draft = { workspace = true, features = ["outline-text"] }
 image = { workspace = true }
 proptest = { workspace = true }
 serde_json = { workspace = true }

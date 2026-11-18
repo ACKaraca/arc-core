@@ -20,7 +20,8 @@
 //! again only when the zoom changes by more than a factor of two (CORE-GPU-010), with polyline
 //! widths, a lineweight display switch and dash patterns evaluated in the line shader by the
 //! position along each path (CORE-GPU-009). With the feature `draft`, the module [`draft`]
-//! extracts `arc-draft` display lists of spaces, entities and sheets (CORE-GPU-013).
+//! extracts `arc-draft` display lists of spaces, entities and sheets (CORE-GPU-013), with hatches
+//! (CORE-GPU-011) and outline text from glyph meshes (CORE-GPU-012).
 //!
 //! Typical use: create a [`Gpu`] from [`GpuSettings`], a [`Scene`] on it, upload geometry with
 //! [`Scene::add_geometry`], set items with [`Scene::update`], and render with
@@ -39,6 +40,8 @@ pub mod curve;
 pub mod draft;
 pub mod error;
 pub mod extract;
+#[cfg(feature = "draft")]
+pub mod glyph;
 pub mod navigation;
 pub mod overlay;
 pub mod pool;

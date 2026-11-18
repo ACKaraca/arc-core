@@ -193,6 +193,7 @@ dependencies = [
  "image",
  "proptest",
  "serde_json",
+ "skrifa",
  "wgpu",
 ]
 
