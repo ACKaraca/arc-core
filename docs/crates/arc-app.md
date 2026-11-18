@@ -218,6 +218,7 @@ The codes `arc-app` owns; messages are in `locales/en-US/arc-app.ftl`.
 | `app.locale.fallback_missing` | `not_found` | There is no `en-US` catalog |
 | `app.log.invalid_config` | `invalid_input` | A logging limit or file name is out of range |
 | `app.log.io` | `io` | A log directory or file cannot be opened |
+| `app.macro.write_failed` | `io` | A recorded macro cannot be written to the chosen file |
 | `app.recent.not_found` | `not_found` | A path is not in the recent-files list |
 | `app.recent.too_many_pinned` | `limit_exceeded` | A fifty-first entry is pinned |
 | `app.product.invalid_id` | `invalid_input` | A panel, tool or extractor identifier is not a dotted key, or a file extension is malformed or can neither be opened nor saved |
@@ -392,7 +393,8 @@ command-line surfaces only (so automation never reaches a dialog); none opens a 
 platform shows a file dialog), `app.file.save` (a document never saved asks for a file),
 `app.file.close` (a dirty document asks whether to save), `app.shell.quit`, `app.edit.undo`,
 `app.edit.redo`, `app.select.set` (`objects`, `mode` `replace`, `add` or `toggle`, and the
-viewport's `gesture`) and `app.select.clear`. Invoked through `arc_command::Invoker` they change
+viewport's `gesture`), `app.select.clear`, `app.macro.record_start` and `app.macro.record_stop`
+(see the frame composition). Invoked through `arc_command::Invoker` they change
 nothing. The labels are in `locales/en-US/arc-app.ftl`. `shell::default_menu` is a File and an
 Edit menu of these commands.
 
@@ -439,8 +441,25 @@ needs no window:
   sequence from `ShellConfig::seed`, so commands generate new identifiers also in a reopened
   document whose revisions repeat earlier ones; the reference shell seeds it from the clock and
   the process. Errors are kept in `errors()` (at most 64).
+- `FrameInput::language` and `PanelContext::language` carry the active language tag (the
+  localizer's language, for example `tr`). The diagnostics panel's `language` and the outliner's
+  filter (`arc_ui::text::matches_filter`) fold case by it, so in Turkish `İ` matches `i` and `I`
+  matches `ı`. The shell has no command palette panel; a product's palette sets
+  `Palette::language` from the same value.
+- The viewport panel draws `arc_ui::view_cube::ViewCube` over the viewport widget. A returned
+  `ViewIntent` becomes the camera through `ViewIntent::frame_from` and
+  `arc_gpu::navigation::interpolate`; the shell has no animation tick, so the end frame
+  (`t = 1`) is applied at once.
+- `app.macro.record_start` attaches an `arc_command::macros::Recorder` (the product's name and
+  version, default limits; starting again discards an unsaved recording). Every product command
+  that completes through `Application::invoke` in the command-line step is recorded with the
+  revision it ran on, its seed and selection; shell commands and failed runs are not. A full
+  recorder drops further steps silently. `app.macro.record_stop` ends the recording and asks
+  for a file with `Request::SaveMacro(text)`, which `platform::carry_out` writes after a save
+  dialog (`macro.jsonl` suggested; `app.macro.write_failed` when the write fails); without a
+  recording it does nothing.
 - The frame returns the egui output, the `Request`s for the platform (`OpenDialog`,
-  `SaveDialog(tab)`, `AskClose(tab)`, `Quit`), whether more frames are on their way and whether
+  `SaveDialog(tab)`, `AskClose(tab)`, `Quit`, `SaveMacro(text)`), whether more frames are on their way and whether
   a setting changed.
 
 ### Start-up, prompts and settings in the shell (CORE-APP-004, 005, 006, 010, 011, 012, 015)

@@ -115,6 +115,12 @@ pub mod codes {
         category: Category::Io,
         message_id: "app-log-io",
     };
+    /// A recorded macro could not be written to its file.
+    pub const MACRO_WRITE_FAILED: ErrorCode = ErrorCode {
+        code: "app.macro.write_failed",
+        category: Category::Io,
+        message_id: "app-macro-write-failed",
+    };
     /// A path is not in the recent-files list.
     pub const RECENT_NOT_FOUND: ErrorCode = ErrorCode {
         code: "app.recent.not_found",

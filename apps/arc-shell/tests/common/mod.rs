@@ -285,6 +285,7 @@ impl Harness {
             },
             time: self.time,
             localize: &self.localizer,
+            language: self.localizer.active().language.as_str(),
             textures: &textures,
             menu_intents: intents,
             native_menu: false,

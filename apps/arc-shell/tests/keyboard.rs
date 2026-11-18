@@ -184,3 +184,49 @@ fn keyboard_only_create_select_edit_undo_and_save() {
     );
     assert!(h.shell.errors().is_empty(), "{:?}", h.shell.errors());
 }
+
+/// Presses Tab until the focused node is the button named exactly `name`, then Enter.
+fn activate_cube_target(h: &mut Harness, name: &str) {
+    for _ in 0..80 {
+        let pass = h.frame(vec![key(egui::Key::Tab, NONE)]);
+        if focused(h, &pass).is_some_and(|(r, n)| r == accesskit::Role::Button && n == name) {
+            h.frame(vec![key(egui::Key::Enter, NONE)]);
+            return;
+        }
+    }
+    panic!("no view cube target {name} reachable by Tab");
+}
+
+#[test]
+fn view_cube_targets_set_the_camera_by_keyboard() {
+    let dir = TempDir::new("view-cube");
+    let mut h = Harness::new(&dir.join("data"), None);
+    h.frame(vec![key(egui::Key::N, CTRL)]);
+    h.frame(Vec::new());
+    let tab = h.app.active().unwrap();
+
+    // Front looks along +Y with Z up.
+    activate_cube_target(&mut h, "Front");
+    let camera = *h.shell.view(tab).unwrap().camera();
+    let look = (camera.target() - camera.eye()).normalize();
+    assert!(
+        (look - arc_base::math::Vector3::y()).norm() < 1e-9,
+        "{look:?}"
+    );
+    assert!((camera.up() - arc_base::math::Vector3::z()).norm() < 1e-9);
+
+    // Top looks along -Z with +Y up, at the same distance from the same target.
+    activate_cube_target(&mut h, "Top");
+    let top = *h.shell.view(tab).unwrap().camera();
+    let look = (top.target() - top.eye()).normalize();
+    assert!(
+        (look + arc_base::math::Vector3::z()).norm() < 1e-9,
+        "{look:?}"
+    );
+    assert!((top.up() - arc_base::math::Vector3::y()).norm() < 1e-9);
+    assert_eq!(top.target(), camera.target());
+    assert!(
+        ((top.eye() - top.target()).norm() - (camera.eye() - camera.target()).norm()).abs() < 1e-9
+    );
+    assert!(h.shell.errors().is_empty(), "{:?}", h.shell.errors());
+}

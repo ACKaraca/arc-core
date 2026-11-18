@@ -398,6 +398,7 @@ impl Handler {
             raw,
             time: self.started.elapsed().as_secs_f64(),
             localize: &self.localizer,
+            language: self.localizer.active().language.as_str(),
             textures: &textures,
             menu_intents: if main { self.menu.poll() } else { Vec::new() },
             native_menu: self.native_menu,

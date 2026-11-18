@@ -6,11 +6,12 @@
 
 use std::path::{Path, PathBuf};
 
-use arc_base::Result;
+use arc_base::{Error, Result};
 use arc_ui::{Entry, Intent, Localize};
 
 use super::Request;
 use crate::application::{Application, CloseAnswer, Closed};
+use crate::error::codes;
 use crate::product::FileType;
 
 /// File and question dialogs.
@@ -225,6 +226,12 @@ pub fn carry_out(
                 None => Ok(Done::Cancelled),
             }
         }
+        Request::SaveMacro(text) => match dialogs.pick_save(&[], Some("macro.jsonl")) {
+            Some(path) => std::fs::write(path, text)
+                .map(|()| Done::Saved)
+                .map_err(|e| Error::new(codes::MACRO_WRITE_FAILED).with_source(e)),
+            None => Ok(Done::Cancelled),
+        },
         Request::AskClose(tab) => close(app, dialogs, *tab).map(Done::Closed),
         Request::Quit => {
             while let Some(tab) = app.tabs().first().map(crate::application::Tab::id) {

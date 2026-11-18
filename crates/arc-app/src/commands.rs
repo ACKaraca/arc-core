@@ -34,6 +34,11 @@ pub const SELECT_SET: &str = "app.select.set";
 /// Clears the selection.
 pub const SELECT_CLEAR: &str = "app.select.clear";
 
+/// Starts recording the product commands the shell runs as a macro.
+pub const MACRO_RECORD_START: &str = "app.macro.record_start";
+/// Stops recording and asks for a file to save the macro to.
+pub const MACRO_RECORD_STOP: &str = "app.macro.record_stop";
+
 /// No parameters.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -89,7 +94,7 @@ struct Description {
     message_id: &'static str,
 }
 
-const NAMES: [Names; 10] = [
+const NAMES: [Names; 12] = [
     Names {
         id: FILE_NEW,
         message_id: "app-command-file-new",
@@ -160,6 +165,20 @@ const NAMES: [Names; 10] = [
             message_id: "app-command-select-clear-description",
         },
     },
+    Names {
+        id: MACRO_RECORD_START,
+        message_id: "app-command-macro-record-start",
+        description: Description {
+            message_id: "app-command-macro-record-start-description",
+        },
+    },
+    Names {
+        id: MACRO_RECORD_STOP,
+        message_id: "app-command-macro-record-stop",
+        description: Description {
+            message_id: "app-command-macro-record-stop-description",
+        },
+    },
 ];
 
 fn spec<P: serde::de::DeserializeOwned + JsonSchema>(id: &'static str) -> CommandSpec {
@@ -192,6 +211,8 @@ pub fn register(registry: &mut Registry) -> Result<()> {
             .with_permissions([Permission::Edit]),
         spec::<SelectParams>(SELECT_SET).with_positional(["objects"]),
         spec::<NoParams>(SELECT_CLEAR),
+        spec::<NoParams>(MACRO_RECORD_START),
+        spec::<NoParams>(MACRO_RECORD_STOP).with_permissions([Permission::FileWrite]),
     ];
     for spec in specs {
         registry.register(spec)?;
@@ -218,7 +239,7 @@ mod tests {
             assert!(is_shell_command(spec.id()), "{}", spec.id());
             assert!(!spec.exposure().contains(&Surface::Automation));
         }
-        assert_eq!(registry.iter().count(), 10);
+        assert_eq!(registry.iter().count(), 12);
         assert!(!is_shell_command("shell.point.create"));
     }
 }

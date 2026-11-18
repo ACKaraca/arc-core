@@ -226,6 +226,7 @@ fn frame(
             },
             time: 1.0,
             localize: &Names,
+            language: "en",
             textures: &textures,
             menu_intents,
             native_menu,

@@ -30,7 +30,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_base::math::{Point3, Vector3};
-use arc_base::{Error, ObjectId, Result, Tolerance};
+use arc_base::{Error, Limits, ObjectId, Result, Tolerance};
+use arc_command::macros::Recorder;
 use arc_command::prompt::PromptInput;
 use arc_command::{
     CommandLine, Invocation, LineStep, Outcome, Permission, Session, Submitted, Surface, Target,
@@ -46,7 +47,8 @@ use arc_ui::{
     Appearance, Binding, ChordResolver, Colors, CommandLineView, DiagnosticsPanel, Dock, DockArea,
     DockLayout, GridContext, Intent, Keymap, LineAction, LineCommands, LineContext, Localize,
     Lookup, Menu, Message, Notifications, PropertyGrid, PropertyModel, PropertyObject, Severity,
-    TreeCommands, TreeItem, TreeSource, TreeView, ViewportCommands, ViewportInput, ViewportWidget,
+    TreeCommands, TreeItem, TreeSource, TreeView, ViewCube, ViewCubeInput, ViewportCommands,
+    ViewportInput, ViewportWidget,
 };
 use serde_json::{Map, Value as Json};
 
@@ -89,6 +91,8 @@ pub struct PanelContext<'a> {
     pub view: Option<&'a mut View>,
     /// The message source.
     pub localize: &'a dyn Localize,
+    /// The active language tag, which selects the case-folding rule of filters.
+    pub language: &'a str,
     /// The theme colors.
     pub colors: &'a Colors,
     /// The texture of the active tab's latest viewport frame, registered by the platform.
@@ -156,6 +160,8 @@ pub enum Request {
     AskClose(TabId),
     /// Close every tab (asking for dirty ones) and end the application.
     Quit,
+    /// Ask for a file and write this macro text to it.
+    SaveMacro(String),
 }
 
 /// What one frame reads.
@@ -166,6 +172,9 @@ pub struct FrameInput<'a> {
     pub time: f64,
     /// The message source.
     pub localize: &'a dyn Localize,
+    /// The active language tag (for example `tr`), which selects the case-folding rule of the
+    /// filters.
+    pub language: &'a str,
     /// The registered texture of each tab's latest viewport frame.
     pub textures: &'a BTreeMap<TabId, TextureId>,
     /// Intents from the native menu bar since the last frame.
@@ -348,6 +357,7 @@ pub struct Shell {
     recent_written: Option<Vec<RecentEntry>>,
     log_ring: Option<LogRing>,
     settings_changed: bool,
+    recorder: Option<Recorder>,
 }
 
 /// The user's files the shell reads at start and writes on change.
@@ -480,6 +490,7 @@ impl Shell {
             recent_written: None,
             log_ring: None,
             settings_changed: false,
+            recorder: None,
         }
     }
 
@@ -897,6 +908,7 @@ impl Shell {
                         tab: active,
                         view: view.as_deref_mut(),
                         localize: input.localize,
+                        language: input.language,
                         colors: &colors,
                         texture,
                         time: input.time,
@@ -1114,6 +1126,7 @@ impl Shell {
                 seed,
             };
             let log = &mut self.log;
+            let recorder = &self.recorder;
             let session = &self.ui_session;
             let mut runner = |invocation: Invocation| -> Result<Outcome> {
                 if commands::is_shell_command(&invocation.command) {
@@ -1131,7 +1144,14 @@ impl Shell {
                     log.remove(0);
                 }
                 log.push(invocation.command.clone());
-                app_ref.invoke(tab, session, invocation)
+                let revision = document.snapshot().revision();
+                let recorded = recorder.as_ref().map(|r| (r, invocation.clone()));
+                let outcome = app_ref.invoke(tab, session, invocation)?;
+                if let Some((recorder, invocation)) = recorded {
+                    // A step the recorder refuses (a full recorder) does not fail the run.
+                    let _ = recorder.record(registry, &invocation, revision);
+                }
+                Ok(outcome)
             };
             view.line.drive(&target, step, &mut runner)
         };
@@ -1203,6 +1223,17 @@ impl Shell {
             }
             commands::APP_QUIT => {
                 requests.push(Request::Quit);
+                Ok(())
+            }
+            commands::MACRO_RECORD_START => {
+                let core = app.product().headless();
+                self.recorder = Some(Recorder::new(&core.name, &core.version, &Limits::DEFAULT));
+                Ok(())
+            }
+            commands::MACRO_RECORD_STOP => {
+                if let Some(recorder) = self.recorder.take() {
+                    requests.push(Request::SaveMacro(recorder.text()));
+                }
                 Ok(())
             }
             commands::EDIT_UNDO => app.undo(need()?).map(drop),
@@ -1404,6 +1435,23 @@ impl Panel for ViewportPanel {
         if let Some(c) = out.camera {
             *camera = c;
         }
+        let cube = ViewCubeInput {
+            frame: camera,
+            localize: cx.localize,
+            colors: cx.colors,
+            size: ui.spacing().interact_size.y * 4.0,
+        };
+        // The shell has no animation tick, so the end frame of the transition is applied at once
+        // (`interpolate` at t = 1).
+        if let Some(intent) = ViewCube.show_over(ui, out.response.rect, &cube) {
+            match intent
+                .frame_from(camera)
+                .and_then(|end| arc_gpu::navigation::interpolate(camera, &end, 1.0))
+            {
+                Ok(end) => *camera = end,
+                Err(e) => cx.actions.push(Action::Error(e)),
+            }
+        }
         *hover = out.hover;
         if let Some(vp) = viewport.as_ref() {
             let overlay = (!out.overlay.primitives.is_empty()).then_some(out.overlay);
@@ -1503,12 +1551,13 @@ impl Panel for PropertiesPanel {
 /// The objects of a snapshot as a flat outliner, in identifier order. Labels are the type key
 /// and the identifier, or the `name` text field when the object has one.
 struct Objects<'a> {
+    language: &'a str,
     items: Vec<TreeItem>,
     _snapshot: &'a arc_doc::Snapshot,
 }
 
 impl<'a> Objects<'a> {
-    fn new(snapshot: &'a arc_doc::Snapshot, selection: &[ObjectId]) -> Self {
+    fn new(snapshot: &'a arc_doc::Snapshot, selection: &[ObjectId], language: &'a str) -> Self {
         let registry = snapshot.registry();
         let mut items: Vec<TreeItem> = snapshot
             .iter()
@@ -1533,16 +1582,16 @@ impl<'a> Objects<'a> {
             .collect();
         items.sort_by_key(|i| i.id);
         Self {
+            language,
             items,
             _snapshot: snapshot,
         }
     }
 
     fn matching<'s>(&'s self, filter: &'s str) -> impl Iterator<Item = &'s TreeItem> + 's {
-        let filter = filter.to_lowercase();
         self.items
             .iter()
-            .filter(move |i| filter.is_empty() || i.label.to_lowercase().contains(&filter))
+            .filter(move |i| arc_ui::text::matches_filter(&i.label, filter, self.language))
     }
 }
 
@@ -1608,7 +1657,7 @@ impl Panel for OutlinerPanel {
             return;
         };
         let snapshot = tab.document().snapshot();
-        let source = Objects::new(&snapshot, &view.selection);
+        let source = Objects::new(&snapshot, &view.selection, cx.language);
         if let Some(intent) = view.tree.show(ui, &source, &self.commands, cx.localize) {
             cx.actions.push(Action::Intent(intent));
         }
@@ -1669,6 +1718,7 @@ impl Panel for DiagnosticsPanelView {
             return;
         };
         let snapshot = tab.document().diagnostics_snapshot();
+        cx.language.clone_into(&mut view.diagnostics.language);
         if let Some(intent) =
             view.diagnostics
                 .show(ui, &snapshot, cx.localize, commands::SELECT_SET)

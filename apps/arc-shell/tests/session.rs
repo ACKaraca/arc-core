@@ -412,3 +412,94 @@ fn a_floating_tree_is_laid_out_as_a_second_window() {
     assert!(h.frame(Vec::new()).shows(&empty));
     assert!(!h.window_frame("float.shell.log", Vec::new()).shows(&empty));
 }
+
+/// Whether the outliner row of a point is listed when `filter` is typed in the outliner filter,
+/// in a shell whose language setting is `language`.
+fn point_row_listed(language: &str, filter: &str) -> bool {
+    let dir = TempDir::new("filter");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join("settings.toml"),
+        format!("[ui]\nlanguage = \"{language}\"\n"),
+    )
+    .unwrap();
+    let mut h = Harness::new(&data, None);
+    h.menu(commands::FILE_NEW);
+    h.command("shell.point.create position=[0, 0, 0]");
+    h.frame(Vec::new());
+    let label = h.text("ui-tree-filter");
+    h.type_into(&label, filter);
+    let listed = h
+        .frame(Vec::new())
+        .find(accesskit::Role::Button, "shell.point")
+        .is_some();
+    assert!(h.shell.errors().is_empty(), "{:?}", h.shell.errors());
+    listed
+}
+
+#[test]
+fn the_outliner_filter_folds_case_by_the_active_language() {
+    // English: `I` folds to `i`, a dotted capital does not match.
+    assert!(point_row_listed("en-US", "POINT"));
+    assert!(!point_row_listed("en-US", "POİNT"));
+    // Turkish: `İ` folds to `i` and `I` to the dotless `ı`.
+    assert!(point_row_listed("tr", "POİNT"));
+    assert!(!point_row_listed("tr", "POINT"));
+}
+
+#[test]
+fn a_recorded_macro_replays_the_session_on_a_copy_of_its_start() {
+    use arc_command::macros::{parse_macro, play};
+    use arc_command::{Permission, Session, Surface};
+
+    let dir = TempDir::new("macro");
+    let start = dir.join("start.arc");
+    let copy = dir.join("copy.arc");
+    new_package(&start);
+    std::fs::copy(&start, &copy).unwrap();
+
+    let mut h = Harness::new(&dir.join("data"), None);
+    let tab = h.app.open(&start).unwrap();
+    h.menu(commands::MACRO_RECORD_START);
+    h.command("shell.layer.create name=walls");
+    h.command("shell.point.create position=[1, 2, 0]");
+    h.command("shell.line.create start=[5, 5, 0] end=[8, 5, 0]");
+    assert_eq!(h.shell.invocations().len(), 3, "{:?}", h.shell.errors());
+    let macro_file = dir.join("session.jsonl");
+    h.dialogs.save = Some(macro_file.clone());
+    h.menu(commands::MACRO_RECORD_STOP);
+    assert_eq!(h.dialogs.asked, ["save"]);
+    // Recording stopped: a further command is not in the macro.
+    h.command("shell.point.create position=[9, 9, 0]");
+    h.menu(commands::MACRO_RECORD_STOP);
+    assert_eq!(
+        h.dialogs.asked,
+        ["save"],
+        "stop without a recording asks nothing"
+    );
+    h.menu(commands::EDIT_UNDO);
+    h.menu(commands::FILE_SAVE);
+    let (_, saved) = objects(&h);
+    assert_eq!(saved.len(), 3);
+    assert!(!h.app.tab(tab).unwrap().is_dirty());
+
+    // Play the macro on the copy of the starting package.
+    let text = std::fs::read_to_string(&macro_file).unwrap();
+    let parsed = parse_macro(&text, &arc_base::Limits::DEFAULT).unwrap();
+    assert_eq!(parsed.steps.len(), 3);
+    let mut other = common::app_in(&dir.join("data2"));
+    let replay = other.open(&copy).unwrap();
+    let session = Session::new(Surface::Ui, [Permission::Read, Permission::Edit]);
+    let registry = &other.product().headless().registry;
+    let document = other.tab(replay).unwrap().document();
+    play(registry, document, &session, &parsed.steps, "macro").unwrap();
+    let snapshot = document.snapshot();
+    let mut replayed: Vec<String> = snapshot
+        .iter()
+        .map(|(_, o)| format!("{} {:?}", o.id, o.values))
+        .collect();
+    replayed.sort();
+    assert_eq!(replayed, saved);
+    let _ = &mut other;
+}
