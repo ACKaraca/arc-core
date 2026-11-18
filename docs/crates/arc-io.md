@@ -183,6 +183,9 @@ memory limit and emits an invalid package, each asserting that the document is u
 
 ## DXF as implemented
 
+The mapping of the neutral model to the drafting types, with the import and export commands, is
+in [arc-draft-dxf.md](arc-draft-dxf.md).
+
 `arc-io-dxf` is the first part of the family. It depends on `arc-base` only (the table above also
 allows `arc-geom`; the neutral model stores coordinates as plain `f64` arrays and needs nothing
 from it), reads and writes byte buffers and streams, and builds for `wasm32-unknown-unknown`.

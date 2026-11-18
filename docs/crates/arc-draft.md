@@ -21,9 +21,9 @@ architecture is specified in [drafting-and-views.md](../architecture/drafting-an
 
 ## Stays in products
 
-Drawing commands and their prompt machines, dynamic block behavior, sheet set management, DWG and
-DXF mapping (DraftBuilder), discipline symbols and toolset objects, title block content, and domain
-annotation objects (tags bound to BIM elements, station labels).
+Drawing commands and their prompt machines, dynamic block behavior, sheet set management, DWG mapping, DXF mapping beyond the shared one of
+[arc-draft-dxf.md](arc-draft-dxf.md) (DraftBuilder), discipline symbols and toolset objects, title
+block content, and domain annotation objects (tags bound to BIM elements, station labels).
 
 ## Key concepts and types
 

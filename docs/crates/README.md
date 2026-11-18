@@ -19,6 +19,7 @@ each specification; the total is 528.
 | `arc-scene` | L4 | `SCENE` | [arc-scene.md](arc-scene.md) | 25 |
 | `arc-nodes` | L4 | `NODES` | [arc-nodes.md](arc-nodes.md) | 23 |
 | `arc-io-*` | L4 | `IO` | [arc-io.md](arc-io.md) | 55 |
+| `arc-draft-dxf` | L4 | none | [arc-draft-dxf.md](arc-draft-dxf.md) | 0 |
 | `arc-hub-api` | L4 | `HUBAPI` | [arc-hub-api.md](arc-hub-api.md) | 21 |
 | `arc-gpu` | L5 | `GPU` | [arc-gpu.md](arc-gpu.md) | 40 |
 | `arc-ui` | L6 | `UI` | [arc-ui.md](arc-ui.md) | 41 |

@@ -1,0 +1,34 @@
+# arc-draft-dxf tarafından sahip olunan hataların, kayıp nedenlerinin, komutların ve ilerleme
+# iletilerinin metinleri. Tanımlayıcılar crates/arc-draft-dxf/src/error.rs ve
+# crates/arc-draft-dxf/src/commands.rs içinde kayıtlıdır. Sözlük için arc-base.ftl dosyasına bakın.
+
+draft-dxf-space-invalid = Hedef bir model alanı olmalıdır.
+draft-dxf-document-invalid = Saklanan bir çizim nesnesi, türünün bildirdiği biçimde değil.
+draft-dxf-loss-entity-unmapped = { $count } { $kind } kaydının çizimde karşılığı yok ve içe aktarılmadı.
+draft-dxf-loss-paper-space-skipped = Kağıt alanındaki { $count } { $kind } kaydı içe aktarılmadı.
+draft-dxf-loss-objects-skipped = Nesneler bölümündeki { $count } kayıt (sözlükler, yerleşimler, gruplar) içe aktarılmadı.
+draft-dxf-loss-table-skipped = Çizimde karşılığı olmayan { $count } { $kind } kaydı içe aktarılmadı.
+draft-dxf-loss-geometry-invalid = { $count } { $kind } kaydının geometrisi oluşturulamadı ve içe aktarılmadı.
+draft-dxf-loss-text-formatting = { $count } çok satırlı metin biçim kodlarını yitirdi ve düz metin olarak içe aktarıldı.
+draft-dxf-loss-text-adjusted = { $count } { $kind } metni kısaltıldı veya denetim karakterlerinden arındırıldı.
+draft-dxf-loss-value-adjusted = { $count } { $kind } değeri sınırlandı veya dışarıda bırakıldı: { $what }.
+draft-dxf-loss-z-dropped = { $count } { $kind } kaydının ekstrüzyon yönündeki koordinatları korunmadı.
+draft-dxf-loss-units-converted = Uzunluklar { $from } dosya biriminden { $factor } çarpanıyla dönüştürüldü.
+draft-dxf-loss-units-unitless = Uzunluklar dönüştürülmedi: { $from } dosya biriminin veya hedef alanın dönüştürülebilir bir birimi yok.
+draft-dxf-loss-dimension-nonassociative = { $count } ölçü geometriyle ilişkilendirilmeden içe aktarıldı.
+draft-dxf-loss-hatch-dropped = { $count } tarama, sınırı saklanamadığı için içe aktarılmadı.
+draft-dxf-loss-hatch-approximated = { $count } tarama daha basit bir dolguyla içe aktarıldı: { $what }.
+draft-dxf-loss-array-expanded = { $count } blok başvurusu dizisi tek tek başvurulara açıldı.
+draft-dxf-loss-attribute-dropped = { $count } { $kind } kaydı, blokları etiketi tanımlamadığı için içe aktarılmadı.
+draft-dxf-loss-reference-unresolved = { $count } blok başvurusu, blokları bulunmadığı veya kendini içereceği için içe aktarılmadı.
+draft-dxf-loss-definition-created = Dosyada kullanılan { $count } { $kind } tanımı varsayılan değerlerle oluşturuldu.
+draft-dxf-loss-linetype-invalid = { $count } çizgi tipi, deseninde pozitif uzunluk olmadığı için içe aktarılmadı.
+draft-dxf-loss-name-adjusted = { $count } { $kind } adı düzeltildi: { $what }.
+draft-dxf-loss-export-unmapped = { $count } { $kind } nesnesinin DXF karşılığı yok ve yazılmadı.
+draft-dxf-loss-export-approximated = { $count } { $kind } nesnesi sahip olduğundan daha az bilgiyle yazıldı: { $what }.
+draft-dxf-command-import = DXF içe aktar
+draft-dxf-command-import-description = Bir DXF dosyasını, katmanları, çizgi tiplerini, stilleri, blokları ve nesneleri ile geri alınabilir tek adımda bir model alanına okur.
+draft-dxf-command-export = DXF dışa aktar
+draft-dxf-command-export-description = Bir model alanını katmanları, çizgi tipleri, stilleri ve blokları ile bir DXF dosyasına yazar.
+draft-dxf-progress-import = DXF dosyası içe aktarılıyor
+draft-dxf-progress-export = DXF dosyası yazılıyor

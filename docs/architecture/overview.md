@@ -25,11 +25,13 @@ explicitly. The allowed same-layer edges are:
 | `arc-command` | `arc-doc` | Commands run transactions |
 | `arc-view` | `arc-draft` | Derived views produce drafting geometry |
 | `arc-io-pdf` | `arc-draft` | Plot output is a drafting display list |
+| `arc-draft-dxf` | `arc-draft`, `arc-io-dxf` | The shared mapping between the neutral DXF model and the drafting types |
 | `arc-scene` | `arc-io-usd` (feature `usd`) | The Arc Scene contract defines its own OpenUSD mapping |
 | `arc-app` | `arc-ui` | The shell composes widgets; `arc-ui` never depends on `arc-app` |
 
 All other `arc-io-*` crates have no same-layer edges. The DXF and DWG crates produce their own
-neutral drawing model; mapping it to `arc-draft` or to a product model is the product's work.
+neutral drawing model; mapping it to a product model is the product's work. The mapping of the DXF
+model to the drafting types of `arc-draft` that every product shares is `arc-draft-dxf`.
 
 Only `arc-brep` links the B-rep kernel. A crate that needs exact solids depends on `arc-brep`
 explicitly; `arc-geom`, `arc-mesh`, `arc-doc`, `arc-draft` and `arc-gpu` never do. `arc-view`

@@ -67,3 +67,22 @@ needs no new class. It is not in the WebAssembly set because its `product` funct
 headless runner, which opens packages. Products never depend on it: it exists for the reference
 shells and their tests. The rejected alternative, a new class for sample code, would have changed
 the rule function for a single crate.
+
+## Amendment: Mapping crate between a format crate and the drafting model
+
+`arc-draft-dxf` maps the neutral drawing model of `arc-io-dxf` to the drafting model of
+`arc-draft` and back, and provides the import and export commands. It is classed `layer(4)` and
+has two same-layer edges, `arc-draft-dxf` to `arc-draft` and `arc-draft-dxf` to `arc-io-dxf`;
+every other dependency (`arc-base`, `arc-geom`, `arc-doc`, `arc-command`) is a lower layer. It
+is in the WebAssembly set, and its only file access goes through `arc_command::Context`.
+
+The two edges are the reason for the crate. The invariants forbid the other placements: product
+mapping never enters an `arc-io-*` crate, which also keeps `arc-io-dxf` free of a dependency on
+`arc-draft`, and `arc-draft` does not depend on a format crate. A product that needs a different
+mapping (another fidelity, product object types) depends on `arc-io-dxf` and writes its own; this
+crate is the shared mapping onto the drafting types that every product stores. The edges follow
+the precedent of `arc-io-pdf` to `arc-draft`, whose input is a drafting type.
+
+The rejected alternative is a feature or module of `arc-io-dxf` that depends on `arc-draft`: it
+would add the same same-layer edge, break the invariant, and put every future format crate's
+drafting mapping into the format crate.

@@ -1,0 +1,33 @@
+# Messages of the errors, loss reasons, commands and progress of arc-draft-dxf. Identifiers are
+# registered in crates/arc-draft-dxf/src/error.rs and crates/arc-draft-dxf/src/commands.rs.
+
+draft-dxf-space-invalid = The target must be a model space.
+draft-dxf-document-invalid = A stored drawing object does not have the shape its type declares.
+draft-dxf-loss-entity-unmapped = { $count } { $kind } records have no drafting counterpart and were not imported.
+draft-dxf-loss-paper-space-skipped = { $count } { $kind } records of paper space were not imported.
+draft-dxf-loss-objects-skipped = { $count } records of the objects section (dictionaries, layouts, groups) were not imported.
+draft-dxf-loss-table-skipped = { $count } { $kind } records without a drafting counterpart were not imported.
+draft-dxf-loss-geometry-invalid = { $count } { $kind } records have geometry that cannot be built and were not imported.
+draft-dxf-loss-text-formatting = { $count } multi-line texts lost their formatting codes and were imported as plain text.
+draft-dxf-loss-text-adjusted = { $count } { $kind } texts were shortened or cleaned of control characters.
+draft-dxf-loss-value-adjusted = { $count } { $kind } values were clamped or left out: { $what }.
+draft-dxf-loss-z-dropped = { $count } { $kind } records had coordinates along the extrusion direction that were not kept.
+draft-dxf-loss-units-converted = Lengths were converted from the file unit { $from } by the factor { $factor }.
+draft-dxf-loss-units-unitless = Lengths were not converted: the file unit { $from } or the target space has no convertible unit.
+draft-dxf-loss-dimension-nonassociative = { $count } dimensions were imported without association to geometry.
+draft-dxf-loss-hatch-dropped = { $count } hatches were not imported because their boundary cannot be stored.
+draft-dxf-loss-hatch-approximated = { $count } hatches were imported with a simpler fill: { $what }.
+draft-dxf-loss-array-expanded = { $count } block reference arrays were expanded into single references.
+draft-dxf-loss-attribute-dropped = { $count } { $kind } attribute records were not imported because their block does not define the tag.
+draft-dxf-loss-reference-unresolved = { $count } block references were not imported because their block is missing or would contain itself.
+draft-dxf-loss-definition-created = { $count } { $kind } definitions used in the file were created with default values.
+draft-dxf-loss-linetype-invalid = { $count } linetypes were not imported because their pattern has no positive length.
+draft-dxf-loss-name-adjusted = { $count } { $kind } names were adjusted: { $what }.
+draft-dxf-loss-export-unmapped = { $count } { $kind } objects have no DXF counterpart and were not written.
+draft-dxf-loss-export-approximated = { $count } { $kind } objects were written with less information than they hold: { $what }.
+draft-dxf-command-import = Import DXF
+draft-dxf-command-import-description = Reads a DXF file into a model space as layers, linetypes, styles, blocks and entities in one undoable step.
+draft-dxf-command-export = Export DXF
+draft-dxf-command-export-description = Writes a model space with its layers, linetypes, styles and blocks to a DXF file.
+draft-dxf-progress-import = Importing the DXF file
+draft-dxf-progress-export = Writing the DXF file

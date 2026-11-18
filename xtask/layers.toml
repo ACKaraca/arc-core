@@ -70,7 +70,7 @@ third_party = [
 ]
 
 # Crates built for wasm32-unknown-unknown by `cargo xtask wasm`.
-wasm = ["arc-base", "arc-geom", "arc-doc", "arc-mesh", "arc-solve", "arc-command", "arc-draft", "arc-ui", "arc-io-dxf", "arc-io-pdf"]
+wasm = ["arc-base", "arc-geom", "arc-doc", "arc-mesh", "arc-solve", "arc-command", "arc-draft", "arc-ui", "arc-io-dxf", "arc-io-pdf", "arc-draft-dxf"]
 
 # Class of every workspace crate: layer(n), ffi(n), app, testkit or tool.
 [crates]
@@ -89,6 +89,9 @@ arc-nodes = "layer(4)"
 arc-hub-api = "layer(4)"
 arc-io-dxf = "layer(4)"
 arc-io-pdf = "layer(4)"
+# The shared mapping between the neutral DXF model and the drafting model (ADR-0001, amendment
+# "Mapping crate between a format crate and the drafting model").
+arc-draft-dxf = "layer(4)"
 # A library above the domain layers, so both reference shells can depend on it (ADR-0001,
 # amendment "Sample set of the reference shell").
 arc-shell-sample = "layer(4)"
@@ -126,3 +129,11 @@ to = "arc-io-usd"
 [[same_layer]]
 from = "arc-app"
 to = "arc-ui"
+
+[[same_layer]]
+from = "arc-draft-dxf"
+to = "arc-draft"
+
+[[same_layer]]
+from = "arc-draft-dxf"
+to = "arc-io-dxf"
