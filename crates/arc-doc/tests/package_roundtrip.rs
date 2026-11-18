@@ -185,7 +185,7 @@ proptest! {
 }
 
 #[test]
-fn a_payload_hash_mismatch_is_reported() {
+fn a_payload_hash_mismatch_quarantines_the_row() {
     let dir = TempDir::new("hash");
     let path = dir.path("hash.arc");
     let mut good = stored(3, 5, 1, None, 1);
@@ -213,8 +213,10 @@ fn a_payload_hash_mismatch_is_reported() {
         .filter(|d| d.error.code() == codes::PACKAGE_HASH_MISMATCH.code)
         .collect();
     assert_eq!(mismatches.len(), 1);
-    assert_eq!(mismatches[0].kind, DiagnosticKind::Warning);
+    assert_eq!(mismatches[0].kind, DiagnosticKind::Quarantined);
     assert_eq!(mismatches[0].object, Some(ObjectId::from_u128(6)));
+    assert_eq!(loaded.counts.quarantined, 1);
+    assert_eq!(loaded.snapshot.held().count(), 1);
 }
 
 #[test]

@@ -11,6 +11,7 @@
 mod lock;
 mod preview;
 mod read;
+pub mod recovery;
 mod schema;
 mod write;
 
@@ -264,8 +265,9 @@ impl Package {
     /// Reads the type and object rows and loads them with [`crate::load::load`].
     ///
     /// Each row's `payload_hash` is checked against the BLAKE3 hash of its payload when its
-    /// encoding is 0 (other encodings cannot be hashed by this version); a mismatch is reported
-    /// as a diagnostic of kind `Warning` with `doc.package.hash_mismatch` (argument `id`).
+    /// encoding is 0 (other encodings cannot be hashed by this version); a row that does not
+    /// match is quarantined ([`crate::load::load_checked`]) with `doc.package.hash_mismatch`
+    /// (argument `id`) and written back unchanged.
     /// Values of an unexpected storage class or text encoding fail with
     /// `doc.package.value_invalid` (arguments `table`, `column`); values longer than
     /// `input_bytes` fail with `doc.load.limit_exceeded`; the load's own limits and failures

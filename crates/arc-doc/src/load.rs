@@ -331,6 +331,24 @@ pub fn load(
     rows: impl IntoIterator<Item = StoredObject>,
     options: &LoadOptions,
 ) -> Result<Loaded> {
+    load_checked(
+        registry,
+        types,
+        rows.into_iter().map(|row| (row, None)),
+        options,
+    )
+}
+
+/// [`load`] with the finding of the reader's own check of each row, such as the package's
+/// payload hash: a row that comes with an error and has a usable identifier, type key, version
+/// and header is quarantined with that error (diagnostic kind
+/// [`DiagnosticKind::Quarantined`]) instead of being decoded, and written back unchanged.
+pub fn load_checked(
+    registry: Arc<TypeRegistry>,
+    types: &[StoredType],
+    rows: impl IntoIterator<Item = (StoredObject, Option<Error>)>,
+    options: &LoadOptions,
+) -> Result<Loaded> {
     let limits = &options.limits;
     if u64::try_from(types.len()).unwrap_or(u64::MAX) > limits.record_count {
         return Err(limit("record_count"));
@@ -361,13 +379,13 @@ pub fn load(
         }
     };
     charge(&mut memory, 0)?;
-    for row in rows {
+    for (row, checked) in rows {
         loader.counts.rows += 1;
         if loader.counts.rows > limits.record_count {
             return Err(limit("record_count"));
         }
         charge(&mut memory, cost(&row))?;
-        let extra = loader.row(row)?;
+        let extra = loader.row(row, checked)?;
         charge(&mut memory, extra)?;
     }
     let Loader {
@@ -434,7 +452,7 @@ struct Loader<'a> {
 
 impl Loader<'_> {
     /// Loads one row and returns what it retains beyond [`cost`].
-    fn row(&mut self, row: StoredObject) -> Result<u64> {
+    fn row(&mut self, row: StoredObject, checked: Option<Error>) -> Result<u64> {
         let Some(id) = parse_id(&row.id) else {
             self.unaddressable(None, header_invalid("id"), row);
             return Ok(HELD_OVERHEAD);
@@ -462,6 +480,8 @@ impl Loader<'_> {
         };
         let version = parse_version(&row);
         let (header, header_error) = parse_header(&row, self.limits);
+        // The reader's finding quarantines the row like an invalid header.
+        let header_error = header_error.or(checked);
         let (key, version) = match (key, version, header_error) {
             (Ok(key), Ok(version), None) => (key, version),
             (key, version, header_error) => {

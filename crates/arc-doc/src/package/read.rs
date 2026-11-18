@@ -12,13 +12,13 @@ use std::sync::Arc;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, Row};
 
-use arc_base::id::{DocumentId, Identifier};
-use arc_base::{Error, Limits, ObjectId, Result};
+use arc_base::id::DocumentId;
+use arc_base::{Error, Limits, Result};
 
 use super::preview::{self, Preview};
 use super::{APPLICATION_ID, FORMAT, FormatVersion, MetaValue, Metadata, display, schema};
 use crate::error::codes;
-use crate::load::{DiagnosticKind, LoadDiagnostic, LoadOptions, Loaded, StoredObject, StoredType};
+use crate::load::{LoadOptions, Loaded, StoredObject, StoredType};
 use crate::registry::TypeRegistry;
 
 /// The SQLite header string at the start of every database file.
@@ -375,8 +375,8 @@ pub(crate) fn load(
         .map_err(|e| sql_error(e, &name))?;
     let mut cursor = statement.query([]).map_err(|e| sql_error(e, &name))?;
     let mut failure = None;
-    let mut mismatches = Vec::new();
-    // Rows stream into the load, which bounds their number and memory as it goes.
+    // Rows stream into the load, which bounds their number and memory as it goes; a row whose
+    // payload hash does not match is quarantined.
     let objects = std::iter::from_fn(|| {
         let next = match cursor.next() {
             Ok(Some(row)) => stored_object(&Cells {
@@ -389,10 +389,9 @@ pub(crate) fn load(
         };
         match next {
             Ok(row) => {
-                if hash_mismatch(&row) {
-                    mismatches.push(row.id.clone());
-                }
-                Some(row)
+                let checked = hash_mismatch(&row)
+                    .then(|| Error::new(codes::PACKAGE_HASH_MISMATCH).with_arg("id", hex(&row.id)));
+                Some((row, checked))
             }
             Err(error) => {
                 failure = Some(error);
@@ -400,23 +399,11 @@ pub(crate) fn load(
             }
         }
     });
-    let loaded = crate::load::load(registry, &types, objects, options);
+    let loaded = crate::load::load_checked(registry, &types, objects, options);
     if let Some(error) = failure {
         return Err(error);
     }
-    let mut loaded = loaded?;
-    for id in mismatches {
-        let object = <[u8; 16]>::try_from(id.as_slice())
-            .ok()
-            .map(|raw| ObjectId::from_u128(u128::from_be_bytes(raw)));
-        loaded.counts.warnings += 1;
-        loaded.diagnostics.push(LoadDiagnostic {
-            kind: DiagnosticKind::Warning,
-            object,
-            error: Error::new(codes::PACKAGE_HASH_MISMATCH).with_arg("id", hex(&id)),
-        });
-    }
-    Ok(loaded)
+    loaded
 }
 
 /// Reads the previews (see [`super::Package::previews`]).

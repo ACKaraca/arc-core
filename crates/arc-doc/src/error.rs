@@ -422,6 +422,36 @@ pub mod codes {
         message_id: "doc-undo-sequence-invalid",
     };
 
+    /// Recovery protection is off: the recovery database could not be created or written.
+    pub const RECOVERY_UNAVAILABLE: ErrorCode = ErrorCode {
+        code: "doc.recovery.unavailable",
+        category: Category::Io,
+        message_id: "doc-recovery-unavailable",
+    };
+    /// A recovery database is damaged, of another application or of an unknown format.
+    pub const RECOVERY_INVALID: ErrorCode = ErrorCode {
+        code: "doc.recovery.invalid",
+        category: Category::CorruptData,
+        message_id: "doc-recovery-invalid",
+    };
+    /// A recovery database is held by a running session.
+    pub const RECOVERY_LOCKED: ErrorCode = ErrorCode {
+        code: "doc.recovery.locked",
+        category: Category::Conflict,
+        message_id: "doc-recovery-locked",
+    };
+    /// The base of a recovery database changed and no copy of it was kept.
+    pub const RECOVERY_BASE_MISSING: ErrorCode = ErrorCode {
+        code: "doc.recovery.base_missing",
+        category: Category::NotFound,
+        message_id: "doc-recovery-base-missing",
+    };
+    /// Recovery replayed a prefix of the records: the next record is damaged or does not apply.
+    pub const RECOVERY_TRUNCATED: ErrorCode = ErrorCode {
+        code: "doc.recovery.truncated",
+        category: Category::CorruptData,
+        message_id: "doc-recovery-truncated",
+    };
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         TYPE_DUPLICATE_KEY,
@@ -492,6 +522,11 @@ pub mod codes {
         PACKAGE_META_INVALID,
         SCHEDULER_STOPPED,
         GRAPH_EVALUATOR_PANICKED,
+        RECOVERY_UNAVAILABLE,
+        RECOVERY_INVALID,
+        RECOVERY_LOCKED,
+        RECOVERY_BASE_MISSING,
+        RECOVERY_TRUNCATED,
     ];
 }
 

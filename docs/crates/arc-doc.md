@@ -915,6 +915,23 @@ occurred when the thread was descheduled.
   transaction identifier in constant time, `iter` lists them in commit order and `ancestors`
   follows the parent chain while the parents are in the journal. Persisting and retaining
   records across saves belongs to the package.
+- **Through the document.** A `Document` owns a `Journal` and an `UndoManager` behind one lock
+  that is a leaf (nothing else is locked while it is held; the job runs without it). The
+  executor's journal step appends every published transaction to the journal and then calls the
+  sink of `Document::set_journal` (the recovery journal); after the commit the transaction is
+  reported to the undo manager with the coalesce key of `Document::submit_with(SubmitOptions,
+  job)` (`submit` passes none). While a group is open, a job's transaction carries the outermost
+  group's identifier; a job naming another group fails with `doc.undo.sequence_invalid` before
+  its commit. `undo`, `redo` and `fail_group` run as jobs: the manager prepares the transaction
+  on the job's base snapshot, it commits like any other (kind `undo_of` or `redo_of`), and the
+  stacks change only after the commit succeeded (a rollback that fails to commit leaves the group
+  open). `begin_group`, `end_group`, `begin_gesture` and `end_gesture` run in submission order as
+  jobs that commit nothing. `can_undo`, `can_redo`, `undo_label` and `redo_label` serve the user
+  interface; `with_journal` and `with_undo` read under the lock. The journal append and the
+  report cannot fail for a record the same process produced; if one does (a defect, or a record
+  beyond the encoding limits), the transaction stays published, a `doc.executor.fault` diagnostic
+  (detail `step` = `history`) is delivered and returned, and the history is cut there: a failed
+  append empties the journal and both stacks, a failed report both stacks.
 - **Undo and redo.** An `UndoManager` holds the undo and redo stacks as steps, each the
   identifiers of the transactions it contains. It does not commit: `undo`, `redo` and
   `fail_group` return an ordinary `Txn` on the given current snapshot, which the caller commits
@@ -1000,10 +1017,11 @@ save may replace the file it was opened from on every platform.
   A value of an unexpected storage class or invalid UTF-8 fails the load with
   `doc.package.value_invalid` (arguments `table`, `column`); a value longer than `input_bytes`
   with `doc.load.limit_exceeded` (`input_bytes`). The `payload_hash` of each row of encoding 0
-  is compared with the BLAKE3 hash of its payload; a mismatch adds a diagnostic of kind
-  `Warning` with `doc.package.hash_mismatch` (argument `id`, the identifier bytes in hex) and
-  counts as a warning. The row itself loads as its other columns allow: quarantining it needs a
-  reason hook in `load`, which this unit does not add. Rows of other encodings are not hashed.
+  is compared with the BLAKE3 hash of its payload; a row that does not match is quarantined
+  with `doc.package.hash_mismatch` (argument `id`, the identifier bytes in hex) and written back
+  unchanged. The reader passes its finding per row to `load_checked`, which quarantines a row
+  that comes with an error once its identifier, type key, version and header are usable (a row
+  failing those is held as before). Rows of other encodings are not hashed.
 - **Full rewrite.** `save_as(target, save, progress)` builds the rows by the write-back
   contract above, with `Save::touched` mapping each object changed since load to the bytes of
   its last transaction (`doc.package.last_txn_missing` for an object with neither that nor a
@@ -1028,8 +1046,8 @@ save may replace the file it was opened from on every platform.
   and at read as the format requires (`doc.package.preview_invalid`, argument `kind`, detail
   `reason`). Previews are read with `Package::previews`; a save without previews leaves
   `arc_preview` empty.
-- **Not yet.** Incremental and background saves, assets and chunks, the journal table, the
-  recovery journal, source maps, preserved foreign data, stored diagnostics and inspection come
+- **Not yet.** Incremental and background saves, assets and chunks, the journal table, source
+  maps, preserved foreign data, stored diagnostics and inspection come
   with later units; their tables exist and stay empty. A newer-minor package saved as a copy
   keeps the rows this version reads, not tables it does not know. Temporary files left by a
   killed save are not cleaned up.
@@ -1096,6 +1114,59 @@ write-back contract through the file against an in-memory load.
   Every change increments the version and emits one `DiagnosticsChanged` event; dropped
   diagnostics count as removed. A sink set with `Document::set_diagnostics` receives what
   commits deliver after the list.
+
+### Recovery journal and crash recovery (CORE-DOC-041, CORE-DOC-042)
+
+`package::recovery` (feature `package`) implements the recovery database of
+[document-package.md](../architecture/document-package.md#recovery-database-format-1). The crate
+makes no environment queries: the application passes its per-user data directory as `root`.
+
+- **Recording.** `RecoveryJournal::start(Session)` creates the database of a document opened for
+  editing or created (`Session`: root, document id, session id, optional `BaseFile`
+  fingerprint, `Clock`, limits, diagnostics sink), copies the base file and starts the storage
+  thread; the application sets it with `Document::set_journal`. As a `JournalSink` it builds each
+  transaction's `TxnRecord` on the executor and sends it, with the commit time of its clock,
+  through a bounded queue (`QUEUE_CAPACITY`, 1,024); a full queue makes the commit wait. The
+  storage thread encodes the records and writes them in group commits, at the latest
+  `FLUSH_INTERVAL` (one second, read from the injectable `Clock`) after the first record of a
+  batch, and whenever the queue runs empty. `flush(timeout)` waits for the queued records;
+  `written()` counts durable records. A failure of the database, of a record's construction or of
+  its encoding turns protection off (`is_protected`), drops later records and delivers one
+  `doc.recovery.unavailable` diagnostic; commits never fail because of it. A failed base copy is
+  a warning: only recovery onto a changed base is lost.
+- **Save and close.** `saved(base, last)` copies the newly saved file, deletes the records up to
+  `last` (all of them when the database does not hold `last`; none when `last` is `None`),
+  records the new fingerprint and turns protection on again. `close` (also on drop) writes what
+  is queued and deletes the session's files when no record is left; `discard` deletes them after
+  the user confirmed discarding the changes.
+- **Scan.** `scan(root, limits)` lists the databases under `<root>/recovery` whose lock no live
+  process holds, at most `record_count`, as `Orphan`s with document, session, base, record
+  count and times; one that cannot be read carries its `problem` and can only be `discard`ed.
+- **Recover.** `recover(orphan, registry, evaluators, RecoverOptions)` takes the orphan's lock
+  (`doc.recovery.locked` when held), checks the database (`doc.recovery.invalid`: not SQLite,
+  another application id or format, missing tables, malformed metadata), loads the base when it
+  is unchanged (`BaseFile::unchanged`), else the copy (`Recovered::base_changed`;
+  `doc.recovery.base_missing` without a copy), or starts empty for a document never saved. It
+  replays the records with `Document`'s replay path: each must match its hash, decode under
+  `Limits`, name the previous record as its parent, apply strictly and pass validation (with
+  `RecoverOptions::validators`); the first that fails ends the replay with
+  `doc.recovery.truncated` (argument `seq`, the failure as its source) in `Recovered::stopped`,
+  so the longest valid prefix is recovered. Replayed transactions keep their identifiers and
+  metadata and are appended to the journal but not reported to the undo manager: the undo
+  history starts at the recovered state, since coalesce keys and gestures are not recorded. A new
+  `RecoveryJournal` of the new session, holding the same base and the replayed records, is set
+  on the document, and the orphan's files are deleted; on any failure before that the orphan is
+  kept.
+
+The `recovery_kill` test runs 30 child processes at once that commit a two-object transaction
+every 10 ms and log each acknowledged commit with its time, kills each after 0.5 to 4 seconds,
+and checks that recovery restores every transaction acknowledged at least two seconds before
+the kill and lands on the state after a whole number of transactions (`kill_during_editing_300`,
+ignored, runs 300). `recovery_journal` covers replay onto unchanged and changed bases, a document
+never saved, truncation at a save, deletion on a clean close, recovery after recovery and
+hostile databases (truncations and byte mutations recover a prefix or fail with a stable code).
+A save does not call `saved` by itself yet: the application, or the save unit, calls it after a
+successful save. Assets first referenced since the last save are not recorded yet.
 
 ### Error codes
 
@@ -1172,3 +1243,8 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.package.meta_invalid` | `corrupt_data` | An `arc_meta` entry the package interprets is malformed |
 | `doc.scheduler.stopped` | `cancelled` | The regeneration scheduler stopped, or could not start a worker, before a node settled |
 | `doc.graph.evaluator_panicked` | `internal` | An evaluator unwound while the scheduler evaluated its node |
+| `doc.recovery.unavailable` | `io` | The recovery database could not be created or written; recovery protection is off |
+| `doc.recovery.invalid` | `corrupt_data` | A recovery database is not SQLite, has another application id or format, or has malformed tables or metadata |
+| `doc.recovery.locked` | `conflict` | A recovery database is held by a running session |
+| `doc.recovery.base_missing` | `not_found` | The base of a recovery database changed and no copy of it was kept |
+| `doc.recovery.truncated` | `corrupt_data` | Recovery replayed a prefix: the next record is damaged, out of order or does not apply |

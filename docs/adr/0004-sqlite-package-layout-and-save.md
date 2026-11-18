@@ -84,3 +84,13 @@ without changing anything it defined; the details are in
 
 No package was released before this amendment; the first compatibility fixtures are written with
 it.
+
+The first implementation of the recovery journal fixes what the package document left open, in
+[document-package.md](../architecture/document-package.md#recovery-database-format-1): the
+application id `ARCR`, the format version, the tables `arc_meta` and `arc_record` (with a BLAKE3
+hash per record), the pragmas (WAL, `synchronous` `FULL`), the lock file and its liveness rule,
+the queue size and back-pressure, the meaning of "unchanged", and the replay rules. Because a
+changed base must still yield the recovered state, the session keeps a copy of its base file
+beside the database; the alternative, refusing recovery when the base changed, contradicts the
+decision that the recovered state opens as a new document. No recovery database was written
+before this amendment.

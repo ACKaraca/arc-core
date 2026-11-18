@@ -285,6 +285,63 @@ The user's file changes only when the user saves. Between saves, committed work 
   compare it with the file.
 - Recovery journals older than 30 days are listed for deletion, never deleted silently.
 
+### Recovery database format 1
+
+- **File and identity.** `<session id>` is the hyphenated lowercase session identifier and
+  `<document id>` the document's `arc_meta` `document_id` (a document never saved generates one).
+  `PRAGMA application_id` is 1,095,914,322 (`0x41524352`, ASCII `ARCR`), `user_version` is 1,
+  the journal mode is WAL and `synchronous` is `FULL`, so every group commit is on disk when it
+  returns. The tables:
+
+  ```sql
+  CREATE TABLE arc_meta (
+    key TEXT PRIMARY KEY NOT NULL,
+    value
+  ) WITHOUT ROWID;
+  CREATE TABLE arc_record (
+    seq INTEGER PRIMARY KEY,
+    txn_id BLOB NOT NULL UNIQUE,
+    time_unix_ms INTEGER NOT NULL,
+    record BLOB NOT NULL,
+    hash BLOB NOT NULL
+  );
+  ```
+
+  `arc_meta` keys: `format_version` (text `1`), `document_id` and `session_id` (text),
+  `created_unix_ms` (integer), and for a document with a file `base_path` (text, the path the
+  application opened), `base_size`, `base_modified_unix_ns` and `base_save_counter` (integers)
+  and `base_copy` (text, a file name in the same directory). `arc_record` holds one row per
+  committed transaction in commit order: its identifier (16 bytes), the commit time, the
+  [journal record](journal-record.md) and the 32-byte BLAKE3 hash of the record bytes, which
+  detects damage SQLite does not.
+- **Liveness.** Beside the database, `<session id>.lock` is held with an exclusive
+  operating-system lock while the session runs. A recovery journal is orphaned when another
+  process can take that lock or the lock file does not exist, the rule of the edit lock.
+- **Base copy.** When the session has a base file, a copy of it is kept beside the database
+  (`<session id>-<n>.arcbase`, written to a temporary file, flushed and renamed), so that the
+  recovered state can be built when the file has changed. A save replaces the copy with one of
+  the saved file. Without a copy, a changed base cannot be recovered and the journal is kept.
+- **Writing.** The commit hands each record to the storage thread through a queue of 1,024
+  records; the thread writes them in group commits, at the latest one second after the first
+  record of a batch and whenever the queue runs empty. A full queue makes the next commit wait
+  (back-pressure) instead of dropping records. A failure of the database (disk full, no
+  permission) never fails a commit: recovery protection turns off and a diagnostic says so; the
+  next successful save turns it on again.
+- **Save and close.** A save deletes the records up to the saved state's last transaction and
+  records the new base fingerprint and copy. A clean close deletes the database, its copy and
+  its lock when it holds no record; otherwise they stay until the user confirms discarding.
+- **Unchanged.** The base is unchanged when the file at `base_path` has the recorded size and
+  modification time and opens as a package with the recorded save counter.
+- **Replay.** Records are replayed in `seq` order through the ordinary commit path (operations
+  applied strictly, validation on), keeping their identifiers and metadata. A record whose hash
+  does not match, that does not decode, that does not name the previous record as its parent or
+  that fails to apply or validate ends the replay: the longest valid prefix is recovered and the
+  rest is reported. When the base changed, the records are replayed onto the copy and the
+  result opens as a new unsaved document. The recovered document's journal holds the replayed
+  records; its undo history starts empty, because coalesce keys and gestures are not part of
+  records. Recovery starts a new session with the same base and the replayed records and then
+  deletes the orphan, so a crash after recovery recovers again.
+
 ## Atomic save
 
 Two strategies, both atomic: after a crash or power loss at any point, the file holds either the

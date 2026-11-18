@@ -434,7 +434,7 @@ fn inverse_ops(journal: &Journal, txns: &[TransactionId]) -> Result<Vec<Op>> {
 /// strictly to a scratch working set, so a state that does not hold their before values fails
 /// with `doc.undo.state_mismatch`; then they are made through the transaction's own operations,
 /// which record the same operations.
-fn prepare(
+pub(crate) fn prepare(
     base: &Snapshot,
     mut meta: TxnMeta,
     limits: TxnLimits,

@@ -57,7 +57,7 @@ pub use diagnostic::{CollectingSink, Diagnostic, DiagnosticSink, Origin};
 pub use diagnostics::{DiagnosticsList, DiagnosticsSnapshot};
 pub use document::{Document, DocumentConfig};
 pub use events::{Event, EventBus, EventKind, Subscription};
-pub use executor::{Completed, Pending};
+pub use executor::{Completed, Pending, SubmitOptions};
 pub use graph::{
     ChangeSet, Derived, DerivedKey, DerivedValue, EvalContext, Evaluators, Graph, NodeKey,
     NodeState, NodeView, StateKind,
@@ -68,7 +68,7 @@ pub use integrity::{
 pub use journal::{Journal, JournalEntry};
 pub use load::{
     DiagnosticKind, LoadCounts, LoadDiagnostic, LoadOptions, Loaded, LoadedRow, LoadedRows,
-    StoredObject, StoredType, load,
+    StoredObject, StoredType, load, load_checked,
 };
 pub use op::{Op, Properties};
 pub use payload::{Decoded, Encoding, Payload};
