@@ -68,6 +68,7 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `zip` | Bounded ZIP reading and writing | MIT |
 | `lyon` | Fill tessellation | MIT or Apache-2.0 |
 | `resvg` | Icon and SVG rasterization | Apache-2.0 or MIT |
+| `egui` | The widget toolkit of `arc-ui` with its AccessKit tree, re-exported by `arc-ui` (no default features: no bundled fonts); `resvg` is used in `arc-ui` without default features (no text, system fonts, compressed SVG or raster images) | MIT or Apache-2.0 |
 | `image` | Image decoding and encoding; in use as a development dependency of `arc-gpu` (PNG reference images, feature `png` only) | MIT or Apache-2.0 |
 | `tiny-skia` | CPU rasterization for plot raster output and reference images | BSD-3-Clause |
 | `cxx` | C++ binding in `arc-brep-occt` | MIT or Apache-2.0 |
