@@ -263,8 +263,10 @@ form that cannot overflow when the plain one does, and stays exactly 0 at near a
   the linear tolerance, the tangential residual is then of the order of
   `ε·(a + |q − center|)·a / |C′(θ)|` for semi-major axis `a` and machine epsilon `ε`. Foot
   points closer than the linear tolerance, or than the rounding of their coordinates, are
-  merged. The closest point is the nearest foot point or end; candidates within the linear
-  tolerance tie and the smallest parameter wins.
+  merged. The closest point is the nearest foot point or end, chosen among the foot points
+  before merging so that a merged foot cannot move it by more than the linear tolerance;
+  candidates within the linear tolerance tie and the smallest parameter wins, so the result is
+  within the linear tolerance of the true minimum distance where `f64` resolves that.
 - Flattening takes a chord tolerance, an angle tolerance (turning per segment) and a vertex
   limit; non-positive or non-finite tolerances fail with `geom.tolerance.invalid`, rays and
   lines with `geom.curve.unbounded`, and a result above the limit with

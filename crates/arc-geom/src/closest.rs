@@ -28,9 +28,9 @@
 //!   `f64` resolves that, and otherwise of the order of
 //!   `ε·(a + |q − center|)·a / |C′(θ)|` (`ε` the machine epsilon): far from the curve or for a
 //!   very large curve the perpendicularity is as good as `f64` allows.
-//! - The closest point is chosen among the foot points and the ends of the range (and the
-//!   vertices of a polyline). Candidates whose distances differ by at most `tolerance.linear`
-//!   tie, and the one with the smallest parameter wins; the result is within
+//! - The closest point is chosen among the foot points before they are merged and the ends of
+//!   the range (and the vertices of a polyline). Candidates whose distances differ by at most
+//!   `tolerance.linear` tie, and the one with the smallest parameter wins; the result is within
 //!   `tolerance.linear` of the true minimum distance where `f64` resolves that.
 //! - Every length is computed from scaled values, so every curve a constructor accepts can be
 //!   projected; a query so far away that its scaled coordinates overflow fails with
@@ -385,12 +385,17 @@ fn ensure_query(query: Point2, tolerance: &Tolerance) -> Result<()> {
     ensure_tolerance("linear", tolerance.linear)
 }
 
-fn feet(shape: &Shape<'_>, query: Point2, tolerance: &Tolerance) -> Result<Vec<FootPoint>> {
+/// Every foot point found, before merging.
+fn raw_feet(shape: &Shape<'_>, query: Point2, tolerance: &Tolerance) -> Result<Vec<FootPoint>> {
     ensure_query(query, tolerance)?;
-    let raw = match shape {
-        Shape::Piece(piece) => piece_feet(piece, query, tolerance)?,
-        Shape::Polyline(polyline) => polyline_feet(polyline, query, tolerance)?,
-    };
+    match shape {
+        Shape::Piece(piece) => piece_feet(piece, query, tolerance),
+        Shape::Polyline(polyline) => polyline_feet(polyline, query, tolerance),
+    }
+}
+
+fn feet(shape: &Shape<'_>, query: Point2, tolerance: &Tolerance) -> Result<Vec<FootPoint>> {
+    let raw = raw_feet(shape, query, tolerance)?;
     let closed = match shape {
         Shape::Piece(piece) => piece.conic().is_some_and(|c| c.span() == TAU),
         Shape::Polyline(polyline) => polyline.is_closed(),
@@ -489,7 +494,9 @@ fn merge(
 const INTERVAL_SAMPLES: u32 = 64;
 
 fn closest(shape: &Shape<'_>, query: Point2, tolerance: &Tolerance) -> Result<CurvePoint> {
-    let feet = feet(shape, query, tolerance)?;
+    // Unmerged: a merged foot stands for one up to the tolerance away, and the tie rule may add
+    // another tolerance on a curve smaller than it.
+    let feet = raw_feet(shape, query, tolerance)?;
     let mut candidates: Vec<f64> = feet.iter().map(FootPoint::parameter).collect();
     // Along an interval every point is a foot point within the tolerance, but their distances
     // still differ by up to twice the offset of the query from the center, which exceeds the
@@ -703,6 +710,27 @@ mod tests {
             let found = c.closest_point(q, &TOL).unwrap();
             assert!(found.distance <= rounding(&c, q), "{found:?}");
         }
+    }
+
+    #[test]
+    fn needle_elliptical_arcs_project_their_own_points() {
+        // Issue #59, found by the extreme-curve property: the minor radius (about 1e-16) is
+        // below the coordinate resolution at the center, so the arc is a doubly covered segment.
+        let needle = Ellipse2::new(
+            Point2::new(1.0, 1.0),
+            Vector2::new(1.259_671_564_875_683_3e-124, 6.080_472_149_213_095e-7),
+            1.573_001_811_792_463_8e-10,
+        )
+        .unwrap();
+        let c = Curve2::EllipticalArc(
+            EllipticalArc2::new(needle, 0.581_220_610_792_976_8, 4.929_556_263_966_859).unwrap(),
+        );
+        let q = c.point_at(parameter(&c, 0.426_507_827_790_982_9));
+        // The curve is smaller than the tolerance, so its foot points merge into one; the
+        // closest point is still chosen among the unmerged ones.
+        assert_eq!(c.foot_points(q, &TOL).unwrap().len(), 1);
+        let found = c.closest_point(q, &TOL).unwrap();
+        assert!(found.distance <= rounding(&c, q), "{found:?}");
     }
 
     #[test]
