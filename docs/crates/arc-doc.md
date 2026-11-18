@@ -989,7 +989,7 @@ development machine, against the budget of 50 ms in [testing.md](../testing.md).
 ### Package format, full rewrite, edit locks and previews (CORE-DOC-040, CORE-DOC-044, CORE-DOC-046, CORE-DOC-051)
 
 The module `package` exists with the feature `package`, which is off by default and in the
-WebAssembly build; `rusqlite` (bundled SQLite) and `blake3` are its optional dependencies. The
+WebAssembly build; `rusqlite` (bundled SQLite), `blake3` and `fastcdc` are its optional dependencies. The
 file format, including the exact schema of format 1.0, the `arc_meta` keys, the lock file and
 the full-rewrite procedure, is specified in
 [document-package.md](../architecture/document-package.md#format-10-schema). No `rusqlite` type
@@ -1046,11 +1046,9 @@ save may replace the file it was opened from on every platform.
   and at read as the format requires (`doc.package.preview_invalid`, argument `kind`, detail
   `reason`). Previews are read with `Package::previews`; a save without previews leaves
   `arc_preview` empty.
-- **Not yet.** Incremental and background saves, assets and chunks, the journal table, source
-  maps, preserved foreign data, stored diagnostics and inspection come
-  with later units; their tables exist and stay empty. A newer-minor package saved as a copy
-  keeps the rows this version reads, not tables it does not know. Temporary files left by a
-  killed save are not cleaned up.
+- **Not yet.** The journal table of the package, foreign data, the `arc_diagnostic` rows and
+  inspection are not written or read by this version; the sections below describe the
+  incremental and background saves, assets and the recovery journal.
 
 The `package_kill` test kills a child process saving 400 objects at random points 50 times in
 the default suite (1,000 times in the ignored `kill_during_save_1000`) and checks that the
@@ -1167,6 +1165,105 @@ never saved, truncation at a save, deletion on a clean close, recovery after rec
 hostile databases (truncations and byte mutations recover a prefix or fail with a stable code).
 A save does not call `saved` by itself yet: the application, or the save unit, calls it after a
 successful save. Assets first referenced since the last save are not recorded yet.
+### Incremental and background saves and assets (CORE-DOC-043, CORE-DOC-045, CORE-DOC-047)
+
+- **Strategies.** `Package::save(save, strategy, progress)` saves a `Save` by a `Strategy`:
+  `Incremental(changes)` in place, `Rewrite` (full rewrite in place), `Compact` (full rewrite in
+  place keeping only referenced assets) or `Copy(path)` (full rewrite to another file; the
+  package is unchanged). It returns `Saved`: the metadata written, whether the incremental save
+  ran, and why it was refused when the full rewrite ran instead. A save in place makes the
+  metadata written the package's metadata. `progress` receives `SaveProgress::Step` before each
+  step and `SaveProgress::Rows` every 256 rows (`ROWS_PER_TICK`); an error from it cancels the
+  save. Saving in place needs a package open for editing (`doc.document.read_only` otherwise).
+- **Changes since the last save.** The incremental save takes `changes`, a map from `ObjectId`
+  to `Touch`: `Created` (live, no row: inserted), `Modified` (live and stored: updated) or
+  `Deleted` (stored, not live: deleted). An object created and deleted again since the last save
+  has no entry; one deleted and created again is `Modified`. The document derives the map from
+  its journal since the last save; `touched_between(before, after)` derives it by structural
+  comparison of two snapshots (type, version, header, values with floating-point numbers by
+  their bits) and misses an object changed and changed back, whose `last_txn` then stays the one
+  of the last save. Each row's `last_txn` comes from `Save::touched` or the load, as in the full
+  rewrite, so both write identical rows.
+- **Incremental save.** One SQLite connection opened for writing with `journal_mode = DELETE`
+  and `synchronous = FULL` runs one `BEGIN IMMEDIATE` transaction, so a crash at any point
+  leaves the previous state, recovered from the rollback journal by the next open for editing.
+  Inside it: the file's `save_counter` must equal `save.metadata.save_counter` (the baseline of
+  the changes); the changed `arc_meta` entries are written and removed keys deleted; the rows of
+  the objects in `changes` are inserted, updated or deleted with their `arc_reference` and
+  `arc_property` rows, built by the same functions as the full rewrite; objects still stored at
+  an older version of their registered type are written at the current version at the first
+  save, as the write-back contract requires, with their loaded `last_txn`; the `arc_type` rows of
+  every stored type key end as the full rewrite writes them (the registry's current row while a
+  typed object of the type exists, else the row as loaded while a held or unaddressable row of
+  that version exists, and no row of a version no object is stored at); changed previews are
+  written and removed kinds deleted. Untouched object and index rows are never written. The
+  steps reported are `Prepare`, `Metadata`, `Objects`, `Types`, `Previews` and `Commit`.
+- **Refusal and fallback.** The incremental save is refused with
+  `doc.package.incremental_refused` (argument `reason`) for a package not open for editing
+  (`read_only_package`), a format other than the one this version writes (`format_upgrade`), a
+  read-only snapshot (`read_only_document`), a file whose `save_counter` is not the baseline
+  (`base_changed`), and changes that do not fit the file and the snapshot (`changes`: a created
+  object with a row, a modified or deleted object without one, a deleted object that is live).
+  A refusal changes nothing, and `Package::save` then runs the full rewrite in place. Which
+  location is unreliable, and the first save of a recovered or imported document, are the
+  caller's decisions: it passes `Rewrite`.
+- **Hot journal.** `Package::open` with `Mode::Edit` first opens the file for writing and reads
+  its schema, which makes SQLite roll back a hot rollback journal left by an interrupted save;
+  the header check runs before, so a newer-format file stays untouched, and SQLite's file locks
+  keep the journal of a save running in another process. A read-only open never writes and
+  cannot roll back: on a file with a hot journal it fails with `doc.package.io_failed`, and the
+  journal stays.
+- **Background save.** `BackgroundSave::start(package, request, progress)` moves the package and
+  a `SaveRequest` (the owned form of `Save` with an `Arc<Loaded>`, and the strategy) onto a
+  storage thread of its own and calls `progress` there. The snapshot is immutable, so the saved
+  state is exactly the one passed in whatever the document commits meanwhile. Owning the package
+  makes one save at a time per package a property of the types: a second save, and an asset
+  written meanwhile, wait for `join`. `cancel` makes the save fail with `base.cancelled` at its
+  next report, checked before and after every callback, up to the commit or the rename; the
+  file is unchanged. `join` hands back `Finished` (the package and the result); a save that
+  unwinds is contained and fails with `doc.package.save_panicked`, with the package handed back.
+  A full rewrite removes its temporary file on every exit before the rename, an unwinding one
+  included.
+- **Assets.** `Package::put_asset(media_type, reader)` stores the bytes as an asset in one write
+  transaction and returns its `AssetHash`, the BLAKE3 hash of the bytes; an asset already stored
+  is not stored again. Up to 4 MiB (`WHOLE_MAX`) the bytes are one `arc_chunk` row whose hash is
+  the asset hash, and `arc_asset.chunked` is 0 with no `arc_asset_chunk` rows; larger content is
+  cut by FastCDC (the 2020 algorithm with normalization level 1 of the `fastcdc` crate; minimum
+  256 KiB, average 1 MiB, maximum 4 MiB) and `arc_asset_chunk` lists the chunks by ordinal from
+  0. Chunks are stored once each (`INSERT OR IGNORE` by hash), so identical runs of different
+  assets share them. The chunk boundaries only make storage deduplicate: a reader never
+  recomputes them, so any chunking reads back correctly. `encoding` is 0 (bytes as given) in
+  `arc_asset` and `arc_chunk`; compression comes with `zstd`. Writing streams with a few chunks
+  in memory; `input_bytes` bounds the asset, `record_count` its chunks, `string_bytes` the media
+  type. The asset is written into the package, not the recovery journal: no object refers to it
+  until a save writes one that does, so the document the file holds is unchanged meanwhile.
+- **Reading assets.** `Package::asset(hash)` checks the asset row (text media type, integer
+  length, `chunked` 0 with at most 4 MiB or 1 with more, encoding 0) and the chunk list
+  (ordinals 0 to n-1, 32-byte hashes, enough chunks for the length) and returns an
+  `AssetReader`, which reads one chunk at a time on a connection of its own, verifies it (at most
+  4 MiB, hash) before returning any of its bytes, and verifies the length and hash of the whole
+  at the end; it implements `Read`. `Package::asset_bytes(hash)` returns the bytes only after all
+  of that, up to `input_bytes`. A damaged or missing chunk or a mismatching whole is
+  `doc.package.asset_corrupt` (argument `hash`, detail `reason`) for that asset only; another
+  encoding is `doc.payload.encoding_unsupported`; an unknown hash is
+  `doc.package.asset_not_found`.
+- **Assets across saves.** The incremental save does not touch the asset tables. Every full
+  rewrite through `Package::save` copies the assets of the package it saves from: `Rewrite` and
+  `Copy` all asset, chunk list and chunk rows unchanged (step `SaveStep::Assets`), `Compact` only
+  the referenced assets with their chunks. An asset is referenced when an `asset` value of a
+  typed object of the saved snapshot names it (`asset_values` walks values, lists, maps and
+  records), or when its 32 bytes occur in the payload of a held or unaddressable row, whose
+  values are not decoded; a row of another encoding keeps every asset. Journal records and
+  preserved foreign data are not stored yet and refer to nothing. The free function `save_as`
+  has no package to copy from and writes no assets.
+
+The `package_incremental` test compares a chain of incremental saves of random documents with
+random edits against a full rewrite of the final state table by table, checks that untouched
+rows keep markers written into the file, and kills a child process saving incrementally 50
+times (1,000 in the ignored `incremental_kill_1000`), including kills inside the commit that
+leave a hot journal for the next open. `package_background` saves while commits continue and
+cancels at several steps; `package_asset` covers the threshold, deduplication, damaged chunks
+flipped in the file, hostile asset tables and compaction.
 
 ### Error codes
 
@@ -1248,3 +1345,7 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.recovery.locked` | `conflict` | A recovery database is held by a running session |
 | `doc.recovery.base_missing` | `not_found` | The base of a recovery database changed and no copy of it was kept |
 | `doc.recovery.truncated` | `corrupt_data` | Recovery replayed a prefix: the next record is damaged, out of order or does not apply |
+| `doc.package.incremental_refused` | `conflict` | An incremental save is not allowed for the package or state; the full rewrite runs instead |
+| `doc.package.asset_not_found` | `not_found` | No asset with the hash is stored in the package |
+| `doc.package.asset_corrupt` | `corrupt_data` | A stored chunk or asset does not match its hash or length, or its rows are malformed |
+| `doc.package.save_panicked` | `internal` | A save unwound on the storage thread; the file holds the previous state |

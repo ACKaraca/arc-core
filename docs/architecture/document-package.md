@@ -245,6 +245,16 @@ embedded fonts, original imported files, B-rep shape data.
 - An **original file** kept on import is an asset with the media type of its format and an
   `arc_meta` entry recording its name and import time.
 
+In format 1.0 an asset of up to 4 MiB is one `arc_chunk` row whose `hash` is the asset hash;
+its `arc_asset.chunked` is 0 and it has no `arc_asset_chunk` rows. A larger asset has `chunked`
+1 and one `arc_asset_chunk` row per chunk, `ordinal` counting from 0, `chunk` the chunk hash; a
+chunk holds at most 4 MiB. `encoding` 0 in `arc_asset` and `arc_chunk` means the bytes as given
+(no compression). The chunk boundaries are not part of the format: a reader concatenates the
+listed chunks and never recomputes boundaries, so packages chunked by any algorithm read back
+the same. The references counted at compaction are the asset values of the decoded objects and,
+for rows a reader does not decode (preserved, quarantined and unaddressable rows), any stored
+asset hash whose 32 bytes occur in the payload.
+
 ## Thumbnails and previews
 
 | `kind` | Content | Required |

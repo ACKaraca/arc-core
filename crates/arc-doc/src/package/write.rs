@@ -13,6 +13,7 @@ use rusqlite::{Connection, OpenFlags, params};
 use arc_base::id::Identifier;
 use arc_base::{Error, Limits, ObjectId, Result};
 
+use super::asset::Carry;
 use super::preview::{self, Preview, THUMBNAIL};
 use super::read::{
     KEY_CREATED_BY, KEY_CRS, KEY_DOCUMENT_ID, KEY_FORMAT, KEY_PARTITIONS, KEY_RETENTION,
@@ -23,9 +24,10 @@ use super::{APPLICATION_ID, FORMAT, MetaValue, Metadata, display, schema};
 use crate::descriptor::descriptor;
 use crate::error::codes;
 use crate::load::{Loaded, StoredObject, StoredType};
+use crate::registry::TypeRegistry;
 use crate::relationship::references;
-use crate::schema::Value;
-use crate::snapshot::Snapshot;
+use crate::schema::{TypeKey, Value};
+use crate::snapshot::{Object, Snapshot};
 
 /// A step of a full rewrite, reported before it starts. Returning an error from the progress
 /// callback cancels the save there; every step up to and including [`SaveStep::Replace`] can be
@@ -46,6 +48,9 @@ pub enum SaveStep {
     Indexes,
     /// Writing `arc_preview`.
     Previews,
+    /// Copying the assets and chunks of the package saved from (a full rewrite through
+    /// [`super::Package::save`] or [`super::Package::save_to`]); nothing otherwise.
+    Assets,
     /// Committing the temporary file.
     Commit,
     /// Verifying the temporary file.
@@ -58,7 +63,7 @@ pub enum SaveStep {
 
 impl SaveStep {
     /// Every step, in order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Prepare,
         Self::Schema,
         Self::Metadata,
@@ -66,11 +71,41 @@ impl SaveStep {
         Self::Objects,
         Self::Indexes,
         Self::Previews,
+        Self::Assets,
         Self::Commit,
         Self::Verify,
         Self::Flush,
         Self::Replace,
     ];
+}
+
+/// What a save reports while it runs: the step about to start, and the number of rows written
+/// so far in the current step (reported every [`ROWS_PER_TICK`] rows). Returning an error from
+/// the callback cancels the save there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SaveProgress {
+    /// A step is about to start.
+    Step(SaveStep),
+    /// Rows written so far in the current step.
+    Rows(u64),
+}
+
+/// How many rows a save writes between two [`SaveProgress::Rows`] reports.
+pub const ROWS_PER_TICK: u64 = 256;
+
+/// The progress callback of the internal save functions.
+pub(super) type Progress<'a> = &'a mut dyn FnMut(SaveProgress) -> Result<()>;
+
+/// Counts rows and reports every [`ROWS_PER_TICK`]th.
+pub(super) fn tick(
+    progress: &mut dyn FnMut(SaveProgress) -> Result<()>,
+    rows: &mut u64,
+) -> Result<()> {
+    *rows += 1;
+    if rows.is_multiple_of(ROWS_PER_TICK) {
+        progress(SaveProgress::Rows(*rows))?;
+    }
+    Ok(())
 }
 
 /// The complete contents of a package, written as given by [`write`].
@@ -125,10 +160,28 @@ pub fn save_as(
     save: &Save<'_>,
     progress: &mut dyn FnMut(SaveStep) -> Result<()>,
 ) -> Result<Metadata> {
-    let (types, objects) = rows(save)?;
-    let mut metadata = save.metadata.clone();
-    metadata.save_counter = metadata.save_counter.saturating_add(1);
-    metadata.thumbnail_missing = !save.previews.iter().any(|p| p.kind == THUMBNAIL);
+    save_full(target, save, None, &mut steps_only(progress))
+}
+
+/// Adapts a step callback to [`SaveProgress`].
+fn steps_only(
+    progress: &mut dyn FnMut(SaveStep) -> Result<()>,
+) -> impl FnMut(SaveProgress) -> Result<()> + '_ {
+    move |event| match event {
+        SaveProgress::Step(step) => progress(step),
+        SaveProgress::Rows(_) => Ok(()),
+    }
+}
+
+/// [`save_as`], copying the assets of `carry` when given.
+pub(super) fn save_full(
+    target: &Path,
+    save: &Save<'_>,
+    carry: Option<&Carry<'_>>,
+    progress: Progress<'_>,
+) -> Result<Metadata> {
+    let (types, objects) = rows(save, progress)?;
+    let metadata = next_metadata(save);
     let contents = Contents {
         metadata: &metadata,
         types: &types,
@@ -136,14 +189,65 @@ pub fn save_as(
         previews: save.previews,
         snapshot: Some(save.snapshot),
     };
-    write(target, &contents, progress)?;
+    write_with(target, &contents, carry, progress)?;
     Ok(metadata)
 }
 
+/// The metadata a save writes: the next `save_counter` and `thumbnail` from the previews.
+pub(super) fn next_metadata(save: &Save<'_>) -> Metadata {
+    let mut metadata = save.metadata.clone();
+    metadata.save_counter = metadata.save_counter.saturating_add(1);
+    metadata.thumbnail_missing = !save.previews.iter().any(|p| p.kind == THUMBNAIL);
+    metadata
+}
+
+/// The row of the typed object `object` of type `key` by the write-back contract: encoded at
+/// the current version of its type, the BLAKE3 hash of its payload and its `last_txn` from
+/// `save.touched` or the load. Shared by the full rewrite and the incremental save, so both
+/// write identical rows.
+pub(super) fn object_row(save: &Save<'_>, key: &TypeKey, object: &Object) -> Result<StoredObject> {
+    let not_found = || Error::new(codes::OBJECT_NOT_FOUND).with_arg("id", object.id.to_string());
+    let decl = save
+        .snapshot
+        .registry()
+        .get(key.as_str())
+        .ok_or_else(not_found)?;
+    let mut row = StoredObject::of(key, &decl.schema, object, &save.limits)?;
+    row.payload_hash = blake3::hash(&row.payload).as_bytes().to_vec();
+    row.last_txn = match save.touched.get(&object.id) {
+        Some(txn) => txn.clone(),
+        None => save
+            .loaded
+            .and_then(|l| l.rows.last_txn(object.id))
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| {
+                Error::new(codes::PACKAGE_LAST_TXN_MISSING).with_arg("id", object.id.to_string())
+            })?,
+    };
+    Ok(row)
+}
+
+/// The current `arc_type` row of the registered type `key`.
+pub(super) fn current_type(registry: &TypeRegistry, key: &str) -> Result<Option<StoredType>> {
+    let Some(decl) = registry.get(key) else {
+        return Ok(None);
+    };
+    let version = decl.schema.version;
+    let text = descriptor(decl, version)
+        .ok_or_else(|| Error::new(codes::TYPE_FIELD_INVALID).with_arg("type", key))?;
+    Ok(Some(StoredType {
+        type_key: key.to_owned(),
+        major: version.major.into(),
+        minor: version.minor.into(),
+        descriptor: text,
+    }))
+}
+
 /// The type and object rows of a save by the write-back contract.
-fn rows(save: &Save<'_>) -> Result<(Vec<StoredType>, Vec<StoredObject>)> {
+fn rows(save: &Save<'_>, progress: Progress<'_>) -> Result<(Vec<StoredType>, Vec<StoredObject>)> {
     let snapshot = save.snapshot;
     let registry = snapshot.registry();
+    let mut count = 0;
     let read_only = !snapshot.read_only().is_empty();
     let loaded = save.loaded;
     let mut kept: Vec<StoredObject> = snapshot
@@ -160,21 +264,9 @@ fn rows(save: &Save<'_>) -> Result<(Vec<StoredType>, Vec<StoredObject>)> {
             kept.push(original.stored.clone());
             continue;
         }
-        let decl = registry.get(key.as_str()).ok_or_else(not_found)?;
-        let mut row = StoredObject::of(key, &decl.schema, object, &save.limits)?;
-        row.payload_hash = blake3::hash(&row.payload).as_bytes().to_vec();
-        row.last_txn = match save.touched.get(&object.id) {
-            Some(txn) => txn.clone(),
-            None => loaded
-                .and_then(|l| l.rows.last_txn(object.id))
-                .map(<[u8]>::to_vec)
-                .ok_or_else(|| {
-                    Error::new(codes::PACKAGE_LAST_TXN_MISSING)
-                        .with_arg("id", object.id.to_string())
-                })?,
-        };
+        rows.push(object_row(save, key, object)?);
         written.insert(key.clone());
-        rows.push(row);
+        tick(progress, &mut count)?;
     }
     if let Some(loaded) = loaded {
         kept.extend(loaded.rows.unaddressable().iter().cloned());
@@ -186,19 +278,9 @@ fn rows(save: &Save<'_>) -> Result<(Vec<StoredType>, Vec<StoredObject>)> {
     }
     let mut types: BTreeMap<(String, i64, i64), StoredType> = BTreeMap::new();
     for key in &written {
-        let Some(decl) = registry.get(key.as_str()) else {
-            continue;
-        };
-        let version = decl.schema.version;
-        let text = descriptor(decl, version)
-            .ok_or_else(|| Error::new(codes::TYPE_FIELD_INVALID).with_arg("type", key.as_str()))?;
-        let row = StoredType {
-            type_key: key.as_str().to_owned(),
-            major: version.major.into(),
-            minor: version.minor.into(),
-            descriptor: text,
-        };
-        types.insert((row.type_key.clone(), row.major, row.minor), row);
+        if let Some(row) = current_type(registry, key.as_str())? {
+            types.insert((row.type_key.clone(), row.major, row.minor), row);
+        }
     }
     for row in &kept {
         let stored = stored_types.iter().find(|t| {
@@ -243,8 +325,13 @@ pub fn write(
     contents: &Contents<'_>,
     progress: &mut dyn FnMut(SaveStep) -> Result<()>,
 ) -> Result<()> {
+    write_with(target, contents, None, &mut steps_only(progress))
+}
+
+/// Checks every preview and that no kind repeats (`doc.package.preview_invalid`).
+pub(super) fn check_previews(previews: &[Preview]) -> Result<()> {
     let mut kinds = BTreeSet::new();
-    for preview in contents.previews {
+    for preview in previews {
         preview::check(preview)?;
         if !kinds.insert(preview.kind.as_str()) {
             return Err(Error::new(codes::PACKAGE_PREVIEW_INVALID)
@@ -252,6 +339,17 @@ pub fn write(
                 .with_detail("reason", "duplicate"));
         }
     }
+    Ok(())
+}
+
+/// [`write`], copying the assets of `carry` when given.
+fn write_with(
+    target: &Path,
+    contents: &Contents<'_>,
+    carry: Option<&Carry<'_>>,
+    progress: Progress<'_>,
+) -> Result<()> {
+    check_previews(contents.previews)?;
     let mut objects: Vec<&StoredObject> = contents.objects.iter().collect();
     objects.sort_by(|a, b| a.id.cmp(&b.id));
     if let Some(pair) = objects
@@ -261,34 +359,42 @@ pub fn write(
         let id = pair.first().map(|row| hex(&row.id)).unwrap_or_default();
         return Err(Error::new(codes::OBJECT_DUPLICATE_ID).with_arg("id", id));
     }
-    progress(SaveStep::Prepare)?;
+    progress(SaveProgress::Step(SaveStep::Prepare))?;
     let temp = temporary(target)?;
     File::create_new(&temp).map_err(|e| io_error(e, &temp))?;
-    let result = (|| {
-        build(&temp, contents, &objects, progress)?;
-        progress(SaveStep::Verify)?;
-        verify(&temp, contents, &objects)?;
-        progress(SaveStep::Flush)?;
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&temp)
-            .and_then(|file| file.sync_all())
-            .map_err(|e| io_error(e, &temp))?;
-        progress(SaveStep::Replace)?;
-        // Replaces the target atomically on the same file system; on Windows `std` replaces an
-        // existing file, which fails while another process has it open without delete sharing.
-        fs::rename(&temp, target).map_err(|e| io_error(e, target))
-    })();
-    if let Err(error) = result {
-        let _ = fs::remove_file(&temp);
-        let mut journal = temp.into_os_string();
-        journal.push("-journal");
-        let _ = fs::remove_file(PathBuf::from(journal));
-        return Err(error);
-    }
+    // Removes the temporary file on every exit before the rename, an unwinding one included.
+    let mut guard = Temporary(Some(temp.clone()));
+    build(&temp, contents, &objects, carry, progress)?;
+    progress(SaveProgress::Step(SaveStep::Verify))?;
+    verify(&temp, contents, &objects)?;
+    progress(SaveProgress::Step(SaveStep::Flush))?;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&temp)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| io_error(e, &temp))?;
+    progress(SaveProgress::Step(SaveStep::Replace))?;
+    // Replaces the target atomically on the same file system; on Windows `std` replaces an
+    // existing file, which fails while another process has it open without delete sharing.
+    fs::rename(&temp, target).map_err(|e| io_error(e, target))?;
+    guard.0 = None;
     sync_directory(target);
     Ok(())
+}
+
+/// A temporary file and its journal, removed when dropped unless taken.
+struct Temporary(Option<PathBuf>);
+
+impl Drop for Temporary {
+    fn drop(&mut self) {
+        if let Some(temp) = self.0.take() {
+            let _ = fs::remove_file(&temp);
+            let mut journal = temp.into_os_string();
+            journal.push("-journal");
+            let _ = fs::remove_file(PathBuf::from(journal));
+        }
+    }
 }
 
 /// Flushes the directory entry of the rename, best effort: the new file is complete either way.
@@ -316,7 +422,7 @@ fn meta_value(value: &MetaValue) -> SqlValue {
 }
 
 /// The `arc_meta` entries of `metadata`.
-fn meta_entries(metadata: &Metadata, thumbnail: bool) -> Vec<(&str, SqlValue)> {
+pub(super) fn meta_entries(metadata: &Metadata, thumbnail: bool) -> Vec<(&str, SqlValue)> {
     let text =
         |key, value: &Option<String>| value.clone().map(|value| (key, SqlValue::Text(value)));
     let mut entries: Vec<(&str, SqlValue)> = [
@@ -366,55 +472,86 @@ fn property(value: &Value) -> Option<(SqlValue, Option<String>)> {
     })
 }
 
-fn id_bytes(id: ObjectId) -> [u8; 16] {
+pub(super) fn id_bytes(id: ObjectId) -> [u8; 16] {
     id.as_u128().to_be_bytes()
+}
+
+/// The statement inserting one `arc_reference` row.
+pub(super) const INSERT_REFERENCE: &str = "INSERT INTO arc_reference \
+    (source, field, target, target_link, rule) VALUES (?1, ?2, ?3, NULL, ?4)";
+/// The statement inserting one `arc_property` row.
+pub(super) const INSERT_PROPERTY: &str =
+    "INSERT INTO arc_property (object, key, value, unit) VALUES (?1, ?2, ?3, ?4)";
+
+/// Writes the `arc_reference` rows of `object` of type `key` (empty for a held object whose
+/// type is not registered: then only its owner) with `insert` ([`INSERT_REFERENCE`]).
+pub(super) fn insert_references(
+    insert: &mut rusqlite::Statement<'_>,
+    registry: &TypeRegistry,
+    key: &str,
+    object: &Object,
+) -> rusqlite::Result<()> {
+    for reference in references(registry, key, object) {
+        let rule = &reference.spec.rule;
+        let rule = serde_json::json!({
+            "strength": rule.strength,
+            "on_delete": rule.on_delete,
+            "on_copy": rule.on_copy,
+        })
+        .to_string();
+        insert.execute(params![
+            id_bytes(object.id),
+            reference.field.to_string(),
+            id_bytes(reference.target),
+            rule
+        ])?;
+    }
+    Ok(())
+}
+
+/// Writes the `arc_property` rows of the typed object `object` of type `key` with `insert`
+/// ([`INSERT_PROPERTY`]): one per indexed field with a scalar value.
+pub(super) fn insert_properties(
+    insert: &mut rusqlite::Statement<'_>,
+    registry: &TypeRegistry,
+    key: &str,
+    object: &Object,
+) -> rusqlite::Result<()> {
+    let Some(decl) = registry.get(key) else {
+        return Ok(());
+    };
+    for (field, value) in decl.schema.fields.iter().zip(&object.values) {
+        if let (true, Some((value, unit))) = (field.indexed, value.as_ref().and_then(property)) {
+            insert.execute(params![id_bytes(object.id), field.name, value, unit])?;
+        }
+    }
+    Ok(())
 }
 
 /// Writes the derived indexes of `snapshot`: every reference of every object (held objects:
 /// their owner) and every indexed scalar field of the typed stores.
-fn indexes(conn: &Connection, snapshot: &Snapshot) -> rusqlite::Result<()> {
+fn indexes(
+    conn: &Connection,
+    snapshot: &Snapshot,
+    path: &str,
+    progress: Progress<'_>,
+) -> Result<()> {
     let registry = snapshot.registry();
-    let mut insert_reference = conn.prepare(
-        "INSERT INTO arc_reference (source, field, target, target_link, rule) \
-         VALUES (?1, ?2, ?3, NULL, ?4)",
-    )?;
+    let sql = |e| sql_error(e, path);
+    let mut insert_reference = conn.prepare(INSERT_REFERENCE).map_err(sql)?;
+    let mut insert_property = conn.prepare(INSERT_PROPERTY).map_err(sql)?;
+    let mut count = 0;
     let typed = snapshot.iter().map(|(handle, object)| (handle, &**object));
     let held = snapshot
         .held()
         .map(|(handle, held)| (handle, &**held.object()));
     for (handle, object) in typed.chain(held) {
         let key = snapshot.type_key(handle).map_or("", |key| key.as_str());
-        for reference in references(registry, key, object) {
-            let rule = &reference.spec.rule;
-            let rule = serde_json::json!({
-                "strength": rule.strength,
-                "on_delete": rule.on_delete,
-                "on_copy": rule.on_copy,
-            })
-            .to_string();
-            insert_reference.execute(params![
-                id_bytes(object.id),
-                reference.field.to_string(),
-                id_bytes(reference.target),
-                rule
-            ])?;
+        insert_references(&mut insert_reference, registry, key, object).map_err(sql)?;
+        if snapshot.held_object(handle).is_none() {
+            insert_properties(&mut insert_property, registry, key, object).map_err(sql)?;
         }
-    }
-    let mut insert_property = conn
-        .prepare("INSERT INTO arc_property (object, key, value, unit) VALUES (?1, ?2, ?3, ?4)")?;
-    for (handle, object) in snapshot.iter() {
-        let Some(decl) = snapshot
-            .type_key(handle)
-            .and_then(|key| registry.get(key.as_str()))
-        else {
-            continue;
-        };
-        for (field, value) in decl.schema.fields.iter().zip(&object.values) {
-            if let (true, Some((value, unit))) = (field.indexed, value.as_ref().and_then(property))
-            {
-                insert_property.execute(params![id_bytes(object.id), field.name, value, unit])?;
-            }
-        }
+        tick(progress, &mut count)?;
     }
     Ok(())
 }
@@ -424,7 +561,8 @@ fn build(
     temp: &Path,
     contents: &Contents<'_>,
     objects: &[&StoredObject],
-    progress: &mut dyn FnMut(SaveStep) -> Result<()>,
+    carry: Option<&Carry<'_>>,
+    progress: Progress<'_>,
 ) -> Result<()> {
     let name = display(temp);
     let sql = |e| sql_error(e, &name);
@@ -441,9 +579,9 @@ fn build(
     ))
     .map_err(sql)?;
     let tx = conn.transaction().map_err(sql)?;
-    progress(SaveStep::Schema)?;
+    progress(SaveProgress::Step(SaveStep::Schema))?;
     schema::create(&tx).map_err(sql)?;
-    progress(SaveStep::Metadata)?;
+    progress(SaveProgress::Step(SaveStep::Metadata))?;
     let thumbnail = contents.previews.iter().any(|p| p.kind == THUMBNAIL);
     {
         let mut insert = tx
@@ -453,7 +591,7 @@ fn build(
             insert.execute(params![key, value]).map_err(sql)?;
         }
     }
-    progress(SaveStep::Types)?;
+    progress(SaveProgress::Step(SaveStep::Types))?;
     {
         let mut types: Vec<&StoredType> = contents.types.iter().collect();
         types.sort_by(|a, b| (&a.type_key, a.major, a.minor).cmp(&(&b.type_key, b.major, b.minor)));
@@ -468,7 +606,7 @@ fn build(
                 .map_err(sql)?;
         }
     }
-    progress(SaveStep::Objects)?;
+    progress(SaveProgress::Step(SaveStep::Objects))?;
     {
         let mut insert = tx
             .prepare(
@@ -477,7 +615,9 @@ fn build(
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )
             .map_err(sql)?;
+        let mut count = 0;
         for row in objects {
+            tick(progress, &mut count)?;
             insert
                 .execute(params![
                     row.id,
@@ -496,33 +636,17 @@ fn build(
                 .map_err(sql)?;
         }
     }
-    progress(SaveStep::Indexes)?;
+    progress(SaveProgress::Step(SaveStep::Indexes))?;
     if let Some(snapshot) = contents.snapshot {
-        indexes(&tx, snapshot).map_err(sql)?;
+        indexes(&tx, snapshot, &name, progress)?;
     }
-    progress(SaveStep::Previews)?;
-    {
-        let mut kinds: Vec<&Preview> = contents.previews.iter().collect();
-        kinds.sort_by(|a, b| a.kind.cmp(&b.kind));
-        let mut insert = tx
-            .prepare(
-                "INSERT INTO arc_preview (kind, media_type, width, height, bytes) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            )
-            .map_err(sql)?;
-        for preview in kinds {
-            insert
-                .execute(params![
-                    preview.kind,
-                    preview.media_type,
-                    preview.width,
-                    preview.height,
-                    preview.bytes
-                ])
-                .map_err(sql)?;
-        }
+    progress(SaveProgress::Step(SaveStep::Previews))?;
+    super::incremental::write_previews(&tx, contents.previews).map_err(sql)?;
+    progress(SaveProgress::Step(SaveStep::Assets))?;
+    if let Some(carry) = carry {
+        super::asset::copy(carry, &tx, progress)?;
     }
-    progress(SaveStep::Commit)?;
+    progress(SaveProgress::Step(SaveStep::Commit))?;
     tx.commit().map_err(sql)?;
     conn.close().map_err(|(_, e)| sql(e))
 }

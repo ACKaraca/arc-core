@@ -34,6 +34,7 @@ wasm_deny = [
 third_party = [
   "arc-swap",
   "blake3",
+  "fastcdc",
   "glam",
   "insta",
   "nalgebra",

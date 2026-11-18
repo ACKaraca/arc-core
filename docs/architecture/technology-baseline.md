@@ -55,6 +55,7 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `uuid` | UUIDv7 identifiers | MIT or Apache-2.0 |
 | `blake3` | Content hashes for assets, payloads and scene data; payload hashes and the save verification of the `arc-doc` package (feature `package`, without default features) | CC0-1.0 or Apache-2.0 |
 | `rusqlite` | SQLite (bundled, features `bundled` and `limits`, no default features) behind the package of `arc-doc` (feature `package`, off in the WebAssembly build); no `rusqlite` type appears in a public signature | MIT; SQLite public domain |
+| `fastcdc` | Content-defined chunking of assets larger than 4 MiB in the `arc-doc` package (feature `package`, without default features) | MIT |
 | `thiserror` | Error enums | MIT or Apache-2.0 |
 | `tracing`, `tracing-subscriber` | Structured logging | MIT |
 | `rayon` | Work-stealing worker pool | MIT or Apache-2.0 |

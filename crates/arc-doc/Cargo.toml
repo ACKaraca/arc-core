@@ -11,12 +11,13 @@ publish.workspace = true
 [features]
 # The SQLite document package (CORE-DOC-040 and following). Off by default and in the
 # WebAssembly build: SQLite is native code.
-package = ["dep:rusqlite", "dep:blake3"]
+package = ["dep:rusqlite", "dep:blake3", "dep:fastcdc"]
 
 [dependencies]
 arc-base = { workspace = true }
 arc-swap = { workspace = true }
 blake3 = { workspace = true, optional = true }
+fastcdc = { workspace = true, optional = true }
 postcard = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 serde = { workspace = true }

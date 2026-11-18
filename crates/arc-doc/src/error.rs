@@ -452,6 +452,32 @@ pub mod codes {
         category: Category::CorruptData,
         message_id: "doc-recovery-truncated",
     };
+    /// An incremental save is not allowed for this package or state; the caller saves by the
+    /// full rewrite instead.
+    pub const PACKAGE_INCREMENTAL_REFUSED: ErrorCode = ErrorCode {
+        code: "doc.package.incremental_refused",
+        category: Category::Conflict,
+        message_id: "doc-package-incremental-refused",
+    };
+    /// No asset with the hash is stored in the package.
+    pub const PACKAGE_ASSET_NOT_FOUND: ErrorCode = ErrorCode {
+        code: "doc.package.asset_not_found",
+        category: Category::NotFound,
+        message_id: "doc-package-asset-not-found",
+    };
+    /// A stored asset or chunk does not match its hash, or its rows are malformed.
+    pub const PACKAGE_ASSET_CORRUPT: ErrorCode = ErrorCode {
+        code: "doc.package.asset_corrupt",
+        category: Category::CorruptData,
+        message_id: "doc-package-asset-corrupt",
+    };
+    /// A save unwound on the storage thread; the file holds the previous state.
+    pub const PACKAGE_SAVE_PANICKED: ErrorCode = ErrorCode {
+        code: "doc.package.save_panicked",
+        category: Category::Internal,
+        message_id: "doc-package-save-panicked",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         TYPE_DUPLICATE_KEY,
@@ -527,6 +553,10 @@ pub mod codes {
         RECOVERY_LOCKED,
         RECOVERY_BASE_MISSING,
         RECOVERY_TRUNCATED,
+        PACKAGE_INCREMENTAL_REFUSED,
+        PACKAGE_ASSET_NOT_FOUND,
+        PACKAGE_ASSET_CORRUPT,
+        PACKAGE_SAVE_PANICKED,
     ];
 }
 

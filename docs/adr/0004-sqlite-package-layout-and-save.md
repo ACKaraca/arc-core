@@ -94,3 +94,20 @@ changed base must still yield the recovered state, the session keeps a copy of i
 beside the database; the alternative, refusing recovery when the base changed, contradicts the
 decision that the recovered state opens as a new document. No recovery database was written
 before this amendment.
+## Amendment: assets and the in-place save
+
+The first implementation of assets and of the incremental save (format 1.0, nothing changed in
+the schema) fixes what the package document left open; the details are in
+[document-package.md](../architecture/document-package.md#assets) and the
+[arc-doc specification](../crates/arc-doc.md):
+
+- an asset of up to 4 MiB is stored as a single chunk keyed by the asset hash, without chunk
+  list rows; larger assets list their chunks by ordinal; `encoding` 0 stores bytes as given;
+- chunk boundaries are not part of the format; FastCDC with the documented sizes is what this
+  implementation uses;
+- the incremental save runs in the rollback-journal mode with `synchronous = FULL` and is
+  refused, falling back to the full rewrite, when the file's save counter is not the one the
+  changes start from;
+- opening a package for editing rolls back a hot journal left by an interrupted save; a
+  read-only open does not write and fails on such a file.
+

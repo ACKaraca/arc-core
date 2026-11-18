@@ -74,3 +74,7 @@ doc-recovery-invalid = The recovery file { $path } is damaged or is not a recove
 doc-recovery-locked = The recovery file { $path } is in use by a running session.
 doc-recovery-base-missing = The document { $path } the recovered changes apply to has changed, and no copy of it was kept.
 doc-recovery-truncated = Recovery stopped at change { $seq }: the rest of the recovery file is damaged or does not apply.
+doc-package-incremental-refused = The package cannot be saved in place ({ $reason }); it will be written in full.
+doc-package-asset-not-found = The package holds no asset { $hash }.
+doc-package-asset-corrupt = The stored asset { $hash } is damaged.
+doc-package-save-panicked = Saving the document failed because of a defect; the file was not changed.

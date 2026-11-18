@@ -8,6 +8,9 @@
 //! Every value read from a file is treated as hostile: failures are errors with stable codes,
 //! never panics. No `rusqlite` type appears in a public signature.
 
+mod asset;
+mod background;
+mod incremental;
 mod lock;
 mod preview;
 mod read;
@@ -26,10 +29,14 @@ use arc_base::{Error, Limits, Result};
 use crate::error::codes;
 use crate::load::{LoadOptions, Loaded};
 use crate::registry::TypeRegistry;
+use crate::schema::AssetHash;
 
+pub use asset::{AssetReader, CHUNK_AVG, CHUNK_MAX, CHUNK_MIN, WHOLE_MAX, asset_values};
+pub use background::{BackgroundSave, Finished, SaveRequest};
+pub use incremental::{Saved, Strategy, Touch, touched_between};
 pub use lock::{LockHolder, LockOwner, lock_path};
 pub use preview::{MAX_PREVIEW_BYTES, PNG, PREVIEW, Preview, SHEET_PREFIX, THUMBNAIL};
-pub use write::{Contents, Save, SaveStep, save_as, write};
+pub use write::{Contents, ROWS_PER_TICK, Save, SaveProgress, SaveStep, save_as, write};
 
 /// `PRAGMA application_id` of every package: ASCII `ARC1`.
 pub const APPLICATION_ID: u32 = 0x4152_4331;
@@ -189,6 +196,9 @@ impl Package {
     /// the edit lock is taken; a live or stale lock of another opener makes the package
     /// read-only and names the holder.
     pub fn open(path: &Path, mode: Mode<'_>, limits: &Limits) -> Result<Self> {
+        if let Mode::Edit(_) = mode {
+            incremental::recover(path, limits)?;
+        }
         let (format, metadata) = read::open_checked(path, limits)?;
         let mut package = Self {
             path: path.to_path_buf(),
@@ -280,6 +290,120 @@ impl Package {
     /// fails with `doc.package.preview_invalid`.
     pub fn previews(&self) -> Result<Vec<Preview>> {
         read::previews(&self.path, &self.limits)
+    }
+}
+
+impl Package {
+    /// Saves `save`, the state descending from the last save of this package, by `strategy`,
+    /// and returns what was written. `progress` is called before each [`SaveStep`] and every
+    /// [`ROWS_PER_TICK`] rows; an error from it cancels the save, which leaves the file as it
+    /// was. A save in place makes the metadata written the package's metadata: its
+    /// `save_counter` is the baseline of the next incremental save.
+    ///
+    /// - [`Strategy::Incremental`] writes, in one SQLite transaction with the rollback journal
+    ///   and `synchronous = FULL`, only the rows of the objects in the map and of objects still
+    ///   stored at an older version of their registered type, their derived index rows, the type
+    ///   rows of their types, the changed metadata entries and the changed previews. It is
+    ///   refused with `doc.package.incremental_refused` (argument `reason`: `read_only_package`,
+    ///   `format_upgrade`, `read_only_document`, `base_changed` when the file's `save_counter`
+    ///   is not the one of `save.metadata`, `changes` when the map does not fit the file and the
+    ///   snapshot), and the full rewrite in place runs instead; [`Saved::refused`] says why.
+    /// - [`Strategy::Rewrite`] and [`Strategy::Compact`] write the package anew by the full
+    ///   rewrite and replace it; `Compact` keeps only the referenced assets.
+    /// - [`Strategy::Copy`] writes the package to another file by the full rewrite; this
+    ///   package is unchanged.
+    ///
+    /// A save in place of a package not open for editing fails with `doc.document.read_only`.
+    /// Other failures are those of [`save_as`] and of SQLite (`doc.package.io_failed`,
+    /// `doc.package.corrupt`).
+    pub fn save(
+        &mut self,
+        save: &Save<'_>,
+        strategy: &Strategy,
+        progress: &mut dyn FnMut(SaveProgress) -> Result<()>,
+    ) -> Result<Saved> {
+        let path = self.path.clone();
+        if let Strategy::Copy(target) = strategy {
+            let carry = asset::Carry {
+                from: &path,
+                only_referenced: None,
+            };
+            let metadata = write::save_full(target, save, Some(&carry), progress)?;
+            return Ok(Saved {
+                metadata,
+                incremental: false,
+                refused: None,
+            });
+        }
+        if !self.is_editable() {
+            return Err(Error::new(codes::DOCUMENT_READ_ONLY)
+                .with_arg("type", "")
+                .with_arg("version", "")
+                .with_detail("reason", "package"));
+        }
+        let mut refused = None;
+        if let Strategy::Incremental(changes) = strategy {
+            match incremental::save(self, save, changes, progress) {
+                Ok(metadata) => {
+                    self.metadata = metadata.clone();
+                    return Ok(Saved {
+                        metadata,
+                        incremental: true,
+                        refused: None,
+                    });
+                }
+                Err(error) if error.code() == codes::PACKAGE_INCREMENTAL_REFUSED.code => {
+                    refused = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let carry = asset::Carry {
+            from: &path,
+            only_referenced: matches!(strategy, Strategy::Compact).then_some(save),
+        };
+        let metadata = write::save_full(&path, save, Some(&carry), progress)?;
+        self.metadata = metadata.clone();
+        Ok(Saved {
+            metadata,
+            incremental: false,
+            refused,
+        })
+    }
+
+    /// Stores the bytes `reader` yields as an asset of `media_type` and returns its hash
+    /// (BLAKE3 of the bytes). An asset already stored is stored once; up to [`WHOLE_MAX`] bytes
+    /// are one chunk, larger content is split into content-defined chunks shared by every asset
+    /// that contains them. The asset is written into the package in its own transaction: no
+    /// object refers to it until a save writes one that does, so the document the file holds
+    /// is unchanged, and an asset no save came to refer to is removed by [`Strategy::Compact`].
+    /// Memory stays bounded by a few chunks. Fails with `doc.document.read_only` when the
+    /// package is not open for editing, `doc.value.out_of_range` for an empty media type or one
+    /// longer than `string_bytes`, `doc.load.limit_exceeded` beyond `input_bytes` bytes or
+    /// `record_count` chunks, and `doc.package.io_failed` when reading fails; nothing is stored
+    /// then.
+    pub fn put_asset(&self, media_type: &str, reader: &mut dyn std::io::Read) -> Result<AssetHash> {
+        if !self.is_editable() {
+            return Err(Error::new(codes::DOCUMENT_READ_ONLY)
+                .with_arg("type", "")
+                .with_arg("version", "")
+                .with_detail("reason", "package"));
+        }
+        asset::put(&self.path, media_type, reader, &self.limits)
+    }
+
+    /// A reader of the asset `hash` that verifies every chunk before returning its bytes and the
+    /// whole at its end (see [`AssetReader`]). Fails with `doc.package.asset_not_found` when no
+    /// such asset is stored and `doc.package.asset_corrupt` when its rows are malformed.
+    pub fn asset(&self, hash: &AssetHash) -> Result<AssetReader> {
+        asset::open(&self.path, hash, &self.limits)
+    }
+
+    /// The bytes of the asset `hash`, returned only after every chunk and the whole verified;
+    /// a damaged asset fails with `doc.package.asset_corrupt` and none of its bytes are
+    /// returned. An asset longer than `input_bytes` fails with `doc.load.limit_exceeded`.
+    pub fn asset_bytes(&self, hash: &AssetHash) -> Result<Vec<u8>> {
+        asset::read_all(&self.path, hash, &self.limits)
     }
 }
 

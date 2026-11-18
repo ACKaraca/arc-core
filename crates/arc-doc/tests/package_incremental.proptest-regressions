@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0b17963795fa08079f5e29496d88e6a9956d8e330c409e7e600921cfb3f66c87 # shrinks to (_, input) = (false, []), edits = []
+cc 5566b5fa43c38d446d21d761801f5c4b5738af8429c9ca85f407b01cde873d09 # shrinks to (_, input) = (false, [StoredObject { id: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], type_key: "x.u", major: 4, minor: 2, owner: Some([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]), name: Some("n1"), partition: None, flags: 1, encoding: 0, payload: [1, 2, 3, 1], payload_hash: [6, 131, 223, 120, 123, 86, 180, 25, 74, 28, 178, 113, 56, 229, 155, 215, 228, 137, 38, 106, 24, 107, 237, 130, 158, 240, 225, 186, 120, 240, 90, 233], last_txn: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }]), edits = []
+cc 7d27c6b1970555808ba9b1d96f74d854fc4fecc27c8a3297b91b61aa8180ad64 # shrinks to (_, input) = (false, [StoredObject { id: [1, 2, 1], type_key: "t.b", major: 1, minor: 0, owner: None, name: Some("n1"), partition: None, flags: 1, encoding: 0, payload: [0], payload_hash: [45, 58, 222, 223, 241, 27, 97, 241, 76, 136, 110, 53, 175, 160, 54, 115, 109, 205, 135, 167, 77, 39, 181, 193, 81, 2, 37, 208, 245, 146, 226, 19], last_txn: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }]), edits = []
+cc 0346fb98de8db7833a6f0d905c51ecc830bdcecabc2d28010ad6f5c54834544b # shrinks to (_, input) = (false, []), edits = [Create(100, 0), Modify(0, -4), Save(false), Modify(0, 0), Modify(0, -4)]
