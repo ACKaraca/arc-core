@@ -318,6 +318,34 @@ mod native {
         None
     }
 
+    /// `O_NOFOLLOW` where the handle's location cannot be read back: the open fails when the
+    /// last component is a link, so a file swapped for a link is never opened through it.
+    #[cfg(any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    const NO_FOLLOW: i32 = 0x0100;
+
+    #[cfg(not(any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    )))]
+    const NO_FOLLOW: i32 = 0;
+
+    /// Open options for a file below a verified directory.
+    fn options() -> OpenOptions {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options.custom_flags(NO_FOLLOW);
+        options
+    }
+
     /// Verifies that the opened `file`, reached through the canonical path `expected`, lies
     /// inside a root of the required kind and is a regular file (a directory when `dir`).
     fn verify(roots: &Roots, file: &File, expected: &Path, write: bool, dir: bool) -> Result<()> {
@@ -330,7 +358,8 @@ mod native {
             return roots.holder(&real, write).map(drop).ok_or_else(outside);
         }
         let now = fs::canonicalize(expected).map_err(|_| outside())?;
-        let again = fs::metadata(&now).map_err(|_| outside())?;
+        // Not following a link: the path may have been swapped for one since it was resolved.
+        let again = fs::symlink_metadata(&now).map_err(|_| outside())?;
         let same = again.dev() == meta.dev() && again.ino() == meta.ino();
         if same && roots.holder(&now, write).is_some() {
             Ok(())
@@ -345,7 +374,10 @@ mod native {
         if !fs::metadata(&canonical).is_ok_and(|m| m.is_file()) {
             return Err(rejected("not_a_file"));
         }
-        let file = File::open(&canonical).map_err(|e| io_error(&e))?;
+        let file = options()
+            .read(true)
+            .open(&canonical)
+            .map_err(|e| io_error(&e))?;
         verify(roots, &file, &canonical, false, false)?;
         Ok(file)
     }
@@ -364,7 +396,7 @@ mod native {
                 PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(name)
             },
         );
-        let created = OpenOptions::new().write(true).create_new(true).open(&via);
+        let created = options().write(true).create_new(true).open(&via);
         let (file, existed) = match created {
             Ok(file) => (file, false),
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {
@@ -373,10 +405,7 @@ mod native {
                 if !fs::metadata(&canonical).is_ok_and(|m| m.is_file()) {
                     return Err(rejected("not_a_file"));
                 }
-                let file = OpenOptions::new()
-                    .write(true)
-                    .open(&via)
-                    .map_err(|e| io_error(&e))?;
+                let file = options().write(true).open(&via).map_err(|e| io_error(&e))?;
                 (file, true)
             }
             Err(e) => return Err(io_error(&e)),

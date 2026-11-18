@@ -488,10 +488,14 @@ validate every request they send and every message the server writes against the
     verified handle of its parent directory (`/proc/self/fd/<dir>/<name>`), so a directory
     swapped for a link after the check cannot redirect the creation. Without `/proc` the
     generic Unix check applies.
-  - Other Unix systems: the device and inode of the handle must equal those of the path
-    resolved again after opening, which must still lie inside a root. A swap is detected and
-    the handle refused before any data moves; creating a new file while another process swaps
-    a directory inside a root for a link can leave an empty file outside the roots.
+  - Other Unix systems: the file is opened without following a link in its last component
+    (macOS and the BSD systems), and the device and inode of the handle must equal those of
+    the path resolved again after opening and read without following a link, which must still
+    lie inside a root. A file swapped for a link is therefore never opened through the link.
+    A directory inside a root that another process swaps for a link between the resolution
+    and the open is not excluded on these systems: creating a new file then can leave an
+    empty file outside the roots, and the re-resolution can accept a file of the swapped
+    directory.
   - Windows: after the path is resolved, every directory of the resolved path from the root
     down to the parent is opened without following reparse points and without sharing delete
     access, so none can be renamed, deleted or replaced by a junction meanwhile; a reparse
