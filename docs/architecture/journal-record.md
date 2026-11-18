@@ -47,7 +47,7 @@ only the bytes the encoder writes.
 ## Operations
 
 Each operation is a `varint` tag, the `varint` index into the type-key table of the object it
-changes, and the fields below.
+changes (except tag 5, which changes no object), and the fields below.
 
 | Tag | Operation | Fields |
 |---|---|---|
@@ -56,11 +56,13 @@ changes, and the fields below.
 | 2 | `modify_properties` | `id`, properties before, properties after |
 | 3 | `delete` | object |
 | 4 | `relink` | `id`, owner before as `option<id>`, owner after as `option<id>` |
+| 5 | `modify_foreign` | no type-key index; the key as a zigzag `varint`, the row before and the row after as `option<row>` |
 
 - **Object** (create and delete): `id`, `version`, owner as `option<id>`, properties, and the
   field values as a `blob` holding the object's payload (`postcard`, the payload codec of
   `arc-doc`, uncompressed) at that schema version.
 - **Properties**: name as `option<text>`, partition as `option<text>`, `flags`.
+- **Row** (`modify_foreign`): `source_format` as `text`, `source_version` and `source_id` as `option<text>`, `object` as `option<blob>`, `record_kind` as `text`, `data` as `blob`, `asset` as `option<blob>`. The key is the operation's, not repeated in the row. A foreign data operation uses no entry of the type-key table.
 - **Path**: a `varint` segment count of at least 1, then per segment a `varint` tag and its
   content: 0 a field name (`text`), 1 a list index (`varint`), 2 a map key (`text`). The first
   segment is a field.
@@ -90,6 +92,10 @@ Records are hostile input. A decoder:
   a failure of the payload codec is its source.
 
 ## Versioning
+
+Tag 5 was added to format 1 without changing the layout of tags 0 to 4: a reader that does not
+know a tag fails with `doc.journal.record_invalid` (unknown operation) for that record only,
+and a record's header, which package retention and `check` read, decodes the same.
 
 The format version changes when the layout changes. A newer format is refused with
 `doc.journal.record_invalid`; a reader of a later format keeps reading format 1. Records of an

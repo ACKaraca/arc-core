@@ -2,6 +2,7 @@
 
 use std::f64::consts::TAU;
 
+use arc_base::id::Identifier;
 use arc_base::math::{Point2, Vector2};
 use arc_base::{Limits, ObjectId, Result};
 use arc_doc::relationship::ReferenceField;
@@ -17,12 +18,13 @@ use arc_io_dxf::model::{
     HatchLoop, HatchVertex, Image, Insert, Line, LwPolyline, LwVertex, MText, PatternLine, Point,
     Ray, Spline, Text,
 };
-use arc_io_dxf::{Entity, EntityKind, Handle};
+use arc_io_dxf::{Entity, EntityKind, Handle, PreservedRecord};
 
 use crate::color::to_true;
 use crate::error::reasons;
 use crate::export::{Exporter, alpha_of, invalid, lineweight_code, note_what};
 use crate::fields::Reader;
+use crate::plan::{FOREIGN_ENTITY, FOREIGN_FORMAT, decode_record};
 
 fn p3(p: Point2, z: f64) -> [f64; 3] {
     [p.x, p.y, z]
@@ -79,7 +81,48 @@ impl Exporter<'_> {
                 out.push(entity);
             }
         }
+        for mut record in self.preserved_records(container, FOREIGN_ENTITY) {
+            // The record's owner is the container it is written to now.
+            let first_marker = record.groups.iter().position(|g| g.code == 100);
+            let owned = record
+                .groups
+                .iter_mut()
+                .take(first_marker.unwrap_or(usize::MAX))
+                .find(|g| g.code == 330);
+            if let Some(group) = owned {
+                group.value = arc_io_dxf::Value::Text(owner.to_hex());
+            }
+            self.count += 1;
+            out.push(Entity::new(EntityKind::Preserved(record)));
+        }
         Ok(out)
+    }
+
+    /// The records of the foreign data rows of format `dxf` and kind `kind` attached to
+    /// `container`, in row order; a row that does not decode is reported and skipped.
+    pub(crate) fn preserved_records(
+        &mut self,
+        container: ObjectId,
+        kind: &str,
+    ) -> Vec<PreservedRecord> {
+        let owner = container.as_u128().to_be_bytes();
+        let mut out = Vec::new();
+        for row in self.snapshot.foreign_rows() {
+            if row.source_format != FOREIGN_FORMAT
+                || row.record_kind != kind
+                || row.object.as_deref() != Some(owner.as_slice())
+            {
+                continue;
+            }
+            if let Some(record) = decode_record(&row.data) {
+                self.rep.mapped(1);
+                out.push(record);
+            } else {
+                self.rep
+                    .note(reasons::EXPORT_UNMAPPED, "foreign data", None, &[]);
+            }
+        }
+        out
     }
 
     fn entity(&mut self, key: &str, r: &Reader<'_>, owner: Handle) -> Result<Option<Entity>> {

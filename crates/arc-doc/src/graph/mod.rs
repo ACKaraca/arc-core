@@ -923,6 +923,26 @@ impl Graph {
             .collect()
     }
 
+    /// [`Graph::drain_transitions`] that also returns, under the same lock, the view of every
+    /// node that is failed, blocked or cyclic after the drain. A consumer that mirrors those
+    /// states reads them at the instant the baseline of the next drain is taken; reading them
+    /// later lets a change that cancels out between two drains go unnoticed.
+    pub fn drain_transitions_viewed(&self) -> Vec<(Transition, Option<NodeView>)> {
+        let mut state = self.lock();
+        std::mem::take(&mut state.transitions)
+            .into_iter()
+            .map(|(key, (before, after))| {
+                let view = matches!(
+                    after,
+                    Some(StateKind::Failed | StateKind::Blocked | StateKind::Cyclic)
+                )
+                .then(|| state.nodes.get(&key).map(|node| node.view(&key)))
+                .flatten();
+                (Transition { key, before, after }, view)
+            })
+            .collect()
+    }
+
     /// Brings `key` to a settled state for the current revision on this thread, evaluating
     /// what it needs, and returns it. Nested demands run inline on this thread.
     ///

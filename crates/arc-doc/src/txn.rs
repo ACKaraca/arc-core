@@ -17,7 +17,10 @@ use arc_base::{Error, Limits, ObjectId, Result, SessionId, TransactionId};
 
 use crate::error::codes;
 use crate::integrity::{self, DeleteReport};
-use crate::op::{Op, Properties, check_shape, check_write, live, modified, with_properties};
+use crate::load::StoredForeign;
+use crate::op::{
+    Op, Properties, check_foreign_row, check_shape, check_write, live, modified, with_properties,
+};
 use crate::schema::{ColorValue, ExternalRef, FieldPath, PathSegment, TypeKey, Value};
 use crate::snapshot::{Change, Header, Object, Savepoint, Snapshot, WorkingSet};
 use crate::store::Handle;
@@ -379,6 +382,56 @@ impl Txn {
         })
     }
 
+    /// Sets the foreign data row `row.id` to `row`, adding it or replacing the row that has that
+    /// key. Foreign data rows are not objects: deleting the object a row names leaves the row,
+    /// and only [`Txn::remove_foreign`] removes it.
+    ///
+    /// Fails with `doc.foreign.invalid` (see [`crate::op`]: `object` must be absent or 16
+    /// identifier bytes, `asset` absent or 32 bytes, `source_format` and `record_kind` not
+    /// empty), `doc.document.read_only` or `doc.txn.limit_exceeded`; the number of rows and the
+    /// size of their columns are bounded by `Limits` at commit.
+    pub fn set_foreign(&mut self, row: StoredForeign) -> Result<()> {
+        check_foreign_row(row.id, &row)?;
+        let id = row.id;
+        let after = Arc::new(row);
+        let op = Op::ModifyForeign {
+            id,
+            before: self.snapshot().foreign(id).cloned(),
+            after: Some(Arc::clone(&after)),
+        };
+        self.record(op, 0, |set| set.set_foreign(after).map(drop))
+    }
+
+    /// Adds `row` under a new key, one more than the highest key in the candidate (1 for none),
+    /// ignoring `row.id`, and returns the key. Fails like [`Txn::set_foreign`], and with
+    /// `doc.foreign.invalid` (reason `id`) when no key is left.
+    pub fn add_foreign(&mut self, mut row: StoredForeign) -> Result<i64> {
+        row.id = self.snapshot().next_foreign_id().ok_or_else(|| {
+            Error::new(codes::FOREIGN_INVALID)
+                .with_arg("row", i64::MAX)
+                .with_arg("reason", "id")
+        })?;
+        let id = row.id;
+        self.set_foreign(row)?;
+        Ok(id)
+    }
+
+    /// Removes the foreign data row `id`. Fails with `doc.foreign.not_found`,
+    /// `doc.document.read_only` or `doc.txn.limit_exceeded`.
+    pub fn remove_foreign(&mut self, id: i64) -> Result<()> {
+        let before = self
+            .snapshot()
+            .foreign(id)
+            .cloned()
+            .ok_or_else(|| Error::new(codes::FOREIGN_NOT_FOUND).with_arg("row", id))?;
+        let op = Op::ModifyForeign {
+            id,
+            before: Some(before),
+            after: None,
+        };
+        self.record(op, 0, |set| set.remove_foreign(id).map(drop))
+    }
+
     /// Applies the deletion rules to the transaction's deletions and records what they change
     /// as operations of the transaction ([`DeleteReport::operations`]), charged against the
     /// limits like the transaction's own operations, so that the operation list still replays
@@ -608,8 +661,32 @@ fn op_bytes(op: &Op) -> u64 {
             .map(|text| bytes_of(text.as_ref().map_or(0, String::len)))
             .fold(0, u64::saturating_add),
         Op::Relink { .. } => 0,
+        Op::ModifyForeign { before, after, .. } => before
+            .iter()
+            .chain(after)
+            .map(|row| foreign_bytes(row))
+            .fold(0, u64::saturating_add),
     };
     bytes_of(size_of::<Op>()).saturating_add(data)
+}
+
+/// The estimated memory of a foreign data row: its size and the heap data of its columns.
+fn foreign_bytes(row: &StoredForeign) -> u64 {
+    let texts = [
+        Some(&row.source_format),
+        row.source_version.as_ref(),
+        row.source_id.as_ref(),
+        Some(&row.record_kind),
+    ];
+    let blobs = [Some(&row.data), row.object.as_ref(), row.asset.as_ref()];
+    let heap = texts
+        .into_iter()
+        .flatten()
+        .map(String::len)
+        .chain(blobs.into_iter().flatten().map(Vec::len))
+        .map(bytes_of)
+        .fold(0, u64::saturating_add);
+    bytes_of(size_of::<StoredForeign>()).saturating_add(heap)
 }
 
 /// The estimated memory of an object: its size, texts and values.

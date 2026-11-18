@@ -491,6 +491,10 @@ fn replay(txn: &mut Txn, op: &Op) -> Result<()> {
         } => txn.modify(*id, path.clone(), after.clone()),
         Op::ModifyProperties { id, after, .. } => txn.set_properties(*id, after.clone()),
         Op::Relink { id, after, .. } => txn.relink(*id, *after),
+        Op::ModifyForeign { id, after, .. } => match after {
+            Some(row) => txn.set_foreign((**row).clone()),
+            None => txn.remove_foreign(*id),
+        },
     }
 }
 

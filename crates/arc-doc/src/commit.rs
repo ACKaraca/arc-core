@@ -122,6 +122,7 @@ pub(crate) fn validate_txn(
         return Err(reason.error());
     }
     validate::check_fields(txn.snapshot(), txn.touched())?;
+    validate::check_foreign(txn.snapshot(), txn.ops(), limits)?;
     txn.apply_delete_rules(limits)?;
     let parts = txn.into_parts();
     let (base, candidate, touched) = (parts.set.base(), parts.set.current(), parts.set.touched());

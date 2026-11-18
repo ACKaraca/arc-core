@@ -32,7 +32,7 @@ use arc_base::{Error, ObjectId};
 use crate::diagnostic::{Diagnostic, DiagnosticSink, Origin};
 use crate::error::codes;
 use crate::events::{DiagnosticsChanged, Event};
-use crate::graph::{ChangeSet, Graph, NodeKey, NodeState, Subject};
+use crate::graph::{ChangeSet, Graph, NodeKey, NodeState, NodeView, Subject};
 use crate::schema::Severity;
 
 /// The capacity of a list made by [`DiagnosticsList::default`].
@@ -368,11 +368,23 @@ impl DiagnosticsList {
     /// a failed, blocked or cyclic node has exactly one diagnostic describing its state; any
     /// other node, or a removed one, has none.
     pub fn sync_nodes<'a>(&self, graph: &Graph, keys: impl IntoIterator<Item = &'a NodeKey>) {
-        let wanted: Vec<(NodeKey, Option<Diagnostic>)> = keys
+        self.sync_views(
+            keys.into_iter()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .map(|key| (key.clone(), graph.node(key))),
+        );
+    }
+
+    /// [`DiagnosticsList::sync_nodes`] for states already read: each entry is a node and its
+    /// view, `None` for a node that is removed or has no problem state.
+    pub fn sync_views(&self, views: impl IntoIterator<Item = (NodeKey, Option<NodeView>)>) {
+        let wanted: Vec<(NodeKey, Option<Diagnostic>)> = views
             .into_iter()
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .map(|key| (key.clone(), node_diagnostic(graph, key)))
+            .map(|(key, view)| {
+                let diagnostic = view.and_then(|view| view_diagnostic(&key, view));
+                (key, diagnostic)
+            })
             .collect();
         let capacity = self.capacity;
         self.change(|state, delta| {
@@ -437,7 +449,10 @@ fn names(keys: &[NodeKey]) -> String {
 /// own, then those of the upstream nodes or cycle members, without repetition.
 #[must_use]
 pub fn node_diagnostic(graph: &Graph, key: &NodeKey) -> Option<Diagnostic> {
-    let view = graph.node(key)?;
+    view_diagnostic(key, graph.node(key)?)
+}
+
+fn view_diagnostic(key: &NodeKey, view: NodeView) -> Option<Diagnostic> {
     let (severity, error, others) = match view.state {
         NodeState::Failed(error) => (Severity::Error, error, Vec::new()),
         NodeState::Blocked(upstream) => (

@@ -25,6 +25,7 @@ use crate::apply::model_space_unit;
 use crate::color::to_true;
 use crate::error::codes;
 use crate::fields::Reader;
+use crate::plan::{FOREIGN_FORMAT, FOREIGN_OBJECT};
 use crate::report::Reporter;
 use crate::units::code_of_unit;
 
@@ -140,7 +141,13 @@ pub fn export_drawing(snapshot: &Snapshot, space: ObjectId) -> Result<Exported> 
     let mut ex = Exporter {
         snapshot,
         rep: Reporter::new(),
-        next: 0x20,
+        // Above the handles of the preserved records, which keep theirs.
+        next: snapshot
+            .foreign_rows()
+            .filter(|row| row.source_format == FOREIGN_FORMAT)
+            .filter_map(|row| u64::from_str_radix(row.source_id.as_deref()?, 16).ok())
+            .max()
+            .map_or(0x20, |top| top.saturating_add(1).max(0x20)),
         layers,
         linetypes,
         text_styles: BTreeMap::new(),
@@ -178,7 +185,12 @@ impl Exporter<'_> {
             blocks.push(self.block(id, record)?);
         }
         let entities = self.container_entities(space, model_record)?;
-        let objects = self.layout_objects(root, model_record, paper_record);
+        let mut objects = self.layout_objects(root, model_record, paper_record);
+        objects.extend(
+            self.preserved_records(space, FOREIGN_OBJECT)
+                .into_iter()
+                .map(|record| Object::new(ObjectKind::Preserved(record))),
+        );
         Ok(Drawing {
             version: Version::R2018,
             header: vec![

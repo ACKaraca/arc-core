@@ -5,12 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use arc_draft::types::SpaceUnit;
 use arc_io_dxf::loss::{Argument, LossReport, Reason};
-use arc_io_dxf::{Drawing, Entity, EntityKind, Group, Handle, Value};
+use arc_io_dxf::{Drawing, Entity, EntityKind, Group, Handle, PreservedRecord, Value};
 
 use crate::error::reasons;
 use crate::plan::{
-    Appearance, BlockSpec, Container, DimStyleSpec, EntitySpec, ImportOptions, LayerSpec,
-    LinetypeSpec, Op, Plan, Shape, TextStyleSpec,
+    Appearance, BlockSpec, Container, DimStyleSpec, EntitySpec, FOREIGN_ENTITY, FOREIGN_OBJECT,
+    ForeignSpec, ImportOptions, LayerSpec, LinetypeSpec, MAX_FOREIGN_RECORDS, Op, Plan, Shape,
+    TextStyleSpec, encode_record,
 };
 use crate::report::Reporter;
 use crate::units;
@@ -75,6 +76,7 @@ pub(crate) struct Mapper<'a> {
     pub(crate) blocks: Defs<BlockSpec>,
     pub(crate) style_by_handle: BTreeMap<u64, String>,
     pub(crate) entities: Vec<(Container, EntitySpec)>,
+    pub(crate) foreign: Vec<ForeignSpec>,
     pub(crate) edges: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -118,6 +120,7 @@ impl<'a> Mapper<'a> {
             blocks: Defs::default(),
             style_by_handle: BTreeMap::new(),
             entities: Vec::new(),
+            foreign: Vec::new(),
             edges: BTreeMap::new(),
         }
     }
@@ -213,6 +216,10 @@ impl<'a> Mapper<'a> {
 
     /// Maps `e` and stores it in `container`; `f` scales its lengths.
     pub(crate) fn add_entity(&mut self, e: &Entity, container: &Container, f: f64) {
+        if let EntityKind::Preserved(record) = &e.kind {
+            self.keep(record, FOREIGN_ENTITY, container);
+            return;
+        }
         if let EntityKind::Insert(i) = &e.kind {
             self.add_insert(e, i, container, f);
             return;
@@ -236,13 +243,50 @@ impl<'a> Mapper<'a> {
         ));
     }
 
+    /// Keeps `record` as a foreign data row attached to `container` unless the import holds
+    /// the most rows it keeps or the record is larger than the limits allow.
+    fn keep(&mut self, record: &PreservedRecord, record_kind: &'static str, container: &Container) {
+        let data = encode_record(record);
+        let handle = record.handle();
+        let fits = self.foreign.len() < MAX_FOREIGN_RECORDS
+            && u64::try_from(data.len()).is_ok_and(|n| n <= self.o.limits.input_bytes)
+            && u64::try_from(self.foreign.len()).is_ok_and(|n| n < self.o.limits.record_count);
+        if !fits {
+            self.note(reasons::FOREIGN_OVERFLOW, &record.kind, handle);
+            return;
+        }
+        self.note(reasons::RECORD_PRESERVED, &record.kind, handle);
+        self.foreign.push(ForeignSpec {
+            record_kind,
+            container: container.clone(),
+            source: handle,
+            data,
+        });
+    }
+
     fn skip_rest(&mut self) {
         let d = self.d;
-        if !d.objects.is_empty() {
-            let handle = d.objects.iter().find_map(|o| o.source_id());
-            let n = u64::try_from(d.objects.len()).unwrap_or(u64::MAX);
-            self.rep
-                .note_n(reasons::OBJECTS_SKIPPED, "OBJECTS", hex(handle), n, &[]);
+        let mut skipped = 0_u64;
+        for o in &d.objects {
+            if let arc_io_dxf::ObjectKind::Preserved(record) = &o.kind {
+                self.keep(record, FOREIGN_OBJECT, &Container::Space);
+            } else {
+                skipped += 1;
+            }
+        }
+        if skipped > 0 {
+            let handle = d
+                .objects
+                .iter()
+                .find(|o| !matches!(o.kind, arc_io_dxf::ObjectKind::Preserved(_)))
+                .and_then(|o| o.source_id());
+            self.rep.note_n(
+                reasons::OBJECTS_SKIPPED,
+                "OBJECTS",
+                hex(handle),
+                skipped,
+                &[],
+            );
         }
         let t = &d.tables;
         let skipped = [
@@ -288,6 +332,8 @@ impl<'a> Mapper<'a> {
         }
         Plan {
             ops,
+            foreign: self.foreign,
+            version: self.d.version.name().to_owned(),
             source_unit: self.source_unit,
             factor: self.factor,
             report: rep.finish(self.d.version.name(), crate::plan::DIRECTION),

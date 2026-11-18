@@ -131,3 +131,23 @@ Packages written before this amendment have empty tables and open unchanged; the
 fixtures stay valid and no fixture is regenerated. Older readers ignore the rows; a full
 rewrite by an older reader drops them, which loses history but no document content.
 
+## Amendment: foreign data as document state
+
+Foreign data rows became part of the document state that transactions change
+([arc-doc specification](../crates/arc-doc.md#journal-foreign-data-and-diagnostics-in-the-package-core-doc-040)).
+The schema of format 1.0 is unchanged, and so is the table; what changes is who writes it:
+
+- a save writes the foreign data rows of the saved state (the incremental save deletes, inserts
+  and replaces the rows that differ), replacing "written back unchanged by every save"; a state
+  that no transaction changed writes the rows it loaded, so existing packages round-trip as
+  before;
+- a transaction adds, replaces and removes rows by their `id` with the journal operation
+  `modify_foreign`, tag 5 of journal record format 1 ([journal-record.md](../architecture/journal-record.md)),
+  added without changing tags 0 to 4 and without a new format version;
+- an older reader does not decode a record with tag 5 (`doc.journal.record_invalid`), which
+  only costs it that record's operations: it keeps the record, since it reads headers only for
+  retention and `check`, and it never sees foreign rows as operations. An older reader that
+  rewrites the package in full writes the foreign rows it loaded, so the rows survive;
+- the rows of a deleted object are kept until a transaction removes them.
+
+Existing fixtures stay valid; no fixture was regenerated.

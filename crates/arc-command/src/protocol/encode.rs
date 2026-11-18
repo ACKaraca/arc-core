@@ -28,7 +28,10 @@ impl Summary {
     pub(super) fn of_ops(ops: &[Op]) -> Self {
         let mut s = Self::default();
         for op in ops {
-            let id = op.id();
+            // A foreign data operation changes no object.
+            let Some(id) = op.object_id() else {
+                continue;
+            };
             match op {
                 // Deleted earlier in the transaction: the object was replaced.
                 Op::Create { .. } if s.deleted.remove(&id) => {

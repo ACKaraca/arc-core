@@ -413,6 +413,7 @@ pub(crate) fn load(
     drop(statement);
     let (journal, foreign, diagnostics) = super::history::read(&conn, &name, limits)?;
     loaded.rows.journal = journal;
+    loaded.snapshot = loaded.snapshot.with_foreign(&foreign);
     loaded.rows.foreign = foreign;
     loaded.rows.diagnostics = diagnostics;
     Ok(loaded)

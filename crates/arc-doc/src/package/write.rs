@@ -359,7 +359,7 @@ pub(super) fn check_previews(previews: &[Preview]) -> Result<()> {
 fn write_with(
     target: &Path,
     contents: &Contents<'_>,
-    history: Option<&HistoryRows<'_>>,
+    history: Option<&HistoryRows>,
     carry: Option<&Carry<'_>>,
     progress: Progress<'_>,
 ) -> Result<()> {
@@ -578,7 +578,7 @@ fn build(
     temp: &Path,
     contents: &Contents<'_>,
     objects: &[&StoredObject],
-    history: Option<&HistoryRows<'_>>,
+    history: Option<&HistoryRows>,
     carry: Option<&Carry<'_>>,
     progress: Progress<'_>,
 ) -> Result<()> {

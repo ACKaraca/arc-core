@@ -126,12 +126,23 @@ the unit of the space as `$INSUNITS` and the unit of each block in its block rec
 | DIMENSION | `core.draft.dimension` | Rotated, aligned, two-line angular, three-point angular, radial, diameter and ordinate dimensions with their definition points, as non-associative dimensions (`draft.dxf.dimension_nonassociative`); the text `<>` stands for the measurement; the anonymous block of the file is not used |
 | HATCH | `core.draft.hatch` | Boundary loops of polylines with bulges, chains of line and arc edges (closed within a relative tolerance of 1e-6, reversed edges are turned) and single full circle or ellipse edges; solid fill or pattern lines stored inline in the final frame of the hatch (offset converted to shift and spacing); island style normal, outer and ignore; a loop with ellipse or spline edges drops the hatch (`draft.dxf.hatch_dropped`); gradient fills and pattern names without lines become solid fills (`draft.dxf.hatch_approximated`) |
 | WIPEOUT | `core.draft.wipeout` | The clip boundary (rectangle or polygon) in world coordinates; the frame flag is not kept |
-| LEADER, SOLID, TRACE, 3DFACE, VIEWPORT, IMAGE, ATTRIB and ATTDEF outside their block, preserved records | none | Reported with their kind and handle (`draft.dxf.entity_unmapped`) |
+| LEADER, SOLID, TRACE, 3DFACE, VIEWPORT, IMAGE, ATTRIB and ATTDEF outside their block | none | Reported with their kind and handle (`draft.dxf.entity_unmapped`) |
+| Preserved records (types the neutral model does not type) | foreign data rows | Kept and reported (`draft.dxf.record_preserved`), see below |
 | Entities of paper space | none | Reported (`draft.dxf.paper_space_skipped`) |
 
-The unmapped records are listed in the loss report only. The document has a place for foreign
-data (`arc_foreign` rows, `StoredForeign` on load), but no transaction operation adds such a row,
-so the import cannot preserve them in the document and the report is the only record of them.
+Records the neutral model does not type (`PreservedRecord`: entities of a type unknown to the
+format crate, in the model space or in a block, and the like records of the OBJECTS section) are
+kept in the document as foreign data rows ([arc-doc](arc-doc.md#journal-foreign-data-and-diagnostics-in-the-package-core-doc-040)):
+one row per record, `source_format` `dxf`, `source_version` the format version of the file,
+`source_id` the handle in hexadecimal, `record_kind` `entity` or `object`, `data` the record
+(its type and groups, encoded by `plan::encode_record`) and `object` the space or block that holds
+the entity, or the target space for a record of the OBJECTS section. The rows are added by the
+import's transaction, so one undo removes them with the rest of the import. At most 10,000 rows
+are kept per import (and no more than `record_count` of the limits, nor rows larger than
+`input_bytes`); further records are counted under `draft.dxf.foreign_overflow`. Kept records are
+reported under `draft.dxf.record_preserved`. Entities of a type the neutral model types but the
+drafting model has no object for (leaders, solids, images and the like) and the typed objects of
+the OBJECTS section are listed in the loss report only.
 
 ### Appearance and geometry fields
 
@@ -175,6 +186,7 @@ APPID, DIMSTYLE (each with its standard entry) and `BLOCK_RECORD`, the blocks `*
 | wipeout | WIPEOUT | The boundary as the clip polygon of a unit image; the frame is not written (reported) |
 | block reference | INSERT with ATTRIB | Attribute values for the tags of the definition, at the definition's attribute positions transformed by the reference; the attribute text height is 2.5 times the y scale |
 | leader, multi-leader, other types | none | Reported (`draft.dxf.export_unmapped`) |
+| foreign data rows of format `dxf` | the preserved records | Rows of kind `entity` attached to the exported space or a block are written after its drawn entities, rows of kind `object` attached to the exported space after the standard objects, each with its groups unchanged except the owner group of an entity, which names the container it is written to. The handles the export assigns start above the handles of the rows. A row that does not decode is reported (`draft.dxf.export_unmapped`) |
 | layer, linetype, text style, dimension style, block | LAYER, LTYPE, STYLE, DIMSTYLE, BLOCK_RECORD and BLOCK | Same fields as the import; linetype text style names are written as handles of the style entries |
 
 ### Loss reasons
@@ -185,6 +197,8 @@ and kind); items of the reader and writer of `arc-io-dxf` are merged into the sa
 | Reason | Outcome |
 |---|---|
 | `draft.dxf.entity_unmapped` | `dropped` |
+| `draft.dxf.record_preserved` | `preserved` |
+| `draft.dxf.foreign_overflow` | `dropped` |
 | `draft.dxf.paper_space_skipped` | `dropped` |
 | `draft.dxf.objects_skipped` | `dropped` |
 | `draft.dxf.table_skipped` | `dropped` |

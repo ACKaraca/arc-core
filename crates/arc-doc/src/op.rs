@@ -9,9 +9,11 @@
 
 use std::sync::Arc;
 
+use arc_base::id::Identifier;
 use arc_base::{Error, ObjectId, Result};
 
 use crate::error::codes;
+use crate::load::StoredForeign;
 use crate::schema::{
     FieldDecl, FieldPath, PathSegment, Schema, SchemaVersion, TypeKey, Value, ValueType,
     check_value, count, options_bits_eq, prefix_field,
@@ -96,17 +98,44 @@ pub enum Op {
         /// The owner after.
         after: Option<ObjectId>,
     },
+    /// A foreign data row (`arc_foreign`) was added, replaced or removed. It is independent of
+    /// the objects: it names no type key and changes no derived data.
+    ModifyForeign {
+        /// The key of the row, its `id` column.
+        id: i64,
+        /// The row before; `None` for a row that did not exist. Its `id` is the key.
+        before: Option<Arc<StoredForeign>>,
+        /// The row after; `None` removes the row. Its `id` is the key.
+        after: Option<Arc<StoredForeign>>,
+    },
 }
 
 impl Op {
-    /// The identifier of the object the operation changes.
+    /// The identifier of the object the operation changes. For a foreign data operation it is
+    /// the object the row belongs to, or the nil identifier for a document-level row; use
+    /// [`Op::object_id`] to tell them apart from objects the operation changes.
     #[must_use]
     pub fn id(&self) -> ObjectId {
         match self {
-            Self::Create { object, .. } | Self::Delete { object, .. } => object.id,
+            Self::ModifyForeign { before, after, .. } => before
+                .iter()
+                .chain(after)
+                .find_map(|row| row.object.as_deref().and_then(crate::load::parse_id))
+                .unwrap_or_else(|| ObjectId::from_u128(0)),
+            _ => self.object_id().unwrap_or_else(|| ObjectId::from_u128(0)),
+        }
+    }
+
+    /// The identifier of the object the operation changes; `None` for a foreign data
+    /// operation, which changes no object.
+    #[must_use]
+    pub fn object_id(&self) -> Option<ObjectId> {
+        match self {
+            Self::Create { object, .. } | Self::Delete { object, .. } => Some(object.id),
             Self::Modify { id, .. }
             | Self::ModifyProperties { id, .. }
-            | Self::Relink { id, .. } => *id,
+            | Self::Relink { id, .. } => Some(*id),
+            Self::ModifyForeign { .. } => None,
         }
     }
 
@@ -143,6 +172,11 @@ impl Op {
                 after: before,
             },
             Self::Relink { id, before, after } => Self::Relink {
+                id,
+                before: after,
+                after: before,
+            },
+            Self::ModifyForeign { id, before, after } => Self::ModifyForeign {
                 id,
                 before: after,
                 after: before,
@@ -227,8 +261,50 @@ impl Op {
                 };
                 set.replace_header(handle, header).map(drop)
             }
+            Self::ModifyForeign { id, before, after } => {
+                let current = set.current().foreign(*id);
+                let held = match (current, before) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b) || **a == **b,
+                    _ => false,
+                };
+                if !held {
+                    return Err(Error::new(codes::OP_MISMATCH).with_detail("foreign_row", *id));
+                }
+                match after {
+                    Some(row) => {
+                        check_foreign_row(*id, row)?;
+                        set.set_foreign(Arc::clone(row)).map(drop)
+                    }
+                    None if current.is_some() => set.remove_foreign(*id).map(drop),
+                    None => Ok(()),
+                }
+            }
         }
     }
+}
+
+/// Checks a foreign data row written at key `id`: its `id` is the key, `object` is absent or 16
+/// identifier bytes, `asset` is absent or a 32-byte hash and the format and kind are not empty
+/// (`doc.foreign.invalid`, argument `reason` the column). Rows loaded from a package are not
+/// checked: they are kept as stored.
+pub(crate) fn check_foreign_row(id: i64, row: &StoredForeign) -> Result<()> {
+    let reason = if row.id != id {
+        "id"
+    } else if row.object.as_ref().is_some_and(|object| object.len() != 16) {
+        "object"
+    } else if row.asset.as_ref().is_some_and(|asset| asset.len() != 32) {
+        "asset"
+    } else if row.source_format.is_empty() {
+        "source_format"
+    } else if row.record_kind.is_empty() {
+        "record_kind"
+    } else {
+        return Ok(());
+    };
+    Err(Error::new(codes::FOREIGN_INVALID)
+        .with_arg("row", id)
+        .with_arg("reason", reason))
 }
 
 /// Checks a write of `value` at `path` of the live object `id` of `set`: the path resolves, and

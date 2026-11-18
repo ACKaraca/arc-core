@@ -67,8 +67,11 @@ impl ChangeSet {
     pub fn from_commit(set: &WorkingSet, ops: &[Op]) -> Self {
         let registry = set.current().registry();
         let mut by_id: BTreeMap<ObjectId, Vec<&Op>> = BTreeMap::new();
+        // Foreign data rows are no inputs of derived data.
         for op in ops {
-            by_id.entry(op.id()).or_default().push(op);
+            if let Some(id) = op.object_id() {
+                by_id.entry(id).or_default().push(op);
+            }
         }
         let mut changes = Self::default();
         for (&id, &change) in set.touched() {
@@ -207,7 +210,7 @@ fn modified_parts(
                 aspects.insert(Arc::from(field.aspect.as_str()));
             }
             Op::ModifyProperties { .. } | Op::Relink { .. } => header = true,
-            Op::Create { .. } | Op::Delete { .. } => return None,
+            Op::Create { .. } | Op::Delete { .. } | Op::ModifyForeign { .. } => return None,
         }
     }
     Some(Changed::Parts { header, aspects })

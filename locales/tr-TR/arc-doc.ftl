@@ -81,3 +81,5 @@ doc-package-save-panicked = Belgenin kaydedilmesi bir hata nedeniyle başarısı
 doc-descriptor-invalid = Saklanan bir tür açıklaması geçersiz.
 doc-package-recovery-needed = { $path } paketi yarım kalmış bir kayıttan arta kalmış; geri yüklemek için düzenlemek üzere açın.
 doc-package-index-mismatch = { $id } nesnesinin saklanan { $table } dizini nesneyle uyuşmuyor.
+doc-foreign-invalid = { $row } numaralı yabancı veri satırı geçerli değil ({ $reason }).
+doc-foreign-not-found = { $row } numaralı yabancı veri satırı yok.

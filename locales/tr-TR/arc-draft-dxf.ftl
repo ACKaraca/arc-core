@@ -5,6 +5,8 @@
 draft-dxf-space-invalid = Hedef bir model alanı olmalıdır.
 draft-dxf-document-invalid = Saklanan bir çizim nesnesi, türünün bildirdiği biçimde değil.
 draft-dxf-loss-entity-unmapped = { $count } { $kind } kaydının çizimde karşılığı yok ve içe aktarılmadı.
+draft-dxf-loss-record-preserved = { $count } { $kind } kaydının çizimde karşılığı yok; belgede yabancı veri olarak saklandı ve dışa aktarmada geri yazılır.
+draft-dxf-loss-foreign-overflow = { $count } { $kind } kaydı yabancı veri olarak saklanamadı; içe aktarma sınırlı sayıda kayıt saklar ya da kayıtlar çok büyük.
 draft-dxf-loss-paper-space-skipped = Kağıt alanındaki { $count } { $kind } kaydı içe aktarılmadı.
 draft-dxf-loss-objects-skipped = Nesneler bölümündeki { $count } kayıt (sözlükler, yerleşimler, gruplar) içe aktarılmadı.
 draft-dxf-loss-table-skipped = Çizimde karşılığı olmayan { $count } { $kind } kaydı içe aktarılmadı.

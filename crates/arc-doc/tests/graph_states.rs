@@ -275,6 +275,42 @@ fn failures_keep_the_last_good_result_block_dependents_and_clear_on_success() {
     );
 }
 
+/// The views of a drain are read with the drain: a node that failed and went dirty again
+/// afterwards is reported failed, with its error, by the drain that saw it fail.
+#[test]
+fn drained_transitions_carry_the_problem_views_of_the_drain() {
+    let mut evaluators = Evaluators::new();
+    evaluators
+        .register_object(cell(), key("test.checked"), |ctx| {
+            let a = field(ctx, ctx.object_id().unwrap(), "a");
+            if a < 0 {
+                Err(Error::new(arc_doc::error::codes::VALUE_OUT_OF_RANGE).with_arg("field", "a"))
+            } else {
+                ok(a)
+            }
+        })
+        .unwrap();
+    let mut doc = Doc::new(evaluators);
+    let checked = node(1, "test.checked");
+    assert_eq!(doc.value(&checked), 1);
+    doc.graph.drain_transitions();
+    doc.set(1, "a", -5);
+    doc.graph.evaluate_now(&checked).unwrap();
+    let viewed = doc.graph.drain_transitions_viewed();
+    assert_eq!(viewed.len(), 1);
+    let (transition, view) = &viewed[0];
+    assert_eq!(transition.after, Some(StateKind::Failed));
+    assert!(matches!(
+        view.as_ref().map(|view| &view.state),
+        Some(NodeState::Failed(_))
+    ));
+    doc.set(1, "a", 7);
+    let viewed = doc.graph.drain_transitions_viewed();
+    assert_eq!(viewed.len(), 1);
+    assert_eq!(viewed[0].0.before, Some(StateKind::Failed));
+    assert!(viewed[0].1.is_none(), "a dirty node has no problem view");
+}
+
 #[test]
 fn cycles_are_reported_with_their_members_and_clear_when_broken() {
     let mut evaluators = Evaluators::new();

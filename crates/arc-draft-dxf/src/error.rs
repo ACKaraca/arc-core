@@ -36,6 +36,25 @@ pub mod reasons {
         message_id: "draft-dxf-loss-entity-unmapped",
     };
 
+    /// A record without a drafting counterpart (an entity or a record of the OBJECTS section
+    /// of a type the neutral model does not type) was kept as a foreign data row of the
+    /// document and is written back by the export.
+    pub const RECORD_PRESERVED: Reason = Reason {
+        code: "draft.dxf.record_preserved",
+        outcome: Outcome::Preserved,
+        severity: Severity::Info,
+        message_id: "draft-dxf-loss-record-preserved",
+    };
+
+    /// A record to keep as foreign data was not kept because the import already holds the
+    /// most rows it keeps, or the record is larger than the limits allow.
+    pub const FOREIGN_OVERFLOW: Reason = Reason {
+        code: "draft.dxf.foreign_overflow",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "draft-dxf-loss-foreign-overflow",
+    };
+
     /// A paper space entity was not imported.
     pub const PAPER_SPACE_SKIPPED: Reason = Reason {
         code: "draft.dxf.paper_space_skipped",
@@ -210,6 +229,8 @@ pub mod reasons {
     /// Every reason of this crate, for the registry check.
     pub const ALL: &[Reason] = &[
         ENTITY_UNMAPPED,
+        RECORD_PRESERVED,
+        FOREIGN_OVERFLOW,
         PAPER_SPACE_SKIPPED,
         OBJECTS_SKIPPED,
         TABLE_SKIPPED,

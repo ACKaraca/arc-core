@@ -3,11 +3,12 @@
 
 use std::collections::BTreeMap;
 
+use arc_base::id::Identifier;
 use arc_base::math::{Point2, Vector3};
 use arc_base::{Error, ObjectId, Result};
 use arc_command::Context;
 use arc_doc::relationship::ReferenceField;
-use arc_doc::{ColorValue, GeometryBytes, Header, Snapshot, Value};
+use arc_doc::{ColorValue, GeometryBytes, Header, Snapshot, StoredForeign, Value};
 use arc_draft::dimension::DefinitionPoint;
 use arc_draft::text::paragraphs_value;
 use arc_draft::types::{
@@ -16,13 +17,15 @@ use arc_draft::types::{
 };
 use arc_geom::Curve2;
 use arc_geom::encoding::GeomCodec;
+use arc_io_dxf::Handle;
 use serde::Serialize;
 
 use crate::error::codes;
 use crate::fields::{Builder, Reader};
 use crate::plan::{
     Appearance, AttributeSpec, BlockSpec, By, Container, DimStyleSpec, ElementSpec, EntitySpec,
-    FamilySpec, HatchSpec, LayerSpec, LinetypeSpec, Op, Plan, Shape, TextStyleSpec,
+    FOREIGN_FORMAT, FamilySpec, ForeignSpec, HatchSpec, LayerSpec, LinetypeSpec, Op, Plan, Shape,
+    TextStyleSpec,
 };
 
 /// How many objects of each kind an import created.
@@ -165,6 +168,12 @@ pub fn apply(ctx: &mut Context<'_>, space: ObjectId, plan: &Plan) -> Result<Appl
         }
         applier.op(op, &taken)?;
     }
+    for (n, spec) in plan.foreign.iter().enumerate() {
+        if n % 256 == 0 {
+            applier.ctx.checkpoint()?;
+        }
+        applier.foreign(spec, &plan.version)?;
+    }
     Ok(applier.applied)
 }
 
@@ -182,6 +191,29 @@ impl Applier<'_, '_> {
         };
         self.ctx.txn()?.create(key, id, header, values)?;
         Ok(id)
+    }
+
+    /// Adds the foreign data row of `spec`, attached to its space or block.
+    fn foreign(&mut self, spec: &ForeignSpec, version: &str) -> Result<()> {
+        let owner = match &spec.container {
+            Container::Space => self.space,
+            Container::Block(name) => *self
+                .ids
+                .blocks
+                .get(&name.to_lowercase())
+                .ok_or_else(|| invalid("block"))?,
+        };
+        self.ctx.txn()?.add_foreign(StoredForeign {
+            id: 0,
+            source_format: FOREIGN_FORMAT.to_owned(),
+            source_version: (!version.is_empty()).then(|| version.to_owned()),
+            source_id: spec.source.map(Handle::to_hex),
+            object: Some(owner.as_u128().to_be_bytes().to_vec()),
+            record_kind: spec.record_kind.to_owned(),
+            data: spec.data.clone(),
+            asset: None,
+        })?;
+        Ok(())
     }
 
     fn builder(&self, key: &str) -> Builder {

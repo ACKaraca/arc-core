@@ -16,11 +16,13 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use arc_base::id::Identifier;
 use arc_base::{Error, ObjectId, Result};
 use arc_swap::ArcSwap;
 
 use crate::error::codes;
 use crate::index::IdIndex;
+use crate::load::StoredForeign;
 use crate::preserved::HeldObject;
 use crate::registry::TypeRegistry;
 use crate::reverse_index::ReverseIndex;
@@ -121,6 +123,9 @@ struct Roots {
     held: Arc<Vec<HeldObject>>,
     /// Why the document is read-only; empty for a writable document.
     read_only: Arc<[ReadOnlyReason]>,
+    /// The foreign data rows by `id`. A transaction that changes a row copies the map once
+    /// (the rows themselves are shared); a snapshot that no transaction touched shares it.
+    foreign: Arc<BTreeMap<i64, Arc<StoredForeign>>>,
 }
 
 /// An immutable view of a document at one revision.
@@ -167,6 +172,7 @@ impl Snapshot {
             reverse: ReverseIndex::default(),
             held: Arc::new(Vec::new()),
             read_only: Arc::from(Vec::new()),
+            foreign: Arc::new(BTreeMap::new()),
         }))
     }
 
@@ -254,6 +260,53 @@ impl Snapshot {
     #[must_use]
     pub fn held_len(&self) -> usize {
         self.0.held.len()
+    }
+
+    /// The foreign data row `id`, if the snapshot holds it.
+    #[must_use]
+    pub fn foreign(&self, id: i64) -> Option<&Arc<StoredForeign>> {
+        self.0.foreign.get(&id)
+    }
+
+    /// Every foreign data row, in `id` order.
+    pub fn foreign_rows(&self) -> impl Iterator<Item = &Arc<StoredForeign>> + '_ {
+        self.0.foreign.values()
+    }
+
+    /// The foreign data rows that belong to the object `id` (their `object` column holds its 16
+    /// identifier bytes), in `id` order. Costs time proportional to the number of rows.
+    pub fn foreign_of(&self, id: ObjectId) -> impl Iterator<Item = &Arc<StoredForeign>> + '_ {
+        let bytes = id.as_u128().to_be_bytes();
+        self.foreign_rows()
+            .filter(move |row| row.object.as_deref() == Some(bytes.as_slice()))
+    }
+
+    /// The number of foreign data rows, in constant time.
+    #[must_use]
+    pub fn foreign_len(&self) -> usize {
+        self.0.foreign.len()
+    }
+
+    /// The key a new foreign data row takes: one more than the highest key, at least 1; `None`
+    /// when the highest key is `i64::MAX`.
+    #[must_use]
+    pub fn next_foreign_id(&self) -> Option<i64> {
+        match self.0.foreign.last_key_value() {
+            None => Some(1),
+            Some((last, _)) => last.checked_add(1).map(|next| next.max(1)),
+        }
+    }
+
+    /// The snapshot with `rows` as its foreign data: how a load installs the rows of its
+    /// package. The revision is unchanged.
+    #[cfg(feature = "package")]
+    pub(crate) fn with_foreign(mut self, rows: &[StoredForeign]) -> Self {
+        let map = rows
+            .iter()
+            .map(|row| (row.id, Arc::new(row.clone())))
+            .collect();
+        Arc::make_mut(&mut self.0).foreign = Arc::new(map);
+        self
     }
 
     /// Why the document is read-only, in type-key order; empty when it is writable. A working
@@ -528,6 +581,29 @@ impl WorkingSet {
             self.touched.insert(old.id, Change::Deleted);
         }
         Ok(old)
+    }
+
+    /// Sets the foreign data row `row.id` to `row`, adding or replacing it, and returns the row it
+    /// replaced. Rows are not checked here; the transaction and [`crate::op::Op::apply`] do. On
+    /// a read-only document the write fails with `doc.document.read_only`.
+    pub fn set_foreign(&mut self, row: Arc<StoredForeign>) -> Result<Option<Arc<StoredForeign>>> {
+        self.writable()?;
+        let roots = Arc::make_mut(&mut self.current.0);
+        Ok(Arc::make_mut(&mut roots.foreign).insert(row.id, row))
+    }
+
+    /// Removes the foreign data row `id` and returns it; an absent row fails with
+    /// `doc.foreign.not_found`. On a read-only document the write fails with
+    /// `doc.document.read_only`.
+    pub fn remove_foreign(&mut self, id: i64) -> Result<Arc<StoredForeign>> {
+        self.writable()?;
+        if self.current.foreign(id).is_none() {
+            return Err(Error::new(codes::FOREIGN_NOT_FOUND).with_arg("row", id));
+        }
+        let roots = Arc::make_mut(&mut self.current.0);
+        Arc::make_mut(&mut roots.foreign)
+            .remove(&id)
+            .ok_or_else(|| Error::new(codes::FOREIGN_NOT_FOUND).with_arg("row", id))
     }
 
     /// Marks the current state (candidate and touched identifiers) so that

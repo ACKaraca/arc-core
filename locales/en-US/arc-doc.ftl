@@ -81,3 +81,5 @@ doc-package-save-panicked = Saving the document failed because of a defect; the 
 doc-descriptor-invalid = A stored type description is invalid.
 doc-package-recovery-needed = The package { $path } was left by an interrupted save; open it for editing to restore it.
 doc-package-index-mismatch = The stored index { $table } of object { $id } does not match the object.
+doc-foreign-invalid = The foreign data row { $row } is not valid ({ $reason }).
+doc-foreign-not-found = The foreign data row { $row } does not exist.

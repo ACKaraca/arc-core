@@ -9,10 +9,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use arc_base::{Error, ObjectId, Result};
+use arc_base::{Error, Limits, ObjectId, Result};
 
 use crate::diagnostic::Diagnostic;
 use crate::error::codes;
+use crate::op::Op;
 use crate::schema::{Finding, Severity, TypeKey, check_values, options_bits_eq};
 use crate::snapshot::{Change, Object, Snapshot};
 
@@ -24,6 +25,50 @@ use crate::snapshot::{Change, Object, Snapshot};
 /// belongs in a dependency-graph node.
 pub type DocumentValidator =
     Arc<dyn Fn(&Snapshot, &Snapshot, &BTreeMap<ObjectId, Change>) -> Vec<Finding> + Send + Sync>;
+
+/// Stage 1b: the foreign data rows a transaction writes stay within `limits`: each text column
+/// within `string_bytes`, `data` within `input_bytes`, and the candidate holds at most
+/// `record_count` rows (`doc.txn.limit_exceeded`, argument `limit`).
+pub(crate) fn check_foreign(candidate: &Snapshot, ops: &[Op], limits: &Limits) -> Result<()> {
+    let mut written = false;
+    for op in ops {
+        let Op::ModifyForeign { after, .. } = op else {
+            continue;
+        };
+        written = true;
+        let Some(row) = after else { continue };
+        let texts = [
+            Some(&row.source_format),
+            row.source_version.as_ref(),
+            row.source_id.as_ref(),
+            Some(&row.record_kind),
+        ];
+        if texts
+            .into_iter()
+            .flatten()
+            .any(|text| size(text.len()) > limits.string_bytes)
+        {
+            return Err(over("string_bytes", limits.string_bytes));
+        }
+        if size(row.data.len()) > limits.input_bytes {
+            return Err(over("input_bytes", limits.input_bytes));
+        }
+    }
+    if written && size(candidate.foreign_len()) > limits.record_count {
+        return Err(over("record_count", limits.record_count));
+    }
+    Ok(())
+}
+
+fn size(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
+}
+
+fn over(limit: &'static str, value: u64) -> Error {
+    Error::new(codes::TXN_LIMIT_EXCEEDED)
+        .with_arg("limit", limit)
+        .with_detail("value", i64::try_from(value).unwrap_or(i64::MAX))
+}
 
 /// The type key and object of the live object `id` in `snapshot`.
 fn live(snapshot: &Snapshot, id: ObjectId) -> Option<(&TypeKey, &Arc<Object>)> {

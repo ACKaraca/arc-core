@@ -204,8 +204,9 @@ CREATE INDEX arc_asset_chunk_chunk ON arc_asset_chunk (chunk);
   a record. `history_retention` in `arc_meta` decides what a save keeps: `none` nothing,
   `saves:<n>` (n ≥ 1) the records of the last n saves, `full`, absent or any other value every
   record. The rows form one parent chain: each record names the one before it as its parent.
-- **`arc_foreign`.** Rows are kept unchanged by every save, also after the object they name
-  was deleted; `asset` names a stored asset.
+- **`arc_foreign`.** Rows are part of the document state: a save writes the rows of the saved
+  state, which a transaction can add, replace and remove by `id`, and keeps the rest unchanged,
+  also after the object a row names was deleted; `asset` names a stored asset.
 
 ## Payload encoding
 

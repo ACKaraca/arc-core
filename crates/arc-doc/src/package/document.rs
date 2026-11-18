@@ -164,8 +164,8 @@ fn state(snapshot: &Snapshot, journal: &Journal, since: Option<u64>, stored: u64
     let mut touched = BTreeMap::new();
     for entry in journal.iter() {
         let bytes = entry.record().txn_id.as_u128().to_be_bytes().to_vec();
-        for op in &entry.record().ops {
-            touched.insert(op.id(), bytes.clone());
+        for id in entry.record().ops.iter().filter_map(Op::object_id) {
+            touched.insert(id, bytes.clone());
         }
     }
     let last = journal
@@ -188,9 +188,11 @@ fn state(snapshot: &Snapshot, journal: &Journal, since: Option<u64>, stored: u64
         }
         let mut existed: BTreeMap<ObjectId, bool> = BTreeMap::new();
         for op in window.iter().flat_map(|entry| &entry.record().ops) {
-            existed
-                .entry(op.id())
-                .or_insert(!matches!(op, Op::Create { .. }));
+            if let Some(id) = op.object_id() {
+                existed
+                    .entry(id)
+                    .or_insert(!matches!(op, Op::Create { .. }));
+            }
         }
         Some(
             existed

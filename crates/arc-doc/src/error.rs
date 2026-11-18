@@ -485,6 +485,20 @@ pub mod codes {
         category: Category::CorruptData,
         message_id: "doc-descriptor-invalid",
     };
+    /// A foreign data row written by a transaction is malformed: its `object` is not 16
+    /// identifier bytes, its `asset` not a 32-byte hash, a text column is empty, or the row's
+    /// `id` differs from the one it is set at.
+    pub const FOREIGN_INVALID: ErrorCode = ErrorCode {
+        code: "doc.foreign.invalid",
+        category: Category::InvalidInput,
+        message_id: "doc-foreign-invalid",
+    };
+    /// A foreign data row to remove does not exist.
+    pub const FOREIGN_NOT_FOUND: ErrorCode = ErrorCode {
+        code: "doc.foreign.not_found",
+        category: Category::NotFound,
+        message_id: "doc-foreign-not-found",
+    };
     /// A package has a hot rollback journal left by an interrupted save and was opened
     /// read-only, which cannot roll it back.
     pub const PACKAGE_RECOVERY_NEEDED: ErrorCode = ErrorCode {
@@ -581,6 +595,8 @@ pub mod codes {
         DESCRIPTOR_INVALID,
         PACKAGE_RECOVERY_NEEDED,
         PACKAGE_INDEX_MISMATCH,
+        FOREIGN_INVALID,
+        FOREIGN_NOT_FOUND,
     ];
 }
 

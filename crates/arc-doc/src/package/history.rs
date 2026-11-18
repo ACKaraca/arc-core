@@ -4,7 +4,8 @@
 //! dumps them and `check` verifies them. The rules are specified in `docs/crates/arc-doc.md`,
 //! section "Journal, foreign data and diagnostics in the package".
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::Arc;
 
 use rusqlite::{Connection, params};
 use serde_json::{Value as Json, json};
@@ -111,23 +112,22 @@ pub(super) fn retained(
 }
 
 /// The rows of the history tables a save writes.
-pub(super) struct HistoryRows<'a> {
+pub(super) struct HistoryRows {
     /// The retained records, each with its `seq`.
     pub(super) journal: Vec<StoredRecord>,
-    /// The preserved foreign data, unchanged.
-    pub(super) foreign: &'a [StoredForeign],
+    /// The foreign data of the saved snapshot, in `id` order.
+    pub(super) foreign: Vec<Arc<StoredForeign>>,
     /// The diagnostics, numbered from 1.
     pub(super) diagnostics: Vec<StoredDiagnostic>,
 }
 
 /// The history rows of `save` written with the save counter `counter`.
-pub(super) fn rows_of<'a>(save: &Save<'a>, counter: u64) -> HistoryRows<'a> {
+pub(super) fn rows_of(save: &Save<'_>, counter: u64) -> HistoryRows {
     let retention = Retention::parse(save.metadata.history_retention.as_deref());
-    let foreign = save.loaded.map_or(&[][..], |loaded| loaded.rows.foreign());
     let stored = |id: ObjectId| save.snapshot.resolve(id).is_ok();
     HistoryRows {
         journal: retained(save.journal, retention, counter, &save.limits),
-        foreign,
+        foreign: save.snapshot.foreign_rows().cloned().collect(),
         diagnostics: save
             .diagnostics
             .iter()
@@ -189,17 +189,28 @@ fn insert_diagnostics(conn: &Connection, rows: &[StoredDiagnostic]) -> rusqlite:
 }
 
 /// Writes every history row into a new package.
-pub(super) fn write_full(conn: &Connection, rows: &HistoryRows<'_>) -> rusqlite::Result<()> {
+pub(super) fn write_full(conn: &Connection, rows: &HistoryRows) -> rusqlite::Result<()> {
     let mut insert = conn.prepare(INSERT_JOURNAL)?;
     for record in &rows.journal {
         insert.execute(params![record.seq, record.txn_id, record.record])?;
     }
-    let mut insert = conn.prepare(
-        "INSERT INTO arc_foreign (id, source_format, source_version, source_id, object, \
-         record_kind, data, asset) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-    )?;
-    for row in rows.foreign {
-        insert.execute(params![
+    let mut insert = conn.prepare(INSERT_FOREIGN)?;
+    for row in &rows.foreign {
+        insert_foreign(&mut insert, row)?;
+    }
+    insert_diagnostics(conn, &rows.diagnostics)
+}
+
+const INSERT_FOREIGN: &str = "INSERT OR REPLACE INTO arc_foreign (id, source_format, \
+    source_version, source_id, object, record_kind, data, asset) \
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+
+fn insert_foreign(
+    insert: &mut rusqlite::Statement<'_>,
+    row: &StoredForeign,
+) -> rusqlite::Result<()> {
+    insert
+        .execute(params![
             row.id,
             row.source_format,
             row.source_version,
@@ -208,15 +219,14 @@ pub(super) fn write_full(conn: &Connection, rows: &HistoryRows<'_>) -> rusqlite:
             row.record_kind,
             row.data,
             row.asset
-        ])?;
-    }
-    insert_diagnostics(conn, &rows.diagnostics)
+        ])
+        .map(drop)
 }
 
 /// Brings the history tables of a package saved in place to `rows`: deletes the journal rows
-/// not retained, inserts the new ones, and replaces the diagnostics. Foreign data is not
-/// touched: it never changes.
-pub(super) fn write_incremental(conn: &Connection, rows: &HistoryRows<'_>) -> rusqlite::Result<()> {
+/// not retained, inserts the new ones, brings the foreign data rows to the saved snapshot's
+/// (deleting, inserting and replacing the rows that differ), and replaces the diagnostics.
+pub(super) fn write_incremental(conn: &Connection, rows: &HistoryRows) -> rusqlite::Result<()> {
     let present: BTreeSet<i64> = conn
         .prepare("SELECT seq FROM arc_journal")?
         .query_map([], |row| row.get(0))?
@@ -232,8 +242,48 @@ pub(super) fn write_incremental(conn: &Connection, rows: &HistoryRows<'_>) -> ru
             insert.execute(params![record.seq, record.txn_id, record.record])?;
         }
     }
+    write_foreign_incremental(conn, &rows.foreign)?;
     conn.execute("DELETE FROM arc_diagnostic", [])?;
     insert_diagnostics(conn, &rows.diagnostics)
+}
+
+/// Makes `arc_foreign` hold `rows`: the rows it has that differ are replaced, the ones it lacks
+/// inserted and the ones not in `rows` deleted. Costs time proportional to the stored rows.
+fn write_foreign_incremental(
+    conn: &Connection,
+    rows: &[Arc<StoredForeign>],
+) -> rusqlite::Result<()> {
+    let present: BTreeMap<i64, StoredForeign> = conn
+        .prepare(
+            "SELECT id, source_format, source_version, source_id, object, record_kind, data, \
+             asset FROM arc_foreign",
+        )?
+        .query_map([], |row| {
+            Ok(StoredForeign {
+                id: row.get(0)?,
+                source_format: row.get(1)?,
+                source_version: row.get(2)?,
+                source_id: row.get(3)?,
+                object: row.get(4)?,
+                record_kind: row.get(5)?,
+                data: row.get(6)?,
+                asset: row.get(7)?,
+            })
+        })?
+        .map(|row| row.map(|row| (row.id, row)))
+        .collect::<rusqlite::Result<_>>()?;
+    let wanted: BTreeSet<i64> = rows.iter().map(|row| row.id).collect();
+    let mut delete = conn.prepare("DELETE FROM arc_foreign WHERE id = ?1")?;
+    for id in present.keys().filter(|id| !wanted.contains(id)) {
+        delete.execute([id])?;
+    }
+    let mut insert = conn.prepare(INSERT_FOREIGN)?;
+    for row in rows {
+        if present.get(&row.id) != Some(&**row) {
+            insert_foreign(&mut insert, row)?;
+        }
+    }
+    Ok(())
 }
 
 /// The history rows of a package as stored, each table in key order. `record_count` bounds the

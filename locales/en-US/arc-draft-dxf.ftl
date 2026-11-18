@@ -4,6 +4,8 @@
 draft-dxf-space-invalid = The target must be a model space.
 draft-dxf-document-invalid = A stored drawing object does not have the shape its type declares.
 draft-dxf-loss-entity-unmapped = { $count } { $kind } records have no drafting counterpart and were not imported.
+draft-dxf-loss-record-preserved = { $count } { $kind } records have no drafting counterpart; they were kept in the document as foreign data and are written back by the export.
+draft-dxf-loss-foreign-overflow = { $count } { $kind } records could not be kept as foreign data because the import keeps a limited number of them, or they are too large.
 draft-dxf-loss-paper-space-skipped = { $count } { $kind } records of paper space were not imported.
 draft-dxf-loss-objects-skipped = { $count } records of the objects section (dictionaries, layouts, groups) were not imported.
 draft-dxf-loss-table-skipped = { $count } { $kind } records without a drafting counterpart were not imported.

@@ -430,10 +430,13 @@ transaction is open per document at a time; the document executor enforces that,
 - **Operations.** `create` (type key, a new `ObjectId` from the caller, header and values, at the
   type's current schema version; `create_copy` also records the source identifier), `modify`
   (sets the value at a `FieldPath`: a whole field, a record field, a list element or a map
-  entry), `set_properties` (name, partition and flags), `delete` and `relink` (owner). Each
+  entry), `set_properties` (name, partition and flags), `delete` and `relink` (owner), and the
+  foreign data operations `set_foreign`, `add_foreign` and `remove_foreign`
+  ([below](#journal-foreign-data-and-diagnostics-in-the-package-core-doc-040)). Each
   appends one `Op` naming the object by `ObjectId` and, for creates and deletes, its type key:
   `Create` and `Delete` hold the whole object, `Modify` the schema version, the path and the
-  before and after values, `ModifyProperties` and `Relink` the before and after header parts.
+  before and after values, `ModifyProperties` and `Relink` the before and after header parts,
+  `ModifyForeign` the key and the row before and after (no object, no type key).
   Every successful call appends an operation, also when it writes the value already there and
   when it changes the same field again; coalescing belongs to the journal. Values are kept
   decoded; the journal encodes them with the payload codec.
@@ -1403,10 +1406,35 @@ were filled reads as one with empty tables.
   set, beyond that many bytes of the three tables together (64 bytes per row plus its record,
   foreign data or diagnostic arguments); a record that does not decode does not block the load, and a later save drops it and
   the records before it.
-- **Foreign data.** `arc_foreign` rows come from importers; the package keeps them unchanged
-  (`StoredForeign`, with its `id`), as the compatibility promise requires: the incremental save
-  does not touch them and the full rewrite writes the loaded rows as they are, also after the
-  object they name was deleted. Their `asset` keeps that asset through compaction.
+- **Foreign data.** `arc_foreign` rows come from importers and are part of the document state.
+  A snapshot holds them as a map from `id` to `Arc<StoredForeign>` behind one `Arc`, beside the
+  stores: cloning a snapshot copies one pointer, a transaction that changes a row copies the map
+  once (pointers, not rows), and a snapshot no transaction touched shares it. `Snapshot::foreign`,
+  `foreign_rows` (in `id` order), `foreign_of` (the rows whose `object` is a given object) and
+  `foreign_len` read them. A load puts the rows of the package into the snapshot; they stay in
+  `LoadedRows::foreign` as read.
+  The operations are `Txn::set_foreign(row)` (adds the row at `row.id` or replaces it),
+  `Txn::add_foreign(row)` (assigns the key one above the highest key, at least 1, and returns
+  it) and `Txn::remove_foreign(id)`; each appends one `Op::ModifyForeign { id, before, after }`
+  (`before` or `after` `None` for an absent row), whose inverse swaps the two, so undo, redo and
+  recovery replay them like any operation (`Op::apply` fails with `doc.op.mismatch` when the
+  row is not the recorded one). A row written by a transaction has `object` absent or 16
+  identifier bytes, `asset` absent or 32 bytes, and a `source_format` and `record_kind` that are
+  not empty (`doc.foreign.invalid`); removing an absent row fails with `doc.foreign.not_found`.
+  Rows loaded from a package are kept as stored, malformed or not. At commit, each text column
+  of a written row is at most `string_bytes`, `data` at most `input_bytes` and the document
+  holds at most `record_count` rows (`doc.txn.limit_exceeded`, argument `limit`); a failed
+  transaction publishes nothing. Foreign data operations change no object and no derived data:
+  the commit's change set is empty and the `Committed` event lists no object. Deleting the object a
+  row names leaves the row (it stays until a transaction removes it), as the package
+  compatibility promise requires, and undoing the delete needs nothing from the row. The full
+  rewrite writes the rows of the saved snapshot; the incremental save brings the table to them,
+  deleting, inserting and replacing the rows that differ (it reads the stored rows to compare,
+  so its cost grows with the table). Their `asset` keeps that asset through compaction. The
+  journal record of a foreign operation is tag 5 of the
+  [record encoding](../architecture/journal-record.md#operations); an older reader that does not
+  know the tag refuses to decode that record (`doc.journal.record_invalid`) but keeps it,
+  because retention and `check` read only the record header.
 - **Diagnostics.** `Save::diagnostics` is written as one row per diagnostic, `id` counting from
   1 in list order: `severity` `error` or `warning`, the stable `code`, `object` the first object
   the diagnostic names that the saved state holds (typed or held) or NULL, `origin`
@@ -1426,7 +1454,9 @@ were filled reads as one with empty tables.
   (`doc.reference.dangling`, argument `field` = `object`). Record operations are not decoded,
   since that needs the type registry.
 
-The `package_history` test runs random edits over several sessions with random retention
+The `foreign_data` test runs random commits, undos and redos of foreign data operations against
+a map and checks that every journal record decodes to itself. The `package_history` test runs
+random edits, including foreign data operations, over several sessions with random retention
 settings, compares each incremental save with a full rewrite of the same state table by table,
 checks reopening against a reference model of retention and seeds corruptions for `check`;
 `package_fixtures` opens a fixture written before the tables were filled and saves history
@@ -1519,3 +1549,5 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.descriptor.invalid` | `corrupt_data` | A stored field descriptor does not follow the grammar, has another format, exceeds a limit or describes a schema the registry rejects |
 | `doc.package.recovery_needed` | `conflict` | A package with a hot rollback journal was opened read-only; an open for editing rolls the journal back |
 | `doc.package.index_mismatch` | `corrupt_data` | A stored derived index row differs from the rows recomputed from the object rows, or names a missing object |
+| `doc.foreign.invalid` | `invalid_input` | A foreign data row written by a transaction is malformed: `object` is not 16 identifier bytes, `asset` not a 32-byte hash, a text column is empty, or the row's `id` differs from its key |
+| `doc.foreign.not_found` | `not_found` | A foreign data row to remove does not exist |

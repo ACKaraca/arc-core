@@ -42,7 +42,7 @@ use crate::diagnostic::{Diagnostic, DiagnosticSink, Origin};
 use crate::diagnostics::{DiagnosticsList, Emitter};
 use crate::error::codes;
 use crate::events::{Event, Ids, RegeneratedEvent};
-use crate::graph::{ChangeSet, Finish, Graph, NodeKey, NodeView, StateKind, Subject};
+use crate::graph::{ChangeSet, Finish, Graph, NodeKey, NodeView, StateKind, Subject, Transition};
 use crate::schema::Severity;
 
 /// How many times [`Scheduler::ensure`] evaluates a node whose results keep being superseded
@@ -526,7 +526,8 @@ impl Inner {
     /// diagnostics and emits one `regenerated` event for the nodes that settled.
     fn settle(&self) {
         let _order = self.settle.lock().unwrap_or_else(PoisonError::into_inner);
-        let transitions = self.graph.drain_transitions();
+        let viewed = self.graph.drain_transitions_viewed();
+        let transitions: Vec<Transition> = viewed.iter().map(|(t, _)| t.clone()).collect();
         if transitions.is_empty() {
             return;
         }
@@ -549,12 +550,11 @@ impl Inner {
             )
         };
         if let Some(list) = &self.diagnostics {
-            list.sync_nodes(
-                &self.graph,
-                transitions
-                    .iter()
-                    .filter(|t| problem(t.before) || problem(t.after))
-                    .map(|t| &t.key),
+            list.sync_views(
+                viewed
+                    .into_iter()
+                    .filter(|(t, _)| problem(t.before) || problem(t.after))
+                    .map(|(t, view)| (t.key, view)),
             );
         }
         let clean: Vec<NodeKey> = transitions

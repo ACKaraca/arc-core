@@ -18,6 +18,7 @@ use arc_base::id::Identifier;
 use arc_base::{Category, Error, Limits, ObjectId, Result, SessionId, TransactionId};
 
 use crate::error::codes;
+use crate::load::StoredForeign;
 use crate::op::{Op, Properties};
 use crate::payload::{self, Encoding};
 use crate::registry::{MAX_TYPE_DEPTH, TypeRegistry};
@@ -59,7 +60,8 @@ pub struct TxnRecord {
     pub selection_after: Option<String>,
     /// The operations in the order they were applied.
     pub ops: Vec<Op>,
-    /// The type key of the object each operation changes, one per operation.
+    /// The type key of the object each operation changes, one per operation that changes an
+    /// object (every operation but the foreign data operations).
     type_keys: Vec<TypeKey>,
 }
 
@@ -74,6 +76,8 @@ impl TxnRecord {
         let mut type_keys = Vec::with_capacity(ops.len());
         for op in &ops {
             let key = match op {
+                // A foreign data row names no type.
+                Op::ModifyForeign { .. } => continue,
                 Op::Create { type_key, .. } | Op::Delete { type_key, .. } => type_key.clone(),
                 _ => match current.get(&op.id()) {
                     Some(key) => key.clone(),
@@ -121,7 +125,7 @@ impl TxnRecord {
     }
 
     /// The type key of the object each operation changes, one per operation of
-    /// [`TxnRecord::ops`].
+    /// [`TxnRecord::ops`] except the foreign data operations, which change no object.
     #[must_use]
     pub fn type_keys(&self) -> &[TypeKey] {
         &self.type_keys
@@ -133,7 +137,12 @@ impl TxnRecord {
     /// payload codec's codes. A record that [`TxnRecord::decode`] would reject under `limits`
     /// fails with `doc.journal.record_limit_exceeded`.
     pub fn encode(&self, registry: &TypeRegistry, limits: &Limits) -> Result<Vec<u8>> {
-        if self.ops.len() != self.type_keys.len() {
+        let objects = self
+            .ops
+            .iter()
+            .filter(|op| !matches!(op, Op::ModifyForeign { .. }))
+            .count();
+        if objects != self.type_keys.len() {
             return Err(invalid("operation and type counts differ"));
         }
         let mut out = Writer {
@@ -182,7 +191,15 @@ impl TxnRecord {
             out.text(key.as_str())?;
         }
         out.count(self.ops.len(), limits.record_count, "record_count")?;
-        for ((op, key), index) in self.ops.iter().zip(&self.type_keys).zip(indices) {
+        let mut keyed = self.type_keys.iter().zip(indices);
+        for op in &self.ops {
+            if let Op::ModifyForeign { id, before, after } = op {
+                out.foreign_op(*id, before.as_deref(), after.as_deref())?;
+                continue;
+            }
+            let (key, index) = keyed
+                .next()
+                .ok_or_else(|| invalid("operation and type counts differ"))?;
             out.op(op, key, index, registry)?;
         }
         if u64::try_from(out.bytes.len()).map_or(true, |n| n > limits.input_bytes) {
@@ -264,6 +281,15 @@ impl TxnRecord {
     }
 }
 
+/// The zigzag form of `n`: small magnitudes of either sign give small numbers.
+fn zigzag(n: i64) -> u64 {
+    u64::from_ne_bytes(((n << 1) ^ (n >> 63)).to_ne_bytes())
+}
+
+fn unzigzag(n: u64) -> i64 {
+    i64::from_ne_bytes((n >> 1).to_ne_bytes()) ^ -i64::from_ne_bytes((n & 1).to_ne_bytes())
+}
+
 fn invalid(reason: &'static str) -> Error {
     Error::new(codes::JOURNAL_RECORD_INVALID).with_detail("reason", reason)
 }
@@ -309,6 +335,7 @@ const OP_MODIFY: u64 = 1;
 const OP_MODIFY_PROPERTIES: u64 = 2;
 const OP_DELETE: u64 = 3;
 const OP_RELINK: u64 = 4;
+const OP_MODIFY_FOREIGN: u64 = 5;
 
 const SEGMENT_FIELD: u64 = 0;
 const SEGMENT_INDEX: u64 = 1;
@@ -410,6 +437,7 @@ impl Writer<'_> {
             Op::ModifyProperties { .. } => OP_MODIFY_PROPERTIES,
             Op::Delete { .. } => OP_DELETE,
             Op::Relink { .. } => OP_RELINK,
+            Op::ModifyForeign { .. } => OP_MODIFY_FOREIGN,
         };
         self.varint(tag);
         self.varint(u64::try_from(index).unwrap_or(u64::MAX));
@@ -462,6 +490,41 @@ impl Writer<'_> {
                 self.id(id.as_u128());
                 self.option(*before, |out, id| out.id(id.as_u128()));
                 self.option(*after, |out, id| out.id(id.as_u128()));
+            }
+            Op::ModifyForeign { .. } => return Err(invalid("foreign operation with a type key")),
+        }
+        Ok(())
+    }
+
+    /// A foreign data operation: its tag, the key as a zigzag `varint`, then the rows before
+    /// and after as `option<row>`. It has no type-key index.
+    fn foreign_op(
+        &mut self,
+        id: i64,
+        before: Option<&StoredForeign>,
+        after: Option<&StoredForeign>,
+    ) -> Result<()> {
+        self.varint(OP_MODIFY_FOREIGN);
+        self.varint(zigzag(id));
+        for row in [before, after] {
+            self.flag(row.is_some());
+            if let Some(row) = row {
+                if row.id != id {
+                    return Err(invalid("foreign row key differs"));
+                }
+                self.text(&row.source_format)?;
+                self.option_text(row.source_version.as_deref())?;
+                self.option_text(row.source_id.as_deref())?;
+                self.flag(row.object.is_some());
+                if let Some(object) = &row.object {
+                    self.blob(object);
+                }
+                self.text(&row.record_kind)?;
+                self.blob(&row.data);
+                self.flag(row.asset.is_some());
+                if let Some(asset) = &row.asset {
+                    self.blob(asset);
+                }
             }
         }
         Ok(())
@@ -664,8 +727,37 @@ impl<'a> Reader<'a> {
             .map_err(as_record_error)
     }
 
-    fn op(&mut self, keys: &[TypeKey], registry: &TypeRegistry) -> Result<(Op, TypeKey)> {
+    fn foreign_row(&mut self, id: i64) -> Result<StoredForeign> {
+        Ok(StoredForeign {
+            id,
+            source_format: self.text()?,
+            source_version: self.option(Self::text)?,
+            source_id: self.option(Self::text)?,
+            object: self.option(|input| input.blob().map(<[u8]>::to_vec))?,
+            record_kind: self.text()?,
+            data: self.blob()?.to_vec(),
+            asset: self.option(|input| input.blob().map(<[u8]>::to_vec))?,
+        })
+    }
+
+    /// A foreign data operation, whose tag was read.
+    fn foreign_op(&mut self) -> Result<Op> {
+        let id = unzigzag(self.varint()?);
+        let before = self.option(|input| input.foreign_row(id))?;
+        let after = self.option(|input| input.foreign_row(id))?;
+        Ok(Op::ModifyForeign {
+            id,
+            before: before.map(Arc::new),
+            after: after.map(Arc::new),
+        })
+    }
+
+    /// One operation and the type key it names; none for a foreign data operation.
+    fn op(&mut self, keys: &[TypeKey], registry: &TypeRegistry) -> Result<(Op, Option<TypeKey>)> {
         let tag = self.varint()?;
+        if tag == OP_MODIFY_FOREIGN {
+            return Ok((self.foreign_op()?, None));
+        }
         let key = usize::try_from(self.varint()?)
             .ok()
             .and_then(|at| keys.get(at))
@@ -709,7 +801,7 @@ impl<'a> Reader<'a> {
             },
             _ => return Err(invalid("unknown operation")),
         };
-        Ok((op, key))
+        Ok((op, Some(key)))
     }
 
     fn kind(&mut self) -> Result<TxnKind> {
@@ -783,7 +875,7 @@ impl<'a> Reader<'a> {
         for _ in 0..n {
             let (op, key) = self.op(&keys, registry)?;
             ops.push(op);
-            type_keys.push(key);
+            type_keys.extend(key);
         }
         Ok(TxnRecord {
             txn_id,

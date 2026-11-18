@@ -25,7 +25,7 @@ use arc_doc::graph::Evaluators;
 use arc_doc::package::{Mode, Package, Save, Strategy as SaveStrategy, check, inspect};
 use arc_doc::{
     Change, Document, DocumentConfig, DocumentValidator, Finding, LoadOptions, Severity, Snapshot,
-    StoredRecord, Value,
+    StoredForeign, StoredRecord, Value,
 };
 use package_support::{TempDir, cases, owner};
 use proptest::prelude::*;
@@ -161,7 +161,14 @@ proptest! {
         initial in prop::collection::btree_map(1_u128..12, -3_i64..9, 0..5),
         foreign in prop::collection::vec((prop::option::of(1_u128..12), any::<bool>()), 0..4),
         sessions in prop::collection::vec(
-            prop::collection::vec((prop::collection::vec((1_u128..12, -3_i64..9), 0..5), retention()), 1..4),
+            prop::collection::vec(
+                (
+                    prop::collection::vec((1_u128..12, -3_i64..9), 0..5),
+                    retention(),
+                    prop::collection::vec((1_i64..9, prop::option::of((prop::option::of(1_u128..12), any::<u8>()))), 0..4),
+                ),
+                1..4,
+            ),
             1..3,
         ),
     ) {
@@ -169,7 +176,16 @@ proptest! {
         let path = dir.path("model.arc");
         write_base(&path, &initial, 1);
         seed_foreign(&path, &foreign);
-        let seeded_foreign = table(&path, FOREIGN);
+        // The foreign rows by key with their data, as the table holds them.
+        let mut foreign_model: BTreeMap<i64, Vec<u8>> = table(&path, FOREIGN)
+            .iter()
+            .map(|row| match (&row[0], &row[6]) {
+                (rusqlite::types::Value::Integer(id), rusqlite::types::Value::Blob(data)) => {
+                    (*id, data.clone())
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect();
         // Every committed transaction and the save counter of the save that first stored it.
         let mut all: Vec<(u128, u64)> = Vec::new();
         let mut kept: Vec<u128> = Vec::new();
@@ -193,15 +209,49 @@ proptest! {
                 .map(|r| u128::from_be_bytes(r.txn_id[..].try_into().unwrap()))
                 .collect();
             prop_assert_eq!(&stored, &kept, "reopened journal");
-            prop_assert_eq!(document.loaded_rows().foreign().len(), foreign.len());
+            prop_assert_eq!(document.loaded_rows().foreign().len(), foreign_model.len());
+            prop_assert_eq!(document.snapshot().foreign_len(), foreign_model.len());
             let mut saved_revision = document.snapshot().revision();
             let mut unsaved: Vec<u128> = Vec::new();
-            for (edits, retention) in saves {
+            for (edits, retention, foreign_edits) in saves {
                 for (id, v) in edits {
                     if model.get(id) != Some(v) {
                         set(&document, *id, *v);
                         model.insert(*id, *v);
                         unsaved.push(last_txn(&document));
+                    }
+                }
+                for (key, edit) in foreign_edits {
+                    let (key, job) = (*key, *edit);
+                    let done = document
+                        .submit(move |txn| match job {
+                            Some((object, byte)) => txn.set_foreign(StoredForeign {
+                                id: key,
+                                source_format: "fmt".to_owned(),
+                                source_version: None,
+                                source_id: Some(format!("e{byte}")),
+                                object: object.map(|o| o.to_be_bytes().to_vec()),
+                                record_kind: "kind".to_owned(),
+                                data: vec![byte; 2],
+                                asset: None,
+                            }),
+                            None => txn.remove_foreign(key),
+                        })
+                        .wait();
+                    match (edit, done) {
+                        (Some((_, byte)), Ok(_)) => {
+                            foreign_model.insert(key, vec![*byte; 2]);
+                            unsaved.push(last_txn(&document));
+                        }
+                        (None, Ok(_)) => {
+                            prop_assert!(foreign_model.remove(&key).is_some());
+                            unsaved.push(last_txn(&document));
+                        }
+                        (None, Err(error)) => {
+                            prop_assert_eq!(error.code(), "doc.foreign.not_found");
+                            prop_assert!(!foreign_model.contains_key(&key));
+                        }
+                        (Some(_), Err(error)) => prop_assert!(false, "{error:?}"),
                     }
                 }
                 set_retention_meta(&mut package, &path, *retention);
@@ -248,8 +298,15 @@ proptest! {
                 prop_assert_eq!(txn_ids(&journal), kept.clone(), "retention {:?}", retention);
                 prop_assert_eq!(&journal, &table(&copy, JOURNAL));
                 prop_assert_eq!(table(&path, DIAGNOSTICS), table(&copy, DIAGNOSTICS));
-                prop_assert_eq!(table(&path, FOREIGN), seeded_foreign.clone());
-                prop_assert_eq!(table(&copy, FOREIGN), seeded_foreign.clone());
+                // Both saves write the rows of the snapshot: table by table equal, and equal to
+                // the reference map.
+                prop_assert_eq!(table(&path, FOREIGN), table(&copy, FOREIGN));
+                let stored: BTreeMap<i64, Vec<u8>> = snapshot
+                    .foreign_rows()
+                    .map(|row| (row.id, row.data.clone()))
+                    .collect();
+                prop_assert_eq!(&stored, &foreign_model);
+                prop_assert_eq!(table(&path, FOREIGN).len(), foreign_model.len());
                 let negative = model.values().filter(|v| **v < 0).count();
                 prop_assert!(table(&path, DIAGNOSTICS).len() <= negative);
                 prop_assert_eq!(check(&path, &Limits::DEFAULT).unwrap().len(), 0);
@@ -262,8 +319,10 @@ proptest! {
                 .load(registry(), &LoadOptions::default())
                 .unwrap();
             prop_assert_eq!(loaded.rows.diagnostics().len(), table(&path, DIAGNOSTICS).len());
-            prop_assert_eq!(loaded.rows.foreign().len(), foreign.len());
+            prop_assert_eq!(loaded.rows.foreign().len(), foreign_model.len());
+            prop_assert_eq!(loaded.snapshot.foreign_len(), foreign_model.len());
             let dump = inspect(&path, &Limits::DEFAULT).unwrap();
+            prop_assert_eq!(dump["foreign"].as_array().unwrap().len(), foreign_model.len());
             prop_assert_eq!(dump["journal"].as_array().unwrap().len(), kept.len());
             prop_assert!(dump["journal"].as_array().unwrap().iter().all(|r| r.get("header").is_some()));
         }
@@ -318,7 +377,7 @@ fn check_reports_seeded_corruptions_of_the_history_tables() {
     assert_eq!(check(&path, &Limits::DEFAULT).unwrap().len(), 0);
     assert_eq!(table(&path, JOURNAL).len(), 3);
     assert_eq!(table(&path, DIAGNOSTICS).len(), 1);
-    let cases: [(&str, &str); 6] = [
+    let cases: [(&str, &str); 7] = [
         (
             "UPDATE arc_journal SET txn_id = zeroblob(16) WHERE seq = (SELECT max(seq) FROM arc_journal)",
             codes::JOURNAL_RECORD_INVALID.code,
@@ -334,6 +393,10 @@ fn check_reports_seeded_corruptions_of_the_history_tables() {
         (
             "UPDATE arc_foreign SET asset = zeroblob(32)",
             codes::PACKAGE_ASSET_NOT_FOUND.code,
+        ),
+        (
+            "UPDATE arc_foreign SET object = zeroblob(5)",
+            codes::PACKAGE_VALUE_INVALID.code,
         ),
         (
             "UPDATE arc_diagnostic SET severity = 'fatal'",
