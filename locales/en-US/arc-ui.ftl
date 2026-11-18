@@ -47,3 +47,10 @@ ui-tree-visible = Visible
 ui-tree-locked = Locked
 ui-diagnostics-filter = Filter diagnostics
 ui-diagnostics-none = No diagnostics
+ui-viewport = { $name } viewport
+ui-viewport-selection = { $count ->
+    [0] No objects selected
+    [one] One object selected
+   *[other] { $count } objects selected
+}
+ui-viewport-status = { $selection }. { $prompt }

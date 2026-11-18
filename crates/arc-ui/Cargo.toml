@@ -1,6 +1,6 @@
 [package]
 name = "arc-ui"
-description = "The widget kit of the Arc suite on egui: theme tokens, density and scale, icons, localized strings, menus and toolbars from data, key bindings, the command palette, notifications and progress, docking and workspaces, the command line, the property grid and numeric input, the tree and the diagnostics panel."
+description = "The widget kit of the Arc suite on egui: theme tokens, density and scale, icons, localized strings, menus and toolbars from data, key bindings, the command palette, notifications and progress, docking and workspaces, the command line, the property grid and numeric input, the tree, the diagnostics panel, and (feature `viewport`) the viewport widget with selection gestures."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,13 +12,21 @@ publish.workspace = true
 arc-base = { workspace = true }
 arc-command = { workspace = true }
 arc-doc = { workspace = true }
+arc-geom = { workspace = true, optional = true }
+arc-gpu = { workspace = true, optional = true }
 arc-solve = { workspace = true }
 egui = { workspace = true }
 resvg = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+[features]
+# The viewport widget and selection gestures; native products enable it. Off by default, so the
+# WebAssembly build of this crate does not reach `arc-gpu`.
+viewport = ["dep:arc-geom", "dep:arc-gpu"]
+
 [dev-dependencies]
+arc-mesh = { workspace = true }
 proptest = { workspace = true }
 schemars = { workspace = true }
 toml = { workspace = true }

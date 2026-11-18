@@ -59,7 +59,7 @@ each panel in the compact, medium and expanded size classes.
 
 The first part of `arc-ui` runs without a window: it depends on `arc-base`, `arc-command`,
 `egui` (without default features, so no bundled fonts) and `resvg` (without default features),
-and not on `winit` or `arc-gpu`. Tests drive it through a headless `egui::Context`. Widgets
+and not on `winit` or (without the feature `viewport`, see below) `arc-gpu`. Tests drive it through a headless `egui::Context`. Widgets
 return an `Intent` naming a command and never run one. Fallible functions return
 `arc_base::Error`.
 
@@ -340,6 +340,92 @@ Objects are listed as hyphenated identifier texts.
   test tabs through a dock holding the command line, a property grid, a tree and the diagnostics
   panel and checks every focused node's name and role and that each comes after the previous one
   down the page or to its right in the same row.
+
+## Viewport and selection gestures as implemented
+
+The third part adds the viewport widget and the selection gestures behind the feature `viewport`,
+which native products enable. It depends in addition on `arc-gpu` (navigation, picking types,
+overlays) and `arc-geom` (view frames), both optional. The feature is off by default, so the
+WebAssembly build of this crate (`cargo xtask wasm`) does not reach `arc-gpu`; the layer check
+does not follow optional dependencies that the default features leave off. No error code was
+added: picking and navigation errors keep their `arc-gpu` and `arc-geom` codes.
+
+### Interaction state machine (CORE-UI-029)
+
+- `Gestures` turns pointer and keyboard events in viewport pixels into camera changes, the
+  pre-selected object, the rubber band, selection intents and prompt answers. It draws nothing
+  and holds no selection; the caller supplies the camera, image size, active prompt, selection
+  count, tolerance and a `ViewPicker` (the identifier pass of `arc-gpu` over the shown scene and
+  the scene's bounding sphere). `ScenePicker` implements it with an `arc_gpu::Renderer` and
+  `Scene`; tests use a fake.
+- Thresholds are logical points multiplied by the pixels-per-point factor and the UI scale:
+  drag distance 4, cycle radius 3, pick square half side 4 (also the line pick tolerance).
+  Double-click time is 0.4 s on the caller's clock; a clock running backwards counts as no time
+  passed. Non-finite positions and amounts are ignored.
+- A primary press and release within the drag distance is a click. A click takes the stack
+  under the pointer: the object visible at the pointer pixel, then the other objects visible in
+  the pick square (at most 64). A further click within the cycle radius of the previous one,
+  with no camera change between them, takes the next object of the same stack, wrapping
+  around. A click selects its object (replace; Shift adds; Ctrl, Cmd on macOS, toggles); a click
+  on nothing emits nothing. Double clicks are not a selection gesture.
+- A primary drag beyond the drag distance is a rubber band. Left to right it is a window: the
+  objects with a visible pixel inside the rectangle and none in the rest of the image. Right to
+  left it is a crossing: the objects with a visible pixel inside. The press modifiers choose the
+  mode; an empty band replaces with nothing and emits nothing for add or toggle. Escape cancels
+  a press or band; otherwise, with no prompt and a non-empty selection, it emits the
+  clear-selection intent.
+- Every click and band emits at most one intent for `ViewportCommands::select` (default
+  `core.select.set`) with `objects`, `mode` (`replace`, `add`, `toggle`) and `gesture`
+  (`click`, `window`, `crossing`); `clear_selection` defaults to `core.select.clear`. Hover,
+  navigation and prompt answers emit no selection intent, so the selection changes only
+  through commands.
+- Pre-selection, while no button is down, is the object a click would select: the next object
+  of the stack near the last click, else the object at the pointer pixel. While a prompt that
+  accepts no object is active nothing is pre-selected.
+- While a command prompts, the primary button answers it: a click on an object answers a pick
+  prompt with `PromptInput::Pick` and a selection prompt with a one-object `Selection`;
+  otherwise a point prompt gets the point where the pick ray meets the view plane (through the
+  camera target, facing the eye), without z for a 2D-only prompt. A band answers a selection
+  prompt and is not started for other prompts; prompts that accept none of these ignore the
+  button, and Escape stays with the command line.
+- Navigation uses `arc_gpu::navigation`: middle drag pans so the target follows the pointer;
+  Shift with middle drag orbits about the target by 0.01 rad per point (`yaw = −dx·k`,
+  `pitch = −dy·k`); the wheel zooms by `exp(0.002 · points)` at the view-plane point under the
+  pointer (a line is 40 points, a page the viewport height), and a pinch by its factor; a
+  second middle press within the double-click time and drag distance zooms to the scene's
+  extents. With focus, arrows orbit by 15°, Shift with arrows pans by a tenth of the image
+  height, `+` and `-` zoom by 1.25 at the target and Home zooms to the extents. A camera change
+  forgets the click stack.
+- Picks see only visible pixels: an object hidden behind others in the whole pick square is not
+  in the stack, and hidden parts or parts outside the image do not count against a window.
+
+### Viewport widget (CORE-UI-005)
+
+- `ViewportWidget::show` fills the available space, paints the viewport background token and
+  the texture the caller registered for the current frame (an `egui::TextureId`; registering
+  `arc_gpu::Frame` textures with the egui renderer belongs to the application's integration,
+  so this crate does not depend on `egui-wgpu`), and feeds its events to the state machine:
+  presses inside the area, moves inside it or during a press, releases, the wheel and pinch
+  while the pointer is over it, and keys while it has focus. A press gives it focus.
+- It returns the pixel size it wants (the area times the pixels-per-point factor, 1 to 65,535
+  per side), the camera for `arc_gpu::Viewport::set_camera`, the pre-selected object for
+  `set_highlight`, the rubber-band overlay for `set_overlay`, the selection intent, the prompt
+  answer for `CommandLine::answer` and the errors of the frame.
+- Rubber bands are `arc-gpu` overlay primitives in screen pixels: a window is a closed solid
+  outline in the viewport selection token, a crossing a dashed outline (6 points on, 4 off, at
+  most 256 dashes per side) in the pre-selection token, each over a fill of its token at alpha
+  40, so the kinds differ by more than color.
+- Several viewports of one document each have a widget with its own gesture state. Cameras are
+  independent, or shared through a `ViewLink`: a widget whose camera changed publishes it, and
+  every other widget on the link returns the published camera on its next frame (in the same
+  frame when drawn later).
+
+### Accessibility of the viewport (CORE-UI-027, in part)
+
+- The viewport area has the role canvas, the name `ui-viewport` with the caller's view name and
+  the description `ui-viewport-selection` with the selection count, or `ui-viewport-status`
+  with that text and the localized prompt message while a command prompts. A headless test
+  inspects these in the AccessKit tree.
 
 ## Capabilities
 

@@ -140,6 +140,18 @@ pub mod messages {
     pub const DIAGNOSTICS_NONE: Message = Message {
         message_id: "ui-diagnostics-none",
     };
+    /// The accessible name of a viewport, with the view's `name`.
+    pub const VIEWPORT: Message = Message {
+        message_id: "ui-viewport",
+    };
+    /// The selection count a viewport describes, with `count`.
+    pub const VIEWPORT_SELECTION: Message = Message {
+        message_id: "ui-viewport-selection",
+    };
+    /// A viewport's description while a command prompts, with `selection` and `prompt`.
+    pub const VIEWPORT_STATUS: Message = Message {
+        message_id: "ui-viewport-status",
+    };
 }
 
 #[cfg(test)]
@@ -224,6 +236,9 @@ pub(crate) mod tests {
             messages::TREE_LOCKED,
             messages::DIAGNOSTICS_FILTER,
             messages::DIAGNOSTICS_NONE,
+            messages::VIEWPORT,
+            messages::VIEWPORT_SELECTION,
+            messages::VIEWPORT_STATUS,
         ] {
             assert!(
                 catalog.contains(&format!("\n{} = ", m.message_id)),

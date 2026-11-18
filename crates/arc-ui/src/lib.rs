@@ -22,7 +22,9 @@
 //! - the property grid and numeric and unit input (CORE-UI-010, CORE-UI-011, [`property`],
 //!   [`quantity`]);
 //! - the virtualized tree and outliner (CORE-UI-012, [`tree`]);
-//! - the diagnostics panel (CORE-UI-020, [`diagnostics`]).
+//! - the diagnostics panel (CORE-UI-020, [`diagnostics`]);
+//! - with the feature `viewport`, the viewport widget, its interaction state machine and the
+//!   selection gestures (CORE-UI-005, CORE-UI-029, `gesture` and `viewport`).
 //!
 //! Widgets never run commands; they return an [`Intent`]. No function in this crate panics.
 
@@ -31,6 +33,8 @@ pub mod command_line;
 pub mod diagnostics;
 pub mod dock;
 pub mod error;
+#[cfg(feature = "viewport")]
+pub mod gesture;
 pub mod icons;
 pub mod keys;
 pub mod menu;
@@ -41,6 +45,8 @@ pub mod quantity;
 pub mod text;
 pub mod theme;
 pub mod tree;
+#[cfg(feature = "viewport")]
+pub mod viewport;
 pub mod workspace;
 
 /// The pinned egui, re-exported so products use the same version.
@@ -53,6 +59,10 @@ pub use command_line::{
 pub use diagnostics::{DiagnosticsFilter, DiagnosticsPanel};
 pub use dock::{Axis, Dock, DockArea, DockLayout, Floating, Side, Target};
 pub use error::codes;
+#[cfg(feature = "viewport")]
+pub use gesture::{
+    Band, BandKind, Gestures, Reaction, View, ViewEvent, ViewPicker, ViewportCommands,
+};
 pub use icons::{IconAtlas, Icons};
 pub use keys::{Binding, ChordResolver, KeyCombo, KeyOutcome, KeySequence, Keymap};
 pub use menu::{Entry, Menu, MenuItem, ToolEntry, Toolbar, ToolbarItem};
@@ -63,4 +73,6 @@ pub use quantity::{QuantityField, QuantityInput};
 pub use text::{Fallback, Localize, Message, resolve};
 pub use theme::{Appearance, Colors, Density, Metrics, Theme, ThemeId, UiScale};
 pub use tree::{TreeCommands, TreeItem, TreeSource, TreeView};
+#[cfg(feature = "viewport")]
+pub use viewport::{ScenePicker, ViewLink, ViewportInput, ViewportOutput, ViewportWidget};
 pub use workspace::{NamedToolbar, ToolSet, Workspace, Workspaces};
