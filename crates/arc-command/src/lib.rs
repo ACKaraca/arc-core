@@ -68,7 +68,7 @@ pub mod roots;
 pub mod schema;
 pub mod spec;
 
-pub use command_line::{CommandLine, LastCommand, Submitted, Target};
+pub use command_line::{CommandLine, LastCommand, LineStep, Runner, Submitted, Target};
 pub use context::{
     Clock, Context, FixedClock, IdParam, PROGRESS_DELAY_MILLIS, Probe, ProgressSink, QuantityParam,
     Session,

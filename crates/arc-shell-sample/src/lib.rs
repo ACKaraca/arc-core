@@ -133,6 +133,20 @@ pub struct Delete {
     pub id: IdParam,
 }
 
+/// Parameters of `shell.object.set_field`, the shape of the property grid's edit intent.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetField {
+    /// The objects to change; each must have the field.
+    #[schemars(length(min = 1, max = 10000))]
+    pub objects: Vec<IdParam>,
+    /// The field: `name` of a layer, `position` of a point, `start` or `end` of a line.
+    pub field: String,
+    /// The value in canonical JSON form: a text for `name`, `[x, y, z]` in meters for the
+    /// point fields.
+    pub value: serde_json::Value,
+}
+
 /// The result of a creating command.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct Created {
@@ -184,6 +198,47 @@ fn move_object(ctx: &mut Context<'_>, p: Move) -> arc_base::Result<()> {
     Ok(())
 }
 
+fn invalid_value(field: &str) -> arc_base::Error {
+    arc_base::Error::new(arc_command::error::codes::PARAMS_INVALID).with_arg("field", field)
+}
+
+/// The value of `field` for an object of type `key`, decoded from its canonical JSON form.
+fn field_value(key: &str, field: &str, value: &serde_json::Value) -> arc_base::Result<Value> {
+    match (key, field) {
+        (LAYER, "name") => value
+            .as_str()
+            .map(|s| Value::String(s.to_owned()))
+            .ok_or_else(|| invalid_value(field)),
+        (POINT, "position") | (LINE, "start" | "end") => {
+            let xyz: Option<Vec<f64>> = value
+                .as_array()
+                .filter(|a| a.len() == 3)
+                .map(|a| a.iter().filter_map(serde_json::Value::as_f64).collect());
+            match xyz.as_deref() {
+                Some(&[x, y, z]) => Ok(point([x, y, z])),
+                _ => Err(invalid_value(field)),
+            }
+        }
+        _ => Err(invalid_value(field)),
+    }
+}
+
+/// Sets `field` of every listed object; the store refuses non-finite and over-long values.
+fn set_field(ctx: &mut Context<'_>, p: SetField) -> arc_base::Result<()> {
+    let txn = ctx.txn()?;
+    for IdParam(id) in p.objects {
+        let snapshot = txn.snapshot();
+        let handle = snapshot.resolve(id)?;
+        let key = snapshot
+            .type_key(handle)
+            .map(|k| k.as_str().to_owned())
+            .unwrap_or_default();
+        let value = field_value(&key, &p.field, &p.value)?;
+        txn.modify(id, FieldPath::new(p.field.as_str()), Some(value))?;
+    }
+    Ok(())
+}
+
 fn delete(ctx: &mut Context<'_>, p: Delete) -> arc_base::Result<()> {
     let limits = *ctx.limits();
     let txn = ctx.txn()?;
@@ -193,7 +248,7 @@ fn delete(ctx: &mut Context<'_>, p: Delete) -> arc_base::Result<()> {
 }
 
 /// The sample commands: `shell.layer.create`, `shell.point.create`, `shell.line.create`,
-/// `shell.object.move` and `shell.object.delete`, all undoable with the permission class
+/// `shell.object.move`, `shell.object.set_field` and `shell.object.delete`, all undoable with the permission class
 /// `edit`.
 ///
 /// # Errors
@@ -230,6 +285,12 @@ pub fn registry() -> arc_base::Result<Registry> {
             "shell-object-move",
             "shell-object-move-description",
             move_object,
+        ),
+        CommandSpec::new(
+            "shell.object.set_field",
+            "shell-object-set-field",
+            "shell-object-set-field-description",
+            set_field,
         ),
         CommandSpec::new(
             "shell.object.delete",

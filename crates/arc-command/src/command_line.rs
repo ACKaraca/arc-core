@@ -67,6 +67,30 @@ pub enum Submitted {
     Cancelled,
 }
 
+/// One step of a command line, for [`CommandLine::drive`]; each variant matches the method of
+/// the same name.
+#[derive(Debug)]
+pub enum LineStep<'a> {
+    /// [`CommandLine::start`]: a command with preset parameters.
+    Start {
+        /// The command name.
+        command: &'a str,
+        /// The parameters already known.
+        preset: Map<String, Value>,
+    },
+    /// [`CommandLine::submit`]: a typed line.
+    Submit(&'a str),
+    /// [`CommandLine::answer`]: an answer from the UI.
+    Answer(PromptInput),
+    /// [`CommandLine::back`].
+    Back,
+    /// [`CommandLine::repeat_last`].
+    Repeat,
+}
+
+/// Runs a completed invocation for [`CommandLine::drive`].
+pub type Runner<'r> = &'r mut dyn FnMut(Invocation) -> Result<Outcome>;
+
 /// The state of one command line: the active prompt session and the last completed command.
 #[derive(Debug, Default)]
 pub struct CommandLine {
@@ -106,17 +130,27 @@ impl CommandLine {
         }
     }
 
-    fn run(&mut self, target: &Target<'_>, command: &str, params: Value) -> Result<Submitted> {
+    fn run(
+        &mut self,
+        target: &Target<'_>,
+        command: &str,
+        params: Value,
+        runner: Runner<'_>,
+    ) -> Result<Submitted> {
         let mut invocation = Invocation::new(command, params.clone());
         invocation.selection = target.selection.to_vec();
         invocation.seed = target.seed;
-        let outcome =
-            Invoker::new(target.registry).invoke(target.document, target.session, invocation)?;
+        let outcome = runner(invocation)?;
         self.record(target.registry, &outcome.command, &params);
         Ok(Submitted::Ran(outcome))
     }
 
-    fn follow(&mut self, target: &Target<'_>, feedback: Feedback) -> Result<Submitted> {
+    fn follow(
+        &mut self,
+        target: &Target<'_>,
+        feedback: Feedback,
+        runner: Runner<'_>,
+    ) -> Result<Submitted> {
         match feedback {
             Feedback::Ask(prompt) => Ok(Submitted::Prompt(prompt)),
             Feedback::Rejected { error, prompt } => Ok(Submitted::Rejected { error, prompt }),
@@ -130,9 +164,93 @@ impl CommandLine {
             }
             Feedback::Done(invocation) => {
                 self.active = None;
-                self.run(target, &invocation.command, invocation.params)
+                self.run(target, &invocation.command, invocation.params, runner)
             }
         }
+    }
+
+    /// Takes one [`LineStep`] like the method of the same name, except that every completed
+    /// invocation goes to `runner` instead of [`Invoker::invoke`]. An application uses it to
+    /// route command-line runs through its own entry point (which may adjust the session or
+    /// handle shell commands); the runner's outcome or error is returned as the run's.
+    ///
+    /// # Errors
+    ///
+    /// Those of the step's method, with the runner's errors in place of the invoker's.
+    pub fn drive(
+        &mut self,
+        target: &Target<'_>,
+        step: LineStep<'_>,
+        runner: Runner<'_>,
+    ) -> Result<Submitted> {
+        match step {
+            LineStep::Start { command, preset } => {
+                self.active = None;
+                let spec = Arc::clone(&target.registry.resolve(command, target.localized)?.spec);
+                let snapshot = target.document.snapshot();
+                let (session, feedback) =
+                    PromptSession::start(spec, preset, target.session, &snapshot);
+                self.active = Some(session);
+                self.follow(target, feedback, runner)
+            }
+            LineStep::Submit(text) => {
+                if let Some(active) = self.active.as_mut() {
+                    let feedback = active.answer_text(text, &target.document.snapshot());
+                    return self.follow(target, feedback, runner);
+                }
+                let Some(parsed) = line::parse_line(target.registry, target.localized, text)?
+                else {
+                    return if self.last.is_some() {
+                        self.drive(target, LineStep::Repeat, runner)
+                    } else {
+                        Ok(Submitted::Idle)
+                    };
+                };
+                if parsed.missing.is_empty() {
+                    return self.run(
+                        target,
+                        &parsed.command,
+                        Value::Object(parsed.params),
+                        runner,
+                    );
+                }
+                self.drive(
+                    target,
+                    LineStep::Start {
+                        command: &parsed.command,
+                        preset: parsed.params,
+                    },
+                    runner,
+                )
+            }
+            LineStep::Answer(input) => {
+                let Some(active) = self.active.as_mut() else {
+                    return Err(Error::new(codes::PROMPT_ENDED));
+                };
+                let feedback = active.answer(input, &target.document.snapshot());
+                self.follow(target, feedback, runner)
+            }
+            LineStep::Back => {
+                let Some(active) = self.active.as_mut() else {
+                    return Err(Error::new(codes::PROMPT_ENDED));
+                };
+                let feedback = active.back(&target.document.snapshot());
+                self.follow(target, feedback, runner)
+            }
+            LineStep::Repeat => {
+                let Some(last) = self.last.clone() else {
+                    return Err(Error::new(codes::REPEAT_NONE));
+                };
+                self.run(target, &last.command, last.params, runner)
+            }
+        }
+    }
+
+    fn invoke(&mut self, target: &Target<'_>, step: LineStep<'_>) -> Result<Submitted> {
+        let invoker = Invoker::new(target.registry);
+        self.drive(target, step, &mut |invocation| {
+            invoker.invoke(target.document, target.session, invocation)
+        })
     }
 
     /// Starts `command` with the parameters `preset` (from a menu or tool), prompting for the
@@ -147,12 +265,7 @@ impl CommandLine {
         command: &str,
         preset: Map<String, Value>,
     ) -> Result<Submitted> {
-        self.active = None;
-        let spec = Arc::clone(&target.registry.resolve(command, target.localized)?.spec);
-        let snapshot = target.document.snapshot();
-        let (session, feedback) = PromptSession::start(spec, preset, target.session, &snapshot);
-        self.active = Some(session);
-        self.follow(target, feedback)
+        self.invoke(target, LineStep::Start { command, preset })
     }
 
     /// Submits a typed line: an answer while a prompt is active, otherwise a command line. A
@@ -163,21 +276,7 @@ impl CommandLine {
     ///
     /// Those of [`line::parse_line`], of the machine, and of the run.
     pub fn submit(&mut self, target: &Target<'_>, text: &str) -> Result<Submitted> {
-        if let Some(active) = self.active.as_mut() {
-            let feedback = active.answer_text(text, &target.document.snapshot());
-            return self.follow(target, feedback);
-        }
-        let Some(parsed) = line::parse_line(target.registry, target.localized, text)? else {
-            return if self.last.is_some() {
-                self.repeat_last(target)
-            } else {
-                Ok(Submitted::Idle)
-            };
-        };
-        if parsed.missing.is_empty() {
-            return self.run(target, &parsed.command, Value::Object(parsed.params));
-        }
-        self.start(target, &parsed.command, parsed.params)
+        self.invoke(target, LineStep::Submit(text))
     }
 
     /// Answers the active prompt with a typed input from the UI.
@@ -186,11 +285,7 @@ impl CommandLine {
     ///
     /// `cmd.prompt.ended` without an active command; those of the machine and the run.
     pub fn answer(&mut self, target: &Target<'_>, input: PromptInput) -> Result<Submitted> {
-        let Some(active) = self.active.as_mut() else {
-            return Err(Error::new(codes::PROMPT_ENDED));
-        };
-        let feedback = active.answer(input, &target.document.snapshot());
-        self.follow(target, feedback)
+        self.invoke(target, LineStep::Answer(input))
     }
 
     /// Steps back one answer in the active command.
@@ -199,11 +294,7 @@ impl CommandLine {
     ///
     /// `cmd.prompt.ended` without an active command; the machine's errors.
     pub fn back(&mut self, target: &Target<'_>) -> Result<Submitted> {
-        let Some(active) = self.active.as_mut() else {
-            return Err(Error::new(codes::PROMPT_ENDED));
-        };
-        let feedback = active.back(&target.document.snapshot());
-        self.follow(target, feedback)
+        self.invoke(target, LineStep::Back)
     }
 
     /// Cancels the active command; [`Submitted::Idle`] when there is none.
@@ -221,10 +312,7 @@ impl CommandLine {
     ///
     /// `cmd.repeat.none` when no command completed yet; those of the run.
     pub fn repeat_last(&mut self, target: &Target<'_>) -> Result<Submitted> {
-        let Some(last) = self.last.clone() else {
-            return Err(Error::new(codes::REPEAT_NONE));
-        };
-        self.run(target, &last.command, last.params)
+        self.invoke(target, LineStep::Repeat)
     }
 
     /// Completion for a partial line: the keyword options of the active prompt, otherwise

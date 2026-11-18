@@ -149,8 +149,12 @@ struct Inputs {
     overlay: Option<Overlay>,
 }
 
+/// Work run on the render thread with its scene, renderer and settings.
+type Job = Box<dyn FnOnce(&mut Renderer, &mut Scene, &RenderSettings) + Send>;
+
 struct State {
     inputs: Inputs,
+    jobs: Vec<Job>,
     dirty: DirtyReasons,
     scene: std::collections::HashMap<ObjectId, ExtractionResult>,
     /// Calls that may need work, and how many of them the thread has handled.
@@ -208,6 +212,7 @@ impl Viewport {
                     settings: true,
                     ..DirtyReasons::default()
                 },
+                jobs: Vec::new(),
                 scene: std::collections::HashMap::new(),
                 requested: 1,
                 processed: 0,
@@ -387,6 +392,35 @@ impl Viewport {
         })
     }
 
+    /// Runs `job` on the render thread with the viewport's renderer, scene (with every
+    /// extraction result queued before this call applied) and current render settings, and
+    /// waits at most `timeout` for its result. Picking a viewport's scene
+    /// ([`Renderer::pick`], [`Scene::bounding_sphere`]) goes through this, since the scene
+    /// lives on the thread. The job runs between frames; it draws nothing by itself.
+    ///
+    /// # Errors
+    ///
+    /// `gpu.timeout` when the job has not finished in time (it still runs later and its result
+    /// is dropped); an earlier error of the render thread.
+    pub fn with_scene<R: Send + 'static>(
+        &self,
+        timeout: Duration,
+        job: impl FnOnce(&mut Renderer, &mut Scene, &RenderSettings) -> R + Send + 'static,
+    ) -> Result<R> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        self.send(|s| {
+            s.jobs.push(Box::new(move |renderer, scene, settings| {
+                let _ = sender.send(job(renderer, scene, settings));
+            }));
+            true
+        })?;
+        receiver.recv_timeout(timeout).map_err(|_| {
+            lock(&self.shared)
+                .stopped
+                .map_or_else(|| Error::new(codes::TIMEOUT), Error::new)
+        })
+    }
+
     /// The number of frames drawn.
     #[must_use]
     pub fn frames(&self) -> u64 {
@@ -513,13 +547,13 @@ impl Drop for ExitGuard {
 
 fn render_loop(shared: &Shared, mut scene: Scene, mut renderer: Renderer, readback: bool) {
     loop {
-        let (inputs, mut reasons, results, generation) = {
+        let (inputs, mut reasons, results, jobs, generation) = {
             let mut state = lock(shared);
             loop {
                 if state.shutdown {
                     return;
                 }
-                if state.dirty.any() || !state.scene.is_empty() {
+                if state.dirty.any() || !state.scene.is_empty() || !state.jobs.is_empty() {
                     break;
                 }
                 state.processed = state.requested;
@@ -540,13 +574,17 @@ fn render_loop(shared: &Shared, mut scene: Scene, mut renderer: Renderer, readba
             };
             let reasons = std::mem::take(&mut state.dirty);
             let results: Vec<_> = std::mem::take(&mut state.scene).into_values().collect();
-            (inputs, reasons, results, state.requested)
+            let jobs = std::mem::take(&mut state.jobs);
+            (inputs, reasons, results, jobs, state.requested)
         };
         let mut error = None;
         if !results.is_empty() {
             let report = scene.apply_extractions(results);
             reasons.scene |= report.applied > 0;
             error = report.failed.into_iter().next().map(|(_, e)| e);
+        }
+        for job in jobs {
+            job(&mut renderer, &mut scene, &inputs.settings);
         }
         let mut drawn = None;
         if reasons.any() && !scene.gpu().is_lost() {
@@ -681,6 +719,25 @@ mod tests {
             let _ = released.lock().unwrap().recv_timeout(WAIT);
         }));
         (on_start, release)
+    }
+
+    #[test]
+    fn jobs_see_the_queued_scene_on_the_render_thread() {
+        let viewport = viewport(false);
+        viewport.update_scene(vec![line(7, 1, 0.0)]).unwrap();
+        let frame = view(10.0);
+        let hits = viewport
+            .with_scene(WAIT, move |renderer, scene, settings| {
+                let region = crate::render::PickRegion::pixel(16, 16, 2.0);
+                let hits = renderer.pick(scene, &frame, 32, 32, settings, &region);
+                (hits, scene.bounding_sphere(None))
+            })
+            .unwrap();
+        let (hits, bounds) = hits;
+        let hits = hits.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].key.object, ObjectId::from_u128(7));
+        assert!(bounds.is_some());
     }
 
     #[test]

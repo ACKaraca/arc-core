@@ -69,6 +69,11 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `lyon` | Fill tessellation | MIT or Apache-2.0 |
 | `resvg` | Icon and SVG rasterization | Apache-2.0 or MIT |
 | `egui` | The widget toolkit of `arc-ui` with its AccessKit tree, re-exported by `arc-ui` (no default features: no bundled fonts); `resvg` is used in `arc-ui` without default features (no text, system fonts, compressed SVG or raster images) | MIT or Apache-2.0 |
+| `winit` | Windows and the event loop of the windowed shell in `arc-app` (feature `window`; features `rwh_06`, `x11`, `wayland`, `wayland-dlopen` and `wayland-csd-adwaita-notitle`, no default features) | Apache-2.0 |
+| `egui-winit` | Translation of `winit` events into egui input in `arc-app` (feature `window`; no default features: no clipboard, links or AccessKit adapter) | MIT or Apache-2.0 |
+| `egui-wgpu` | The egui renderer on the shared `wgpu` device in `arc-app` (feature `window`; no default features) | MIT or Apache-2.0 |
+| `muda` | Native menu bar of the windowed shell in `arc-app` (feature `window`), macOS only, no default features | MIT or Apache-2.0 |
+| `rfd` | Native file and question dialogs of the windowed shell in `arc-app` (feature `window`; feature `xdg-portal` only: the desktop portal on Linux, no GTK) | MIT |
 | `image` | Image decoding and encoding; in use as a development dependency of `arc-gpu` (PNG reference images, feature `png` only) | MIT or Apache-2.0 |
 | `tiny-skia` | CPU rasterization for plot raster output and reference images | BSD-3-Clause |
 | `cxx` | C++ binding in `arc-brep-occt` | MIT or Apache-2.0 |

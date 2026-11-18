@@ -158,7 +158,9 @@ is a software rasterizer and whether it is a fallback, gives the usable multisam
 1) and lists the reduced features: `SoftwareRasterizer`, `GpuCulling` (no indirect multi-draw
 with count, so culling will use the CPU path), `Multisampling` (no four-sample color and depth
 targets) and `DownlevelLimits` (only the downlevel default limits). Devices are created with the
-downlevel default limits and no optional features.
+downlevel default limits and no optional features. `Gpu::instance` and `Gpu::adapter` expose the
+`wgpu` instance and adapter for creating a window surface; the instance has no display handle,
+so a surface presents on Vulkan, Metal and DirectX 12 and not on the OpenGL backend.
 
 Device errors never panic. Resource creation, updates and frames run inside out-of-memory and
 validation error scopes; errors outside a scope are captured by the device's error handler and
@@ -421,6 +423,12 @@ the thread, which draws the first frame.
   thread waits for the device to finish each frame, so at most one frame is in flight.
   `latest_frame` returns the newest frame without waiting; `wait_frame` and `sync` (every
   earlier call handled) wait with a caller-given bound and fail with `gpu.timeout`.
+- **Jobs on the scene.** `with_scene(timeout, job)` runs `job` on the render thread with the
+  renderer, the scene (after every extraction result queued before the call is applied) and the
+  current render settings, between frames, and waits at most `timeout` for its result
+  (`gpu.timeout` otherwise; the job still runs later and its result is dropped). Picking a
+  viewport's scene and reading its bounding sphere go through it. A job draws nothing by
+  itself.
 - **Errors.** An error on the thread (a rejected extraction result, a device error) is returned
   by the next call, which still records its input. After `gpu.device.lost` the thread stops and
   every call returns that code; a thread that ends otherwise makes calls return

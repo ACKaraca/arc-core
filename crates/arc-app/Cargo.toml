@@ -1,6 +1,6 @@
 [package]
 name = "arc-app"
-description = "The application shell of the Arc suite, window-free parts: product registration, the application model, typed settings and their editor model, settings files, locale selection, logging and the recent-files model."
+description = "The application shell of the Arc suite: product registration, the application model, typed settings and their editor model, settings files, locale selection, logging, the recent-files model, the window-state model and (feature `window`) the windowed shell: frame composition, menus, dialogs and the event loop."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,14 +13,40 @@ arc-base = { workspace = true }
 arc-command = { workspace = true, features = ["headless"] }
 arc-doc = { workspace = true, features = ["package"] }
 fluent-bundle = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 unic-langid = { workspace = true }
+arc-geom = { workspace = true, optional = true }
+arc-gpu = { workspace = true, optional = true }
+arc-ui = { workspace = true, optional = true, features = ["viewport"] }
+egui-wgpu = { workspace = true, optional = true }
+egui-winit = { workspace = true, optional = true }
+rfd = { workspace = true, optional = true }
+winit = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { workspace = true, optional = true }
+
+[features]
+# The windowed shell: frame composition over `arc-ui` and `arc-gpu`, menus and dialogs, and the
+# `winit` event loop. Off by default, so the window-free build stays light.
+window = [
+  "dep:arc-geom",
+  "dep:arc-gpu",
+  "dep:arc-ui",
+  "dep:egui-wgpu",
+  "dep:egui-winit",
+  "dep:muda",
+  "dep:rfd",
+  "dep:winit",
+]
 
 [dev-dependencies]
 arc-shell-sample = { workspace = true }
-serde_json = { workspace = true }
 proptest = { workspace = true }
 
 [lints]

@@ -4,7 +4,7 @@ The shared Rust foundation of the Arc suite: geometry, the document store and pa
 automation, drafting, rendering, the UI kit and interchange, written once and used by every Arc
 product.
 
-> **Status: foundation phase.** The workspace, the CI gate, `arc-base` and the first parts of `arc-geom`, `arc-mesh`, `arc-solve`, `arc-doc`, `arc-command`, `arc-gpu`, `arc-ui` and `arc-app` exist, and the reference headless CLI `apps/arc-shell-cli` with its sample set `arc-shell-sample` exist; the other crates are specifications. No release is available yet; the documents in this repository describe the target that implementation follows.
+> **Status: foundation phase.** The workspace, the CI gate, `arc-base` and the first parts of `arc-geom`, `arc-mesh`, `arc-solve`, `arc-doc`, `arc-command`, `arc-gpu`, `arc-ui` and `arc-app` exist, and the reference windowed shell `apps/arc-shell`, the reference headless CLI `apps/arc-shell-cli` and their sample set `arc-shell-sample` exist; the other crates are specifications. No release is available yet; the documents in this repository describe the target that implementation follows.
 
 ## Building
 

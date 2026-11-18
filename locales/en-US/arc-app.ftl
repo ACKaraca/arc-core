@@ -41,3 +41,31 @@ app-setting-log-level = The most detailed level written to the log files.
 app-setting-log-max-file-bytes = The size at which a log file is replaced by a new one, in bytes.
 app-setting-log-max-files = The number of log files kept.
 app-setting-recent-max-entries = The number of unpinned files kept in the recent files list.
+
+app-command-file-new = New
+app-command-file-new-description = Opens a new, empty document.
+app-command-file-open = Open…
+app-command-file-open-description = Opens a document from a file.
+app-command-file-save = Save
+app-command-file-save-description = Saves the active document to its file.
+app-command-file-save-as = Save As…
+app-command-file-save-as-description = Saves the active document to another file.
+app-command-file-close = Close
+app-command-file-close-description = Closes the active document.
+app-command-quit = Quit
+app-command-quit-description = Ends the application after asking about unsaved changes.
+app-command-undo = Undo
+app-command-undo-description = Undoes the last change of the active document.
+app-command-redo = Redo
+app-command-redo-description = Redoes the last undone change of the active document.
+app-command-select = Select
+app-command-select-description = Changes the selection.
+app-command-select-clear = Clear Selection
+app-command-select-clear-description = Clears the selection.
+
+app-dialog-unsaved = This document has unsaved changes. Save them before closing?
+app-window-failed = The application window could not be opened.
+app-window-surface-failed = The graphics device cannot draw into the application window.
+
+app-menu-file = File
+app-menu-edit = Edit

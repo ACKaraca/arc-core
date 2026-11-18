@@ -179,6 +179,8 @@ struct Health {
 /// A device and queue created from the selected adapter. Cloning shares the device.
 #[derive(Debug, Clone)]
 pub struct Gpu {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     report: Arc<AdapterReport>,
@@ -254,15 +256,19 @@ impl Gpu {
         let Some((rank, _, adapter)) = ranked.into_iter().next() else {
             return Err(Error::new(codes::ADAPTER_NOT_FOUND));
         };
-        Self::from_adapter(&adapter, rank.0 > 0)
+        Self::from_adapter(instance, adapter, rank.0 > 0)
     }
 
-    fn from_adapter(adapter: &wgpu::Adapter, fallback: bool) -> Result<Self> {
+    fn from_adapter(
+        instance: wgpu::Instance,
+        adapter: wgpu::Adapter,
+        fallback: bool,
+    ) -> Result<Self> {
         let info = adapter.get_info();
         let backend = BackendKind::from_wgpu(info.backend)
             .ok_or_else(|| Error::new(codes::ADAPTER_NOT_FOUND))?;
         let kind = AdapterKind::from_wgpu(info.device_type);
-        let samples = max_samples(adapter);
+        let samples = max_samples(&adapter);
         let mut reduced = Vec::new();
         if kind == AdapterKind::Software {
             reduced.push(ReducedFeature::SoftwareRasterizer);
@@ -301,6 +307,8 @@ impl Gpu {
             slot.get_or_insert((oom, error.to_string()));
         }));
         Ok(Self {
+            instance,
+            adapter,
             device,
             queue,
             report: Arc::new(AdapterReport {
@@ -323,6 +331,20 @@ impl Gpu {
     #[must_use]
     pub fn report(&self) -> &AdapterReport {
         &self.report
+    }
+
+    /// The `wgpu` instance the adapter came from, for creating a window surface. It was
+    /// created without a display handle, so presenting works on Vulkan, Metal and DirectX 12
+    /// and not on the OpenGL fallback.
+    #[must_use]
+    pub fn instance(&self) -> &wgpu::Instance {
+        &self.instance
+    }
+
+    /// The selected `wgpu` adapter, for surface capabilities.
+    #[must_use]
+    pub fn adapter(&self) -> &wgpu::Adapter {
+        &self.adapter
     }
 
     /// The `wgpu` device, for products that add their own passes.

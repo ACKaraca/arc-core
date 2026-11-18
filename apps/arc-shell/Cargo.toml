@@ -1,0 +1,25 @@
+[package]
+name = "arc-shell"
+description = "The reference windowed shell of the Arc suite: the sample document types with a viewport, property grid, outliner and command line."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+arc-app = { workspace = true, features = ["window"] }
+arc-base = { workspace = true }
+arc-command = { workspace = true }
+arc-doc = { workspace = true }
+arc-gpu = { workspace = true }
+arc-shell-sample = { workspace = true }
+arc-ui = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

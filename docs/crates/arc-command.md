@@ -320,6 +320,11 @@ group      = "(" , { group | char - ( "(" | ")" ) } , ")" ;
   runs the same command with the same final parameters, again through `Invoker::invoke`;
   `last()` exposes the command and parameters for a surface that prefers to re-enter the prompts.
   `cmd.repeat.none` when nothing completed yet.
+- **Drive.** `drive(target, step, runner)` takes one `LineStep` (start, submit, answer, back,
+  repeat) like the method of the same name, except that each completed invocation goes to the
+  caller's `runner` instead of `Invoker::invoke`; the runner's outcome or error is the run's.
+  An application uses it to route command-line runs through its own entry point. The methods
+  above are `drive` with the invoker as runner.
 
 ## Automation protocol and file roots as implemented
 

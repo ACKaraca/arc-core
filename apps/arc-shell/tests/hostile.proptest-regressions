@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 70b79c5b795efdabf8398a23da978ffbb333eb90cdbc74d928ba6bd0fa3dd9b2 # shrinks to frames = [[MouseWheel { unit: Line, delta: [0.0 NaN], phase: Move, source: Unknown, modifiers: Modifiers::NONE }]], lines = [], intents = []
+cc ecce7338e12554f31dfb741f7f0a02a565d171c9fc7fffe9203d2f2b98f67cbb # shrinks to frames = [[MouseWheel { unit: Line, delta: [0.0 11082955109241389116639541421313884160.0], phase: Move, source: Unknown, modifiers: Modifiers::NONE }], []], lines = [], intents = []

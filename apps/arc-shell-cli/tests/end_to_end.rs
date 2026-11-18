@@ -285,6 +285,7 @@ fn edits_need_the_flag_and_failures_have_their_exit_codes() {
             "shell.line.create",
             "shell.object.delete",
             "shell.object.move",
+            "shell.object.set_field",
             "shell.point.create"
         ]
     );

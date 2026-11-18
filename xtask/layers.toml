@@ -35,15 +35,19 @@ third_party = [
   "arc-swap",
   "blake3",
   "egui",
+  "egui-wgpu",
+  "egui-winit",
   "fastcdc",
   "fluent-bundle",
   "glam",
   "image",
   "insta",
+  "muda",
   "nalgebra",
   "postcard",
   "proptest",
   "resvg",
+  "rfd",
   "robust",
   "rstar",
   "rustix",
@@ -59,6 +63,7 @@ third_party = [
   "unic-langid",
   "uuid",
   "wgpu",
+  "winit",
 ]
 
 # Crates built for wasm32-unknown-unknown by `cargo xtask wasm`.

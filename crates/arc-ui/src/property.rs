@@ -98,6 +98,7 @@ fn editable(value_type: &ValueType) -> bool {
             | ValueType::String
             | ValueType::Quantity(_)
             | ValueType::Enum(_)
+            | ValueType::Point3
     )
 }
 
@@ -268,7 +269,9 @@ impl PropertyGrid {
             .iter()
             .flat_map(|c| c.rows.iter().map(|r| r.path.to_string()))
             .collect();
-        self.numbers.retain(|k, _| keys.contains(k));
+        // Point fields keep one input per axis under `<path>#<axis>`.
+        self.numbers
+            .retain(|k, _| keys.contains(k.split('#').next().unwrap_or_default()));
         self.texts.retain(|k, _| keys.contains(k));
         let mut intent = None;
         for category in &model.categories {
@@ -348,6 +351,8 @@ impl PropertyGrid {
                         *editing = true;
                     }
                     if edit.lost_focus() {
+                        // The committing Enter must not also reach the command line.
+                        ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                         *editing = false;
                         let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
                         if !escaped && *text != shown {
@@ -369,10 +374,60 @@ impl PropertyGrid {
                         _ => Value::Quantity(q),
                     })
                 }
+                ValueType::Point3 => self.point(ui, &key, id, row, context, label.id),
                 _ => None,
             }
         })
         .inner
+    }
+
+    /// A point as three stacked length fields in the display unit of lengths; committing one axis
+    /// returns the point with that axis replaced. A mixed or absent point is shown read-only.
+    fn point(
+        &mut self,
+        ui: &mut Ui,
+        key: &str,
+        id: egui::Id,
+        row: &PropertyRow,
+        context: &GridContext<'_>,
+        label: egui::Id,
+    ) -> Option<Value> {
+        let Shown::Value(Value::Point3(at)) = &row.shown else {
+            let text = shown_text(&row.shown, context.localize);
+            ui.add_enabled(false, TextEdit::singleline(&mut text.as_str()))
+                .labelled_by(label);
+            return None;
+        };
+        let mut field = QuantityField::new(
+            Dimension::LENGTH,
+            context.units.get(Dimension::LENGTH).copied(),
+        );
+        field.decimal_separator = context.decimal_separator;
+        let mut coordinates = [at.x, at.y, at.z];
+        // The axes are stacked, so a narrow grid still shows each field whole.
+        let changed = ui
+            .vertical(|ui| {
+                let mut changed = false;
+                for (axis, value) in ["x", "y", "z"].into_iter().zip(&mut coordinates) {
+                    let input = self.numbers.entry(format!("{key}#{axis}")).or_default();
+                    let shown = Quantity::new(*value, Dimension::LENGTH);
+                    if let Some(q) = input.show(
+                        ui,
+                        id.with(axis),
+                        &field,
+                        Some(shown),
+                        context.localize,
+                        Some(label),
+                    ) {
+                        *value = q.value();
+                        changed = true;
+                    }
+                }
+                changed
+            })
+            .inner;
+        let [x, y, z] = coordinates;
+        changed.then_some(Value::Point3(arc_base::math::Point3::new(x, y, z)))
     }
 }
 

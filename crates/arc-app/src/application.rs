@@ -398,6 +398,23 @@ impl Application {
         Invoker::new(&self.product.headless().registry).invoke(&tab.document, &session, invocation)
     }
 
+    /// Undoes the top undo step of tab `id`'s document and waits for it; false when there was
+    /// nothing to undo. A read-only tab has no edits, so nothing to undo.
+    ///
+    /// # Errors
+    /// `app.document.unknown` and the errors of [`Document::undo`].
+    pub fn undo(&self, id: TabId) -> Result<bool> {
+        Ok(self.tab(id)?.document.undo().wait()?.value)
+    }
+
+    /// Redoes the top redo step of tab `id`'s document, like [`Application::undo`].
+    ///
+    /// # Errors
+    /// `app.document.unknown` and the errors of [`Document::redo`].
+    pub fn redo(&self, id: TabId) -> Result<bool> {
+        Ok(self.tab(id)?.document.redo().wait()?.value)
+    }
+
     fn document_config(&mut self, session: SessionId) -> DocumentConfig {
         DocumentConfig {
             ids: (self.id_generators)(),

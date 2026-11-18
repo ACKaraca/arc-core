@@ -63,8 +63,9 @@ capability is disabled with a reason.
 ## Window-free parts as implemented
 
 The first part of `arc-app` has no window, renderer or network dependency: it depends on
-`arc-base` and, for logic only, on `fluent-bundle`, `unic-langid`, `toml`, `tracing` and
-`tracing-subscriber`. It does not query the operating system; the operating-system locale list and
+`arc-base` and, for logic only, on `fluent-bundle`, `unic-langid`, `toml`, `tracing`,
+`tracing-subscriber`, and `serde`, `serde_json` and `schemars` for the shell command
+parameters. It does not query the operating system; the operating-system locale list and
 the configuration directory are arguments. Fallible functions return `arc_base::Error`.
 
 ### No unsolicited network (CORE-APP-019)
@@ -159,8 +160,10 @@ and `shell.line` (`start`, `end`), each version 1.0, where points and lines have
 `layer` reference to a layer (associative, cleared when the layer is deleted). They are
 registered through `TypeRegistry::register`. The sample commands `shell.layer.create`,
 `shell.point.create`, `shell.line.create`, `shell.object.move` (adds an offset to the points of
-a point or line; other types are unchanged) and `shell.object.delete` (applies the deletion
-rules) are undoable, need the class `edit` and are registered through `Registry::register`;
+a point or line; other types are unchanged), `shell.object.set_field` (sets `name` of layers,
+`position` of points or `start` and `end` of lines on the listed `objects` from the canonical
+JSON `value`, the shape of the property grid's edit intent; any other field or value is
+`cmd.params.invalid`) and `shell.object.delete` (applies the deletion rules) are undoable, need the class `edit` and are registered through `Registry::register`;
 every change is a transaction of the invoker. `product(clock, owner)` bundles them for
 `arc_command::headless::run`, and the binary's `main` only passes the process arguments, the
 standard streams, the system clock and the edit-lock owner (user and host from the environment)
@@ -200,6 +203,8 @@ The codes `arc-app` owns; messages are in `locales/en-US/arc-app.ftl`.
 | `app.document.unknown` | `not_found` | No open tab has the identifier |
 | `app.document.read_only` | `conflict` | A save targets a package that is open read-only |
 | `app.document.no_path` | `conflict` | A document never saved is saved in place; it needs save as |
+| `app.window.failed` | `failed_operation` | The event loop or the main window cannot be created |
+| `app.window.surface_failed` | `failed_operation` | The GPU device cannot present to the window (no surface, no surface format) |
 
 ## Application model as implemented
 
@@ -249,7 +254,8 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
   deleted.
 - `invoke(tab, session, invocation)` runs a product command on the tab's document; on a
   read-only tab the `edit` class is removed from the session, so editing commands fail with
-  `cmd.permission_denied`.
+  `cmd.permission_denied`. `undo(tab)` and `redo(tab)` step the document's undo history and
+  wait for the step; they return false when there was nothing to step.
 
 ### Open and save flows (CORE-APP-004)
 
@@ -328,6 +334,126 @@ The integration test `application` builds the product from the sample set and co
 registrations, independent dirty state and undo of two documents, the close decision table, open,
 save, save as and reopen, a failed save, a second instance on a locked package, the newer-major
 fixture, recovery after an application was dropped with unsaved changes, and the settings editor.
+
+## Windowed shell as implemented
+
+### Window state (CORE-APP-002)
+
+`window_state` is a model without a window and is always built.
+
+- A monitor is its position and size in physical pixels and its scale factor; scale factors
+  outside 0.25 to 16 or not finite count as 1. The configuration key lists each monitor with a
+  nonzero size as `WxH+X+Y@S` (scale with three decimals), sorted and joined by `;`, so it does
+  not depend on the order the platform lists monitors in; at most 16 monitors count.
+- `WindowStates::save(monitors, id, placement)` stores a window's position, inner size (physical
+  pixels) and maximized state under the current key; the key becomes the most recent one. At
+  most 32 configurations and 16 windows per configuration are kept, the oldest dropped first.
+  Window identifiers are 1 to 64 bytes of lowercase letters, digits, `.`, `-` and `_` starting
+  with a letter; malformed identifiers, coordinates beyond 2^20 and zero sizes are ignored.
+- `restore(monitors, primary, id)` takes the placement saved for the current configuration,
+  else the most recent one of the window from any configuration, and clamps it: the window
+  moves onto the monitor it overlaps most, entirely inside it, or is centered on the primary
+  monitor when it overlaps none; sizes shrink to the monitor and grow to 160 pixels where the
+  monitor allows. Without a saved placement or a usable monitor the caller's default applies.
+- `rescale(size, old, new)` keeps the logical size when a window's scale factor changes.
+- The states are a TOML table (`configurations = [{ key, windows = [{ id, x, y, width, height,
+  maximized }] }]`) loaded and saved through the settings-file functions; malformed entries,
+  duplicates and entries beyond the limits are skipped on load.
+
+### Shell commands (CORE-APP-009)
+
+`commands::register` adds the commands the shell carries out itself, exposed on the UI and
+command-line surfaces only (so automation never reaches a dialog); none opens a transaction:
+`app.file.new`, `app.file.open` and `app.file.save_as` (optional `path`; without one the
+platform shows a file dialog), `app.file.save` (a document never saved asks for a file),
+`app.file.close` (a dirty document asks whether to save), `app.shell.quit`, `app.edit.undo`,
+`app.edit.redo`, `app.select.set` (`objects`, `mode` `replace`, `add` or `toggle`, and the
+viewport's `gesture`) and `app.select.clear`. Invoked through `arc_command::Invoker` they change
+nothing. The labels are in `locales/en-US/arc-app.ftl`. `shell::default_menu` is a File and an
+Edit menu of these commands.
+
+### Frame composition (CORE-APP-025, feature `window`)
+
+The feature `window` adds `arc-ui` (feature `viewport`), `arc-gpu`, `arc-geom`, `winit`,
+`egui-winit`, `egui-wgpu`, `rfd` and, on macOS only, `muda`. `Shell::frame(app, ctx, input)`
+needs no window:
+
+- Each frame drops input events with non-finite positions, deltas or factors, or with
+  magnitudes above 10^6 points (egui sums wheel deltas, which overflows from finite input),
+  resolves the key bindings and takes the native menu's intents, draws the egui menu bar (unless a native menu
+  bar shows the menu) and the dock with the product's panels, then carries out what the panels
+  asked for, in order.
+- Panels are product `Entry`s whose factory returns `Box<dyn Panel>` (`shell::panel`); a
+  factory of another type is reported with `app.product.invalid_id` and left out. The standard
+  panels are `ViewportPanel`, `PropertiesPanel` (with the product's edit command),
+  `OutlinerPanel` (every object, flat, labelled by its `name` text field or type and
+  identifier), `CommandLinePanel`, `DiagnosticsPanelView` and `SettingsPanel` (effective value
+  and source of every setting with a search text; it does not change values). Extractors are
+  product `Extractor`s whose factory returns an `arc_gpu` extractor (`shell::extractor`).
+- Every tab has a view: selection, camera (initially looking down the z axis at the origin,
+  20 m high, orthographic), the viewport widget, an `arc_gpu::Viewport` created on the first
+  frame that shows the tab when the shell has a GPU, an extraction driver with two workers, a
+  subscription to the document's events, and its command line, property grid, tree and
+  diagnostics states. Committed events submit their changes to extraction, and finished results
+  go to the viewport; deleted objects leave the selection. `settle` waits for extraction and
+  the viewports, for tests and the first frame; frames never wait.
+- Viewport reactions go to the viewport (size, camera, highlight, rubber-band overlay); picks run
+  on the viewport's render thread through `Viewport::with_scene`, waiting at most 5 s.
+- An intent naming a shell command is carried out by the shell. Any other intent starts the
+  command through the active tab's command line (`CommandLine::drive`), which prompts for
+  missing parameters; every completed invocation of a product command goes to
+  `Application::invoke` with the UI session (read, edit, file read and file write), and
+  `invocations()` lists the commands that did. Each command-line step takes the next seed of a
+  sequence from `ShellConfig::seed`, so commands generate new identifiers also in a reopened
+  document whose revisions repeat earlier ones; the reference shell seeds it from the clock and
+  the process. Errors are kept in `errors()` (at most 64).
+- The frame returns the egui output, the `Request`s for the platform (`OpenDialog`,
+  `SaveDialog(tab)`, `AskClose(tab)`, `Quit`) and whether more frames are on their way.
+
+### Menus, dialogs and the event loop (CORE-APP-002, CORE-APP-009)
+
+- `FileDialogs` (open, save, the save-discard-cancel question) and `NativeMenu` (install the
+  resolved entries, poll activated command identifiers) are traits; `carry_out(app, dialogs,
+  request)` drives `Application::open`, `save_as` and `close` from them. Closing a dirty
+  document never saved asks for a file after the answer to save; quitting closes every tab in
+  order and stops at the first one the user keeps.
+- `NativeDialogs` uses `rfd`: the desktop portal on Linux (where `rfd` asks the question
+  through `zenity`), the system dialogs on Windows and macOS; the question's answers map to
+  save (yes), discard (no) and cancel (anything else). `native_menu()` is a `muda` menu bar on macOS, item identifiers being command
+  identifiers; on Windows and Linux there is none and the shell draws the egui menu bar.
+- `event_loop::run` opens one main window with `winit`, restores its placement from the
+  window-state file, presents through a surface of the `arc-gpu` device (`Gpu::instance`,
+  `Gpu::adapter`; a non-sRGB surface format), copies each new viewport frame into an
+  `Rgba8Unorm` texture registered with the `egui-wgpu` renderer, saves the placement on moves and
+  resizes, keeps the logical size on scale changes and writes the file on quit. The text font is
+  loaded at start from a short list of system font files (DejaVu Sans, Noto Sans or Liberation
+  Sans on Linux, Segoe UI or Arial on Windows, Helvetica or Arial on macOS), at most 32 MiB.
+
+### What runs where
+
+- Tested headless: the window-state model with a property test; the shell commands; menus
+  through a fake native menu and the egui menu bar; the open, save, close and quit flows
+  through fake dialogs; and, in `apps/arc-shell`, a scripted session on the software adapter
+  (create a layer, a point and a line on the command line, select the point by a click in the
+  viewport, set its x coordinate to `1200 mm + 3 in` in the property grid, undo, save through
+  the save dialog, close and reopen through the open dialog, with every edit in
+  `invocations()`) and a panic-hunt property test of hostile event streams, command lines and
+  intents.
+- Compiled and linted but never run here: the `winit` event loop, the window surface and its
+  presentation, the `egui-wgpu` renderer and texture registration, `NativeDialogs` and the
+  `muda` menu bar (built on macOS only), and font loading from the system.
+
+### Owner decisions
+
+- No native menu bar on Windows: `muda` attaches one only through an `unsafe` function, which
+  the workspace lints forbid outside the FFI crates. Windows shows the egui menu bar.
+- No bundled font: egui's fonts are under a license outside the allowlist. Without one of the
+  listed system fonts, text shows as boxes; a font under an allowed license, or a font
+  lookup crate, would remove this.
+- The egui clipboard integration, the AccessKit platform adapter (screen readers) and Wayland
+  window title text are off: each brings dependency trees not reviewed for this change.
+- The window surface is created from the `arc-gpu` device's instance, which has no display
+  handle, so presenting works on Vulkan, Metal and DirectX 12 and not on the OpenGL fallback.
 
 ## Capabilities
 

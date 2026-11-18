@@ -9,6 +9,7 @@
 //! shell. No function in this crate panics.
 
 pub mod application;
+pub mod commands;
 pub mod error;
 pub mod locale;
 pub mod logging;
@@ -17,6 +18,9 @@ pub mod recent;
 pub mod settings;
 pub mod settings_editor;
 pub mod settings_file;
+#[cfg(feature = "window")]
+pub mod shell;
+pub mod window_state;
 
 pub use error::codes;
 

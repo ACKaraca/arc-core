@@ -198,6 +198,8 @@ impl QuantityInput {
                 self.editing = true;
             }
             if edit.lost_focus() {
+                // The Enter that commits the field must not also reach the command line.
+                ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
                 if ui.input(|i| i.key_pressed(Key::Escape)) {
                     self.editing = false;
                     self.error = None;

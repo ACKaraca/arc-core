@@ -291,10 +291,13 @@ Objects are listed as hyphenated identifier texts.
   is read-only when any object marks it so or its type has no editor, and shows an override marker
   when any object marks it overridden. Objects times fields are limited to 1,000,000.
 - Editors: a check box (indeterminate when mixed) for truth values, a choice for enums, a text
-  field for text, and numeric fields for integers, reals and quantities. Other types show their
-  canonical JSON text, cut to 64 characters, read-only.
+  field for text, numeric fields for integers, reals and quantities, and three stacked length
+  fields (x, y, z, in the display unit of lengths) for a point in space; committing one axis
+  commits the point with that axis replaced, and a mixed or absent point is read-only. Other
+  types show their canonical JSON text, cut to 64 characters, read-only.
 - A check box or choice commits at once; text and numbers commit on Enter or when the field loses
-  focus with a changed text; Escape restores the shown value. Each commit returns exactly one
+  focus with a changed text, and the committing Enter is consumed so it does not also reach the
+  command line; Escape restores the shown value. Each commit returns exactly one
   intent for the grid's edit command with `objects`, `field` (the field path text) and `value`
   (the value's canonical JSON form, quantities in SI base units).
 

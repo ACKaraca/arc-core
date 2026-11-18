@@ -1,0 +1,428 @@
+//! Menus and dialogs of the windowed shell through fakes (CORE-APP-009): a menu activation
+//! emits the command intent, the open, save and close flows go through the dialog trait into
+//! the application model, and panel factories of the wrong type are reported.
+
+#![cfg(feature = "window")]
+#![allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::cast_possible_truncation,
+    reason = "tests"
+)]
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use arc_app::application::{AppConfig, Application, CloseAnswer, Closed};
+use arc_app::commands;
+use arc_app::product::{Entry, FileType, ProductBuilder};
+use arc_app::recent::RecentFiles;
+use arc_app::shell::platform::{self, Done, FileDialogs, NativeMenu};
+use arc_app::shell::{
+    self, CommandLinePanel, FrameInput, Request, Shell, ShellConfig, ViewportPanel,
+};
+use arc_base::error::Value;
+use arc_base::{IdGenerator, Limits};
+use arc_command::{FixedClock, Permission, Session, Surface};
+use arc_doc::package::LockOwner;
+use arc_ui::egui::{self, accesskit};
+use arc_ui::{Dock, DockLayout, Entry as MenuEntry, Intent, Localize};
+
+struct Names;
+impl Localize for Names {
+    fn message(&self, id: &str, _: &[(&str, Value)]) -> Option<String> {
+        Some(
+            match id {
+                "app-menu-file" => "File",
+                "app-menu-edit" => "Edit",
+                "app-command-file-new" => "New",
+                "app-command-file-open" => "Open",
+                _ => return None,
+            }
+            .to_owned(),
+        )
+    }
+}
+
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("arc-app-shell-{name}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn app(data: &Path, extra_panel: bool) -> Application {
+    let mut b = ProductBuilder::new("arc-shell", "0.1.0")
+        .with_types(arc_shell_sample::types().unwrap())
+        .with_commands(arc_shell_sample::registry().unwrap());
+    commands::register(b.commands_mut()).unwrap();
+    b.file_type(FileType {
+        extension: "arc".into(),
+        message_id: "shell-file-arc".into(),
+        open: true,
+        save: true,
+    })
+    .unwrap();
+    b.panel(Entry {
+        id: "test.viewport".into(),
+        message_id: "test-viewport".into(),
+        factory: Arc::new(|| shell::panel(ViewportPanel::new())),
+    })
+    .unwrap();
+    b.panel(Entry {
+        id: "test.line".into(),
+        message_id: "test-line".into(),
+        factory: Arc::new(|| shell::panel(CommandLinePanel)),
+    })
+    .unwrap();
+    if extra_panel {
+        b.panel(Entry {
+            id: "test.wrong".into(),
+            message_id: "test-wrong".into(),
+            factory: Arc::new(|| 7_u32),
+        })
+        .unwrap();
+    }
+    let owner = LockOwner {
+        user: "tester".into(),
+        host: "test-host".into(),
+        application: "arc-shell".into(),
+        time_unix_ms: 0,
+    };
+    let product = b.build(Arc::new(FixedClock(0)), owner).unwrap();
+    let next = AtomicU64::new(7 << 32);
+    Application::new(
+        product,
+        AppConfig {
+            data_dir: data.to_path_buf(),
+            limits: Limits::DEFAULT,
+            id_generators: Box::new(move || {
+                IdGenerator::seeded(next.fetch_add(1, Ordering::Relaxed))
+            }),
+            recent: RecentFiles::new(20),
+        },
+    )
+}
+
+fn config() -> ShellConfig {
+    let root = Dock::Split {
+        axis: arc_ui::Axis::Vertical,
+        fraction: 0.8,
+        first: Box::new(Dock::Tabs {
+            tabs: vec!["test.viewport".into()],
+            active: 0,
+        }),
+        second: Box::new(Dock::Tabs {
+            tabs: vec!["test.line".into()],
+            active: 0,
+        }),
+    };
+    ShellConfig {
+        layout: DockLayout::new(root, Vec::new()).unwrap(),
+        menu: shell::default_menu().unwrap(),
+        bindings: Vec::new(),
+        appearance: arc_ui::Appearance::default(),
+        seed: 1,
+    }
+}
+
+#[derive(Default)]
+struct FakeDialogs {
+    open: Option<PathBuf>,
+    save: Option<PathBuf>,
+    close: Vec<CloseAnswer>,
+    asked: Vec<String>,
+}
+
+impl FileDialogs for FakeDialogs {
+    fn pick_open(&mut self, types: &[FileType]) -> Option<PathBuf> {
+        self.asked.push(format!("open {}", types.len()));
+        self.open.clone()
+    }
+
+    fn pick_save(&mut self, _: &[FileType], _: Option<&str>) -> Option<PathBuf> {
+        self.asked.push("save".into());
+        self.save.clone()
+    }
+
+    fn ask_close(&mut self, _: &str) -> CloseAnswer {
+        self.asked.push("close".into());
+        if self.close.is_empty() {
+            CloseAnswer::Cancel
+        } else {
+            self.close.remove(0)
+        }
+    }
+}
+
+/// A native menu that records what it shows and activates items on request.
+#[derive(Default)]
+struct FakeMenu {
+    shown: Vec<String>,
+    activated: Vec<String>,
+}
+
+fn ids(entries: &[MenuEntry], out: &mut Vec<String>) {
+    for e in entries {
+        match e {
+            MenuEntry::Command(view) => out.push(view.id.clone()),
+            MenuEntry::Submenu { entries, .. } => ids(entries, out),
+            MenuEntry::Separator => {}
+        }
+    }
+}
+
+impl NativeMenu for FakeMenu {
+    fn install(&mut self, entries: &[MenuEntry]) -> bool {
+        ids(entries, &mut self.shown);
+        true
+    }
+
+    fn poll(&mut self) -> Vec<Intent> {
+        self.activated.drain(..).map(Intent::new).collect()
+    }
+}
+
+struct Run {
+    requests: Vec<Request>,
+    nodes: Vec<accesskit::Node>,
+}
+
+fn frame(
+    shell: &mut Shell,
+    app: &mut Application,
+    ctx: &egui::Context,
+    events: Vec<egui::Event>,
+    menu_intents: Vec<Intent>,
+    native_menu: bool,
+) -> Run {
+    let textures = BTreeMap::new();
+    let mut out = shell.frame(
+        app,
+        ctx,
+        FrameInput {
+            raw: egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            time: 1.0,
+            localize: &Names,
+            textures: &textures,
+            menu_intents,
+            native_menu,
+        },
+    );
+    out.full.textures_delta.clear();
+    let nodes = out
+        .full
+        .platform_output
+        .accesskit_update
+        .map(|u| u.nodes.into_iter().map(|(_, n)| n).collect())
+        .unwrap_or_default();
+    Run {
+        requests: out.requests,
+        nodes,
+    }
+}
+
+fn click(node: &accesskit::Node) -> Vec<egui::Event> {
+    let b = node.bounds().unwrap();
+    let at = egui::pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32);
+    let button = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    vec![egui::Event::PointerMoved(at), button(true), button(false)]
+}
+
+fn button<'a>(nodes: &'a [accesskit::Node], name: &str) -> &'a accesskit::Node {
+    nodes
+        .iter()
+        .find(|n| n.role() == accesskit::Role::Button && n.label() == Some(name))
+        .unwrap_or_else(|| panic!("no button {name}"))
+}
+
+#[test]
+fn native_menu_activation_emits_the_command_intent() {
+    let dir = TempDir::new("native-menu");
+    let mut app = app(&dir.0, false);
+    let mut shell = Shell::new(&app, config(), None);
+    let mut menu = FakeMenu::default();
+    let entries = shell.menu_entries(&app, &Names);
+    assert!(menu.install(&entries));
+    assert!(menu.shown.contains(&commands::FILE_NEW.to_owned()));
+    assert_eq!(menu.shown.len(), 9, "{:?}", menu.shown);
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    menu.activated.push(commands::FILE_NEW.into());
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), menu.poll(), true);
+    assert_eq!(app.tabs().len(), 1);
+    assert!(run.requests.is_empty());
+    // With a native menu bar, the egui menu bar is not drawn.
+    assert!(run.nodes.iter().all(|n| n.label() != Some("File")));
+}
+
+#[test]
+fn egui_menu_bar_activation_emits_the_command_intent() {
+    let dir = TempDir::new("egui-menu");
+    let mut app = app(&dir.0, false);
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    let file = button(&run.nodes, "File");
+    frame(&mut shell, &mut app, &ctx, click(file), Vec::new(), false);
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    let new = button(&run.nodes, "New");
+    frame(&mut shell, &mut app, &ctx, click(new), Vec::new(), false);
+    assert_eq!(app.tabs().len(), 1);
+}
+
+#[test]
+fn open_save_and_close_go_through_the_dialogs_into_the_application() {
+    let dir = TempDir::new("dialogs");
+    let mut app = app(&dir.0.join("data"), false);
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    let mut dialogs = FakeDialogs::default();
+    let step = |shell: &mut Shell, app: &mut Application, command: &str| {
+        frame(
+            shell,
+            app,
+            &ctx,
+            Vec::new(),
+            vec![Intent::new(command)],
+            false,
+        )
+        .requests
+    };
+
+    // Open without a path asks the dialog; a cancelled dialog changes nothing.
+    assert_eq!(
+        step(&mut shell, &mut app, commands::FILE_OPEN),
+        [Request::OpenDialog]
+    );
+    let done = platform::carry_out(&mut app, &mut dialogs, &Request::OpenDialog).unwrap();
+    assert_eq!(done, Done::Cancelled);
+    assert!(app.tabs().is_empty());
+
+    // A new document saved through the save dialog, then opened through the open dialog.
+    step(&mut shell, &mut app, commands::FILE_NEW);
+    let tab = app.active().unwrap();
+    let session = Session::new(Surface::Ui, [Permission::Edit]);
+    let mut create = arc_command::Invocation::new(
+        "shell.point.create",
+        serde_json::json!({"position": [1.0, 2.0, 3.0]}),
+    );
+    create.seed = 1;
+    app.invoke(tab, &session, create).unwrap();
+    let requests = step(&mut shell, &mut app, commands::FILE_SAVE);
+    assert_eq!(requests, [Request::SaveDialog(tab)]);
+    let file = dir.0.join("saved.arc");
+    dialogs.save = Some(file.clone());
+    assert_eq!(
+        platform::carry_out(&mut app, &mut dialogs, &requests[0]).unwrap(),
+        Done::Saved
+    );
+    assert_eq!(app.tab(tab).unwrap().path(), Some(file.as_path()));
+
+    // Closing a clean tab asks nothing; the open dialog then opens the file.
+    assert!(step(&mut shell, &mut app, commands::FILE_CLOSE).is_empty());
+    assert!(app.tabs().is_empty());
+    dialogs.open = Some(file.clone());
+    let done = platform::carry_out(&mut app, &mut dialogs, &Request::OpenDialog).unwrap();
+    let Done::Opened(opened) = done else {
+        panic!("{done:?}")
+    };
+    assert_eq!(app.tab(opened).unwrap().document().snapshot().len(), 1);
+    assert_eq!(dialogs.asked, ["open 1", "save", "open 1"]);
+
+    // A dirty tab asks before closing: cancel keeps it, discard closes it.
+    // Another seed: the reopened document starts at the revision the first point was made at.
+    let mut second = arc_command::Invocation::new(
+        "shell.point.create",
+        serde_json::json!({"position": [0.0, 0.0, 0.0]}),
+    );
+    second.seed = 2;
+    app.invoke(opened, &session, second).unwrap();
+    let requests = step(&mut shell, &mut app, commands::FILE_CLOSE);
+    assert_eq!(requests, [Request::AskClose(opened)]);
+    dialogs.close = vec![CloseAnswer::Cancel];
+    assert_eq!(
+        platform::carry_out(&mut app, &mut dialogs, &requests[0]).unwrap(),
+        Done::Closed(Closed::Cancelled)
+    );
+    assert_eq!(app.tabs().len(), 1);
+    // Quit asks for the dirty tab; discarding ends the application.
+    assert_eq!(
+        step(&mut shell, &mut app, commands::APP_QUIT),
+        [Request::Quit]
+    );
+    dialogs.close = vec![CloseAnswer::Discard];
+    assert_eq!(
+        platform::carry_out(&mut app, &mut dialogs, &Request::Quit).unwrap(),
+        Done::Quit
+    );
+    assert!(app.tabs().is_empty());
+    assert!(shell.errors().is_empty(), "{:?}", shell.errors());
+}
+
+#[test]
+fn save_of_a_new_document_on_close_asks_for_a_file() {
+    let dir = TempDir::new("close-save");
+    let mut app = app(&dir.0.join("data"), false);
+    let tab = app.new_document().unwrap();
+    let session = Session::new(Surface::Ui, [Permission::Edit]);
+    app.invoke(
+        tab,
+        &session,
+        arc_command::Invocation::new("shell.layer.create", serde_json::json!({"name": "a"})),
+    )
+    .unwrap();
+    let mut dialogs = FakeDialogs {
+        close: vec![CloseAnswer::Save],
+        save: Some(dir.0.join("new.arc")),
+        ..FakeDialogs::default()
+    };
+    let done = platform::carry_out(&mut app, &mut dialogs, &Request::AskClose(tab)).unwrap();
+    assert_eq!(done, Done::Closed(Closed::Closed));
+    assert!(dir.0.join("new.arc").exists());
+    assert_eq!(dialogs.asked, ["close", "save"]);
+}
+
+#[test]
+fn factories_of_the_wrong_type_are_reported() {
+    let dir = TempDir::new("factory");
+    let app = app(&dir.0, true);
+    let shell = Shell::new(&app, config(), None);
+    assert_eq!(
+        shell
+            .errors()
+            .iter()
+            .map(arc_base::Error::code)
+            .collect::<Vec<_>>(),
+        ["app.product.invalid_id"]
+    );
+}

@@ -170,6 +170,18 @@ pub mod codes {
         category: Category::Conflict,
         message_id: "app-document-no-path",
     };
+    /// The event loop or a window could not be created.
+    pub const WINDOW_FAILED: ErrorCode = ErrorCode {
+        code: "app.window.failed",
+        category: Category::FailedOperation,
+        message_id: "app-window-failed",
+    };
+    /// The GPU device cannot present to the window.
+    pub const WINDOW_SURFACE_FAILED: ErrorCode = ErrorCode {
+        code: "app.window.surface_failed",
+        category: Category::FailedOperation,
+        message_id: "app-window-surface-failed",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -200,6 +212,8 @@ pub mod codes {
         DOCUMENT_UNKNOWN,
         DOCUMENT_READ_ONLY,
         DOCUMENT_NO_PATH,
+        WINDOW_FAILED,
+        WINDOW_SURFACE_FAILED,
     ];
 }
 
