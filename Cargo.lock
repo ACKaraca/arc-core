@@ -58,8 +58,12 @@ name = "arc-app"
 version = "0.1.0"
 dependencies = [
  "arc-base",
+ "arc-command",
+ "arc-doc",
+ "arc-shell-sample",
  "fluent-bundle",
  "proptest",
+ "serde_json",
  "toml",
  "tracing",
  "tracing-subscriber",
@@ -149,10 +153,20 @@ dependencies = [
 name = "arc-shell-cli"
 version = "0.1.0"
 dependencies = [
+ "arc-command",
+ "arc-doc",
+ "arc-shell-sample",
+ "proptest",
+ "serde_json",
+]
+
+[[package]]
+name = "arc-shell-sample"
+version = "0.1.0"
+dependencies = [
  "arc-base",
  "arc-command",
  "arc-doc",
- "proptest",
  "schemars",
  "serde",
  "serde_json",

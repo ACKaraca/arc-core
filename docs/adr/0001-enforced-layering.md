@@ -54,3 +54,16 @@ and names the chain, so the violation is found by `cargo xtask layers` and not o
 features leave off are not followed either: the dependency resolution covers the whole workspace,
 so a native application that turns such a feature on would otherwise fail the rule for the crates
 below it. `cargo xtask wasm` builds the set with default features and finds a real use.
+
+## Amendment: Sample set of the reference shell
+
+The sample object types and commands of the reference shell move from the library target of the
+application package `apps/arc-shell-cli` into the library crate `crates/arc-shell-sample`, so that
+the windowed reference shell can use them too: the table forbids a dependency on an application
+crate. The crate is classed `layer(4)`. It depends only on L0–L3 crates (`arc-base`, `arc-doc`,
+`arc-command`), has no windowing, GPU or UI dependency, and its types and commands are a small
+model in the same sense as the other L4 crates, so the existing class fits and the rule function
+needs no new class. It is not in the WebAssembly set because its `product` function uses the
+headless runner, which opens packages. Products never depend on it: it exists for the reference
+shells and their tests. The rejected alternative, a new class for sample code, would have changed
+the rule function for a single crate.

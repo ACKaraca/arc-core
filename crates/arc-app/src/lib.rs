@@ -1,17 +1,21 @@
-//! The window-free parts of the Arc application shell: typed settings with scope resolution,
-//! settings files, locale selection and message formatting, structured logging and the
-//! recent-files model.
+//! The window-free parts of the Arc application shell: product registration, the application
+//! model (document tabs, open and save flows, read-only banners and the recovery prompt), typed
+//! settings with scope resolution, settings files and the settings editor model, locale
+//! selection and message formatting, structured logging and the recent-files model.
 //!
 //! This crate has no network dependency and makes no network request (CORE-APP-019). It does not
 //! query the operating system: the operating-system locale list, the configuration directory and
 //! the clock reach it as arguments. Windows, renderers and dialogs belong to later parts of the
 //! shell. No function in this crate panics.
 
+pub mod application;
 pub mod error;
 pub mod locale;
 pub mod logging;
+pub mod product;
 pub mod recent;
 pub mod settings;
+pub mod settings_editor;
 pub mod settings_file;
 
 pub use error::codes;

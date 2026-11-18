@@ -128,6 +128,49 @@ pub mod codes {
         message_id: "app-recent-too-many-pinned",
     };
 
+    /// A panel, tool or extractor identifier or a file extension is malformed.
+    pub const PRODUCT_INVALID_ID: ErrorCode = ErrorCode {
+        code: "app.product.invalid_id",
+        category: Category::InvalidInput,
+        message_id: "app-product-invalid-id",
+    };
+    /// A panel, tool, extractor or file extension is registered twice.
+    pub const PRODUCT_DUPLICATE: ErrorCode = ErrorCode {
+        code: "app.product.duplicate",
+        category: Category::Conflict,
+        message_id: "app-product-duplicate",
+    };
+    /// An extractor names an object type that is not registered.
+    pub const PRODUCT_UNKNOWN_TYPE: ErrorCode = ErrorCode {
+        code: "app.product.unknown_type",
+        category: Category::NotFound,
+        message_id: "app-product-unknown-type",
+    };
+    /// No registered file type opens or saves the path's extension.
+    pub const FILE_UNSUPPORTED_TYPE: ErrorCode = ErrorCode {
+        code: "app.file.unsupported_type",
+        category: Category::Unsupported,
+        message_id: "app-file-unsupported-type",
+    };
+    /// No open tab has the identifier.
+    pub const DOCUMENT_UNKNOWN: ErrorCode = ErrorCode {
+        code: "app.document.unknown",
+        category: Category::NotFound,
+        message_id: "app-document-unknown",
+    };
+    /// The package is open read-only and cannot be written.
+    pub const DOCUMENT_READ_ONLY: ErrorCode = ErrorCode {
+        code: "app.document.read_only",
+        category: Category::Conflict,
+        message_id: "app-document-read-only",
+    };
+    /// The document has no file to save in place.
+    pub const DOCUMENT_NO_PATH: ErrorCode = ErrorCode {
+        code: "app.document.no_path",
+        category: Category::Conflict,
+        message_id: "app-document-no-path",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         SETTINGS_INVALID_KEY,
@@ -150,6 +193,13 @@ pub mod codes {
         LOG_IO,
         RECENT_NOT_FOUND,
         RECENT_TOO_MANY_PINNED,
+        PRODUCT_INVALID_ID,
+        PRODUCT_DUPLICATE,
+        PRODUCT_UNKNOWN_TYPE,
+        FILE_UNSUPPORTED_TYPE,
+        DOCUMENT_UNKNOWN,
+        DOCUMENT_READ_ONLY,
+        DOCUMENT_NO_PATH,
     ];
 }
 

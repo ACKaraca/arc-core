@@ -151,8 +151,10 @@ reports, Hub) are added in later parts behind settings that default to off.
 
 ### Reference CLI (CORE-APP-026)
 
-`apps/arc-shell-cli` is one package with a library and a binary. The library holds the sample
-document type set the reference shell uses: `shell.layer` (`name`), `shell.point` (`position`)
+`apps/arc-shell-cli` is one package with a library and a binary. The sample document type set
+the reference shells use lives in the library crate `crates/arc-shell-sample` (class `layer(4)`,
+[ADR-0001](../adr/0001-enforced-layering.md#amendment-sample-set-of-the-reference-shell)), which
+the CLI's library re-exports unchanged: `shell.layer` (`name`), `shell.point` (`position`)
 and `shell.line` (`start`, `end`), each version 1.0, where points and lines have an optional
 `layer` reference to a layer (associative, cleared when the layer is deleted). They are
 registered through `TypeRegistry::register`. The sample commands `shell.layer.create`,
@@ -163,9 +165,7 @@ every change is a transaction of the invoker. `product(clock, owner)` bundles th
 `arc_command::headless::run`, and the binary's `main` only passes the process arguments, the
 standard streams, the system clock and the edit-lock owner (user and host from the environment)
 and returns the runner's exit code. The subcommands, flags and exit codes are those of the
-[headless runner](arc-command.md#headless-runner-as-implemented). The layer table forbids a
-dependency on an application crate, so the windowed shell cannot depend on this package as it
-stands; reusing the sample set there needs a library crate with its own class.
+[headless runner](arc-command.md#headless-runner-as-implemented).
 
 ### Error codes
 
@@ -193,6 +193,141 @@ The codes `arc-app` owns; messages are in `locales/en-US/arc-app.ftl`.
 | `app.log.io` | `io` | A log directory or file cannot be opened |
 | `app.recent.not_found` | `not_found` | A path is not in the recent-files list |
 | `app.recent.too_many_pinned` | `limit_exceeded` | A fifty-first entry is pinned |
+| `app.product.invalid_id` | `invalid_input` | A panel, tool or extractor identifier is not a dotted key, or a file extension is malformed or can neither be opened nor saved |
+| `app.product.duplicate` | `conflict` | A panel, tool, extractor or file extension is registered twice |
+| `app.product.unknown_type` | `not_found` | An extractor names an object type that is not registered |
+| `app.file.unsupported_type` | `unsupported` | No registered file type with the needed capability matches a path's extension |
+| `app.document.unknown` | `not_found` | No open tab has the identifier |
+| `app.document.read_only` | `conflict` | A save targets a package that is open read-only |
+| `app.document.no_path` | `conflict` | A document never saved is saved in place; it needs save as |
+
+## Application model as implemented
+
+The application model has no window either. It depends on `arc-doc` (feature `package`) and
+`arc-command` (feature `headless`), takes the data directory, limits, identifier generators and
+the recent-files list as arguments (`AppConfig`), and answers no user decision itself: the caller
+passes the answers. Fallible functions return `arc_base::Error` with the codes in the
+[table above](#error-codes) or those of the crates below.
+
+### Product registration (CORE-APP-001)
+
+- `ProductBuilder::new(name, version)` collects a product's registrations: object types and
+  evaluators (`types_mut`, `with_types`, `evaluators_mut`) and commands (`commands_mut`,
+  `with_commands`) are the `arc-doc` and `arc-command` registries themselves, with their own
+  checks; settings (`setting`, beside the built-in ones of `SettingsRegistry::builtin`), file
+  types, panels, tools and extractors are added here. `build(clock, owner)` returns a `Product`.
+- A `Product` contains the `arc_command::headless::Product` (name, version, types, evaluators,
+  commands, clock and edit-lock owner) and returns it from `headless()`, so the headless runner
+  and the application run the same registration; the application-only parts are kept beside it.
+- A `FileType` is an extension (1 to 16 lowercase ASCII letters and digits, matched
+  case-insensitively), the description's message identifier and whether it opens and saves.
+  Every file type is a document package; the extension only routes a path to the product.
+- Panels and tools are `Entry`s (a dotted-key identifier, unique per kind, the label's message
+  identifier and a `Factory`); an `Extractor` has an identifier, the object type keys it handles
+  (each must be registered when the product is built) and a `Factory`. `Factory::create` returns
+  `Box<dyn Any + Send>`, which the windowed shell downcasts to the type it registered; any
+  `Fn() -> T` closure is a factory. This crate never calls a factory.
+
+### Document tabs (CORE-APP-003)
+
+- `Application::new(product, config)` holds the product, a `SettingsStore` over the product's
+  settings, the recent files and the tabs in display order. A `Tab` has a `TabId` that is never
+  reused, its document (with its own undo history), the package when it has a file, the
+  recovery journal, the banners and the view states (`views`, `views_mut`; opaque
+  `Box<dyn Any + Send>` values the shell keeps).
+- A tab is dirty when its document's revision differs from the revision of its saved state. The
+  revision is read before a save, so a commit that races the save leaves the tab dirty, never
+  falsely clean. Undoing back to the saved state is a new revision, so the tab stays dirty. A
+  new document is clean until edited; a recovered document is dirty until saved.
+- The title is the file name, or none for a document never saved, which the shell names. `activate`, `move_tab` (the position is clamped) and `close` manage the
+  order; the tab opened last becomes active, and closing the active tab activates the next one,
+  else the previous one.
+- `close(tab, ask)` closes a clean tab at once. For a dirty tab `ask` is called and its answer
+  decides: `Save` saves first and keeps the tab open with the error when the save fails
+  (`app.document.no_path` for a document never saved); `Discard` deletes the recovery journal;
+  `Cancel` keeps it open. Closing releases the edit lock; a recovery journal without records is
+  deleted.
+- `invoke(tab, session, invocation)` runs a product command on the tab's document; on a
+  read-only tab the `edit` class is removed from the session, so editing commands fail with
+  `cmd.permission_denied`.
+
+### Open and save flows (CORE-APP-004)
+
+- `open(path)` is the one entry for a dialog, drag and drop, a command-line argument and a file
+  association. A path already open activates its tab. Otherwise the extension must be a file type
+  that opens (`app.file.unsupported_type`), the package is opened with `Package::open` for
+  editing under the product's lock owner and loaded with `Package::open_document`; a document
+  open for editing gets a recovery journal (the package's `document_id`, or a generated one, and
+  a fresh session identifier for each journal) whose failure to start is a banner, not an error.
+  The path moves to the front of the recent files. On an error nothing is opened.
+- `new_document()` opens an empty document without a file, protected by a journal without base.
+- `save(tab)` saves in place with `Package::save_document`, passing the recovery journal, so the
+  journal holds nothing to replay afterwards. A document never saved fails with
+  `app.document.no_path`, a read-only package with `app.document.read_only`. A
+  `doc.recovery.unavailable` error after the file was written counts as saved and becomes a
+  banner. Any other failure keeps the document open and dirty and returns the error.
+- `save_as(tab, target)` requires a file type that saves. A missing target is created with the
+  current package's metadata (or a new document identifier) and the document is written to it by
+  the full rewrite; an existing target is opened for editing and overwritten (asking for the
+  overwrite is the dialog's task), or refused with `app.document.read_only` when it opens
+  read-only. On success the old package is dropped, which releases its lock, the tab belongs to
+  the target, its read-only banners are cleared and a recovery journal starts when it had none.
+  On failure a target this call created is removed and the tab is unchanged.
+- `take_over(tab)` takes over a stale edit lock after the user confirmed it
+  (`Package::take_over`) and starts a recovery journal.
+
+### Read-only and lock banners (CORE-APP-005)
+
+A `Banner` is a message identifier and named arguments. A package that opens read-only shows:
+
+| Cause | Message | Arguments |
+|---|---|---|
+| Live lock with a readable holder | `app-banner-locked` | `user`, `host`, `application` |
+| Live lock that cannot be read | `app-banner-locked-unknown` | none |
+| Stale lock of this host | `app-banner-stale-lock` | `user`, `host`, `application` |
+| Newer format minor version | `app-banner-newer-format` | `version` (`major.minor`) |
+
+A package of a newer format major version is not opened at all: `open` fails with
+`doc.package.newer_format` (arguments `version` and `current`), as the package reader refuses it
+without touching the file or creating a lock. Errors that do not stop an open or a save
+(`doc.recovery.unavailable`, `doc.recovery.truncated`) are banners with the error's message
+identifier and arguments.
+
+### Recovery prompt (CORE-APP-006)
+
+- `recoverable()` lists the recovery databases under `<data_dir>/recovery` that no running
+  session holds (`arc_doc::package::recovery::scan`): each `Orphan` names its document, base
+  file, record count and times. The application's own open documents hold their journals and are
+  not listed.
+- `compare(orphan)` changes nothing and replays nothing. It reports the base path, whether the
+  base still has the recorded fingerprint, the number of objects in the base file as it is now
+  (from `package::inspect`; none without a base or when it cannot be inspected) and the number
+  of recorded transactions that recovery would replay. A per-object difference needs the replay
+  and is not provided.
+- `recover(orphan)` replays the orphan into a new, dirty, active tab and deletes the orphan. With
+  an unchanged base the tab belongs to the base file and takes its edit lock (or opens read-only
+  with a lock banner); with a changed base (banner `app-banner-recovered-copy`) or no base the
+  tab has no path and is saved with `save_as`. A replay that stopped early adds the banner of its
+  `doc.recovery.truncated` error. On an error the orphan is kept.
+- `discard_recovery(orphan)` deletes the database after the user chose to discard it
+  (`doc.recovery.locked` when a running session holds it).
+
+### Settings editor (CORE-APP-011)
+
+- `settings_editor::rows(store)` lists every registered setting in key order with its effective
+  value, source scope, highest allowed scope, description message identifier and skipped
+  values.
+- `search(store, localizer, query)` keeps the rows whose key or localized description contains
+  the trimmed query, ignoring case; a blank query keeps every row.
+- `set(store, scope, key, value, file)` and `reset(store, scope, key, file)` go through
+  `SettingsStore::set` and `reset` and then write the scope's table to `file` when one is given,
+  with the settings-file save; a reset that removed nothing writes nothing. A failed write
+  returns `app.settings_file.write_failed` and leaves the value changed in memory.
+
+The integration test `application` builds the product from the sample set and covers the
+registrations, independent dirty state and undo of two documents, the close decision table, open,
+save, save as and reopen, a failed save, a second instance on a locked package, the newer-major
+fixture, recovery after an application was dropped with unsaved changes, and the settings editor.
 
 ## Capabilities
 
