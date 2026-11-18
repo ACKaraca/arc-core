@@ -29,8 +29,8 @@ override API).
 
 | Concept | Description |
 |---|---|
-| `GpuContext` | Device, queue, adapter information, feature set |
-| `ViewportScene` | Render items keyed by object identifier with dirty tracking |
+| `Gpu` | Device, queue and the `AdapterReport` (adapter, backend, software flag, reduced features) |
+| `Scene` | Render items keyed by object identifier and sub-item index on pooled buffers, with write accounting and a memory report |
 | `RenderItem` | Mesh instance, line batch, fill batch, glyph run, point set, image or overlay item, with `f64` origin, material and flags |
 | `Extractor` | Product function from snapshot and changed ids to render items |
 | `ViewportMaterial` | Documented OpenPBR subset used for viewport shading |
@@ -43,8 +43,8 @@ override API).
 
 | Kind | Crates |
 |---|---|
-| Arc | `arc-base`, `arc-geom`, `arc-mesh`, `arc-doc`; `arc-draft` (feature `draft`, display-list extractor, from phase 1); `arc-scene` (feature `scene`, material and camera conversion, from phase 4) |
-| Third-party | `wgpu`, `glam`, `lyon`, `swash` (glyph rasterization), `image` (headless output) |
+| Arc | `arc-base`, `arc-geom`, `arc-mesh` (in use); `arc-doc` (extractors, from CORE-GPU-003); `arc-draft` (feature `draft`, display-list extractor, from phase 1); `arc-scene` (feature `scene`, material and camera conversion, from phase 4) |
+| Third-party | `wgpu` (in use: Vulkan, Metal, DirectX 12 and OpenGL backends, WGSL), `glam`, `lyon`, `swash` (glyph rasterization); `image` (PNG reference images, tests only: headless rendering returns raw RGBA8 buffers) |
 
 ## Test strategy
 
@@ -133,3 +133,167 @@ contract. The platform guarantees are in the
 | CORE-GPU-038 | Mobile performance targets | Sustains 30 frames per second orbiting 2 million triangles and 500,000 line segments on the reference tablet, with adaptive quality always enabled during navigation. | T3 | 5 |
 | CORE-GPU-039 | Pointer-sized picking | Sizes the identifier-pass region from the pointer kind's pick radius so touch and pen picks resolve the intended object within 16 ms. | T3 | 5 |
 | CORE-GPU-040 | Thermal and power response | Lowers frame rate cap and expensive effects when the platform reports thermal pressure or low-power mode and restores them afterward. | T3 | 5 |
+
+## Phase 0 rules
+
+The first part implements CORE-GPU-001, 002, 004, 006, 007, 008 and 031. It renders headless;
+viewport targets, the render thread, extraction, shading modes, picking and overlays are later
+parts and add passes to the frame without changing the scene.
+
+### Adapter selection
+
+`Gpu::new(&GpuSettings)` enumerates adapters on the Vulkan, Metal, DirectX 12 and OpenGL backends,
+or only on the backend `GpuSettings::backend` forces; `adapter_name` keeps the adapters whose name
+contains it, ignoring case. An adapter is suitable when it supports the downlevel default limits
+and drawing with a base vertex. Suitable adapters are ranked in tiers: hardware adapters on
+Vulkan, Metal or DirectX 12; software adapters on those backends; adapters on the OpenGL backend,
+hardware before software. Within a tier, discrete adapters come before integrated, virtual and
+other ones, then Vulkan before Metal before DirectX 12, then the adapter name. Every tier after
+the first is a fallback, which `forbid_fallback` excludes. A forced backend or name never falls
+back to a different adapter.
+
+The `AdapterReport` names the adapter, driver, backend and device kind, says whether the adapter
+is a software rasterizer and whether it is a fallback, gives the usable multisample count (4 or
+1) and lists the reduced features: `SoftwareRasterizer`, `GpuCulling` (no indirect multi-draw
+with count, so culling will use the CPU path), `Multisampling` (no four-sample color and depth
+targets) and `DownlevelLimits` (only the downlevel default limits). Devices are created with the
+downlevel default limits and no optional features.
+
+Device errors never panic. Resource creation, updates and frames run inside out-of-memory and
+validation error scopes; errors outside a scope are captured by the device's error handler and
+returned by the next operation. Device loss is `gpu.device.lost`. Adapter and device requests and
+error-scope results are awaited for at most 30 seconds, image readback for at most 60 seconds.
+
+### Scene and pooled buffers
+
+- A `Scene` holds render items keyed by `ItemKey { object, sub }`. `update` takes, per object, the
+  complete new list of its items (the index in the list is `sub`); an empty list removes the
+  object. All items are validated before anything changes. Only the instance ranges of the named
+  objects are written; every other item's bytes stay untouched on the GPU. A device error during
+  the update leaves earlier objects updated and the failing object without items.
+- A **mesh item** references a geometry uploaded once with `add_geometry(mesh, origin)` (vertex
+  positions relative to `origin`, see `TriMesh::gpu_positions`) and has an `f64` origin and one or
+  more instances, each with a 3×4 `f32` transform from geometry coordinates to offsets from the
+  item origin, a linear color, a material slot and flags. A geometry is removed only when no item
+  uses it.
+- A **line item** has an `f64` origin, polylines of `f32` points relative to it (open or closed;
+  consecutive equal points merge; a single point is a dot), a style and a color.
+- Vertex, index, mesh-instance and line-segment data live in four pools: one buffer each, divided
+  into units of a fixed stride (24, 4, 80 and 80 bytes). Allocation is first-fit from a sorted,
+  coalesced free list. When no free block fits, the pool compacts if its total free space
+  suffices, and otherwise grows to at least twice its capacity, up to `max_pool_bytes` and the
+  device's buffer size limit. After each update a pool compacts when at least 25 % of it is free
+  and its largest free block is less than half of its free space; `Scene::compact` compacts on
+  demand. Compaction and growth copy live ranges on the GPU, keep their order and are not counted
+  as written bytes.
+- Each instance pool has a companion buffer of camera-relative translations (12 bytes per
+  instance). A frame writes all translations when the translation origin moved or a pool was
+  relocated, and otherwise only those of items changed since the last frame.
+- `pending_writes` counts the bytes written per category (vertex, index, mesh instance, line
+  segment, translation) since the last frame; `last_frame_writes` holds what the last frame wrote,
+  including the updates before it. `memory` reports capacity and used bytes per category.
+- `SceneLimits` bounds objects, items per object, instances and segments per item, geometry
+  vertices and triangles, bytes per pool, the screen line width and the image side.
+
+Instance layouts are little-endian: a mesh instance is the three transform rows (12 `f32`), the
+color (4 `f32`), then material, flags, the object's identifier slot (kept for the picking pass)
+and a reserved `u32`. A line segment is its start, end, previous and next points (3 `f32` each;
+the neighbors equal the ends when absent), the color, the width and the miter limit (`f32`), the
+style bits (bit 0 square cap; bits 1–2 join: 0 round, 1 miter, 2 bevel; bit 3 has a previous
+segment; bit 4 has a next segment; bit 5 paper width) and the identifier slot.
+
+### Camera-relative precision and depth
+
+- Each frame computes every item's translation `origin − translation origin` in `f64` and
+  narrows it to `f32`; the view matrix on the GPU is the rotation of the view frame only. For a
+  perspective view the translation origin is the eye.
+- Depth is reversed: 1 on the near plane, 0 on the far plane, the opposite of the view-frame
+  convention. The reversed projection is built directly in `f64` from the frame's finite near and
+  far distances. The depth target is `Depth32Float`, cleared to 0 and tested with *greater*
+  (meshes) or *greater or equal* (lines).
+- Orthographic views use the frame's depth range intersected with the depth range of the scene's
+  bounding spheres plus a 1 % margin, and take translations relative to the eye moved forward to
+  the near end of that range, so depth is computed from small numbers.
+- Bound: for an item whose vertices are within 500 m of its origin on each axis (items larger
+  than 1 km are tiled by CORE-GPU-005), with the eye inside the item's extent, the camera-relative
+  position of every vertex is within 0.1 mm of its exact value at any distance from the model
+  origin up to 10,000 km.
+
+### Meshes
+
+Meshes are drawn as indexed, instanced triangles with a base vertex. Normals transform by the
+cofactor matrix of each instance's linear part; a mesh without normals is shaded with its face
+normal. The phase-0 lighting model is a headlight: the color is the base color times
+`ambient + (1 − ambient) · |n · l|`, where `l` points toward the eye along the view direction and
+`ambient` is a render setting (0.25 by default). Lighting is two-sided; back faces (clockwise in
+the image) are culled when `cull_back_faces` is set. The fragment stage calls one shading function
+that shading modes replace.
+
+### Lines
+
+Each segment is an instanced quad expanded in the vertex shader in screen space; the fragment
+shader computes the signed distance to the segment's region and its coverage.
+
+- **Widths** are full widths. A screen width is in pixels and does not change with zoom. A paper
+  width is in paper millimetres: it is multiplied by the plot scale (model units per paper
+  millimetre, a render setting) and converted to pixels through the view, evaluated at the
+  segment's start for perspective views. Widths below one pixel draw one pixel wide; screen widths
+  above `max_line_width_px` are rejected.
+- **Caps** apply to ends that join nothing: round adds a half disk, square extends the segment by
+  half the width.
+- **Joins** apply where two segments of a polyline meet: round adds a disk; miter splits the two
+  segments at the bisector of the corner, which extends their outer edges until they meet; when
+  the miter would reach farther than the miter limit (a multiple of half the width, at least 1,
+  default 4) from the vertex, or for bevel joins, the corner is cut by the line through the two
+  outer corners. A path that reverses direction joins round.
+- **Zero length.** A segment whose ends coincide in the image draws a disk with round caps and an
+  image-aligned square with square caps.
+- **Near plane.** A segment crossing the near plane is clipped in clip space before expansion and
+  its cut end has no cap; a segment entirely behind it draws nothing.
+- **Smoothing.** With `line_smoothing` (the default) coverage falls off over one pixel at the
+  edge and blends with the color's alpha; without it a pixel is covered when its center is inside.
+- Lines are depth-tested against meshes and do not write depth.
+
+### Headless rendering
+
+`Renderer::render_to_image(scene, frame, width, height, settings)` renders the default frame
+(meshes, then lines) into an offscreen `Rgba8UnormSrgb` target and returns an `Image` of rows top
+to bottom, four bytes per pixel, sRGB-encoded with straight alpha. With `sample_count` 4 the
+target is multisampled and resolved; adapters without four-sample support render one sample.
+Readback strips the row padding of the copy. Sides are limited by `max_image_side` and the
+device's texture limit. Results are deterministic for a given adapter.
+
+### Reference images
+
+Reference images live in `crates/arc-gpu/tests/reference/` and are compared only on the pinned
+software adapter, Mesa lavapipe on Vulkan, which the Linux CI job installs. The metric blurs both
+images with a 3×3 box filter and takes the mean and the maximum absolute channel difference
+(0–255); each test states both thresholds. On other adapters each test's analytic checks (colors
+of flat regions, depth order, measured widths, coverage masks, areas) are the assertions. A failed
+comparison writes the rendered and difference images to `target/tmp/arc-gpu-image-diffs/`.
+`ARC_UPDATE_REFERENCES=1 cargo nextest run -p arc-gpu` rewrites the references on the pinned
+adapter; changed references are reviewed in the commit that changes them. The rendering tests fail
+when no adapter is available.
+
+### Error codes
+
+The codes `arc-gpu` owns. A code is never reused for a different meaning; messages are in
+`locales/en-US/arc-gpu.ftl`.
+
+| Code | Category | Raised when |
+|---|---|---|
+| `gpu.adapter.not_found` | `not_found` | No adapter matches the settings, or none is available |
+| `gpu.settings.invalid` | `invalid_input` | A settings value is out of range: a sample count other than 1 or 4, a negative or non-finite ambient term or plot scale, or a limit of zero |
+| `gpu.device.request_failed` | `failed_operation` | The adapter refused to create a device with the required features and limits |
+| `gpu.device.lost` | `failed_operation` | The device was lost or destroyed; the scene and renderer must be recreated on a new device |
+| `gpu.out_of_memory` | `limit_exceeded` | The device ran out of memory while creating a resource or executing work |
+| `gpu.validation` | `internal` | The device reported a validation error: a defect in Arc |
+| `gpu.timeout` | `failed_operation` | A wait for the device exceeded its bound |
+| `gpu.readback.failed` | `failed_operation` | Reading a rendered image back from the device failed |
+| `gpu.limit.exceeded` | `limit_exceeded` | A count or size exceeds the scene limits or the device limits |
+| `gpu.value.not_finite` | `invalid_input` | A coordinate, origin, transform, color or width is NaN or infinite |
+| `gpu.item.invalid` | `invalid_input` | A render item is empty (no instances, no points) or a line width or miter limit is out of range |
+| `gpu.geometry.invalid` | `invalid_input` | A mesh has no triangles |
+| `gpu.geometry.not_found` | `not_found` | An item or call refers to a geometry handle the scene does not hold |
+| `gpu.geometry.in_use` | `conflict` | A geometry is removed while render items still refer to it |
+| `gpu.precision.insufficient` | `failed_operation` | A camera-relative translation or projection cannot be represented in `f32` |

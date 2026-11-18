@@ -68,7 +68,7 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `zip` | Bounded ZIP reading and writing | MIT |
 | `lyon` | Fill tessellation | MIT or Apache-2.0 |
 | `resvg` | Icon and SVG rasterization | Apache-2.0 or MIT |
-| `image` | Image decoding and encoding | MIT or Apache-2.0 |
+| `image` | Image decoding and encoding; in use as a development dependency of `arc-gpu` (PNG reference images, feature `png` only) | MIT or Apache-2.0 |
 | `tiny-skia` | CPU rasterization for plot raster output and reference images | BSD-3-Clause |
 | `cxx` | C++ binding in `arc-brep-occt` | MIT or Apache-2.0 |
 | `egui_table`, `egui_ltreeview`, `egui-snarl` | Bases for virtualized tables, trees and the node editor in `arc-ui` | MIT or Apache-2.0 |
@@ -81,6 +81,7 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `rstar` | R*-tree behind the spatial index of `arc-geom`; no `rstar` type appears in a public signature | MIT or Apache-2.0 |
 | `spade` | Constrained Delaunay triangulation behind the polygon triangulation of `arc-geom`; no `spade` type appears in a public signature | MIT or Apache-2.0 |
 | `toml` | Reading the layer table and manifests in `xtask` | MIT or Apache-2.0 |
+| `wgpu` | The renderer of `arc-gpu`, pinned to one version and re-exported; features: Vulkan, Metal, DirectX 12, OpenGL and WGSL only | MIT or Apache-2.0 |
 
 ## Not built in the first two years
 

@@ -37,6 +37,7 @@ third_party = [
   "fastcdc",
   "fluent-bundle",
   "glam",
+  "image",
   "insta",
   "nalgebra",
   "postcard",
@@ -54,6 +55,7 @@ third_party = [
   "tracing-subscriber",
   "unic-langid",
   "uuid",
+  "wgpu",
 ]
 
 # Crates built for wasm32-unknown-unknown by `cargo xtask wasm`.

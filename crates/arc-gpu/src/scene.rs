@@ -1,0 +1,1046 @@
+//! The retained viewport scene (CORE-GPU-002) on pooled buffers (CORE-GPU-006).
+//!
+//! A [`Scene`] holds render items keyed by [`ItemKey`] (object identifier and sub-item index).
+//! Mesh geometry is uploaded once with [`Scene::add_geometry`] into the vertex and index pools;
+//! items reference it by [`GeometryId`]. [`Scene::update`] replaces the items of the objects it
+//! names and writes only their instance ranges: the bytes of every other item stay untouched on
+//! the GPU. [`Scene::pending_writes`] counts the bytes written since the last frame per
+//! category.
+//!
+//! Instance data is serialized by hand as little-endian bytes; see the layouts in the
+//! specification.
+
+use std::collections::HashMap;
+
+use arc_base::math::Point3;
+use arc_base::{Color, Error, ObjectId, Result};
+use arc_mesh::TriMesh;
+
+use crate::adapter::Gpu;
+use crate::camera::relative_translation;
+use crate::error::codes;
+use crate::pool::{AllocId, Pool, PoolUsage};
+
+/// Bytes per vertex: position and normal, `f32` each.
+pub const VERTEX_STRIDE: u64 = 24;
+/// Bytes per index (`u32`).
+pub const INDEX_STRIDE: u64 = 4;
+/// Bytes per mesh instance.
+pub const MESH_INSTANCE_STRIDE: u64 = 80;
+/// Bytes per line segment instance.
+pub const SEGMENT_STRIDE: u64 = 80;
+/// Bytes per camera-relative translation.
+pub const TRANSLATION_STRIDE: u64 = 12;
+
+/// The limits of a scene. Inputs beyond them fail with `gpu.limit.exceeded`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneLimits {
+    /// Objects with items.
+    pub max_objects: u32,
+    /// Items of one object.
+    pub max_items_per_object: u32,
+    /// Instances of one mesh item.
+    pub max_instances_per_item: u32,
+    /// Segments of one line item, after polylines are split into segments.
+    pub max_segments_per_item: u32,
+    /// Vertices of one geometry.
+    pub max_geometry_vertices: u32,
+    /// Triangles of one geometry.
+    pub max_geometry_triangles: u32,
+    /// Bytes of one pool (vertex, index, mesh instance or line segment).
+    pub max_pool_bytes: u64,
+    /// The largest line width in pixels, after paper widths are converted.
+    pub max_line_width_px: f32,
+    /// The largest side of a rendered image in pixels.
+    pub max_image_side: u32,
+}
+
+impl SceneLimits {
+    /// The default limits.
+    pub const DEFAULT: Self = Self {
+        max_objects: 10_000_000,
+        max_items_per_object: 4096,
+        max_instances_per_item: 1_000_000,
+        max_segments_per_item: 1_000_000,
+        max_geometry_vertices: 16_000_000,
+        max_geometry_triangles: 16_000_000,
+        max_pool_bytes: 1 << 30,
+        max_line_width_px: 256.0,
+        max_image_side: 8192,
+    };
+}
+
+impl Default for SceneLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The key of a render item: the object it came from and its index among that object's items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ItemKey {
+    /// The source object.
+    pub object: ObjectId,
+    /// The index of the item among the object's items.
+    pub sub: u32,
+}
+
+/// The handle of a geometry uploaded to a scene.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GeometryId(u64);
+
+/// One instance of a mesh item.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeshInstance {
+    /// The affine transform from geometry coordinates to offsets from the item origin, as the
+    /// three rows of a 3×4 matrix.
+    pub transform: [[f32; 4]; 3],
+    /// The base color.
+    pub color: Color,
+    /// The material slot.
+    pub material: u32,
+    /// Display flags, reserved for overrides.
+    pub flags: u32,
+}
+
+impl MeshInstance {
+    /// The identity transform.
+    pub const IDENTITY: [[f32; 4]; 3] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ];
+
+    /// An instance at the item origin with the identity transform.
+    #[must_use]
+    pub fn new(color: Color) -> Self {
+        Self {
+            transform: Self::IDENTITY,
+            color,
+            material: 0,
+            flags: 0,
+        }
+    }
+}
+
+/// Instances of one uploaded geometry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeshItem {
+    /// The geometry.
+    pub geometry: GeometryId,
+    /// The model-space point the instance transforms are relative to.
+    pub origin: Point3,
+    /// The instances; at least one.
+    pub instances: Vec<MeshInstance>,
+}
+
+/// The width of a line.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LineWidth {
+    /// A full width in pixels, independent of zoom.
+    Screen(f32),
+    /// A full width in paper millimetres, converted to model units through the plot scale of
+    /// the render settings and to pixels through the view.
+    Paper(f32),
+}
+
+/// The shape of a line end that does not join another segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineCap {
+    /// A half disk.
+    Round,
+    /// A half square: the line extends by half its width.
+    Square,
+}
+
+/// The shape of the corner where two segments of a polyline meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineJoin {
+    /// A disk around the shared vertex.
+    Round,
+    /// The outer edges extended until they meet, or a bevel when the miter is longer than the
+    /// miter limit.
+    Miter,
+    /// The outer corners connected by a straight edge.
+    Bevel,
+}
+
+/// The style of a line item.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LineStyle {
+    /// The width.
+    pub width: LineWidth,
+    /// The caps of free ends.
+    pub cap: LineCap,
+    /// The joins between segments.
+    pub join: LineJoin,
+    /// The longest miter as a multiple of half the width, at least 1.
+    pub miter_limit: f32,
+}
+
+impl LineStyle {
+    /// A style with round caps and joins.
+    #[must_use]
+    pub fn round(width: LineWidth) -> Self {
+        Self {
+            width,
+            cap: LineCap::Round,
+            join: LineJoin::Round,
+            miter_limit: 4.0,
+        }
+    }
+}
+
+/// A polyline of a line item, with points relative to the item origin.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinePath {
+    /// The points; at least one. Consecutive equal points are merged. A path of one point is
+    /// a dot.
+    pub points: Vec<[f32; 3]>,
+    /// Whether the last point connects back to the first.
+    pub closed: bool,
+}
+
+/// Polylines drawn with one style and color.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineItem {
+    /// The model-space point the path points are relative to.
+    pub origin: Point3,
+    /// The polylines; at least one.
+    pub paths: Vec<LinePath>,
+    /// The style.
+    pub style: LineStyle,
+    /// The color; alpha blends.
+    pub color: Color,
+}
+
+/// A render item.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RenderItem {
+    /// Mesh instances.
+    Mesh(MeshItem),
+    /// Lines.
+    Lines(LineItem),
+}
+
+/// Bytes written to GPU buffers per category.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteCounters {
+    /// Vertex data.
+    pub vertex: u64,
+    /// Index data.
+    pub index: u64,
+    /// Mesh instance data.
+    pub mesh_instance: u64,
+    /// Line segment data.
+    pub line_segment: u64,
+    /// Camera-relative translations.
+    pub translation: u64,
+}
+
+/// GPU memory per category.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemoryReport {
+    /// The vertex pool.
+    pub vertex: PoolUsage,
+    /// The index pool.
+    pub index: PoolUsage,
+    /// The mesh instance pool.
+    pub mesh_instance: PoolUsage,
+    /// The line segment pool.
+    pub line_segment: PoolUsage,
+    /// The translation buffers of both instance pools.
+    pub translation: PoolUsage,
+}
+
+impl MemoryReport {
+    /// The sum over all categories.
+    #[must_use]
+    pub fn total(&self) -> PoolUsage {
+        let all = [
+            self.vertex,
+            self.index,
+            self.mesh_instance,
+            self.line_segment,
+            self.translation,
+        ];
+        PoolUsage {
+            capacity_bytes: all.iter().map(|u| u.capacity_bytes).sum(),
+            used_bytes: all.iter().map(|u| u.used_bytes).sum(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GeometryEntry {
+    vertices: AllocId,
+    indices: AllocId,
+    index_count: u32,
+    radius: f64,
+    users: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ItemGpu {
+    Mesh {
+        geometry: GeometryId,
+        instances: AllocId,
+        count: u32,
+    },
+    Lines {
+        segments: AllocId,
+        count: u32,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) struct ItemEntry {
+    pub(crate) gpu: ItemGpu,
+    pub(crate) origin: Point3,
+    pub(crate) radius: f64,
+    translation_dirty: bool,
+}
+
+#[derive(Debug)]
+struct ObjectEntry {
+    slot: u32,
+    items: Vec<ItemEntry>,
+}
+
+/// A retained viewport scene on one device.
+#[derive(Debug)]
+pub struct Scene {
+    gpu: Gpu,
+    limits: SceneLimits,
+    vertices: Pool,
+    indices: Pool,
+    mesh_instances: Pool,
+    segments: Pool,
+    geometries: HashMap<GeometryId, GeometryEntry>,
+    next_geometry: u64,
+    objects: HashMap<ObjectId, ObjectEntry>,
+    free_slots: Vec<u32>,
+    next_slot: u32,
+    pending: WriteCounters,
+    last_frame: WriteCounters,
+    last_eye: Option<Point3>,
+    all_translations_dirty: bool,
+}
+
+fn put_f32(out: &mut Vec<u8>, values: &[f32]) {
+    for v in values {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+}
+
+fn put_u32(out: &mut Vec<u8>, values: &[u32]) {
+    for v in values {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+}
+
+fn finite(values: &[f32]) -> Result<()> {
+    if values.iter().all(|v| v.is_finite()) {
+        Ok(())
+    } else {
+        Err(Error::new(codes::VALUE_NOT_FINITE))
+    }
+}
+
+fn finite_point(p: &Point3) -> Result<()> {
+    if p.iter().all(|v| v.is_finite()) {
+        Ok(())
+    } else {
+        Err(Error::new(codes::VALUE_NOT_FINITE))
+    }
+}
+
+fn limit(detail: &'static str) -> Error {
+    Error::new(codes::LIMIT_EXCEEDED).with_detail("limit", detail)
+}
+
+fn color_array(c: Color) -> [f32; 4] {
+    [c.r, c.g, c.b, c.a]
+}
+
+fn length3(v: [f32; 3]) -> f64 {
+    let [x, y, z] = v.map(f64::from);
+    x.hypot(y).hypot(z)
+}
+
+/// The style bits of a segment: bit 0 square cap; bits 1–2 join (0 round, 1 miter, 2 bevel);
+/// bit 3 has a previous segment; bit 4 has a next segment; bit 5 paper width.
+fn style_bits(style: &LineStyle, prev: bool, next: bool) -> u32 {
+    let mut bits = u32::from(style.cap == LineCap::Square);
+    bits |= match style.join {
+        LineJoin::Round => 0,
+        LineJoin::Miter => 1,
+        LineJoin::Bevel => 2,
+    } << 1;
+    bits |= u32::from(prev) << 3;
+    bits |= u32::from(next) << 4;
+    bits |= u32::from(matches!(style.width, LineWidth::Paper(_))) << 5;
+    bits
+}
+
+/// The segments of a line item as instance bytes, and their count and bounding radius.
+fn encode_lines(item: &LineItem, limits: &SceneLimits, slot: u32) -> Result<(Vec<u8>, u32, f64)> {
+    let style = &item.style;
+    let width = match style.width {
+        LineWidth::Screen(w) | LineWidth::Paper(w) => w,
+    };
+    finite(&[width, style.miter_limit])?;
+    finite(&color_array(item.color))?;
+    if !(width > 0.0 && style.miter_limit >= 1.0) || item.paths.is_empty() {
+        return Err(Error::new(codes::ITEM_INVALID));
+    }
+    if matches!(style.width, LineWidth::Screen(w) if w > limits.max_line_width_px) {
+        return Err(limit("max_line_width_px"));
+    }
+    let max = limits.max_segments_per_item;
+    let mut bytes = Vec::new();
+    let mut count: u32 = 0;
+    let mut radius: f64 = 0.0;
+    for path in &item.paths {
+        let mut points: Vec<[f32; 3]> = Vec::with_capacity(path.points.len());
+        for p in &path.points {
+            finite(p)?;
+            if points.last() != Some(p) {
+                points.push(*p);
+            }
+            radius = radius.max(length3(*p));
+        }
+        if path.closed && points.len() > 2 && points.first() == points.last() {
+            points.pop();
+        }
+        let n = points.len();
+        if n == 0 {
+            return Err(Error::new(codes::ITEM_INVALID));
+        }
+        let closed = path.closed && n > 2;
+        let segment_count = match n {
+            1 => 1,
+            _ if closed => n,
+            _ => n - 1,
+        };
+        let at = |i: usize| points.get(i % n).copied().unwrap_or_default();
+        for i in 0..segment_count {
+            count = count
+                .checked_add(1)
+                .filter(|c| *c <= max)
+                .ok_or_else(|| limit("max_segments_per_item"))?;
+            let a = at(i);
+            let b = if n == 1 { a } else { at(i + 1) };
+            let has_prev = closed || i > 0;
+            let has_next = closed || i + 2 < n;
+            let prev = if has_prev { at(i + n - 1) } else { a };
+            let next = if has_next { at(i + 2) } else { b };
+            put_f32(&mut bytes, &a);
+            put_f32(&mut bytes, &b);
+            put_f32(&mut bytes, &prev);
+            put_f32(&mut bytes, &next);
+            put_f32(&mut bytes, &color_array(item.color));
+            put_f32(&mut bytes, &[width, style.miter_limit]);
+            put_u32(&mut bytes, &[style_bits(style, has_prev, has_next), slot]);
+        }
+    }
+    Ok((bytes, count, radius))
+}
+
+impl Scene {
+    /// Creates an empty scene on `gpu`.
+    ///
+    /// # Errors
+    ///
+    /// `gpu.settings.invalid` when a limit is zero or the line width limit is not positive;
+    /// device errors from buffer creation.
+    pub fn new(gpu: &Gpu, limits: SceneLimits) -> Result<Self> {
+        let counts = [
+            limits.max_objects,
+            limits.max_items_per_object,
+            limits.max_instances_per_item,
+            limits.max_segments_per_item,
+            limits.max_geometry_vertices,
+            limits.max_geometry_triangles,
+            limits.max_image_side,
+        ];
+        if counts.contains(&0)
+            || limits.max_pool_bytes < 1024
+            || !(limits.max_line_width_px >= 1.0 && limits.max_line_width_px.is_finite())
+        {
+            return Err(Error::new(codes::SETTINGS_INVALID));
+        }
+        let device = gpu.device();
+        let max_bytes = limits.max_pool_bytes.min(device.limits().max_buffer_size);
+        let vertex = wgpu::BufferUsages::VERTEX;
+        gpu.scoped(|| {
+            Ok(Self {
+                gpu: gpu.clone(),
+                limits,
+                vertices: Pool::new(
+                    device,
+                    "arc-gpu vertices",
+                    vertex,
+                    VERTEX_STRIDE,
+                    0,
+                    max_bytes,
+                ),
+                indices: Pool::new(
+                    device,
+                    "arc-gpu indices",
+                    wgpu::BufferUsages::INDEX,
+                    INDEX_STRIDE,
+                    0,
+                    max_bytes,
+                ),
+                mesh_instances: Pool::new(
+                    device,
+                    "arc-gpu mesh instances",
+                    vertex,
+                    MESH_INSTANCE_STRIDE,
+                    TRANSLATION_STRIDE,
+                    max_bytes,
+                ),
+                segments: Pool::new(
+                    device,
+                    "arc-gpu line segments",
+                    vertex,
+                    SEGMENT_STRIDE,
+                    TRANSLATION_STRIDE,
+                    max_bytes,
+                ),
+                geometries: HashMap::new(),
+                next_geometry: 0,
+                objects: HashMap::new(),
+                free_slots: Vec::new(),
+                next_slot: 0,
+                pending: WriteCounters::default(),
+                last_frame: WriteCounters::default(),
+                last_eye: None,
+                all_translations_dirty: true,
+            })
+        })
+    }
+
+    /// The device of the scene.
+    #[must_use]
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
+    }
+
+    /// The limits of the scene.
+    #[must_use]
+    pub fn limits(&self) -> &SceneLimits {
+        &self.limits
+    }
+
+    /// Uploads a mesh with its positions relative to `origin` (see
+    /// [`TriMesh::gpu_positions`]); items place the point `origin` at their own origin. The
+    /// mesh normals are used when present; otherwise shading uses the face normal.
+    ///
+    /// # Errors
+    ///
+    /// `gpu.geometry.invalid` for a mesh without triangles; `gpu.limit.exceeded` beyond the
+    /// limits; `gpu.value.not_finite` and `gpu.precision.insufficient` for an origin that is
+    /// not finite or too far from the positions; device errors.
+    pub fn add_geometry(&mut self, mesh: &TriMesh, origin: &Point3) -> Result<GeometryId> {
+        finite_point(origin)?;
+        if mesh.triangle_count() == 0 {
+            return Err(Error::new(codes::GEOMETRY_INVALID));
+        }
+        let vertex_count = u32::try_from(mesh.vertex_count())
+            .ok()
+            .filter(|n| *n <= self.limits.max_geometry_vertices)
+            .ok_or_else(|| limit("max_geometry_vertices"))?;
+        let triangle_count = u32::try_from(mesh.triangle_count())
+            .ok()
+            .filter(|n| *n <= self.limits.max_geometry_triangles)
+            .ok_or_else(|| limit("max_geometry_triangles"))?;
+        let positions = mesh
+            .gpu_positions(origin)
+            .map_err(|_| Error::new(codes::PRECISION_INSUFFICIENT))?;
+        let normals = mesh.normals();
+        let mut vertex_bytes = Vec::with_capacity(positions.len() * 24);
+        let mut radius: f64 = 0.0;
+        for (i, p) in positions.iter().enumerate() {
+            put_f32(&mut vertex_bytes, &p.to_array());
+            let n = normals.and_then(|n| n.get(i)).copied().unwrap_or([0.0; 3]);
+            put_f32(&mut vertex_bytes, &n);
+            radius = radius.max(length3(p.to_array()));
+        }
+        let mut index_bytes = Vec::with_capacity(mesh.triangle_count() * 12);
+        for t in mesh.triangles() {
+            put_u32(&mut index_bytes, t);
+        }
+        let index_count = triangle_count * 3;
+        let (device, queue) = (self.gpu.device().clone(), self.gpu.queue().clone());
+        let gpu = self.gpu.clone();
+        let (vertices, indices) = gpu.scoped(|| {
+            let (vertices, _) =
+                self.vertices
+                    .insert(&device, &queue, u64::from(vertex_count), &vertex_bytes)?;
+            match self
+                .indices
+                .insert(&device, &queue, u64::from(index_count), &index_bytes)
+            {
+                Ok((indices, _)) => Ok((vertices, indices)),
+                Err(e) => {
+                    self.vertices.free(vertices);
+                    Err(e)
+                }
+            }
+        })?;
+        self.pending.vertex += vertex_bytes.len() as u64;
+        self.pending.index += index_bytes.len() as u64;
+        let id = GeometryId(self.next_geometry);
+        self.next_geometry += 1;
+        self.geometries.insert(
+            id,
+            GeometryEntry {
+                vertices,
+                indices,
+                index_count,
+                radius,
+                users: 0,
+            },
+        );
+        Ok(id)
+    }
+
+    /// Removes a geometry no item uses.
+    ///
+    /// # Errors
+    ///
+    /// `gpu.geometry.not_found` for an unknown handle; `gpu.geometry.in_use` while items use it.
+    pub fn remove_geometry(&mut self, id: GeometryId) -> Result<()> {
+        match self.geometries.get(&id) {
+            None => Err(Error::new(codes::GEOMETRY_NOT_FOUND)),
+            Some(g) if g.users > 0 => Err(Error::new(codes::GEOMETRY_IN_USE)),
+            Some(_) => {
+                if let Some(g) = self.geometries.remove(&id) {
+                    self.vertices.free(g.vertices);
+                    self.indices.free(g.indices);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Replaces the items of each named object with the given items; an empty list removes
+    /// the object. Items of objects that are not named are not touched. Each item's index in
+    /// its list is its [`ItemKey::sub`].
+    ///
+    /// Every object's items are validated before any change is applied. A device error while
+    /// writing leaves the objects processed before it updated and the failing object without
+    /// items; the scene is derived data and the caller re-extracts it.
+    ///
+    /// # Errors
+    ///
+    /// `gpu.value.not_finite`, `gpu.item.invalid`, `gpu.geometry.not_found` and
+    /// `gpu.limit.exceeded` for invalid items; device errors.
+    pub fn update(&mut self, changes: Vec<(ObjectId, Vec<RenderItem>)>) -> Result<()> {
+        self.validate(&changes)?;
+        let gpu = self.gpu.clone();
+        gpu.scoped(|| {
+            for (object, items) in changes {
+                self.remove_object(object);
+                if !items.is_empty()
+                    && let Err(error) = self.insert_object(object, &items)
+                {
+                    self.remove_object(object);
+                    return Err(error);
+                }
+            }
+            if self.mesh_instances.wants_compaction() {
+                self.mesh_instances.compact(gpu.device(), gpu.queue());
+                self.all_translations_dirty = true;
+            }
+            if self.segments.wants_compaction() {
+                self.segments.compact(gpu.device(), gpu.queue());
+                self.all_translations_dirty = true;
+            }
+            for pool in [&mut self.vertices, &mut self.indices] {
+                if pool.wants_compaction() {
+                    pool.compact(gpu.device(), gpu.queue());
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn validate(&self, changes: &[(ObjectId, Vec<RenderItem>)]) -> Result<()> {
+        let added = changes
+            .iter()
+            .filter(|(o, i)| !i.is_empty() && !self.objects.contains_key(o));
+        if self.objects.len().saturating_add(added.count())
+            > usize::try_from(self.limits.max_objects).unwrap_or(usize::MAX)
+        {
+            return Err(limit("max_objects"));
+        }
+        for (_, items) in changes {
+            if items.len() > usize::try_from(self.limits.max_items_per_object).unwrap_or(usize::MAX)
+            {
+                return Err(limit("max_items_per_object"));
+            }
+            for item in items {
+                match item {
+                    RenderItem::Mesh(mesh) => {
+                        finite_point(&mesh.origin)?;
+                        if !self.geometries.contains_key(&mesh.geometry) {
+                            return Err(Error::new(codes::GEOMETRY_NOT_FOUND));
+                        }
+                        if mesh.instances.is_empty() {
+                            return Err(Error::new(codes::ITEM_INVALID));
+                        }
+                        if mesh.instances.len()
+                            > usize::try_from(self.limits.max_instances_per_item)
+                                .unwrap_or(usize::MAX)
+                        {
+                            return Err(limit("max_instances_per_item"));
+                        }
+                        for i in &mesh.instances {
+                            finite(i.transform.as_flattened())?;
+                            finite(&color_array(i.color))?;
+                        }
+                    }
+                    RenderItem::Lines(lines) => {
+                        finite_point(&lines.origin)?;
+                        encode_lines(lines, &self.limits, 0)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_object(&mut self, object: ObjectId) {
+        let Some(entry) = self.objects.remove(&object) else {
+            return;
+        };
+        for item in entry.items {
+            match item.gpu {
+                ItemGpu::Mesh {
+                    geometry,
+                    instances,
+                    ..
+                } => {
+                    self.mesh_instances.free(instances);
+                    if let Some(g) = self.geometries.get_mut(&geometry) {
+                        g.users = g.users.saturating_sub(1);
+                    }
+                }
+                ItemGpu::Lines { segments, .. } => self.segments.free(segments),
+            }
+        }
+        self.free_slots.push(entry.slot);
+    }
+
+    fn insert_object(&mut self, object: ObjectId, items: &[RenderItem]) -> Result<()> {
+        let slot = self.free_slots.pop().unwrap_or_else(|| {
+            self.next_slot += 1;
+            self.next_slot - 1
+        });
+        // Registered first so a failure below still releases what was allocated.
+        self.objects.insert(
+            object,
+            ObjectEntry {
+                slot,
+                items: Vec::new(),
+            },
+        );
+        let (device, queue) = (self.gpu.device().clone(), self.gpu.queue().clone());
+        for item in items {
+            let entry = match item {
+                RenderItem::Mesh(mesh) => {
+                    let geometry_radius = self
+                        .geometries
+                        .get(&mesh.geometry)
+                        .map_or(0.0, |g| g.radius);
+                    let mut bytes = Vec::with_capacity(mesh.instances.len() * 80);
+                    let mut radius: f64 = 0.0;
+                    for i in &mesh.instances {
+                        put_f32(&mut bytes, i.transform.as_flattened());
+                        put_f32(&mut bytes, &color_array(i.color));
+                        put_u32(&mut bytes, &[i.material, i.flags, slot, 0]);
+                        let [r0, r1, r2] = i.transform;
+                        let column = |c: usize| {
+                            length3(
+                                [r0.get(c), r1.get(c), r2.get(c)]
+                                    .map(|v| v.copied().unwrap_or(0.0)),
+                            )
+                        };
+                        let scale = column(0).max(column(1)).max(column(2));
+                        radius = radius.max(column(3) + scale * geometry_radius);
+                    }
+                    let count = u32::try_from(mesh.instances.len())
+                        .map_err(|_| limit("max_instances_per_item"))?;
+                    let (instances, moved) =
+                        self.mesh_instances
+                            .insert(&device, &queue, u64::from(count), &bytes)?;
+                    self.all_translations_dirty |= moved;
+                    self.pending.mesh_instance += bytes.len() as u64;
+                    if let Some(g) = self.geometries.get_mut(&mesh.geometry) {
+                        g.users += 1;
+                    }
+                    ItemEntry {
+                        gpu: ItemGpu::Mesh {
+                            geometry: mesh.geometry,
+                            instances,
+                            count,
+                        },
+                        origin: mesh.origin,
+                        radius,
+                        translation_dirty: true,
+                    }
+                }
+                RenderItem::Lines(lines) => {
+                    let (bytes, count, radius) = encode_lines(lines, &self.limits, slot)?;
+                    let (segments, moved) =
+                        self.segments
+                            .insert(&device, &queue, u64::from(count), &bytes)?;
+                    self.all_translations_dirty |= moved;
+                    self.pending.line_segment += bytes.len() as u64;
+                    ItemEntry {
+                        gpu: ItemGpu::Lines { segments, count },
+                        origin: lines.origin,
+                        radius,
+                        translation_dirty: true,
+                    }
+                }
+            };
+            if let Some(o) = self.objects.get_mut(&object) {
+                o.items.push(entry);
+            }
+        }
+        Ok(())
+    }
+
+    /// Compacts every pool now, regardless of the compaction rule.
+    ///
+    /// # Errors
+    ///
+    /// Device errors.
+    pub fn compact(&mut self) -> Result<()> {
+        let gpu = self.gpu.clone();
+        gpu.scoped(|| {
+            for pool in [
+                &mut self.vertices,
+                &mut self.indices,
+                &mut self.mesh_instances,
+                &mut self.segments,
+            ] {
+                pool.compact(gpu.device(), gpu.queue());
+            }
+            self.all_translations_dirty = true;
+            Ok(())
+        })
+    }
+
+    /// The keys of all items, sorted.
+    #[must_use]
+    pub fn keys(&self) -> Vec<ItemKey> {
+        let mut keys: Vec<ItemKey> = self
+            .objects
+            .iter()
+            .flat_map(|(object, entry)| {
+                (0..entry.items.len()).map(move |i| ItemKey {
+                    object: *object,
+                    sub: u32::try_from(i).unwrap_or(u32::MAX),
+                })
+            })
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// The bytes written since the last frame, per category.
+    #[must_use]
+    pub fn pending_writes(&self) -> WriteCounters {
+        self.pending
+    }
+
+    /// The bytes written for the last rendered frame: the writes pending when it started plus
+    /// its translations.
+    #[must_use]
+    pub fn last_frame_writes(&self) -> WriteCounters {
+        self.last_frame
+    }
+
+    /// GPU memory per category.
+    #[must_use]
+    pub fn memory(&self) -> MemoryReport {
+        let a = self.mesh_instances.companion_usage();
+        let b = self.segments.companion_usage();
+        MemoryReport {
+            vertex: self.vertices.usage(),
+            index: self.indices.usage(),
+            mesh_instance: self.mesh_instances.usage(),
+            line_segment: self.segments.usage(),
+            translation: PoolUsage {
+                capacity_bytes: a.capacity_bytes + b.capacity_bytes,
+                used_bytes: a.used_bytes + b.used_bytes,
+            },
+        }
+    }
+
+    /// Writes the camera-relative translations for `eye`: all of them when the eye moved or
+    /// buffers were relocated, otherwise only those of changed items. Ends the frame's write
+    /// accounting.
+    pub(crate) fn prepare_frame(&mut self, eye: &Point3) -> Result<()> {
+        let all = self.all_translations_dirty || self.last_eye != Some(*eye);
+        let queue = self.gpu.queue().clone();
+        let mut written = 0;
+        for entry in self.objects.values_mut() {
+            for item in &mut entry.items {
+                if !(all || item.translation_dirty) {
+                    continue;
+                }
+                let t = relative_translation(&item.origin, eye)?;
+                let (pool, id, count) = match item.gpu {
+                    ItemGpu::Mesh {
+                        instances, count, ..
+                    } => (&self.mesh_instances, instances, count),
+                    ItemGpu::Lines { segments, count } => (&self.segments, segments, count),
+                };
+                let mut bytes = Vec::with_capacity(usize::try_from(count).unwrap_or(0) * 12);
+                for _ in 0..count {
+                    put_f32(&mut bytes, &t);
+                }
+                pool.write_companion(&queue, id, &bytes);
+                written += bytes.len() as u64;
+                item.translation_dirty = false;
+            }
+        }
+        self.all_translations_dirty = false;
+        self.last_eye = Some(*eye);
+        self.pending.translation += written;
+        self.last_frame = std::mem::take(&mut self.pending);
+        Ok(())
+    }
+
+    /// The items, for drawing and bounds.
+    pub(crate) fn items(&self) -> impl Iterator<Item = &ItemEntry> {
+        self.objects.values().flat_map(|o| o.items.iter())
+    }
+
+    /// The vertex, index and index-count data of a geometry: `(first vertex, first index,
+    /// index count)`.
+    pub(crate) fn geometry_ranges(&self, id: GeometryId) -> Option<(u64, u64, u32)> {
+        let g = self.geometries.get(&id)?;
+        Some((
+            self.vertices.range(g.vertices)?.start,
+            self.indices.range(g.indices)?.start,
+            g.index_count,
+        ))
+    }
+
+    pub(crate) fn instance_range(&self, gpu: ItemGpu) -> Option<std::ops::Range<u64>> {
+        match gpu {
+            ItemGpu::Mesh { instances, .. } => self.mesh_instances.range(instances),
+            ItemGpu::Lines { segments, .. } => self.segments.range(segments),
+        }
+    }
+
+    pub(crate) fn buffers(&self) -> SceneBuffers<'_> {
+        SceneBuffers {
+            vertices: self.vertices.buffer(),
+            indices: self.indices.buffer(),
+            mesh_instances: self.mesh_instances.buffer(),
+            mesh_translations: self.mesh_instances.companion(),
+            segments: self.segments.buffer(),
+            segment_translations: self.segments.companion(),
+        }
+    }
+}
+
+pub(crate) struct SceneBuffers<'a> {
+    pub(crate) vertices: &'a wgpu::Buffer,
+    pub(crate) indices: &'a wgpu::Buffer,
+    pub(crate) mesh_instances: &'a wgpu::Buffer,
+    pub(crate) mesh_translations: Option<&'a wgpu::Buffer>,
+    pub(crate) segments: &'a wgpu::Buffer,
+    pub(crate) segment_translations: Option<&'a wgpu::Buffer>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(paths: Vec<LinePath>) -> LineItem {
+        LineItem {
+            origin: Point3::origin(),
+            paths,
+            style: LineStyle::round(LineWidth::Screen(2.0)),
+            color: Color::WHITE,
+        }
+    }
+
+    #[test]
+    fn polylines_split_into_segments_with_neighbors() {
+        let open = LinePath {
+            points: vec![[0.0; 3], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+            closed: false,
+        };
+        let (bytes, count, _) = encode_lines(&item(vec![open]), &SceneLimits::DEFAULT, 7).unwrap();
+        assert_eq!(count, 2, "the repeated point is merged");
+        assert_eq!(bytes.len(), 160);
+        let bits = |segment: usize| {
+            let at = segment * 80 + 72;
+            u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+        };
+        assert_eq!(bits(0) & 0b11000, 0b10000, "first: next only");
+        assert_eq!(bits(1) & 0b11000, 0b01000, "last: previous only");
+        let closed = LinePath {
+            points: vec![[0.0; 3], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0; 3]],
+            closed: true,
+        };
+        let (_, count, _) = encode_lines(&item(vec![closed]), &SceneLimits::DEFAULT, 0).unwrap();
+        assert_eq!(count, 3, "a repeated closing point is dropped");
+        let dot = LinePath {
+            points: vec![[2.0; 3]],
+            closed: false,
+        };
+        let (_, count, radius) = encode_lines(&item(vec![dot]), &SceneLimits::DEFAULT, 0).unwrap();
+        assert_eq!(count, 1);
+        assert!((radius - 12_f64.sqrt()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn invalid_lines_are_rejected() {
+        let path = || LinePath {
+            points: vec![[0.0; 3], [1.0, 0.0, 0.0]],
+            closed: false,
+        };
+        let code = |i: LineItem| {
+            encode_lines(&i, &SceneLimits::DEFAULT, 0)
+                .unwrap_err()
+                .code()
+        };
+        assert_eq!(code(item(vec![])), "gpu.item.invalid");
+        assert_eq!(
+            code(item(vec![LinePath {
+                points: vec![],
+                closed: false
+            }])),
+            "gpu.item.invalid"
+        );
+        let mut wide = item(vec![path()]);
+        wide.style.width = LineWidth::Screen(1000.0);
+        assert_eq!(code(wide), "gpu.limit.exceeded");
+        let mut zero = item(vec![path()]);
+        zero.style.width = LineWidth::Paper(0.0);
+        assert_eq!(code(zero), "gpu.item.invalid");
+        let mut nan = item(vec![path()]);
+        nan.paths[0].points[1][2] = f32::NAN;
+        assert_eq!(code(nan), "gpu.value.not_finite");
+        let limits = SceneLimits {
+            max_segments_per_item: 1,
+            ..SceneLimits::DEFAULT
+        };
+        let two = item(vec![path(), path()]);
+        assert_eq!(
+            encode_lines(&two, &limits, 0).unwrap_err().code(),
+            "gpu.limit.exceeded"
+        );
+    }
+}

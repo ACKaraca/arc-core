@@ -22,6 +22,7 @@ arc-mesh = { path = "crates/arc-mesh" }
 arc-solve = { path = "crates/arc-solve" }
 arc-command = { path = "crates/arc-command" }
 arc-app = { path = "crates/arc-app" }
+arc-gpu = { path = "crates/arc-gpu" }
 
 # Lock-free publication of document snapshots in `arc-doc`; the optional `serde` feature stays off.
 arc-swap = { version = "1.9.5", default-features = false }
@@ -34,6 +35,8 @@ fastcdc = { version = "5.0.0", default-features = false }
 # Message formatting for the localization of `arc-app`; default features stay off.
 fluent-bundle = { version = "0.16.0", default-features = false }
 glam = "0.34"
+# PNG encoding and decoding of reference images in the `arc-gpu` tests; every other format stays off.
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 # Snapshot tests only; default features (terminal colors) stay off.
 insta = { version = "1.49", default-features = false }
 nalgebra = { version = "0.35", default-features = false, features = ["std", "serde-serialize"] }
@@ -63,6 +66,9 @@ tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "fmt", "registry"] }
 # Locale identifiers in `arc-app`; the macro crate and the likely-subtags data stay off.
 unic-langid = { version = "0.9.6", default-features = false }
+# The renderer of `arc-gpu`: Vulkan, Metal and DirectX 12, the OpenGL fallback and WGSL only; no
+# browser, shader-translation or tracing features. Pinned because products use the re-export.
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "wgsl", "vulkan", "metal", "dx12", "gles"] }
 uuid = { version = "1.29", default-features = false, features = ["std", "serde"] }
 
 # The suite lint table (arc-suite docs/engineering/coding-standards.md). Every crate inherits it
