@@ -108,10 +108,10 @@ automatically, and a regression beyond a budget blocks release.
 The single gate command is **`cargo xtask ci`**. It runs, in order:
 
 1. `cargo fmt --all --check`
-2. `cargo clippy --workspace --all-targets -- -D warnings`
+2. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 3. `cargo xtask layers`
 4. `cargo xtask wasm`
-5. `cargo nextest run --workspace` (unit, integration, property, snapshot, UI snapshot and image
+5. `cargo nextest run --workspace --all-features` (unit, integration, property, snapshot, UI snapshot and image
    tests on the software adapter, package compatibility, guard and panic-hunt tests), then
    `cargo test --workspace --doc` for the documentation tests
 6. Feature matrix builds: for each crate that declares features, `cargo check` without default

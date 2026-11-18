@@ -36,8 +36,8 @@ The toolchain is pinned in `rust-toolchain.toml`; the gate also needs `cargo-nex
 `cargo-deny` and `cargo-audit`.
 
 - `cargo fmt --all --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo nextest run --workspace` (`cargo test --workspace --doc` for documentation tests)
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo nextest run --workspace --all-features` (`cargo test --workspace --doc` for documentation tests)
 - `cargo xtask layers`
 - `cargo xtask wasm`
 - `cargo xtask features`, `cargo xtask catalogs` and `cargo xtask schemas` (single gates of `ci`)

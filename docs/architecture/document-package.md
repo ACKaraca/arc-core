@@ -65,6 +65,139 @@ CREATE TABLE arc_object (
 ) WITHOUT ROWID;
 ```
 
+### Format 1.0 schema
+
+A package of format 1.0 is created by exactly these statements, in this order; `sqlite_master`
+holds them verbatim (a test compares it with this block). SQLite adds one automatic index for
+`arc_journal.txn_id`. A reader checks that every table exists with at least these columns;
+tables and appended columns of a newer minor version and `arc_ext_` tables are allowed.
+
+```sql
+CREATE TABLE arc_meta (
+  key TEXT PRIMARY KEY NOT NULL,
+  value
+) WITHOUT ROWID;
+CREATE TABLE arc_type (
+  type_key TEXT NOT NULL,
+  major INTEGER NOT NULL,
+  minor INTEGER NOT NULL,
+  descriptor TEXT NOT NULL,
+  PRIMARY KEY (type_key, major, minor)
+) WITHOUT ROWID;
+CREATE TABLE arc_object (
+  id BLOB PRIMARY KEY NOT NULL,
+  type_key TEXT NOT NULL,
+  schema_major INTEGER NOT NULL,
+  schema_minor INTEGER NOT NULL,
+  owner BLOB,
+  name TEXT,
+  partition TEXT,
+  flags INTEGER NOT NULL,
+  encoding INTEGER NOT NULL,
+  payload BLOB NOT NULL,
+  payload_hash BLOB NOT NULL,
+  last_txn BLOB NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE arc_property (
+  object BLOB NOT NULL,
+  key TEXT NOT NULL,
+  value,
+  unit TEXT,
+  PRIMARY KEY (object, key)
+) WITHOUT ROWID;
+CREATE TABLE arc_reference (
+  source BLOB NOT NULL,
+  field TEXT NOT NULL,
+  target BLOB NOT NULL,
+  target_link BLOB,
+  rule TEXT NOT NULL,
+  PRIMARY KEY (source, field, target)
+) WITHOUT ROWID;
+CREATE TABLE arc_source_map (
+  object BLOB NOT NULL,
+  source_format TEXT NOT NULL,
+  source_document TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  PRIMARY KEY (source_format, source_document, source_id)
+) WITHOUT ROWID;
+CREATE TABLE arc_journal (
+  seq INTEGER PRIMARY KEY,
+  txn_id BLOB NOT NULL UNIQUE,
+  record BLOB NOT NULL
+);
+CREATE TABLE arc_asset (
+  hash BLOB PRIMARY KEY NOT NULL,
+  media_type TEXT NOT NULL,
+  byte_length INTEGER NOT NULL,
+  chunked INTEGER NOT NULL,
+  encoding INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE arc_asset_chunk (
+  asset BLOB NOT NULL,
+  ordinal INTEGER NOT NULL,
+  chunk BLOB NOT NULL,
+  PRIMARY KEY (asset, ordinal)
+) WITHOUT ROWID;
+CREATE TABLE arc_chunk (
+  hash BLOB PRIMARY KEY NOT NULL,
+  encoding INTEGER NOT NULL,
+  bytes BLOB NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE arc_preview (
+  kind TEXT PRIMARY KEY NOT NULL,
+  media_type TEXT NOT NULL,
+  width INTEGER NOT NULL,
+  height INTEGER NOT NULL,
+  bytes BLOB NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE arc_foreign (
+  id INTEGER PRIMARY KEY,
+  source_format TEXT NOT NULL,
+  source_version TEXT,
+  source_id TEXT,
+  object BLOB,
+  record_kind TEXT NOT NULL,
+  data BLOB NOT NULL,
+  asset BLOB
+);
+CREATE TABLE arc_diagnostic (
+  id INTEGER PRIMARY KEY,
+  severity TEXT NOT NULL,
+  code TEXT NOT NULL,
+  object BLOB,
+  origin TEXT NOT NULL,
+  arguments TEXT NOT NULL
+);
+CREATE INDEX arc_object_type_key ON arc_object (type_key);
+CREATE INDEX arc_reference_target ON arc_reference (target);
+CREATE INDEX arc_asset_chunk_chunk ON arc_asset_chunk (chunk);
+```
+
+- **Header and pragmas.** `page_size` 4,096, `encoding` UTF-8, `application_id` 1,095,910,193
+  (`0x41524331`), `user_version` the format major version, no `auto_vacuum`. The journal mode at
+  rest is `DELETE`, SQLite's default, which is not stored in the file; a reader opens the file
+  read-only, with `trusted_schema` off and `cell_size_check` on.
+- **`arc_meta`.** Keys and values: `format_version` (text `1.0`), `document_id` (text, the
+  hyphenated lowercase UUID), `created_by` and `saved_by` (text, application and version),
+  `units`, `coordinate_reference` and `history_retention` (text), `save_counter` (integer, the
+  number of saves; each save writes the next one), `partitions` (text, a JSON array of strings;
+  absent when empty) and `thumbnail` (text `none` when the last save wrote no thumbnail; absent
+  otherwise). Absent keys mean "not set". Other keys are kept unchanged by every save.
+- **Derived indexes.** `arc_reference` holds one row per reference of every object: `field` is
+  the field path, `(owner)` for the header owner; `rule` is a JSON object with `strength`,
+  `on_delete` and `on_copy`; `target_link` is NULL for references within the document. Of a
+  preserved or quarantined object only the owner is indexed. `arc_property` holds one row per
+  indexed field with a scalar value (truth value and enum code as integer, integer, real,
+  text; a quantity as real in SI base units with `unit` the JSON array of its nine dimension
+  exponents); `key` is the field name.
+- **`arc_preview`.** `media_type` is `image/png`; `width` and `height` are the image's size in
+  pixels and equal its `IHDR` header; `thumbnail` is 256 × 256, `preview` has a longest side of
+  1,024 and `sheet:<id>` (an identifier of 1 to 256 bytes without control characters) a longest
+  side of at most 1,024; each image is at most 16 MiB.
+- **`arc_diagnostic`.** `severity` (`error`, `warning`), `code` (a stable error code), `object`
+  (16 identifier bytes or NULL), `origin` (`validator`, `node`, `load`) and `arguments` (a JSON
+  object).
+
 ## Payload encoding
 
 - Object payloads, journal operations and preserved foreign records are encoded with `postcard`
@@ -166,6 +299,19 @@ Saving runs on the storage thread from a snapshot, so editing continues during a
 reports progress and can be cancelled before the final commit or rename; cancellation leaves the
 file untouched.
 
+The full rewrite in detail: the temporary file is `~<file name>.<process id>-<n>.tmp` beside the
+target, created exclusively. The summary is the BLAKE3 hash over every `arc_object` row in
+identifier order (length and bytes of the identifier, length and bytes of `payload_hash`, the
+BLAKE3 hash of `payload`), compared with the rows the save meant to write, together with the
+object and type row counts and the header. The temporary file is flushed (`fsync` or its
+platform equivalent) and renamed over the target; on Unix the directory is flushed afterwards. A
+failure or cancellation before the rename removes the temporary file and leaves the target
+unchanged; a process killed during a save can leave a temporary file behind, never a changed
+target. On Windows the rename replaces an existing target as the platform's file replacement
+does: atomic on a local NTFS volume, and refused while another process keeps the target open
+without delete sharing. `payload_hash` is the 32-byte BLAKE3 hash of the payload as written for
+encoding 0.
+
 ## File locking
 
 Opening a package for editing takes an **edit lock**:
@@ -177,6 +323,13 @@ Opening a package for editing takes an **edit lock**:
 - A lock whose host is the local machine and whose process is not running is stale and is taken
   over after the user confirms. A lock from another host is never broken automatically.
 - Read-only opening takes no lock and never writes to the file or its directory.
+- The lock file of format 1 holds one JSON object: `format` (1), `user`, `host`, `pid`,
+  `application` and `time_unix_ms` (milliseconds since the Unix epoch). The holder writes and
+  flushes it, then holds a shared operating-system lock on it, so other processes can still read
+  it. A process is "not running" when another process can take an exclusive lock on the file;
+  the host is "the local machine" when `host` equals the opening application's host name. A lock
+  file that cannot be read or parsed counts as live. Closing the package releases the lock and
+  removes the file.
 - When the package is checked out through Arc Hub, the Hub lock governs editing and the local lock
   only protects against two local processes.
 

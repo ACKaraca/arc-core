@@ -1,0 +1,43 @@
+{
+  "diagnostics": [],
+  "format": "1.0",
+  "held": [],
+  "metadata": {
+    "coordinate_reference": null,
+    "created_by": "arc-doc fixtures 0.1.0",
+    "document_id": "01900000-0000-7000-8000-0000000000ff",
+    "history_retention": "none",
+    "partitions": [
+      "ground"
+    ],
+    "save_counter": 1,
+    "saved_by": "arc-doc fixtures 0.1.0",
+    "thumbnail_missing": true,
+    "units": "m"
+  },
+  "objects": [
+    {
+      "flags": [
+        false,
+        false,
+        false
+      ],
+      "id": "01900000-0000-7000-8000-000000000001",
+      "last_txn": "11111111111111111111111111111111",
+      "name": "point 1",
+      "owner": null,
+      "partition": "ground",
+      "payload": "000000000000f83f000000000000f8bf00",
+      "type": "fx.point",
+      "version": "1.0"
+    }
+  ],
+  "previews": [],
+  "types": [
+    {
+      "descriptor_blake3": "0052ff74745e910d08fac4bad9aa404443a9ce3d3f794d0422d6dc7341b53ad1",
+      "type": "fx.point",
+      "version": "1.0"
+    }
+  ]
+}

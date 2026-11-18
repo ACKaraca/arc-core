@@ -969,6 +969,75 @@ default; run it in a release build) undoes a step of 1,000 single-field modifica
 objects, including the deletion rules, the reference check, publication, the journal record and
 the report to the manager; the worst of 20 rounds measured 3.3 ms on a shared four-core
 development machine, against the budget of 50 ms in [testing.md](../testing.md).
+### Package format, full rewrite, edit locks and previews (CORE-DOC-040, CORE-DOC-044, CORE-DOC-046, CORE-DOC-051)
+
+The module `package` exists with the feature `package`, which is off by default and in the
+WebAssembly build; `rusqlite` (bundled SQLite) and `blake3` are its optional dependencies. The
+file format, including the exact schema of format 1.0, the `arc_meta` keys, the lock file and
+the full-rewrite procedure, is specified in
+[document-package.md](../architecture/document-package.md#format-10-schema). No `rusqlite` type
+appears in a public signature. `Package` keeps no database connection open between calls, so a
+save may replace the file it was opened from on every platform.
+
+- **Open.** `Package::open(path, mode, limits)` reads the 100-byte header with plain file reads:
+  not SQLite or another application id is `doc.package.not_a_package`; a `user_version` above
+  the supported major is `doc.package.newer_format` (arguments `version`, `current`) before
+  SQLite opens the file and before any lock, so the file, its modification time and its
+  directory stay unchanged. SQLite then opens the file read-only with `SQLITE_LIMIT_LENGTH` set
+  to `input_bytes`; `arc_meta` must exist (`doc.package.not_a_package`), `format_version` must
+  parse as `major.minor` with the major of `user_version` and at least 1, and every documented
+  table must have its columns (`doc.package.schema_invalid`, argument `table`). Format 1.0 is the
+  first: there is no older format to migrate. A newer minor version opens read-only
+  (`ReadOnlyCause::NewerFormat`) without a lock. `Mode::Edit(owner)` takes the edit lock;
+  `Mode::ReadOnly` touches nothing. `Package::create` writes an empty package by the full
+  rewrite (`doc.package.exists` when the path exists) and opens it for editing.
+- **Metadata.** `Metadata` holds the documented `arc_meta` keys as fields and every other key
+  unchanged in `other`; an interpreted key with a value of the wrong storage class or form is
+  `doc.package.meta_invalid` (argument `key`). Document settings and tolerances are not
+  `arc_meta` keys: they belong to the object type `core.doc.settings`.
+- **Load.** `Package::load(registry, options)` streams the `arc_type` and `arc_object` rows in
+  key order into `load`, so `record_count` and `memory_bytes` bound the rows as they are read.
+  A value of an unexpected storage class or invalid UTF-8 fails the load with
+  `doc.package.value_invalid` (arguments `table`, `column`); a value longer than `input_bytes`
+  with `doc.load.limit_exceeded` (`input_bytes`). The `payload_hash` of each row of encoding 0
+  is compared with the BLAKE3 hash of its payload; a mismatch adds a diagnostic of kind
+  `Warning` with `doc.package.hash_mismatch` (argument `id`, the identifier bytes in hex) and
+  counts as a warning. The row itself loads as its other columns allow: quarantining it needs a
+  reason hook in `load`, which this unit does not add. Rows of other encodings are not hashed.
+- **Full rewrite.** `save_as(target, save, progress)` builds the rows by the write-back
+  contract above, with `Save::touched` mapping each object changed since load to the bytes of
+  its last transaction (`doc.package.last_txn_missing` for an object with neither that nor a
+  loaded `last_txn`; `Save::loaded` is `None` for a document never loaded), writes the next
+  `save_counter` and `thumbnail` = `none` when no thumbnail is supplied, and returns the
+  metadata written. `write(target, contents, progress)` writes given rows as they are, with the
+  derived indexes of an optional snapshot. Both run the steps of `SaveStep` in order, calling
+  `progress` before each; an error from it cancels the save. Rows are written in key order and
+  the file holds no time stamps, so equal contents give byte-identical files with the same SQLite
+  library version; a different SQLite version may lay out pages differently. Two rows with one
+  identifier fail with `doc.object.duplicate_id` before anything is written.
+- **Edit locks.** `LockOwner` (user, host, application, time) comes from the application: the
+  crate asks the operating system only for its process id. A lock of another opener makes the
+  package read-only with `ReadOnlyCause::Locked(holder)`, or `StaleLock(holder)` when the
+  holder's host is the owner's and no process holds the file's operating-system lock.
+  `Package::take_over(owner)`, the application's call after the user confirmed, checks that the
+  lock is still stale and still names the same holder, replaces it and makes the package
+  editable; otherwise `doc.package.locked`. Dropping the package releases the lock and removes
+  the lock file. Two take-overs of the same stale lock confirmed at the same instant can race:
+  one may remove the lock the other has just created.
+- **Previews.** `Preview` is kind, media type, pixel size and PNG bytes; each is checked at save
+  and at read as the format requires (`doc.package.preview_invalid`, argument `kind`, detail
+  `reason`). Previews are read with `Package::previews`; a save without previews leaves
+  `arc_preview` empty.
+- **Not yet.** Incremental and background saves, assets and chunks, the journal table, the
+  recovery journal, source maps, preserved foreign data, stored diagnostics and inspection come
+  with later units; their tables exist and stay empty. A newer-minor package saved as a copy
+  keeps the rows this version reads, not tables it does not know. Temporary files left by a
+  killed save are not cleaned up.
+
+The `package_kill` test kills a child process saving 400 objects at random points 50 times in
+the default suite (1,000 times in the ignored `kill_during_save_1000`) and checks that the
+target always opens and equals the old or the new state; `package_roundtrip` checks the
+write-back contract through the file against an in-memory load.
 
 ### Error codes
 
@@ -1030,3 +1099,16 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.journal.parent_mismatch` | `conflict` | A transaction is appended whose parent is not the journal's last transaction |
 | `doc.undo.state_mismatch` | `internal` | An undo, redo or group rollback does not fit the current state of the document |
 | `doc.undo.sequence_invalid` | `invalid_input` | The undo history is used out of order: a commit it did not prepare, a group that is not open, a group member without the group's identifier, or an undo or redo inside an open group |
+| `doc.package.not_a_package` | `invalid_input` | A file is not SQLite, has another application id or has no `arc_meta` table |
+| `doc.package.newer_format` | `unsupported` | A package has a newer format major version; the file is not touched |
+| `doc.package.schema_invalid` | `corrupt_data` | A documented table or column is missing, the format version is malformed or disagrees with `user_version`, or the text encoding is not UTF-8 |
+| `doc.package.value_invalid` | `corrupt_data` | A stored value has an unexpected storage class or text encoding |
+| `doc.package.hash_mismatch` | `corrupt_data` | The `payload_hash` of a stored object is not the BLAKE3 hash of its payload |
+| `doc.package.io_failed` | `io` | Reading or writing a package, its temporary file or its lock file failed |
+| `doc.package.corrupt` | `corrupt_data` | SQLite reports the package file as damaged |
+| `doc.package.verify_failed` | `io` | A newly written temporary package failed its verification; the target is unchanged |
+| `doc.package.exists` | `conflict` | A package to be created already exists |
+| `doc.package.locked` | `conflict` | A lock to be taken over is live, belongs to another host or was taken in the meantime |
+| `doc.package.preview_invalid` | `invalid_input` | A preview has an unknown or repeated kind, another media type, a wrong pixel size or too many bytes |
+| `doc.package.last_txn_missing` | `invalid_input` | A save knows no last transaction for an object |
+| `doc.package.meta_invalid` | `corrupt_data` | An `arc_meta` entry the package interprets is malformed |

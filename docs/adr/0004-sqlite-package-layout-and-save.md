@@ -61,3 +61,26 @@ defined; a row with another bit set is loaded as a quarantined object and writte
 unchanged. The bits are listed in
 [document-package.md](../architecture/document-package.md#example-outline); no package has been
 released before this amendment, so no fixture changes.
+
+The first implementation of the package (format 1.0) fixes what the package document left open,
+without changing anything it defined; the details are in
+[document-package.md](../architecture/document-package.md#format-10-schema):
+
+- the exact statements of every table and index (column types, `NOT NULL`, the index names
+  `arc_object_type_key`, `arc_reference_target` and `arc_asset_chunk_chunk`) and the columns of
+  `arc_meta`, `arc_type`, `arc_property`, `arc_reference`, `arc_source_map`, `arc_journal`,
+  `arc_asset`, `arc_asset_chunk`, `arc_chunk`, `arc_preview`, `arc_foreign` and
+  `arc_diagnostic`;
+- the pragma values (`page_size` 4,096, UTF-8, `application_id`, `user_version` = major, no
+  `auto_vacuum`) and the text form of `format_version` (`1.0`);
+- the `arc_meta` keys and the forms of their values, including `thumbnail` = `none` for a save
+  without thumbnail;
+- the contents of `arc_reference.rule` and of `arc_property` for scalar values;
+- the media type, sizes and size limit of previews;
+- the temporary file name, the hash summary of the verification and the platform behavior of the
+  replacement;
+- the lock file content (`format`, `user`, `host`, `pid`, `application`, `time_unix_ms`), the
+  shared operating-system lock and the meaning of "not running" and "local machine".
+
+No package was released before this amendment; the first compatibility fixtures are written with
+it.

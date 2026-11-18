@@ -78,13 +78,16 @@ fn run_ci() -> Result<(), Failure> {
         "clippy",
         "--workspace",
         "--all-targets",
+        "--all-features",
         "--",
         "-D",
         "warnings",
     ])?;
     run_layers()?;
     run_wasm()?;
-    cargo(&["nextest", "run", "--workspace"])?;
+    // Feature-gated code (the `package` feature of arc-doc) is linted and tested too; the
+    // WebAssembly step builds without features.
+    cargo(&["nextest", "run", "--workspace", "--all-features"])?;
     // nextest does not run documentation tests.
     cargo(&["test", "--workspace", "--doc"])?;
     run_features()?;

@@ -274,6 +274,84 @@ pub mod codes {
         category: Category::Internal,
         message_id: "doc-load-validator-panicked",
     };
+    /// A file is not an Arc package: not SQLite, another application id, or no `arc_meta`.
+    pub const PACKAGE_NOT_A_PACKAGE: ErrorCode = ErrorCode {
+        code: "doc.package.not_a_package",
+        category: Category::InvalidInput,
+        message_id: "doc-package-not-a-package",
+    };
+    /// A package has a newer format major version than this version reads.
+    pub const PACKAGE_NEWER_FORMAT: ErrorCode = ErrorCode {
+        code: "doc.package.newer_format",
+        category: Category::Unsupported,
+        message_id: "doc-package-newer-format",
+    };
+    /// A table or column of the package schema is missing, or the format version is malformed.
+    pub const PACKAGE_SCHEMA_INVALID: ErrorCode = ErrorCode {
+        code: "doc.package.schema_invalid",
+        category: Category::CorruptData,
+        message_id: "doc-package-schema-invalid",
+    };
+    /// A stored value has an unexpected storage class, text encoding or size.
+    pub const PACKAGE_VALUE_INVALID: ErrorCode = ErrorCode {
+        code: "doc.package.value_invalid",
+        category: Category::CorruptData,
+        message_id: "doc-package-value-invalid",
+    };
+    /// The payload hash of a stored object does not match its payload.
+    pub const PACKAGE_HASH_MISMATCH: ErrorCode = ErrorCode {
+        code: "doc.package.hash_mismatch",
+        category: Category::CorruptData,
+        message_id: "doc-package-hash-mismatch",
+    };
+    /// Reading or writing a package, its temporary file or its lock file failed.
+    pub const PACKAGE_IO_FAILED: ErrorCode = ErrorCode {
+        code: "doc.package.io_failed",
+        category: Category::Io,
+        message_id: "doc-package-io-failed",
+    };
+    /// SQLite reports the package file as damaged.
+    pub const PACKAGE_CORRUPT: ErrorCode = ErrorCode {
+        code: "doc.package.corrupt",
+        category: Category::CorruptData,
+        message_id: "doc-package-corrupt",
+    };
+    /// The newly written temporary package failed its verification; the target is unchanged.
+    pub const PACKAGE_VERIFY_FAILED: ErrorCode = ErrorCode {
+        code: "doc.package.verify_failed",
+        category: Category::Io,
+        message_id: "doc-package-verify-failed",
+    };
+    /// A package to be created already exists.
+    pub const PACKAGE_EXISTS: ErrorCode = ErrorCode {
+        code: "doc.package.exists",
+        category: Category::Conflict,
+        message_id: "doc-package-exists",
+    };
+    /// The edit lock of a package is held by a live process or another host.
+    pub const PACKAGE_LOCKED: ErrorCode = ErrorCode {
+        code: "doc.package.locked",
+        category: Category::Conflict,
+        message_id: "doc-package-locked",
+    };
+    /// A preview image has an unknown kind, another media type, wrong pixel size or too many bytes.
+    pub const PACKAGE_PREVIEW_INVALID: ErrorCode = ErrorCode {
+        code: "doc.package.preview_invalid",
+        category: Category::InvalidInput,
+        message_id: "doc-package-preview-invalid",
+    };
+    /// A save has no last transaction for an object.
+    pub const PACKAGE_LAST_TXN_MISSING: ErrorCode = ErrorCode {
+        code: "doc.package.last_txn_missing",
+        category: Category::InvalidInput,
+        message_id: "doc-package-last-txn-missing",
+    };
+    /// A metadata entry of `arc_meta` is malformed.
+    pub const PACKAGE_META_INVALID: ErrorCode = ErrorCode {
+        code: "doc.package.meta_invalid",
+        category: Category::CorruptData,
+        message_id: "doc-package-meta-invalid",
+    };
 
     /// An object flagged read-only would have its values or owner changed, or be deleted.
     pub const OBJECT_READ_ONLY: ErrorCode = ErrorCode {
@@ -387,6 +465,19 @@ pub mod codes {
         JOURNAL_PARENT_MISMATCH,
         UNDO_STATE_MISMATCH,
         UNDO_SEQUENCE_INVALID,
+        PACKAGE_NOT_A_PACKAGE,
+        PACKAGE_NEWER_FORMAT,
+        PACKAGE_SCHEMA_INVALID,
+        PACKAGE_VALUE_INVALID,
+        PACKAGE_HASH_MISMATCH,
+        PACKAGE_IO_FAILED,
+        PACKAGE_CORRUPT,
+        PACKAGE_VERIFY_FAILED,
+        PACKAGE_EXISTS,
+        PACKAGE_LOCKED,
+        PACKAGE_PREVIEW_INVALID,
+        PACKAGE_LAST_TXN_MISSING,
+        PACKAGE_META_INVALID,
     ];
 }
 

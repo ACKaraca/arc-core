@@ -30,6 +30,8 @@ pub mod journal;
 pub mod load;
 pub mod migrate;
 pub mod op;
+#[cfg(feature = "package")]
+pub mod package;
 pub mod payload;
 pub mod preserved;
 pub mod record;

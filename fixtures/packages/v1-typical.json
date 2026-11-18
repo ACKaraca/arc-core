@@ -1,0 +1,148 @@
+{
+  "diagnostics": [
+    {
+      "code": "doc.type.unknown",
+      "kind": "Preserved",
+      "object": "01900000-0000-7000-8000-000000000005"
+    },
+    {
+      "code": "doc.payload.invalid",
+      "kind": "Quarantined",
+      "object": "01900000-0000-7000-8000-000000000006"
+    }
+  ],
+  "format": "1.0",
+  "held": [
+    {
+      "id": "01900000000070008000000000000005",
+      "kind": "Preserved",
+      "last_txn": "05050505050505050505050505050505",
+      "payload": "070707",
+      "reason": "doc.type.unknown",
+      "type": "fx.legacy",
+      "version": "3.0"
+    },
+    {
+      "id": "01900000000070008000000000000006",
+      "kind": "Quarantined",
+      "last_txn": "06060606060606060606060606060606",
+      "payload": "ff",
+      "reason": "doc.payload.invalid",
+      "type": "fx.point",
+      "version": "1.0"
+    }
+  ],
+  "metadata": {
+    "coordinate_reference": null,
+    "created_by": "arc-doc fixtures 0.1.0",
+    "document_id": "01900000-0000-7000-8000-0000000000ff",
+    "history_retention": "none",
+    "partitions": [
+      "ground"
+    ],
+    "save_counter": 1,
+    "saved_by": "arc-doc fixtures 0.1.0",
+    "thumbnail_missing": false,
+    "units": "m"
+  },
+  "objects": [
+    {
+      "flags": [
+        false,
+        false,
+        false
+      ],
+      "id": "01900000-0000-7000-8000-000000000003",
+      "last_txn": "03030303030303030303030303030303",
+      "name": "fx.line 3",
+      "owner": null,
+      "partition": "ground",
+      "payload": "0190000000007000800000000000000101900000000070008000000000000002",
+      "type": "fx.line",
+      "version": "1.0"
+    },
+    {
+      "flags": [
+        false,
+        false,
+        false
+      ],
+      "id": "01900000-0000-7000-8000-000000000004",
+      "last_txn": "04040404040404040404040404040404",
+      "name": "fx.note 4",
+      "owner": "01900000-0000-7000-8000-000000000003",
+      "partition": "ground",
+      "payload": "0661206e6f746518",
+      "type": "fx.note",
+      "version": "2.0"
+    },
+    {
+      "flags": [
+        false,
+        false,
+        false
+      ],
+      "id": "01900000-0000-7000-8000-000000000001",
+      "last_txn": "01010101010101010101010101010101",
+      "name": "fx.point 1",
+      "owner": null,
+      "partition": "ground",
+      "payload": "0000000000000000000000000000000001066f726967696e",
+      "type": "fx.point",
+      "version": "1.0"
+    },
+    {
+      "flags": [
+        false,
+        false,
+        false
+      ],
+      "id": "01900000-0000-7000-8000-000000000002",
+      "last_txn": "02020202020202020202020202020202",
+      "name": "fx.point 2",
+      "owner": null,
+      "partition": "ground",
+      "payload": "0000000000000840000000000000104000",
+      "type": "fx.point",
+      "version": "1.0"
+    }
+  ],
+  "previews": [
+    {
+      "blake3": "84c7a6a97f06e21938378a1e279ce4c11677c73fab082d28a98b48cdff546613",
+      "height": 8,
+      "kind": "preview",
+      "media_type": "image/png",
+      "width": 1024
+    },
+    {
+      "blake3": "5182c9b0e343f13f66ecd8b09c0d532525066786eb33d383429edda833221de8",
+      "height": 256,
+      "kind": "thumbnail",
+      "media_type": "image/png",
+      "width": 256
+    }
+  ],
+  "types": [
+    {
+      "descriptor_blake3": "f4d69234c737efc16ec1baa98fc7a5023a4710ff42aaaa35969fed36762ecd93",
+      "type": "fx.legacy",
+      "version": "3.0"
+    },
+    {
+      "descriptor_blake3": "e9c80987a8a6b1f7d0c5258f7a4cebfb5b811f7df8073042073db441e3e4ff55",
+      "type": "fx.line",
+      "version": "1.0"
+    },
+    {
+      "descriptor_blake3": "a38e298427efe91f4316e415f0c4b098826b142a757ddd1cbb3c4ff01b30aa9c",
+      "type": "fx.note",
+      "version": "2.0"
+    },
+    {
+      "descriptor_blake3": "0052ff74745e910d08fac4bad9aa404443a9ce3d3f794d0422d6dc7341b53ad1",
+      "type": "fx.point",
+      "version": "1.0"
+    }
+  ]
+}

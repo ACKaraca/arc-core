@@ -33,6 +33,7 @@ wasm_deny = [
 # docs/architecture/technology-baseline.md that are in use.
 third_party = [
   "arc-swap",
+  "blake3",
   "glam",
   "insta",
   "nalgebra",
@@ -41,6 +42,7 @@ third_party = [
   "robust",
   "rstar",
   "schemars",
+  "rusqlite",
   "serde",
   "serde_json",
   "spade",
