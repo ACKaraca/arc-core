@@ -58,7 +58,8 @@ rollback); macro record-and-playback round trips; fuzzing of the protocol messag
 ## Command model as implemented
 
 The first part covers CORE-CMD-001 to CORE-CMD-005 and CORE-CMD-007 to CORE-CMD-010. The
-modules are `spec`, `schema`, `context`, `invoke` and `registry`.
+modules are `spec`, `schema`, `context`, `invoke` and `registry`. Prompt machines, command-line
+parsing and repeat (CORE-CMD-011, CORE-CMD-013, CORE-CMD-015) are described in the next section.
 
 ### Specification
 
@@ -77,12 +78,17 @@ modules are `spec`, `schema`, `context`, `invoke` and `registry`.
 - **Exposure**: a set of the surfaces `ui`, `command_line`, `automation`, `mcp`, `plugin`; the
   default is all. A command with no surface is internal: it is not in the catalog and no
   invocation reaches it.
-- **Prompt machine**: an optional `Arc<dyn PromptMachine>`. The trait has no methods yet; the
-  prompt machine unit (CORE-CMD-011) defines them.
+- **Prompt machine**: an optional `Arc<dyn PromptMachine>` (see
+  [Prompt machines](#prompt-machines-command-line-and-repeat-as-implemented)).
+- **Positional order**: the parameters that inline values without a name fill, in order. The
+  default is the required parameters in declaration order (the order of the schema's
+  `required`); optional parameters are named-only unless the command states the order with
+  `with_positional`. The generated `properties` are alphabetical, so they cannot give the order.
 - **Registration check**: the identifier and message identifier grammars, at least one
   permission class, both schemas within the supported subset, a parameter schema of type
   `object` with `additionalProperties: false` (an unknown parameter name is an error, not
-  ignored), and every example valid against the parameter schema. Failures are
+  ignored), every example valid against the parameter schema, and a positional order of
+  distinct parameter names. Failures are
   `cmd.spec.invalid` with the detail `reason`.
 
 ### Parameters and schemas
@@ -169,6 +175,151 @@ Progress reaches the invocation's sink only once the session clock shows 300 ms
   (whether a prompt machine exists) and `deprecated_aliases`. Object keys are sorted, so the
   same registry always gives the same text.
 
+## Prompt machines, command line and repeat as implemented
+
+The modules are `prompt` (CORE-CMD-011), `line` (CORE-CMD-013) and `command_line`
+(CORE-CMD-013, CORE-CMD-015).
+
+### Prompt machines
+
+- A `PromptMachine` is a pure function of a `PromptState`: the parameters typed inline
+  (`preset`), the answers so far and the current snapshot, which it reads and never changes.
+  `next` returns `Step::Ask(Prompt)` or `Step::Done(params)`; the machine has no state of its
+  own, so "back" is removing the last answer. Keyword options change the path by being answers
+  the machine reads. `check` may reject an answer that fits the prompt (any error, for example
+  a predicate on the picked object), and `preview` returns the preview of the pending result as
+  JSON data in the product's terms (the architecture's transient geometry), from the answers and
+  the pointer's current input. This layer draws nothing; running a command in a rolled-back
+  preview transaction is CORE-CMD-006, a later row.
+- A `Prompt` has a key (unique on one path; the parameter name for declarative machines), a
+  message identifier with arguments, the accepted inputs (never empty) and an optional default
+  answer. Accepted inputs and their constraints (bounds inclusive, in SI base units):
+
+| `Accept` | Answer (`PromptInput`) | JSON value |
+|---|---|---|
+| `Point { dims }` (2D, 3D or both) | `Point { x, y, z }` in meters | `[x, y]` or `[x, y, z]` |
+| `Distance { min, max }` | `Distance(meters)` | number |
+| `Angle { min, max }` | `Angle(radians)` | number |
+| `Pick { types }` | `Pick(ObjectId)` of a live object whose type key is listed (any when empty) | identifier text |
+| `Selection { min, max, types }` | `Selection(ids)`: distinct live objects of the listed types | array of identifier texts |
+| `Text { min_chars, max_chars }` | `Text` | string |
+| `Number { dimension, min, max, integer }` | `Number(Quantity)` of that dimension | number in SI units; a JSON integer when `integer` |
+| `Expression` | `Expression(text)` that `arc-solve` parses | string, evaluated by the command |
+| `Keyword { options }` | `Keyword(id)` | the option's value (its identifier by default) |
+
+- Keyword options have an identifier (1 to 64 bytes, no whitespace, unique ignoring ASCII case),
+  a label message identifier, an optional shortcut letter (unique ignoring ASCII case) and the
+  parameter value they stand for. A prompt that accepts nothing or has malformed options ends
+  the session with `cmd.prompt.invalid`.
+- `PromptSequence` is the declarative machine: one `PromptStep` per parameter, asked in order,
+  skipping parameters given inline; a step may add a check. `CommandSpec::with_prompts` gives
+  every step without a default the parameter's schema `default` when an accepted input can
+  represent it (the inverse of the JSON mapping above); otherwise the step has no default.
+- A command without a machine gets `PromptSequence::from_schema`: one step for each required
+  parameter, in `required` order, with the message `cmd-prompt-param` (argument `name`). The
+  schema kind decides the input: a quantity (`anyOf` number and string) takes an `Expression`,
+  `number` a dimensionless `Number`, `integer` an integer `Number`, `boolean` the keywords
+  `true` (`y`) and `false` (`n`), a closed list of values (`enum`, or `oneOf` of `const`)
+  keywords with those values (label `cmd-keyword-value`, to which the surface passes the option
+  identifier as `value`), a `uuid` string a `Pick`, an array of `uuid` strings a
+  `Selection`, an array of numbers or quantities a `Point`, everything else `Text`.
+
+### Prompt sessions
+
+- A `PromptSession` drives one machine for one command and holds the inline parameters, the
+  answers and the current prompt. It is transient UI state and is not serialized. Every call of
+  the machine runs under an unwind boundary; a panic or an error of the machine ends the session
+  (`Feedback::Failed`, a panic as `cmd.fault`).
+- `answer(input)`: the input must fit one accepted kind and its constraints and pass the
+  machine's check. A rejection returns `Feedback::Rejected` with the error, whose message
+  identifier is the message, and the session stays at the same prompt: `cmd.prompt.kind`,
+  `cmd.prompt.range` (detail `reason`: `not_finite`, `minimum`, `maximum`, `dimensions`,
+  `count`, `duplicate`, `length` or `integer`), `cmd.prompt.object` (`not_found` or `type`),
+  `cmd.prompt.limit_exceeded` (text over the session's `string_bytes`, a selection over its
+  `array_length`, or more than 1,024 answers), or the expression parser's error.
+- `accept_default()` answers with the default (Enter; `cmd.prompt.no_default` without one),
+  `back()` removes the last answer and asks again, `cancel()` ends the session. Input after the
+  session ended is `cmd.prompt.ended`.
+- When the machine is done, its parameters are merged over the inline ones and validated
+  against the parameter schema with the session's limits. A violation rejects the last answer
+  (it is removed and its prompt asked again with `cmd.params.invalid`); with no answer to
+  remove the session fails. Valid parameters give `Feedback::Done(Invocation)`, which runs only
+  through `Invoker::invoke`, the same path as a programmatic call, so prompts never bypass
+  validation, permissions or predicates.
+- **Typed answers** (`answer_text`): the text is trimmed; empty text accepts the default. A
+  keyword option is matched first by identifier or shortcut letter, ignoring ASCII case. Then
+  each accepted kind is tried in order: a point is two or three comma-separated components
+  (commas inside parentheses do not separate), each a length read like a distance; a distance,
+  an angle and a number are read by `arc_solve::parse_quantity` with `.` as the decimal
+  separator and the session's context unit of the dimension for bare numbers (so
+  `1200 mm + 3 in` is a distance, and an angle prompt needs an angle context unit for bare
+  numbers); an expression is kept as text; a pick is an identifier text; a selection is
+  identifier texts separated by commas or whitespace; a text is the text. The architecture
+  defines no relative or polar coordinate entry, so only absolute `x,y[,z]` is read. Text no kind
+  reads is `cmd.prompt.unreadable`; text a kind reads but rejects reports that kind's error.
+
+### Command-line grammar
+
+A line is at most 64 KiB. Whitespace is Unicode whitespace.
+
+```ebnf
+line       = ws , [ name , { ws1 , argument } , ws ] ;
+name       = quoted | name-char , { name-char } ;    (* name-char: any character but whitespace *)
+argument   = [ param-name , "=" ] , value ;           (* no whitespace around "=" *)
+param-name = ( letter | "_" ) , { letter | digit | "_" } ;      (* ASCII *)
+value      = quoted | list | json | bare ;            (* followed by whitespace, the end, or, in a list, "," or "]" *)
+quoted     = '"' , { char - ( '"' | "\" ) | escape } , '"' ;
+escape     = "\" , ( '"' | "\" | "n" | "t" ) ;
+list       = "[" , ws , [ value , { ws , "," , ws , value } , ws ] , "]" ;
+json       = "$" , json-value ;                       (* RFC 8259, no leading whitespace *)
+bare       = bare-part , { bare-part } ;              (* does not start with '"', "[", "]" or "$" *)
+bare-part  = group | char - ( whitespace | '"' | "[" | "]" | "(" | ")" ) ;   (* in a list also not "," *)
+group      = "(" , { group | char - ( "(" | ")" ) } , ")" ;
+```
+
+- An inline value may contain whitespace only inside quotes or parentheses:
+  `length="1200 mm + 3 in"` or `length=(1200 mm + 3 in)`. Text with `"` such as `3'6"` must be
+  quoted with escapes. Lists nest at most 32 deep, parentheses 128 deep; a line has at most
+  1,024 arguments and a list at most 1,024 elements (`cmd.line.limit_exceeded`, detail
+  `limit`).
+- The name is resolved by `Registry::resolve` with the caller's localized names (`cmd.unknown`,
+  `cmd.name.ambiguous`; a localized name with spaces is quoted). Positional values fill the
+  positional order and must precede named ones (`cmd.line.syntax` with reason
+  `positional_after_named`); `cmd.line.too_many_values`, `cmd.line.unknown_param` and
+  `cmd.line.duplicate_param` report the rest.
+- Values convert by the parameter's schema kind: `$` JSON is taken as is; a quantity keeps the
+  text as a string (an expression with units evaluated by the command); `number` and `integer`
+  take a JSON number literal; `boolean` takes `true` or `false`; a closed list takes one of its
+  values; strings take the text; an array takes a list, or bare text split at commas outside
+  parentheses (`0,0`), each element converted by the item kind. A value that does not fit, or
+  inline parameters that violate the schema without its `required` list, are `cmd.line.value`.
+- Every error from the line carries the byte span of the offending text in the details `start`
+  and `end`; name errors carry the span of the name.
+- **Canonical form** (`format_line`): the command identifier, then every parameter as
+  `name=value` in name order. A value is written bare when that reads back to the same JSON,
+  else quoted, else as `$` and compact JSON, so parsing the canonical line gives the same command
+  and parameters. Macros record this form.
+- **Completion** (`complete`, data only): in the first word, command identifiers, user aliases and
+  localized names exposed on the command line; after it, `name=` for parameters not yet given and
+  the values of a parameter with a closed list of values (`boolean`, `enum`); with an active
+  prompt, its keyword options. Matching is by prefix, ignoring case; at most 100 candidates.
+
+### Command line and repeat
+
+- `CommandLine` holds the active prompt session and the last completed command. `submit(line)`:
+  with an active prompt the line answers it; otherwise a complete line runs at once through
+  `Invoker::invoke`, and a line with missing required parameters starts the command's machine
+  (or the derived one) with the inline parameters as `preset`. `start` begins a command from a
+  menu or tool with given parameters; `answer`, `back` and `cancel` drive the active prompt.
+- The empty line accepts the active prompt's default; with no active command it repeats the
+  last command (Enter), or does nothing when there is none.
+- **Repeat** (`repeat_last`): the last completed command is the last invocation that succeeded
+  through the command line, or that the application reported with `record`; transparent
+  commands are not recorded. The architecture does not say that repeat prompts again, so repeat
+  runs the same command with the same final parameters, again through `Invoker::invoke`;
+  `last()` exposes the command and parameters for a surface that prefers to re-enter the prompts.
+  `cmd.repeat.none` when nothing completed yet.
+
 ### Error codes
 
 | Code | Category | Meaning |
@@ -190,6 +341,21 @@ Progress reaches the invocation's sink only once the session clock shows 300 ms
 | `cmd.fault` | `internal` | A fault escaped; the document was restored |
 | `cmd.result.invalid` | `internal` | The result cannot be encoded or violates its schema |
 | `cmd.no_transaction` | `internal` | A command without a transaction asked for one |
+| `cmd.prompt.kind` | `invalid_input` | The answer is not a kind of input the prompt accepts, or not one of its keyword options |
+| `cmd.prompt.range` | `invalid_input` | The answer is outside the prompt's constraints; the detail `reason` says which |
+| `cmd.prompt.object` | `invalid_input` | A picked or selected object does not exist or has a type the prompt does not accept |
+| `cmd.prompt.unreadable` | `invalid_input` | Typed text cannot be read as any input the prompt accepts |
+| `cmd.prompt.no_default` | `invalid_input` | Enter was given to a prompt without a default |
+| `cmd.prompt.invalid` | `internal` | A prompt machine produced a prompt that accepts nothing or has malformed keyword options |
+| `cmd.prompt.limit_exceeded` | `limit_exceeded` | An answer or the number of answers exceeds a limit |
+| `cmd.prompt.ended` | `conflict` | Input was given when no prompt is active |
+| `cmd.line.syntax` | `invalid_input` | The command line does not follow the grammar; the detail `reason` says where |
+| `cmd.line.limit_exceeded` | `limit_exceeded` | The command line exceeds a length, count or nesting limit |
+| `cmd.line.unknown_param` | `invalid_input` | A named inline parameter does not exist |
+| `cmd.line.duplicate_param` | `invalid_input` | An inline parameter is given twice |
+| `cmd.line.too_many_values` | `invalid_input` | More positional values than positional parameters |
+| `cmd.line.value` | `invalid_input` | An inline value does not fit its parameter |
+| `cmd.repeat.none` | `not_found` | There is no completed command to repeat |
 
 ## Capabilities
 

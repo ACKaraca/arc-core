@@ -277,7 +277,7 @@ expression: text
       "permissions": [
         "edit"
       ],
-      "prompt": false,
+      "prompt": true,
       "result": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -372,6 +372,56 @@ expression: text
     },
     {
       "category": null,
+      "coalesce": null,
+      "deprecated_aliases": [],
+      "description": "test-rename-description",
+      "examples": [],
+      "exposure": [
+        "ui",
+        "command_line",
+        "automation",
+        "mcp",
+        "plugin"
+      ],
+      "id": "test.item.rename",
+      "keywords": null,
+      "label": "test-rename",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ids",
+          "name"
+        ],
+        "title": "Rename",
+        "type": "object"
+      },
+      "permissions": [
+        "edit"
+      ],
+      "prompt": true,
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "null",
+        "type": "null"
+      },
+      "transparent": false,
+      "undo": "undoable"
+    },
+    {
+      "category": null,
       "coalesce": "test.length",
       "deprecated_aliases": [],
       "description": "test-set-length-description",
@@ -429,7 +479,7 @@ expression: text
       "permissions": [
         "edit"
       ],
-      "prompt": false,
+      "prompt": true,
       "result": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "null",
@@ -536,6 +586,72 @@ expression: text
         "minimum": 0,
         "title": "uint32",
         "type": "integer"
+      },
+      "transparent": false,
+      "undo": "undoable"
+    },
+    {
+      "category": null,
+      "coalesce": null,
+      "deprecated_aliases": [],
+      "description": "test-draw-description",
+      "examples": [
+        {
+          "copies": 2,
+          "length": 1.0,
+          "name": "s"
+        }
+      ],
+      "exposure": [
+        "ui",
+        "command_line",
+        "automation",
+        "mcp",
+        "plugin"
+      ],
+      "id": "test.shape.draw",
+      "keywords": null,
+      "label": "test-draw",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "copies": {
+            "format": "uint32",
+            "maximum": 10,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "length": {
+            "format": "double",
+            "maximum": 1000000.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "length",
+          "copies"
+        ],
+        "title": "Draw",
+        "type": "object"
+      },
+      "permissions": [
+        "edit"
+      ],
+      "prompt": true,
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "items": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "title": "Array_of_ObjectId",
+        "type": "array"
       },
       "transparent": false,
       "undo": "undoable"

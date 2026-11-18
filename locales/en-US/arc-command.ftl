@@ -18,3 +18,24 @@ cmd-cancelled = The command was cancelled; nothing was changed.
 cmd-fault = The command failed unexpectedly; the document was restored.
 cmd-result-invalid = The command produced an invalid result; nothing was changed.
 cmd-no-transaction = The command tried to change the document without a transaction.
+cmd-prompt-kind = This prompt does not accept that input.
+cmd-prompt-range = The value is outside the allowed range.
+cmd-prompt-object = The object does not exist or cannot be used here.
+cmd-prompt-unreadable = The input cannot be read here.
+cmd-prompt-no-default = This prompt has no default.
+cmd-prompt-invalid = The command asked for input it cannot accept.
+cmd-prompt-limit-exceeded = The input exceeds a size or count limit.
+cmd-prompt-ended = No command is waiting for input.
+cmd-line-syntax = The command line cannot be read.
+cmd-line-limit-exceeded = The command line is too long or too deeply nested.
+cmd-line-unknown-param = The command has no parameter { $name }.
+cmd-line-duplicate-param = The parameter { $name } is given twice.
+cmd-line-too-many-values = The command line has more values than the command takes.
+cmd-line-value = The value of { $name } is not valid.
+cmd-repeat-none = There is no command to repeat.
+
+# Prompt messages of machines derived from parameter schemas.
+cmd-prompt-param = Enter { $name }.
+cmd-keyword-yes = Yes
+cmd-keyword-no = No
+cmd-keyword-value = { $value }

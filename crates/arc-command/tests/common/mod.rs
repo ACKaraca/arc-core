@@ -13,8 +13,10 @@ use std::sync::{Arc, Mutex};
 
 use arc_base::{Dimension, Error, ObjectId, Quantity, Unit};
 use arc_command::{
-    Clock, CommandSpec, Context, Disabled, IdParam, Invocation, Invoker, Outcome, Permission,
-    ProgressSink, QuantityParam, Registry, Session, Surface, UndoBehavior,
+    Accept, Clock, CommandSpec, Context, Disabled, IdParam, Invocation, Invoker, KeywordOption,
+    Outcome, Permission, Point, PointDims, ProgressSink, Prompt, PromptInput, PromptMachine,
+    PromptSequence, PromptState, PromptStep, QuantityParam, Registry, Session, Step, Surface,
+    UndoBehavior,
 };
 use arc_doc::graph::Evaluators;
 use arc_doc::{
@@ -116,6 +118,191 @@ impl Serialize for ExplosiveResult {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Rename {
+    pub ids: Vec<IdParam>,
+    pub name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Draw {
+    pub name: String,
+    #[schemars(range(min = 0.0, max = 1e6))]
+    pub length: f64,
+    #[schemars(range(min = 1, max = 10))]
+    pub copies: u32,
+}
+
+fn draw(ctx: &mut Context<'_>, p: Draw) -> arc_base::Result<Vec<IdParam>> {
+    let mut out = Vec::new();
+    for _ in 0..p.copies {
+        let Created { id } = create(
+            ctx,
+            Create {
+                name: p.name.clone(),
+                length: QuantityParam::Si(p.length),
+            },
+        )?;
+        out.push(id);
+    }
+    Ok(out)
+}
+
+/// A hand-written machine: a line from two points, or from a point, a distance and an angle,
+/// or a circle (keyword `circle`, shortcut `c`) from a center and a radius; then a name and a
+/// number of copies. Its parameters are the name, the length and the copies.
+#[derive(Debug)]
+pub struct DrawMachine;
+
+fn point(input: Option<&PromptInput>) -> Option<Point> {
+    match input {
+        Some(PromptInput::Point(p)) => Some(*p),
+        _ => None,
+    }
+}
+
+fn distance(a: Point, b: Point) -> f64 {
+    (b.x - a.x)
+        .hypot(b.y - a.y)
+        .hypot(b.z.unwrap_or(0.0) - a.z.unwrap_or(0.0))
+}
+
+impl PromptMachine for DrawMachine {
+    fn next(&self, state: &PromptState<'_>) -> arc_base::Result<Step> {
+        let ask = |p: Prompt| Ok(Step::Ask(p));
+        let length = match state.answer("start") {
+            None => {
+                return ask(Prompt::new(
+                    "start",
+                    "test-prompt-start",
+                    Accept::Point {
+                        dims: PointDims::Any,
+                    },
+                )
+                .or(Accept::keywords([KeywordOption::new(
+                    "circle",
+                    "test-keyword-circle",
+                )
+                .with_shortcut('c')])));
+            }
+            Some(PromptInput::Keyword(_)) => {
+                let Some(_) = point(state.answer("center")) else {
+                    return ask(Prompt::new(
+                        "center",
+                        "test-prompt-center",
+                        Accept::Point {
+                            dims: PointDims::Two,
+                        },
+                    ));
+                };
+                match state.answer("radius") {
+                    Some(PromptInput::Distance(r)) => 2.0 * std::f64::consts::PI * r,
+                    _ => {
+                        return ask(Prompt::new(
+                            "radius",
+                            "test-prompt-radius",
+                            Accept::Distance {
+                                min: Some(0.0),
+                                max: Some(1e5),
+                            },
+                        ));
+                    }
+                }
+            }
+            Some(start) => {
+                let start = point(Some(start)).unwrap_or(Point {
+                    x: 0.0,
+                    y: 0.0,
+                    z: None,
+                });
+                match state.answer("end") {
+                    None => {
+                        return ask(Prompt::new(
+                            "end",
+                            "test-prompt-end",
+                            Accept::Point {
+                                dims: PointDims::Any,
+                            },
+                        )
+                        .or(Accept::Distance {
+                            min: Some(0.0),
+                            max: Some(1e6),
+                        }));
+                    }
+                    Some(PromptInput::Distance(d)) => {
+                        if state.answer("angle").is_none() {
+                            return ask(Prompt::new(
+                                "angle",
+                                "test-prompt-angle",
+                                Accept::Angle {
+                                    min: Some(-7.0),
+                                    max: Some(7.0),
+                                },
+                            )
+                            .with_default(PromptInput::Angle(0.0)));
+                        }
+                        *d
+                    }
+                    end => distance(start, point(end).unwrap_or(start)),
+                }
+            }
+        };
+        let Some(PromptInput::Text(name)) = state.answer("name") else {
+            return ask(Prompt::new("name", "test-prompt-name", Accept::text())
+                .with_default(PromptInput::Text("shape".into())));
+        };
+        let Some(PromptInput::Number(copies)) = state.answer("copies") else {
+            return ask(Prompt::new(
+                "copies",
+                "test-prompt-copies",
+                Accept::Number {
+                    dimension: Dimension::NONE,
+                    min: Some(1.0),
+                    max: Some(10.0),
+                    integer: true,
+                },
+            )
+            .with_default(PromptInput::Number(Quantity::new(1.0, Dimension::NONE))));
+        };
+        let mut params = serde_json::Map::new();
+        params.insert("name".into(), json!(name));
+        params.insert("length".into(), json!(length));
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a whole number in 1..=10"
+        )]
+        params.insert("copies".into(), json!(copies.value() as u64));
+        Ok(Step::Done(params))
+    }
+
+    fn check(
+        &self,
+        _state: &PromptState<'_>,
+        prompt: &Prompt,
+        input: &PromptInput,
+    ) -> arc_base::Result<()> {
+        match (prompt.key.as_str(), input) {
+            ("name", PromptInput::Text(t)) if t.is_empty() || t.len() > 64 => {
+                Err(Error::new(arc_command::error::codes::PROMPT_RANGE))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn preview(
+        &self,
+        state: &PromptState<'_>,
+        pointer: Option<&PromptInput>,
+    ) -> Option<serde_json::Value> {
+        let start = point(state.answer("start"))?;
+        let end = point(pointer)?;
+        Some(json!({"segment": [[start.x, start.y], [end.x, end.y]]}))
+    }
+}
+
 fn length_of(ctx: &Context<'_>, param: &QuantityParam) -> arc_base::Result<Quantity> {
     ctx.quantity(param, Dimension::LENGTH)
 }
@@ -158,7 +345,28 @@ pub fn registry() -> Registry {
             create,
         )
         .with_example(json!({"name": "a", "length": 2.4}))
-        .with_example(json!({"name": "b", "length": "2400 mm"})),
+        .with_example(json!({"name": "b", "length": "2400 mm"}))
+        .with_prompts(
+            PromptSequence::new()
+                .step(PromptStep::new(
+                    "name",
+                    "test-prompt-name",
+                    Accept::Text {
+                        min_chars: 1,
+                        max_chars: Some(64),
+                    },
+                ))
+                .step(PromptStep::new(
+                    "length",
+                    "test-prompt-length",
+                    Accept::Number {
+                        dimension: Dimension::LENGTH,
+                        min: Some(0.0),
+                        max: Some(1e6),
+                        integer: false,
+                    },
+                )),
+        ),
         CommandSpec::new(
             "test.item.set_length",
             "test-set-length",
@@ -173,6 +381,26 @@ pub fn registry() -> Registry {
             },
         )
         .coalesced("test.length")
+        .with_prompts(
+            PromptSequence::new()
+                .step(PromptStep::new(
+                    "id",
+                    "test-prompt-item",
+                    Accept::Pick {
+                        types: vec![ITEM.into()],
+                    },
+                ))
+                .step(PromptStep::new(
+                    "length",
+                    "test-prompt-length",
+                    Accept::Number {
+                        dimension: Dimension::LENGTH,
+                        min: Some(0.0),
+                        max: Some(1e6),
+                        integer: false,
+                    },
+                )),
+        )
         .with_enabled(|probe| {
             if probe.snapshot.is_empty() {
                 Err(Disabled::new("test-nothing-to-change").with_arg("count", 0_i64))
@@ -181,6 +409,57 @@ pub fn registry() -> Registry {
             }
         })
         .with_example(json!({"id": "0190f3c4-0a11-7c2e-8f00-5d6e7f8a9b0c", "length": "3'6\""})),
+        CommandSpec::new(
+            "test.item.rename",
+            "test-rename",
+            "test-rename-description",
+            |ctx, p: Rename| {
+                for id in &p.ids {
+                    ctx.txn()?.modify(
+                        id.0,
+                        FieldPath::new("name"),
+                        Some(Value::String(p.name.clone())),
+                    )?;
+                }
+                Ok(())
+            },
+        )
+        .with_prompts(
+            PromptSequence::new()
+                .step(PromptStep::new(
+                    "ids",
+                    "test-prompt-items",
+                    Accept::Selection {
+                        min: 1,
+                        max: Some(100),
+                        types: vec![ITEM.into()],
+                    },
+                ))
+                .step(
+                    PromptStep::new(
+                        "name",
+                        "test-prompt-name",
+                        Accept::Text {
+                            min_chars: 1,
+                            max_chars: Some(64),
+                        },
+                    )
+                    .with_check(|_, input| match input {
+                        PromptInput::Text(t) if t == "forbidden" => {
+                            Err(Error::new(arc_doc::error::codes::OBJECT_NOT_FOUND))
+                        }
+                        _ => Ok(()),
+                    }),
+                ),
+        ),
+        CommandSpec::new(
+            "test.shape.draw",
+            "test-draw",
+            "test-draw-description",
+            draw,
+        )
+        .with_prompt(Arc::new(DrawMachine))
+        .with_example(json!({"name": "s", "length": 1.0, "copies": 2})),
         CommandSpec::new(
             "test.item.delete",
             "test-delete",

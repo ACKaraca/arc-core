@@ -1,5 +1,5 @@
 //! The command specification (CORE-CMD-001): identifier, labels, schemas, examples, enabled
-//! predicate, `run`, the prompt machine slot, transparency, undo behavior, permission classes and
+//! predicate, `run`, the prompt machine, the positional order, transparency, undo behavior, permission classes and
 //! exposure.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use crate::context::{Context, Probe};
 use crate::error::codes;
+use crate::prompt::{PromptMachine, PromptSequence};
 use crate::schema::{self, Violation, ViolationKind};
 
 /// The longest command identifier, in bytes.
@@ -80,11 +81,6 @@ pub enum UndoBehavior {
     UndoControl,
 }
 
-/// The slot of the interactive state machine that collects parameters from user input
-/// (CORE-CMD-011). Its states, prompts, input kinds and transitions are specified by the prompt
-/// machine unit, which adds the methods; until then the trait only marks the type.
-pub trait PromptMachine: Send + Sync + fmt::Debug {}
-
 /// Why a command is disabled: a message identifier with arguments.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Disabled {
@@ -139,6 +135,7 @@ pub struct CommandSpec {
     enabled: Option<Predicate>,
     run: RunFn,
     prompt: Option<Arc<dyn PromptMachine>>,
+    positional: Vec<String>,
     transparent: bool,
     undo: UndoBehavior,
     coalesce: Option<String>,
@@ -153,6 +150,7 @@ impl fmt::Debug for CommandSpec {
             .field("undo", &self.undo)
             .field("permissions", &self.permissions)
             .field("exposure", &self.exposure)
+            .field("positional", &self.positional)
             .finish_non_exhaustive()
     }
 }
@@ -182,7 +180,8 @@ impl CommandSpec {
     /// The parameter and result schemas are generated from `P` and `R`.
     ///
     /// Defaults: undoable, permission class `edit`, exposed on every surface, always enabled,
-    /// not transparent, no examples, no prompt machine.
+    /// not transparent, no examples, no prompt machine, and the required parameters in
+    /// declaration order as the positional order.
     pub fn new<P, R, F>(
         id: impl Into<String>,
         label: impl Into<String>,
@@ -204,18 +203,30 @@ impl CommandSpec {
             let value = run(context, params)?;
             serde_json::to_value(value).map_err(|_| Error::new(codes::RESULT_INVALID))
         });
+        let params = schema::schema_for::<P>();
+        let positional = params
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|r| {
+                r.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             id: id.into(),
             label: label.into(),
             description: description.into(),
             category: None,
             keywords: None,
-            params: schema::schema_for::<P>(),
+            params,
             result: schema::schema_for::<R>(),
             examples: Vec::new(),
             enabled: None,
             run,
             prompt: None,
+            positional,
             transparent: false,
             undo: UndoBehavior::Undoable,
             coalesce: None,
@@ -260,6 +271,29 @@ impl CommandSpec {
     pub fn with_prompt(mut self, machine: Arc<dyn PromptMachine>) -> Self {
         self.prompt = Some(machine);
         self
+    }
+
+    /// Sets a declarative prompt machine; steps without a default take the parameter's schema
+    /// `default` ([`PromptSequence::with_schema_defaults`]).
+    #[must_use]
+    pub fn with_prompts(mut self, sequence: PromptSequence) -> Self {
+        self.prompt = Some(Arc::new(sequence.with_schema_defaults(&self.params)));
+        self
+    }
+
+    /// Replaces the positional order: the parameters that inline values without a name fill,
+    /// in order. The default is the required parameters in declaration order; optional
+    /// parameters are named-only unless listed here.
+    #[must_use]
+    pub fn with_positional<S: Into<String>>(mut self, names: impl IntoIterator<Item = S>) -> Self {
+        self.positional = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The positional order of inline parameters.
+    #[must_use]
+    pub fn positional(&self) -> &[String] {
+        &self.positional
     }
 
     /// Marks the command transparent.
@@ -420,7 +454,7 @@ impl CommandSpec {
     /// identifiers for label, description, category and keywords, at least one permission
     /// class, schemas within the supported subset ([`schema::check_schema`]), a parameter schema
     /// that is an object rejecting unknown properties (`additionalProperties: false`), and
-    /// valid examples.
+    /// valid examples, and a positional order of distinct parameter names.
     ///
     /// # Errors
     ///
@@ -444,6 +478,14 @@ impl CommandSpec {
             && self.params.get("additionalProperties") == Some(&Value::Bool(false));
         if !object {
             return Err(invalid("params_not_closed_object"));
+        }
+        let properties = self.params.get("properties").and_then(Value::as_object);
+        let mut seen = BTreeSet::new();
+        let positional_ok = self.positional.iter().all(|name| {
+            seen.insert(name.as_str()) && properties.is_some_and(|p| p.contains_key(name))
+        });
+        if !positional_ok {
+            return Err(invalid("positional_invalid"));
         }
         self.validate_examples()
     }

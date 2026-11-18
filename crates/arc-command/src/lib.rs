@@ -3,7 +3,7 @@
 //! The parts that exist:
 //!
 //! - the command specification with identifier, labels, schemas, examples, enabled predicate,
-//!   `run`, the prompt machine slot, transparency, undo behavior, permission classes and
+//!   `run`, the prompt machine, transparency, undo behavior, permission classes and
 //!   exposure (CORE-CMD-001, [`spec`]);
 //! - parameter and result schemas generated from Rust types, bounded parameter parsing and
 //!   validation with JSON-pointer violations (CORE-CMD-002, [`schema`]);
@@ -12,7 +12,13 @@
 //! - guarded execution through `arc-doc` transactions with permission checks (CORE-CMD-004,
 //!   CORE-CMD-007, [`invoke`]);
 //! - the registry with deprecated and user aliases, name resolution and the command catalog
-//!   (CORE-CMD-009, CORE-CMD-010, [`registry`]).
+//!   (CORE-CMD-009, CORE-CMD-010, [`registry`]);
+//! - prompt machines with typed inputs, defaults, keyword options, back, cancel and previews
+//!   (CORE-CMD-011, [`prompt`]);
+//! - command-line parsing with inline positional and named parameters, the canonical line form
+//!   and completion data (CORE-CMD-013, [`line`]);
+//! - the command-line driver that continues with prompts and repeats the last command
+//!   (CORE-CMD-013, CORE-CMD-015, [`command_line`]).
 //!
 //! A command is a typed Rust function over its parameters and a [`Context`]:
 //!
@@ -43,20 +49,29 @@
 //!
 //! No function in this crate panics.
 
+pub mod command_line;
 pub mod context;
 pub mod error;
 pub mod invoke;
+pub mod line;
+pub mod prompt;
 pub mod registry;
 pub mod schema;
 pub mod spec;
 
+pub use command_line::{CommandLine, LastCommand, Submitted, Target};
 pub use context::{
     Clock, Context, FixedClock, IdParam, PROGRESS_DELAY_MILLIS, Probe, ProgressSink, QuantityParam,
     Session,
 };
 pub use invoke::{Invocation, Invoker, Outcome};
+pub use line::{
+    Candidate, CandidateKind, Completion, ParsedLine, Span, complete, format_line, parse_line,
+};
+pub use prompt::{
+    Accept, Answer, Feedback, KeywordOption, Message, Point, PointDims, Prompt, PromptInput,
+    PromptMachine, PromptSequence, PromptSession, PromptState, PromptStep, Step,
+};
 pub use registry::{CATALOG_FORMAT, CATALOG_VERSION, Registry, Resolved, Via};
 pub use schema::{Violation, ViolationKind, parse_params};
-pub use spec::{
-    CommandSpec, Disabled, Permission, Predicate, PromptMachine, Surface, UndoBehavior,
-};
+pub use spec::{CommandSpec, Disabled, Permission, Predicate, Surface, UndoBehavior};
