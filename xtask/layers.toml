@@ -35,6 +35,7 @@ third_party = [
   "arc-swap",
   "blake3",
   "fastcdc",
+  "fluent-bundle",
   "glam",
   "insta",
   "nalgebra",
@@ -49,6 +50,9 @@ third_party = [
   "spade",
   "thiserror",
   "toml",
+  "tracing",
+  "tracing-subscriber",
+  "unic-langid",
   "uuid",
 ]
 

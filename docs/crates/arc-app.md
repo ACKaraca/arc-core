@@ -60,6 +60,122 @@ file-access tests per platform with failing providers; quota-exhaustion tests as
 are evicted before documents; availability tests asserting that every command with a missing
 capability is disabled with a reason.
 
+## Window-free parts as implemented
+
+The first part of `arc-app` has no window, renderer or network dependency: it depends on
+`arc-base` and, for logic only, on `fluent-bundle`, `unic-langid`, `toml`, `tracing` and
+`tracing-subscriber`. It does not query the operating system; the operating-system locale list and
+the configuration directory are arguments. Fallible functions return `arc_base::Error`.
+
+### No unsolicited network (CORE-APP-019)
+
+The crate has no network dependency and makes no network request. Network features (updates,
+reports, Hub) are added in later parts behind settings that default to off.
+
+### Settings (CORE-APP-010)
+
+- A `Setting` has a dotted key (one to eight segments of `[a-z][a-z0-9_]*`), a type (`Bool`,
+  `Int` with an inclusive range, `Float`, `Text`, `Choice` of fixed texts), a default that satisfies
+  the type, the highest scope that may supply a value, and the Fluent identifier of its
+  description. Registration rejects a malformed or duplicate key and a default of the wrong type.
+- Scopes are, lowest first: default, system, user, workspace, document. A setting declared at scope
+  `S` accepts values in scopes up to `S`; the system scope is always accepted.
+- A scope's values are a TOML table; the key `ui.language` is the key `language` in the table
+  `ui`. Resolution starts at the document scope and returns the first value that is in an allowed
+  scope and satisfies the type, together with its scope. Skipped values are returned as issues
+  (`type_mismatch`, `scope_not_allowed`), highest scope first, and resolution continues with the next
+  lower scope; with no valid value the default applies and the source is `default`.
+- A `Float` accepts a TOML integer and converts it; non-finite floats are invalid. Out-of-range
+  integers and texts outside a `Choice` are type mismatches.
+- `set` validates key, scope, type and range and fails with a code instead of storing a bad value;
+  `reset` removes the value of one scope. Keys the registry does not know stay in the tables.
+- The registry `SettingsRegistry::builtin` holds `ui.language`, `log.level`, `log.max_file_bytes`,
+  `log.max_files` and `recent.max_entries`, all user-scoped.
+
+### Settings files (CORE-APP-012)
+
+- A file is read into a TOML table, so unknown keys, including nested ones, survive load and
+  save. Comments and layout are not preserved and keys are written sorted.
+- A missing file yields an empty table. A file larger than 1 MiB, not valid UTF-8 or not valid
+  TOML is renamed to the first free `<name>.malformed-<n>` beside it and reported with
+  `app.settings_file.malformed` or `app.settings_file.too_large`; the caller applies defaults. An
+  existing aside file is never overwritten. Renaming is not atomic against another process
+  creating the same name.
+- A save writes `.<name>.tmp` beside the target, flushes it to disk and renames it over the
+  target; a failure leaves the previous file in place and removes the temporary file.
+
+### Locale selection (CORE-APP-014)
+
+- Catalogs are parsed once and added per language tag; a catalog with a syntax error or above
+  4 MiB is rejected as a whole. A `Localizer` requires the `en-US` catalog.
+- The requested tags are either the operating-system list, when the `ui.language` value is
+  `system` or empty, or the single configured tag. POSIX spellings (`tr_TR.UTF-8`) are accepted;
+  unparsable tags are skipped.
+- Negotiation takes the requested tags in order: an exact catalog match, else a catalog with the
+  same language subtag, preferring one without a region. Without a match, English is selected and
+  the selection reports `matched = false`.
+- The fallback chain is the selected language, its region-less sibling and `en-US`; a message
+  is taken from the first catalog that defines it, so a missing message falls back per message.
+  An identifier no catalog defines formats as the identifier itself.
+- `set_requested` rebuilds the chain from the already parsed catalogs, so a language change
+  takes effect on the next `format` call without a restart. Errors format from their message
+  identifier and arguments. Bidirectional isolation marks around arguments are kept.
+
+### Logging (CORE-APP-015)
+
+- `subscriber` builds a `tracing` subscriber that writes text records (fields as `key=value`, no
+  colors) at or above the configured level to a `RotatingWriter`. Installing it globally is the
+  caller's decision. There is no log viewer in this part.
+- The current file is `<file_name>`; rotation renames it to `<file_name>.1` and shifts older
+  files up; the file that would exceed the count is deleted. At most `max_files` files exist,
+  the current one included; with one file, the file is replaced.
+- Each record is one write and is never split, so a file stays within `max_file_bytes` unless a
+  single record is larger. Limits: size 4 KiB to 1 GiB, count 1 to 100. Files left over from an
+  earlier, larger count are not cleaned up.
+- `Redacted<T>` formats as `[redacted]` through `Debug` and `Display` without reading the value.
+  Document content and credentials are logged only through it; the type system cannot stop a
+  caller from formatting such a value as plain text.
+
+### Recent files (CORE-APP-007)
+
+- The list is ordered most recent first. `touch` moves or inserts a path at the front and keeps
+  its pin. The bound applies to unpinned entries (1 to 1000, default setting 20); pinned entries
+  are never evicted, at most 50. Pinned entries are listed first.
+- `unpin` returns the entry to its recency position, and the bound may then evict it.
+- Missing files are never checked implicitly; `prune_missing` removes every entry, pinned ones
+  included, for which the caller's predicate says the file is missing, and returns the paths.
+- The list is its own TOML file (`entries = [{ path, pinned }]`) written through the settings-file
+  functions. On load, malformed items and duplicates are skipped, surplus pins become unpinned and
+  the bound is applied. Paths that are not UTF-8 are not persisted. Thumbnails are not part of
+  this model.
+
+### Error codes
+
+The codes `arc-app` owns; messages are in `locales/en-US/arc-app.ftl`.
+
+| Code | Category | Raised when |
+|---|---|---|
+| `app.settings.invalid_key` | `invalid_input` | A setting key is not one to eight dotted lowercase segments |
+| `app.settings.duplicate_key` | `conflict` | A setting key is registered twice |
+| `app.settings.default_mismatch` | `invalid_input` | A setting's default does not satisfy its type |
+| `app.settings.unknown_key` | `not_found` | A key is not registered |
+| `app.settings.type_mismatch` | `invalid_input` | A value does not satisfy its setting's type or range (also reported as an issue by resolution) |
+| `app.settings.scope_not_allowed` | `invalid_input` | A value is in a scope above the setting's highest scope, or in the default scope (also reported as an issue) |
+| `app.settings.path_conflict` | `conflict` | A parent key of a setting holds a non-table value, or the key holds a table |
+| `app.settings_file.read_failed` | `io` | An existing settings file cannot be read |
+| `app.settings_file.write_failed` | `io` | A settings file cannot be written |
+| `app.settings_file.malformed` | `corrupt_data` | A settings file is not UTF-8 TOML; it was set aside |
+| `app.settings_file.too_large` | `limit_exceeded` | A settings file exceeds 1 MiB; it was set aside |
+| `app.settings_file.set_aside_failed` | `io` | A malformed settings file cannot be renamed |
+| `app.locale.invalid_tag` | `invalid_input` | A catalog is added under a text that is not a language tag |
+| `app.locale.catalog_invalid` | `invalid_input` | A catalog has a syntax error |
+| `app.locale.catalog_too_large` | `limit_exceeded` | A catalog exceeds 4 MiB |
+| `app.locale.fallback_missing` | `not_found` | There is no `en-US` catalog |
+| `app.log.invalid_config` | `invalid_input` | A logging limit or file name is out of range |
+| `app.log.io` | `io` | A log directory or file cannot be opened |
+| `app.recent.not_found` | `not_found` | A path is not in the recent-files list |
+| `app.recent.too_many_pinned` | `limit_exceeded` | A fifty-first entry is pinned |
+
 ## Capabilities
 
 ### Shell and documents

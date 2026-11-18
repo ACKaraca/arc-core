@@ -21,6 +21,7 @@ arc-doc = { path = "crates/arc-doc" }
 arc-mesh = { path = "crates/arc-mesh" }
 arc-solve = { path = "crates/arc-solve" }
 arc-command = { path = "crates/arc-command" }
+arc-app = { path = "crates/arc-app" }
 
 # Lock-free publication of document snapshots in `arc-doc`; the optional `serde` feature stays off.
 arc-swap = { version = "1.9.5", default-features = false }
@@ -30,6 +31,8 @@ blake3 = { version = "1.8.7", default-features = false }
 # Content-defined chunking of large assets in `arc-doc` (feature `package`); the async
 # integrations (`tokio`, `futures`) stay off.
 fastcdc = { version = "5.0.0", default-features = false }
+# Message formatting for the localization of `arc-app`; default features stay off.
+fluent-bundle = { version = "0.16.0", default-features = false }
 glam = "0.34"
 # Snapshot tests only; default features (terminal colors) stay off.
 insta = { version = "1.49", default-features = false }
@@ -54,6 +57,12 @@ spade = { version = "2.15", default-features = false, features = ["std"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
 toml = "1"
+# Structured logging in `arc-app`; the attribute macros and every optional integration stay off.
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+# Formatting and writing of log records in `arc-app`; ansi colors, filters and JSON stay off.
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "fmt", "registry"] }
+# Locale identifiers in `arc-app`; the macro crate and the likely-subtags data stay off.
+unic-langid = { version = "0.9.6", default-features = false }
 uuid = { version = "1.29", default-features = false, features = ["std", "serde"] }
 
 # The suite lint table (arc-suite docs/engineering/coding-standards.md). Every crate inherits it

@@ -57,7 +57,8 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `rusqlite` | SQLite (bundled, features `bundled` and `limits`, no default features) behind the package of `arc-doc` (feature `package`, off in the WebAssembly build); no `rusqlite` type appears in a public signature | MIT; SQLite public domain |
 | `fastcdc` | Content-defined chunking of assets larger than 4 MiB in the `arc-doc` package (feature `package`, without default features) | MIT |
 | `thiserror` | Error enums | MIT or Apache-2.0 |
-| `tracing`, `tracing-subscriber` | Structured logging | MIT |
+| `tracing`, `tracing-subscriber` | Structured logging in `arc-app` (`tracing`: `std`; `tracing-subscriber`: `std`, `fmt`, `registry`; no colors, filters or JSON) | MIT |
+| `fluent-bundle`, `unic-langid` | Message formatting and language identifiers for localization in `arc-app` (no default features) | Apache-2.0 or MIT |
 | `rayon` | Work-stealing worker pool | MIT or Apache-2.0 |
 | `crossbeam-channel` | Bounded channels between threads | MIT or Apache-2.0 |
 | `arc-swap` | Lock-free publication of snapshots | MIT or Apache-2.0 |
