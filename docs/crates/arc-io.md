@@ -504,7 +504,7 @@ because the layer table does not allow one format crate to depend on another.
 | `io.pdf.option_invalid` | `invalid_input` | An option is out of range or malformed; the argument `option` names it |
 | `io.pdf.stream_invalid` | `invalid_input` | A page size, area, clip index or coordinate of the stream cannot be written; the argument `what` names it |
 
-| `io.pdf.raster_unavailable` | `unsupported` | PNG output was requested and the crate was built without the feature `raster` |
+| `io.pdf.raster_unavailable` | `unsupported` | PNG output was requested without the feature `raster` |
 | `io.pdf.plot_params_invalid` | `invalid_input` | A parameter of `core.draft.plot` is missing, inconsistent or out of range; the argument `what` names it |
 
 `base.cancelled` is returned when the token is cancelled.
