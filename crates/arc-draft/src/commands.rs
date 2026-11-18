@@ -21,7 +21,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::codes;
+use crate::layout::{LAYOUT, Orientation, VIEWPORT, viewport};
 use crate::order::{Place, reorder};
+use crate::style::{DEFAULT_NAME, DIM_STYLE, LEADER_STYLE, STYLES, TABLE_STYLE, TEXT_STYLE};
 use crate::types::{
     self, BLOCK, BLOCK_REF, CONTAINERS, ENTITIES, ElementKind, LAYER, LINETYPE, SPACE, SpaceKind,
     SpaceUnit, entity, layer, table,
@@ -158,6 +160,83 @@ const NAMES: &[Names] = &[
         message_id: "draft-command-order-below",
         description: Description {
             message_id: "draft-command-order-below-description",
+        },
+    },
+    Names {
+        id: "core.draft.layout.create",
+        message_id: "draft-command-layout-create",
+        description: Description {
+            message_id: "draft-command-layout-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.layout.modify",
+        message_id: "draft-command-layout-modify",
+        description: Description {
+            message_id: "draft-command-layout-modify-description",
+        },
+    },
+    Names {
+        id: "core.draft.viewport.create",
+        message_id: "draft-command-viewport-create",
+        description: Description {
+            message_id: "draft-command-viewport-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.viewport.modify",
+        message_id: "draft-command-viewport-modify",
+        description: Description {
+            message_id: "draft-command-viewport-modify-description",
+        },
+    },
+    Names {
+        id: "core.draft.viewport.delete",
+        message_id: "draft-command-viewport-delete",
+        description: Description {
+            message_id: "draft-command-viewport-delete-description",
+        },
+    },
+    Names {
+        id: "core.draft.wipeout.create",
+        message_id: "draft-command-wipeout-create",
+        description: Description {
+            message_id: "draft-command-wipeout-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.style.create",
+        message_id: "draft-command-style-create",
+        description: Description {
+            message_id: "draft-command-style-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.style.modify",
+        message_id: "draft-command-style-modify",
+        description: Description {
+            message_id: "draft-command-style-modify-description",
+        },
+    },
+    Names {
+        id: "core.draft.style.delete",
+        message_id: "draft-command-style-delete",
+        description: Description {
+            message_id: "draft-command-style-delete-description",
+        },
+    },
+    Names {
+        id: "core.draft.style.defaults",
+        message_id: "draft-command-style-defaults",
+        description: Description {
+            message_id: "draft-command-style-defaults-description",
+        },
+    },
+    Names {
+        id: "core.draft.purge",
+        message_id: "draft-command-purge",
+        description: Description {
+            message_id: "draft-command-purge-description",
         },
     },
 ];
@@ -375,6 +454,128 @@ pub struct OrderRelative {
     pub objects: Vec<IdParam>,
     /// The entity to place them next to.
     pub reference: IdParam,
+}
+
+/// The result of `core.draft.layout.create`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CreatedLayout {
+    /// The new layout space.
+    pub space: IdParam,
+    /// Its layout settings.
+    pub layout: IdParam,
+}
+
+/// Parameters of `core.draft.layout.create`; the other settings take their defaults.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateLayout {
+    /// The name of the layout space.
+    #[schemars(length(max = 255))]
+    pub name: String,
+    /// The unit; `millimeter` when absent.
+    #[serde(default)]
+    pub unit: Option<SpaceUnit>,
+    /// The name of the paper size.
+    #[serde(default)]
+    pub paper_name: Option<String>,
+    /// The paper width as named, in the layout's unit.
+    pub paper_width: f64,
+    /// The paper height as named.
+    pub paper_height: f64,
+    /// The orientation; `portrait` when absent.
+    #[serde(default)]
+    pub orientation: Option<Orientation>,
+}
+
+/// Parameters of `core.draft.viewport.create`; the other fields take their defaults.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateViewport {
+    /// The layout space that owns the viewport.
+    pub layout: IdParam,
+    /// The space shown.
+    pub model: IdParam,
+    /// The center on the sheet.
+    pub center: [f64; 2],
+    /// The width on the sheet.
+    pub width: f64,
+    /// The height on the sheet.
+    pub height: f64,
+    /// The model point shown at the center; the origin when absent.
+    #[serde(default)]
+    pub view_center: [f64; 2],
+    /// Paper length per model length in one unit; 1 when absent.
+    #[serde(default)]
+    pub scale: Option<f64>,
+    /// The rotation in radians.
+    #[serde(default)]
+    pub rotation: f64,
+}
+
+/// Parameters of `core.draft.wipeout.create`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateWipeout {
+    /// The space or block definition the wipeout belongs to.
+    pub owner: IdParam,
+    /// The boundary: a closed `arc-geom` polyline in its JSON form.
+    pub boundary: serde_json::Value,
+    /// Whether the boundary is drawn.
+    #[serde(default)]
+    pub frame: bool,
+    /// The layer, if any.
+    #[serde(default)]
+    pub layer: Option<IdParam>,
+}
+
+/// The kind of a style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StyleKind {
+    /// A text style.
+    Text,
+    /// A dimension style.
+    Dimension,
+    /// A leader style.
+    Leader,
+    /// A table style.
+    Table,
+}
+
+impl StyleKind {
+    /// The type key of the kind.
+    #[must_use]
+    pub fn type_key(self) -> &'static str {
+        match self {
+            Self::Text => TEXT_STYLE,
+            Self::Dimension => DIM_STYLE,
+            Self::Leader => LEADER_STYLE,
+            Self::Table => TABLE_STYLE,
+        }
+    }
+}
+
+/// Parameters of `core.draft.style.create`; the other fields take their defaults.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateStyle {
+    /// The kind.
+    pub kind: StyleKind,
+    /// The name, unique among styles of the kind.
+    #[schemars(length(max = 255))]
+    pub name: String,
+}
+
+/// Parameters of `core.draft.style.defaults`.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Defaults {}
+
+/// The result of `core.draft.style.defaults`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CreatedStyles {
+    /// The new styles, in the order text, dimension, leader, table.
+    pub created: Vec<IdParam>,
 }
 
 fn wrong_type(id: ObjectId) -> Error {
@@ -790,6 +991,158 @@ fn insert_block(ctx: &mut Context<'_>, p: InsertBlock) -> Result<Created> {
     create_entity(ctx, BLOCK_REF, p.owner.0, p.layer, kind)
 }
 
+fn create_layout(ctx: &mut Context<'_>, p: CreateLayout) -> Result<CreatedLayout> {
+    let unit = p.unit.unwrap_or(SpaceUnit::Millimeter);
+    let space = create(
+        ctx,
+        SPACE,
+        None,
+        vec![
+            Some(Value::String(p.name)),
+            Some(Value::Enum(SpaceKind::Layout as u32)),
+            Some(Value::Enum(unit.code())),
+        ],
+    )?;
+    let mut values = types::defaults(ctx.snapshot().registry(), LAYOUT);
+    set(
+        &mut values,
+        crate::layout::settings::PAPER_NAME,
+        p.paper_name.map(Value::String),
+    );
+    set(
+        &mut values,
+        crate::layout::settings::PAPER_WIDTH,
+        Some(Value::F64(p.paper_width)),
+    );
+    set(
+        &mut values,
+        crate::layout::settings::PAPER_HEIGHT,
+        Some(Value::F64(p.paper_height)),
+    );
+    if let Some(o) = p.orientation {
+        set(
+            &mut values,
+            crate::layout::settings::ORIENTATION,
+            Some(Value::Enum(o as u32)),
+        );
+    }
+    let layout = create(ctx, LAYOUT, Some(space), values)?;
+    ctx.set_selection_after(vec![space]);
+    Ok(CreatedLayout {
+        space: IdParam(space),
+        layout: IdParam(layout),
+    })
+}
+
+fn create_viewport(ctx: &mut Context<'_>, p: CreateViewport) -> Result<Created> {
+    let mut values = types::defaults(ctx.snapshot().registry(), VIEWPORT);
+    set(
+        &mut values,
+        viewport::MODEL,
+        Some(Value::Reference(p.model.0)),
+    );
+    set(&mut values, viewport::CENTER, Some(point2(p.center)));
+    set(&mut values, viewport::WIDTH, Some(Value::F64(p.width)));
+    set(&mut values, viewport::HEIGHT, Some(Value::F64(p.height)));
+    set(
+        &mut values,
+        viewport::VIEW_CENTER,
+        Some(point2(p.view_center)),
+    );
+    set(
+        &mut values,
+        viewport::SCALE,
+        Some(Value::F64(p.scale.unwrap_or(1.0))),
+    );
+    set(
+        &mut values,
+        viewport::ROTATION,
+        Some(Value::F64(p.rotation)),
+    );
+    Ok(Created {
+        id: IdParam(create(ctx, VIEWPORT, Some(p.layout.0), values)?),
+    })
+}
+
+/// `core.draft.viewport.modify`: the view fields of a locked viewport are refused.
+fn modify_viewport(ctx: &mut Context<'_>, p: SetField) -> Result<()> {
+    if viewport::VIEW_FIELDS.contains(&p.field.as_str()) {
+        let snapshot = ctx.snapshot().clone();
+        for IdParam(id) in &p.objects {
+            expect(&snapshot, *id, &[VIEWPORT])?;
+            if values_of(&snapshot, *id)?.get(viewport::LOCKED) == Some(&Some(Value::Bool(true))) {
+                return Err(Error::new(codes::VIEWPORT_LOCKED).with_detail("id", id.to_string()));
+            }
+        }
+    }
+    modify(ctx, p, &[VIEWPORT])
+}
+
+fn create_wipeout(ctx: &mut Context<'_>, p: CreateWipeout) -> Result<Created> {
+    let invalid = || field_invalid("boundary");
+    let curve: Curve2 = serde_json::from_value(p.boundary).map_err(|_| invalid())?;
+    if !matches!(&curve, Curve2::Polyline(_)) {
+        return Err(invalid());
+    }
+    let kind = vec![
+        (entity::KIND, Value::Geometry(GeometryBytes(curve.encode()))),
+        (entity::WIPEOUT_FRAME, Value::Bool(p.frame)),
+    ];
+    create_entity(ctx, types::WIPEOUT, p.owner.0, p.layer, kind)
+}
+
+fn create_style(ctx: &mut Context<'_>, kind: StyleKind, name: String) -> Result<ObjectId> {
+    let key = kind.type_key();
+    let mut values = types::defaults(ctx.snapshot().registry(), key);
+    set(&mut values, table::NAME, Some(Value::String(name)));
+    create(ctx, key, None, values)
+}
+
+/// Creates a style named [`DEFAULT_NAME`] of every kind that has none.
+fn create_defaults(ctx: &mut Context<'_>, _: Defaults) -> Result<CreatedStyles> {
+    let mut created = Vec::new();
+    for kind in [
+        StyleKind::Text,
+        StyleKind::Dimension,
+        StyleKind::Leader,
+        StyleKind::Table,
+    ] {
+        let exists = ctx
+            .txn()?
+            .snapshot()
+            .iter_type(kind.type_key())
+            .is_ok_and(|mut all| {
+                all.any(|(_, o)| types::text_at(&o.values, table::NAME) == Some(DEFAULT_NAME))
+            });
+        if !exists {
+            created.push(IdParam(create_style(ctx, kind, DEFAULT_NAME.to_owned())?));
+        }
+    }
+    ctx.set_selection_after(created.iter().map(|IdParam(id)| *id).collect());
+    Ok(CreatedStyles { created })
+}
+
+/// `core.draft.purge`: deletes the objects, each unused in the transaction's state.
+fn purge(ctx: &mut Context<'_>, p: Delete) -> Result<()> {
+    let keys = crate::purge::purgeable();
+    let limits = *ctx.limits();
+    let txn = ctx.txn()?;
+    for IdParam(id) in &p.objects {
+        expect(txn.snapshot(), *id, &keys)?;
+        if crate::purge::in_use(txn.snapshot(), *id) {
+            return Err(Error::new(codes::PURGE_IN_USE).with_detail("id", id.to_string()));
+        }
+    }
+    for IdParam(id) in p.objects {
+        // An object listed twice is deleted once.
+        if txn.snapshot().resolve(id).is_ok() {
+            txn.delete(id)?;
+        }
+    }
+    txn.apply_delete_rules(&limits)?;
+    Ok(())
+}
+
 /// Moves `objects`, which must share one container, to `place`.
 fn order(ctx: &mut Context<'_>, objects: Vec<IdParam>, place: Place) -> Result<()> {
     let snapshot = ctx.txn()?.snapshot().clone();
@@ -879,6 +1232,28 @@ pub fn register_commands(registry: &mut Registry) -> Result<()> {
         spec("core.draft.order.below", |ctx, p: OrderRelative| {
             order(ctx, p.objects, Place::Below(p.reference.0))
         }),
+        spec("core.draft.layout.create", create_layout).with_example(serde_json::json!({
+            "name": "sheet 1", "paper_width": 297.0, "paper_height": 210.0
+        })),
+        family("core.draft.layout.modify", &[LAYOUT]),
+        spec("core.draft.viewport.create", create_viewport),
+        spec("core.draft.viewport.modify", modify_viewport),
+        spec("core.draft.viewport.delete", |ctx, p: Delete| {
+            delete(ctx, p, &[VIEWPORT])
+        }),
+        spec("core.draft.wipeout.create", create_wipeout),
+        spec("core.draft.style.create", |ctx, p: CreateStyle| {
+            Ok(Created {
+                id: IdParam(create_style(ctx, p.kind, p.name)?),
+            })
+        })
+        .with_example(serde_json::json!({"kind": "text", "name": "notes"})),
+        family("core.draft.style.modify", STYLES),
+        spec("core.draft.style.delete", |ctx, p: Delete| {
+            delete(ctx, p, STYLES)
+        }),
+        spec("core.draft.style.defaults", create_defaults).with_example(serde_json::json!({})),
+        spec("core.draft.purge", purge),
     ];
     for spec in specs {
         registry.register(spec)?;

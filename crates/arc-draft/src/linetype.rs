@@ -397,7 +397,8 @@ mod tests {
             let mut at = 0.0;
             for dash in &p {
                 prop_assert!(dash.start >= at && dash.end >= dash.start && dash.end <= total);
-                prop_assert!(dash.end - dash.start <= d * k * (1.0 + 1e-12));
+                // Positions far along the curve round to their own ulps, not the dash's.
+                prop_assert!(dash.end - dash.start <= d * k * (1.0 + 1e-12) + 4.0 * f64::EPSILON * dash.end);
                 blank += dash.start - at;
                 drawn += dash.end - dash.start;
                 at = dash.end;

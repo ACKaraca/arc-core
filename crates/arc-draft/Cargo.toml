@@ -1,6 +1,6 @@
 [package]
 name = "arc-draft"
-description = "The 2D drafting model of the Arc suite: spaces, curve entities, layers, linetypes, blocks, draw order and appearance resolution."
+description = "The 2D drafting model of the Arc suite: spaces, curve entities, layers, linetypes, blocks, draw order, appearance resolution, layouts, viewports, styles and display lists."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -92,6 +92,67 @@ pub mod codes {
         message_id: "draft-order-container-mismatch",
     };
 
+    /// The margins of a layout leave no printable area on its sheet.
+    pub const LAYOUT_MARGINS_INVALID: ErrorCode = ErrorCode {
+        code: "draft.layout.margins_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-layout-margins-invalid",
+    };
+    /// A layout plots a window without two corners, or with corners not in ascending order.
+    pub const LAYOUT_WINDOW_INVALID: ErrorCode = ErrorCode {
+        code: "draft.layout.window_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-layout-window-invalid",
+    };
+    /// Layout settings or a viewport are not owned by a layout space.
+    pub const LAYOUT_OWNER_INVALID: ErrorCode = ErrorCode {
+        code: "draft.layout.owner_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-layout-owner-invalid",
+    };
+    /// A layout space would have two layout settings objects.
+    pub const LAYOUT_DUPLICATE: ErrorCode = ErrorCode {
+        code: "draft.layout.duplicate",
+        category: Category::Conflict,
+        message_id: "draft-layout-duplicate",
+    };
+    /// The clip boundary of a viewport is not a closed polyline.
+    pub const VIEWPORT_CLIP_INVALID: ErrorCode = ErrorCode {
+        code: "draft.viewport.clip_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-viewport-clip-invalid",
+    };
+    /// The view of a locked viewport cannot change.
+    pub const VIEWPORT_LOCKED: ErrorCode = ErrorCode {
+        code: "draft.viewport.locked",
+        category: Category::Conflict,
+        message_id: "draft-viewport-locked",
+    };
+    /// The boundary of a wipeout is not a closed polyline.
+    pub const WIPEOUT_BOUNDARY_OPEN: ErrorCode = ErrorCode {
+        code: "draft.wipeout.boundary_open",
+        category: Category::InvalidInput,
+        message_id: "draft-wipeout-boundary-open",
+    };
+    /// A dimension style's parent is not a style for all kinds without a parent of its own.
+    pub const STYLE_PARENT_INVALID: ErrorCode = ErrorCode {
+        code: "draft.style.parent_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-style-parent-invalid",
+    };
+    /// An object selected for purging is in use.
+    pub const PURGE_IN_USE: ErrorCode = ErrorCode {
+        code: "draft.purge.in_use",
+        category: Category::Conflict,
+        message_id: "draft-purge-in-use",
+    };
+    /// A display list would hold more primitives than the bound.
+    pub const DISPLAY_TOO_LARGE: ErrorCode = ErrorCode {
+        code: "draft.display.too_large",
+        category: Category::LimitExceeded,
+        message_id: "draft-display-too-large",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         GEOMETRY_INVALID,
@@ -108,6 +169,16 @@ pub mod codes {
         FIELD_INVALID,
         ORDER_REFERENCE_MOVED,
         ORDER_CONTAINER_MISMATCH,
+        LAYOUT_MARGINS_INVALID,
+        LAYOUT_WINDOW_INVALID,
+        LAYOUT_OWNER_INVALID,
+        LAYOUT_DUPLICATE,
+        VIEWPORT_CLIP_INVALID,
+        VIEWPORT_LOCKED,
+        WIPEOUT_BOUNDARY_OPEN,
+        STYLE_PARENT_INVALID,
+        PURGE_IN_USE,
+        DISPLAY_TOO_LARGE,
     ];
 }
 

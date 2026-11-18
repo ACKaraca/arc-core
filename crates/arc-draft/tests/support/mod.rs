@@ -14,7 +14,8 @@ use arc_base::ObjectId;
 use arc_base::math::{Point2, Vector2};
 use arc_command::{Invocation, Invoker, Permission, Registry, Session, Surface};
 use arc_doc::graph::Evaluators;
-use arc_doc::{Document, TypeRegistry};
+use arc_doc::{Document, DocumentConfig, Snapshot, TypeRegistry};
+use arc_draft::display::DisplayOptions;
 use arc_geom::{
     Arc2, Circle2, Curve2, Ellipse2, EllipticalArc2, Line2, Polyline2, PolylineVertex, Ray2,
     Segment2,
@@ -40,7 +41,28 @@ impl Fixture {
     }
 
     pub fn with_nesting(limit: u32) -> Self {
-        let document = Document::new(types(), Arc::new(Evaluators::new())).unwrap();
+        Self::build(limit, Evaluators::new())
+    }
+
+    /// A document with the drafting evaluators and no regeneration workers: nodes evaluate
+    /// only when demanded.
+    pub fn drafting() -> Self {
+        let mut evaluators = Evaluators::new();
+        arc_draft::register_evaluators(&mut evaluators, DisplayOptions::default()).unwrap();
+        Self::with_evaluators(evaluators)
+    }
+
+    pub fn with_evaluators(evaluators: Evaluators) -> Self {
+        Self::build(arc_draft::validate::DEFAULT_MAX_NESTING, evaluators)
+    }
+
+    fn build(limit: u32, evaluators: Evaluators) -> Self {
+        let config = DocumentConfig {
+            workers: 0,
+            ..DocumentConfig::default()
+        };
+        let document =
+            Document::open(Snapshot::empty(types()), Arc::new(evaluators), config).unwrap();
         for validator in arc_draft::validate::validators(limit) {
             document.add_validator(validator);
         }
@@ -86,6 +108,16 @@ impl Fixture {
 
     pub fn line(&mut self, owner: ObjectId) -> ObjectId {
         self.entity(owner, curve_json(&every_curve()[0]))
+    }
+
+    /// Sets `field` of `objects` with the modify command `command`.
+    pub fn set(&mut self, command: &str, objects: &[ObjectId], field: &str, value: Value) {
+        let ids: Vec<String> = objects.iter().map(ToString::to_string).collect();
+        self.run(
+            command,
+            json!({"objects": ids, "field": field, "value": value}),
+        )
+        .unwrap();
     }
 
     pub fn values(&self, id: ObjectId) -> Vec<Option<arc_doc::Value>> {

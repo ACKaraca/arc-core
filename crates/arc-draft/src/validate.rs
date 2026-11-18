@@ -19,9 +19,16 @@
 //!
 //! The search stops below the limit, so a cycle longer than the limit is reported as too deep.
 //!
-//! **Names.** A layer, linetype or block definition that a transaction creates or modifies must
-//! not have the exact name (byte for byte) of another live object of its type:
+//! **Names.** A layer, linetype, block definition or style that a transaction creates or
+//! modifies must not have the exact name (byte for byte) of another live object of its type:
 //! `draft.name.taken` with the argument `name`.
+//!
+//! **Layouts.** Layout settings and viewports must be owned by a space of kind `layout`, and a
+//! layout space owns at most one settings object (`draft.layout.owner_invalid`,
+//! `draft.layout.duplicate`); a touched space of kind `model` owns neither.
+//!
+//! **Dimension style parents.** A dimension style with a parent has a kind other than `all`,
+//! and its parent has the kind `all` and no parent (`draft.style.parent_invalid`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -34,7 +41,11 @@ use arc_doc::{
 };
 
 use crate::error::codes;
-use crate::types::{BLOCK, BLOCK_REF, LAYER, LINETYPE, entity, reference_at, table, text_at};
+use crate::layout::{LAYOUT, VIEWPORT};
+use crate::style::{DIM_STYLE, STYLES, dim};
+use crate::types::{
+    BLOCK, BLOCK_REF, LAYER, LINETYPE, SPACE, SpaceKind, entity, reference_at, table, text_at,
+};
 
 /// The default bound on the nesting depth of block references.
 pub const DEFAULT_MAX_NESTING: u32 = 64;
@@ -219,7 +230,7 @@ fn names(candidate: &Snapshot, touched: &BTreeMap<ObjectId, Change>) -> Vec<Find
         let Some(key) = type_of(candidate, id).map(|k| k.as_str().to_owned()) else {
             continue;
         };
-        if ![LAYER, LINETYPE, BLOCK].contains(&key.as_str()) {
+        if ![LAYER, LINETYPE, BLOCK].contains(&key.as_str()) && !STYLES.contains(&key.as_str()) {
             continue;
         }
         let Some(object) = candidate
@@ -244,13 +255,104 @@ fn names(candidate: &Snapshot, touched: &BTreeMap<ObjectId, Change>) -> Vec<Find
     findings
 }
 
-/// The drafting document validators: nesting with the depth bound `max_nesting`, and names.
+fn values(
+    snapshot: &Snapshot,
+    id: ObjectId,
+) -> Option<(&arc_doc::Header, &[Option<arc_doc::Value>])> {
+    let object = snapshot.get(snapshot.resolve(id).ok()?).ok()?;
+    Some((&object.header, &object.values))
+}
+
+fn is_layout_space(snapshot: &Snapshot, id: Option<ObjectId>) -> bool {
+    id.filter(|id| is(snapshot, *id, SPACE))
+        .and_then(|id| values(snapshot, id))
+        .is_some_and(|(_, v)| {
+            v.get(table::SPACE_KIND) == Some(&Some(arc_doc::Value::Enum(SpaceKind::Layout as u32)))
+        })
+}
+
+/// The owned objects of `space` of type `key`.
+fn owned(snapshot: &Snapshot, space: ObjectId, key: &str) -> Vec<ObjectId> {
+    snapshot
+        .referrers(space)
+        .filter(|r| r.field == ReferenceField::Owner && is(snapshot, r.source, key))
+        .map(|r| r.source)
+        .collect()
+}
+
+/// Layout settings and viewports belong to a layout space, at most one settings object each.
+fn layouts(candidate: &Snapshot, touched: &BTreeMap<ObjectId, Change>) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let owner_invalid = || error(Error::new(codes::LAYOUT_OWNER_INVALID));
+    for (&id, &change) in touched {
+        if change == Change::Deleted {
+            continue;
+        }
+        let Some((header, _)) = values(candidate, id) else {
+            continue;
+        };
+        if is(candidate, id, LAYOUT) || is(candidate, id, VIEWPORT) {
+            if !is_layout_space(candidate, header.owner) {
+                findings.push(owner_invalid());
+            } else if let Some(space) = header.owner
+                && is(candidate, id, LAYOUT)
+                && owned(candidate, space, LAYOUT).len() > 1
+            {
+                findings.push(error(Error::new(codes::LAYOUT_DUPLICATE)));
+            }
+        } else if is(candidate, id, SPACE)
+            && !is_layout_space(candidate, Some(id))
+            && (!owned(candidate, id, LAYOUT).is_empty()
+                || !owned(candidate, id, VIEWPORT).is_empty())
+        {
+            findings.push(owner_invalid());
+        }
+    }
+    findings
+}
+
+/// A dimension style with a parent applies to one kind, and its parent applies to all kinds
+/// and has no parent.
+fn dim_parents(candidate: &Snapshot, touched: &BTreeMap<ObjectId, Change>) -> Vec<Finding> {
+    let all = |id: ObjectId| {
+        values(candidate, id).is_some_and(|(_, v)| {
+            v.get(dim::KIND) == Some(&Some(arc_doc::Value::Enum(0)))
+                && reference_at(v, dim::PARENT).is_none()
+        })
+    };
+    let parent_field = ReferenceField::Field(FieldPath::new("parent"));
+    let mut findings = Vec::new();
+    for (&id, &change) in touched {
+        if change == Change::Deleted || !is(candidate, id, DIM_STYLE) {
+            continue;
+        }
+        let Some((_, v)) = values(candidate, id) else {
+            continue;
+        };
+        let parent = reference_at(v, dim::PARENT);
+        let child_ok = parent
+            .is_none_or(|p| v.get(dim::KIND) != Some(&Some(arc_doc::Value::Enum(0))) && all(p));
+        let has_children = candidate
+            .referrers(id)
+            .any(|r| r.field == parent_field && is(candidate, r.source, DIM_STYLE));
+        if !child_ok || (has_children && !all(id)) {
+            findings.push(error(Error::new(codes::STYLE_PARENT_INVALID)));
+        }
+    }
+    findings
+}
+
+/// The drafting document validators: nesting with the depth bound `max_nesting`, names,
+/// layout owners and dimension style parents.
 #[must_use]
 pub fn validators(max_nesting: u32) -> Vec<DocumentValidator> {
     let nesting: DocumentValidator =
         Arc::new(move |_, candidate, touched| nesting(candidate, touched, max_nesting));
     let names: DocumentValidator = Arc::new(|_, candidate, touched| names(candidate, touched));
-    vec![nesting, names]
+    let layouts: DocumentValidator = Arc::new(|_, candidate, touched| layouts(candidate, touched));
+    let parents: DocumentValidator =
+        Arc::new(|_, candidate, touched| dim_parents(candidate, touched));
+    vec![nesting, names, layouts, parents]
 }
 
 /// Adds [`validators`] with [`DEFAULT_MAX_NESTING`] to `document`.

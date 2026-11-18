@@ -48,6 +48,10 @@ pub const POLYLINE: &str = "core.draft.polyline";
 /// `attributes`.
 pub const BLOCK_REF: &str = "core.draft.block_ref";
 
+/// A wipeout: common fields, then `geometry` (a closed polyline) and `frame`. It masks what is
+/// beneath it in draw order (CORE-DRAFT-004).
+pub const WIPEOUT: &str = "core.draft.wipeout";
+
 /// Every entity type key: objects with the common fields that live in a space or block.
 pub const ENTITIES: &[&str] = &[
     POINT,
@@ -60,6 +64,7 @@ pub const ENTITIES: &[&str] = &[
     ELLIPTICAL_ARC,
     POLYLINE,
     BLOCK_REF,
+    WIPEOUT,
 ];
 
 /// The types that contain entities: spaces and block definitions.
@@ -114,6 +119,8 @@ pub mod entity {
     pub const KIND: usize = 16;
     /// `continuous_pattern` of a polyline.
     pub const CONTINUOUS_PATTERN: usize = 17;
+    /// `frame` of a wipeout: whether its boundary is drawn.
+    pub const WIPEOUT_FRAME: usize = 17;
     /// `position` of a block reference.
     pub const REF_POSITION: usize = 17;
     /// `scale` of a block reference: per-axis factors, none zero.
@@ -312,7 +319,7 @@ impl ElementKind {
     }
 }
 
-fn variants(names: &[&str]) -> ValueType {
+pub(crate) fn variants(names: &[&str]) -> ValueType {
     ValueType::Enum(
         names
             .iter()
@@ -332,7 +339,12 @@ fn unit_type() -> ValueType {
     variants(&UNITS.map(|(_, name)| name))
 }
 
-fn reference(target: &str, strength: Strength, on_delete: OnDelete, optional: bool) -> ValueType {
+pub(crate) fn reference(
+    target: &str,
+    strength: Strength,
+    on_delete: OnDelete,
+    optional: bool,
+) -> ValueType {
     ValueType::Reference(ReferenceSpec {
         targets: TypeKey::new(target).into_iter().collect(),
         rule: RelationshipRule {
@@ -348,25 +360,25 @@ fn reference(target: &str, strength: Strength, on_delete: OnDelete, optional: bo
     })
 }
 
-fn name_field() -> FieldDecl {
+pub(crate) fn name_field() -> FieldDecl {
     FieldDecl::new("name", ValueType::String)
         .with_bound(Bound::Length { max: NAME_BYTES })
         .in_aspect("identity")
 }
 
-fn text(name: &str, max: u64) -> FieldDecl {
+pub(crate) fn text(name: &str, max: u64) -> FieldDecl {
     FieldDecl::new(name, ValueType::String)
         .with_bound(Bound::Length { max })
         .optional()
 }
 
-fn real(name: &str, default: f64, min: f64, max: f64) -> FieldDecl {
+pub(crate) fn real(name: &str, default: f64, min: f64, max: f64) -> FieldDecl {
     FieldDecl::new(name, ValueType::F64)
         .with_default(Value::F64(default))
         .with_bound(Bound::Real { min, max })
 }
 
-fn flag(name: &str, default: bool) -> FieldDecl {
+pub(crate) fn flag(name: &str, default: bool) -> FieldDecl {
     FieldDecl::new(name, ValueType::Bool).with_default(Value::Bool(default))
 }
 
@@ -424,7 +436,7 @@ fn common() -> Vec<FieldDecl> {
     ]
 }
 
-fn geometry() -> FieldDecl {
+pub(crate) fn geometry() -> FieldDecl {
     let encoding = arc_geom::GeomEncoding::CURRENT;
     FieldDecl::new(
         "geometry",
@@ -436,7 +448,7 @@ fn geometry() -> FieldDecl {
     .in_aspect("geometry")
 }
 
-fn finding(error: Error) -> Finding {
+pub(crate) fn finding(error: Error) -> Finding {
     Finding {
         severity: Severity::Error,
         error,
@@ -463,6 +475,18 @@ fn curve_entity<T: GeomCodec>(values: &[Option<Value>]) -> Vec<Finding> {
         findings.push(finding(
             Error::new(codes::GEOMETRY_INVALID).with_source(error),
         ));
+    }
+    findings
+}
+
+/// The type validator of a wipeout: a polyline boundary that is closed.
+fn wipeout_entity(values: &[Option<Value>]) -> Vec<Finding> {
+    let mut findings = curve_entity::<Polyline2>(values);
+    if let Some(Some(Value::Geometry(bytes))) = values.get(entity::KIND)
+        && let Ok(polyline) = Polyline2::decode(&bytes.0, &Limits::DEFAULT)
+        && !polyline.is_closed()
+    {
+        findings.push(finding(Error::new(codes::WIPEOUT_BOUNDARY_OPEN)));
     }
     findings
 }
@@ -602,7 +626,7 @@ fn block_ref_fields() -> Vec<FieldDecl> {
 /// Every drafting type declaration.
 fn declarations() -> arc_base::Result<Vec<TypeDecl>> {
     let curve = || with_kind(vec![geometry()]);
-    let table: [(&str, Vec<FieldDecl>, Vec<TypeValidator>); 14] = [
+    let table: [(&str, Vec<FieldDecl>, Vec<TypeValidator>); 15] = [
         (SPACE, space_fields(), vec![space_findings]),
         (LAYER, layer_fields(), vec![]),
         (LINETYPE, linetype_fields(), vec![linetype_findings]),
@@ -629,10 +653,17 @@ fn declarations() -> arc_base::Result<Vec<TypeDecl>> {
             vec![curve_entity::<Polyline2>],
         ),
         (BLOCK_REF, block_ref_fields(), vec![block_ref_entity]),
+        (
+            WIPEOUT,
+            with_kind(vec![geometry(), flag("frame", false)]),
+            vec![wipeout_entity],
+        ),
     ];
     let version = SchemaVersion::new(1, 0);
     table
         .into_iter()
+        .chain(crate::layout::declarations())
+        .chain(crate::style::declarations())
         .map(|(key, fields, validators)| {
             let mut decl = TypeDecl::new(TypeKey::new(key)?, Schema::new(version, fields));
             decl.validators = validators;
@@ -712,7 +743,7 @@ mod tests {
     fn every_type_registers_and_field_indices_match_names() {
         let mut registry = TypeRegistry::new();
         register_types(&mut registry).unwrap();
-        assert_eq!(registry.len(), 14);
+        assert_eq!(registry.len(), 21);
         let name = |key: &str, i: usize| registry.get(key).unwrap().schema.fields[i].name.clone();
         assert_eq!(name(LINE, entity::EXTRUSION), "extrusion");
         assert_eq!(name(LINE, entity::KIND), "geometry");

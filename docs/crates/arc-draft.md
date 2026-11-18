@@ -262,7 +262,145 @@ family.
 | `core.draft.order.front`, `core.draft.order.back` | Moves entities to the front or back |
 | `core.draft.order.above`, `core.draft.order.below` | Moves entities directly above or below `reference` |
 
-### Error codes
+## Layouts, viewports and display lists as implemented
+
+The second part of the crate implements CORE-DRAFT-004, 019 (the style objects and their update
+and deletion rules; text and dimension layout come later), 021, 027, 028 and 029.
+
+### Object types
+
+`register_types` also adds these types, each at schema version 1.0.
+
+| Type key | Fields |
+|---|---|
+| `core.draft.wipeout` | common fields; `geometry`: a closed polyline; `frame` |
+| `core.draft.layout` | `paper_name`; `paper_width`, `paper_height` (positive, in the layout's unit, the paper as named); `orientation` (`portrait`, `landscape`); `margin_left`, `margin_bottom`, `margin_right`, `margin_top` (not negative); `origin`; `plot_scale` (positive, default 1); `plot_style_table`; `plot_area` (`layout`, `extents`, `window`); `window_min`, `window_max` |
+| `core.draft.viewport` | `model` (the space shown); `center`; `width`, `height` (positive); `view_center`; `scale` (positive, default 1); `rotation` in radians; `clip` (optional closed polyline); `locked`; `annotation_scale` (positive, default 1, stored only); `layer_overrides`: up to 4096 records of `layer`, `frozen`, `color`, `linetype`, `lineweight`, `transparency` |
+| `core.draft.text_style` | `name`; `font` (by name); `height` (0: set per text); `width_factor` (positive); `oblique` (at most 85 degrees either way); `backwards`; `upside_down`; `vertical`; `description` |
+| `core.draft.dim_style` | `name`; `parent`; `kind` (`all`, `linear`, `angular`, `radial`, `diameter`, `ordinate`, `arc_length`); `text_style`; `text_height`; `text_gap`; `arrow` (`closed_filled`, `closed`, `open`, `dot`, `tick`, `none`); `arrow_size`; `extension_offset`; `extension_beyond`; `unit_format` (`decimal`, `engineering`, `architectural`, `fractional`, `scientific`); `precision` (0 to 8); `measurement_scale`; `overall_scale`; `description` |
+| `core.draft.leader_style` | `name`; `text_style`; `text_height`; `arrow`; `arrow_size`; `landing`; `landing_length`; `content` (`text`, `block`, `tolerance`, `none`); `description` |
+| `core.draft.table_style` | `name`; `cell_margin`; `title`, `header`, `data`: optional records of `text_style`, `text_height`, `alignment` (`left`, `center`, `right`), `borders`, `format`; `description` |
+
+Rules:
+
+- **Layouts (CORE-DRAFT-027).** A layout's settings are a `core.draft.layout` object owned by a
+  space of kind `layout`, at most one per space (`draft.layout.duplicate`); the space created by
+  `core.draft.space.create` has none until a command adds them. The sheet is the paper as named
+  for `portrait` and turned a quarter for `landscape`. The left and right margins add up to less
+  than the sheet's width and the bottom and top margins to less than its height
+  (`draft.layout.margins_invalid`). A `plot_area` of `window` needs `window_min` below and left
+  of `window_max` (`draft.layout.window_invalid`). The other settings are stored for the plot
+  pipeline.
+- **Viewports (CORE-DRAFT-028).** A viewport is owned by a layout space and deleted with it. The
+  owner of layout settings and viewports must be a space of kind `layout`, and a space of kind
+  `model` owns neither (`draft.layout.owner_invalid`). A model point `p` appears on the sheet at
+  `center + R(rotation) · k · (p − view_center)` with `k = scale · factor`, where `factor` is
+  `SpaceUnit::factor_to` from the unit of the shown space to the unit of the layout: `scale` is
+  paper length per model length in one unit, so 1:100 is 0.01 whatever the two units. The clip
+  boundary is `clip`, a closed polyline in sheet coordinates (`draft.viewport.clip_invalid`), or
+  the rectangle of `width` and `height` about `center`. While `locked` is set,
+  `core.draft.viewport.modify` refuses `model`, `view_center`, `scale` and `rotation`
+  (`draft.viewport.locked`). In `layer_overrides` the last record of a layer wins; `frozen`
+  hides the layer in the viewport and the other values are the overrides of
+  `appearance::resolve`. The `layer`, `linetype` and `model` references refuse deletion of their
+  targets.
+- **Wipeouts (CORE-DRAFT-004).** A wipeout is an entity whose closed polyline boundary
+  (`draft.wipeout.boundary_open`) masks what is beneath it in draw order; `frame` also draws the
+  boundary.
+- **Styles (CORE-DRAFT-019).** `style::style_reference` is the reference type of every field that
+  uses a style: associative, with the deletion rule `block`, so deleting a style in use fails
+  with `doc.reference.delete_blocked`. The dimension, leader and table styles use text styles
+  through it. A dimension style with a `parent` has a kind other than `all`, and its parent has
+  the kind `all` and no parent (`draft.style.parent_invalid`). Style names are unique per type
+  (`draft.name.taken`). The derived node `core.draft.style.effective` of a style holds its field
+  values and the effective data of every style it references; an evaluator of a style user reads
+  it, so changing a style marks the derived data of its users stale. No style exists until a
+  command creates one; `core.draft.style.defaults` creates a style named `default` of each kind
+  that has none.
+
+### Purge (CORE-DRAFT-021)
+
+`purge::unused` lists the layers, linetypes, block definitions and styles that no live object
+refers to through a field, read from the reverse index; owning a block's entities is not a use.
+`core.draft.purge` deletes the given objects of these types in one undoable transaction. It fails
+with `draft.purge.in_use`, deleting nothing, when one of them is in use in the transaction's
+state. Purging a block definition deletes its entities. An object used only by an unused object
+is listed after that one is purged.
+
+### Display lists (CORE-DRAFT-029)
+
+`register_evaluators` registers the node `core.draft.display` for every entity type and the
+style node above. `DisplayOptions` gives the tolerance, the nesting bound (default 64, the
+validator's), the most primitives of one list (default the `array_length` of the default limits)
+and the dash bound.
+
+- **Primitives.** A `Primitive` is a point, a stroke (a line, ray, construction line, circle, arc,
+  ellipse, elliptical arc or polyline with widths, kept exact, with its drawn pieces when they are
+  not the whole curve), a filled region or a wipeout mask (closed polyline). It carries its
+  resolved color, linetype, lineweight and transparency with their sources, the drawing
+  entity's linetype scale and pattern continuity, the layers of its chain, the draw-order key of
+  the outermost entity, the source `ObjectId` (the entity in the list's container) and the
+  sub-object key: the path of nested entities below the source, outermost first, and the part (0
+  the shape, 1 the frame of a wipeout). Dashes are generated: the drawn pieces are exact
+  sub-curves (a dot is a point), so consumers draw them without a pattern.
+- **Entity lists.** The list of an entity reads the entity, its layer and its linetype. An
+  invisible entity has an empty list. Appearance resolves as in `appearance::resolve` with one
+  level; a value set to `block` stays open in a block definition and becomes the default in a
+  space. Dashes are generated in the entity's container with the entity's `linetype_scale` and a
+  global scale of 1.
+- **Block references.** The list of a block reference reads the reference, its layer and
+  linetype, the definition's `base_point` and `unit`, the unit of its container, the set of the
+  definition's entities and their lists. It maps them with translation to the position, rotation,
+  the per-axis scale times the unit factor of the definition to the container, and translation by
+  the negated base point, in the definition's draw order. An open value takes the reference's own
+  resolution; a value of the reference itself gets the source `Block { level }`, the level being
+  the length of the path. A stroke whose linetype opens to the reference gets its dashes then, in
+  the definition's coordinates. A nesting deeper than the bound fails with
+  `draft.block.nesting_too_deep`, more primitives than the bound with `draft.display.too_large`,
+  and a polyline with arcs or widths under a non-similar map with `geom.transform.not_similarity`.
+- **Regeneration.** Editing an entity regenerates its list and, through the nodes that read it,
+  the lists of the references inserting its definition. Editing a layer or linetype regenerates
+  the lists that read it; a list whose result does not change leaves its readers clean. Editing a
+  block definition's fields or its set of entities regenerates the lists of its references.
+  `display::entity_list` evaluates the same rules from a snapshot without the graph.
+- **Space lists.** `space_list` takes the lists of the space's entities in draw order, from the
+  graph or by direct evaluation (`Lists`), and leaves out every primitive with an off or frozen
+  layer in its chain. Then, in draw order, each wipeout mask cuts away what the curves and points
+  before it have inside its boundary; fills and masks before it stay and are painted over. An
+  entity whose list fails, or whose primitives cannot be cut, is left out and listed in
+  `failed`.
+- **Viewport lists.** `viewport_list` does the same for the shown space, also leaving out the
+  layers frozen in the viewport. Before the masks it applies the viewport's overrides: a value
+  whose source is a layer with an override takes the override with the source
+  `ViewportOverride`, which is what `appearance::resolve` gives with the overrides; a linetype
+  override generates the dashes again in model coordinates. It maps the primitives to the sheet
+  and cuts curves and points to the clip boundary; fills and masks that reach the boundary are
+  kept whole and the list's `clip` tells the consumer to clip them. Lineweights stay in
+  millimeters; polyline widths scale with the map.
+- **Cutting.** A curve is split where it meets a boundary (`arc-geom` intersections) and each
+  stretch is classified by its middle point; stretches on the boundary are kept, consecutive kept
+  stretches join, and an unbounded stretch is outside. Pieces too small to construct are dropped.
+  A cut polyline keeps its widths; the width beyond the cut is the consumer's to clip.
+
+### Commands
+
+| Command | Effect |
+|---|---|
+| `core.draft.layout.create` | Creates a layout space (`name`, optional `unit`, default `millimeter`) and its settings (`paper_width`, `paper_height`, optional `paper_name` and `orientation`); returns `space` and `layout` |
+| `core.draft.layout.modify` | Sets a field of layout settings |
+| `core.draft.viewport.create` | Creates a viewport in `layout` showing `model` with `center`, `width`, `height` and optional `view_center`, `scale`, `rotation` |
+| `core.draft.viewport.modify` | Sets a field of viewports, `layer_overrides` as a list of records; refuses the view fields of a locked viewport |
+| `core.draft.viewport.delete` | Deletes viewports |
+| `core.draft.wipeout.create` | Creates a wipeout in `owner` from a closed polyline `boundary`, with optional `frame` and `layer` |
+| `core.draft.style.create` | Creates a style of `kind` (`text`, `dimension`, `leader`, `table`) named `name` |
+| `core.draft.style.modify` | Sets a field of styles |
+| `core.draft.style.delete` | Deletes styles; refused while an object uses one |
+| `core.draft.style.defaults` | Creates a style named `default` of each kind that has none; returns `created` |
+| `core.draft.purge` | Deletes unused layers, linetypes, block definitions and styles in one transaction |
+
+## Error codes
+
+The codes of every part of the crate:
 
 | Code | Category | Meaning |
 |---|---|---|
@@ -280,3 +418,13 @@ family.
 | `draft.field.invalid` | `invalid_input` | A JSON value does not fit the field, or the field does not exist |
 | `draft.order.reference_moved` | `invalid_input` | The reference of a draw-order move is one of the moved entities |
 | `draft.order.container_mismatch` | `invalid_input` | The entities of a draw-order move are not in one container |
+| `draft.layout.margins_invalid` | `invalid_input` | The margins of a layout leave no printable area on its sheet |
+| `draft.layout.window_invalid` | `invalid_input` | A layout plots a window without both corners, or with corners not in ascending order |
+| `draft.layout.owner_invalid` | `invalid_input` | Layout settings or a viewport are not owned by a layout space |
+| `draft.layout.duplicate` | `conflict` | A layout space would own two layout settings objects |
+| `draft.viewport.clip_invalid` | `invalid_input` | The clip boundary of a viewport is not a closed polyline |
+| `draft.viewport.locked` | `conflict` | A command changes the view of a locked viewport |
+| `draft.wipeout.boundary_open` | `invalid_input` | The boundary of a wipeout is not a closed polyline |
+| `draft.style.parent_invalid` | `invalid_input` | A dimension style's parent rule is broken |
+| `draft.purge.in_use` | `conflict` | An object selected for purging is in use |
+| `draft.display.too_large` | `limit_exceeded` | A display list would hold more primitives than the bound |

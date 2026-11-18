@@ -12,7 +12,7 @@ mod support;
 
 use std::sync::Arc;
 
-use arc_base::Limits;
+use arc_base::{Limits, ObjectId};
 use arc_doc::graph::Evaluators;
 use arc_doc::package::{LockOwner, Metadata, Mode, Package};
 use arc_doc::{DocumentConfig, LoadOptions, Snapshot};
@@ -34,6 +34,68 @@ fn dump(snapshot: &Snapshot) -> Vec<String> {
         .collect();
     rows.sort();
     rows
+}
+
+/// Adds a layout with settings, a viewport with overrides and a clip, a wipeout and the default
+/// styles with a table row format (CORE-DRAFT-004, 019, 027, 028).
+fn add_sheet_objects(f: &mut Fixture, space: ObjectId, layer: ObjectId, dashed: ObjectId) {
+    let created = f
+        .run(
+            "core.draft.layout.create",
+            json!({"name": "sheet 2", "unit": "inch", "paper_width": 8.5, "paper_height": 11.0, "orientation": "landscape"}),
+        )
+        .unwrap();
+    let sheet = created["space"].as_str().unwrap().to_owned();
+    let settings = created["layout"].as_str().unwrap().to_owned();
+    f.run(
+        "core.draft.layout.modify",
+        json!({"objects": [settings], "field": "plot_style_table", "value": "monochrome"}),
+    )
+    .unwrap();
+    let viewport = f.create(
+        "core.draft.viewport.create",
+        json!({"layout": sheet, "model": space.to_string(), "center": [5.0, 4.0], "width": 6.0,
+               "height": 4.0, "view_center": [1.0, 1.0], "scale": 0.02, "rotation": 0.25}),
+    );
+    let square = json!({"kind": "polyline", "closed": true, "vertices": [
+        {"point": [0.0, 0.0], "bulge": 0.0, "start_width": 0.0, "end_width": 0.0},
+        {"point": [2.0, 0.0], "bulge": 0.3, "start_width": 0.0, "end_width": 0.0},
+        {"point": [2.0, 2.0], "bulge": 0.0, "start_width": 0.0, "end_width": 0.0}]});
+    for (field, value) in [
+        (
+            "layer_overrides",
+            json!([[
+                layer.to_string(),
+                true,
+                [0.0, 0.0, 1.0, 1.0],
+                dashed.to_string(),
+                0.3,
+                0.5
+            ]]),
+        ),
+        ("clip", square.clone()),
+        ("locked", json!(true)),
+        ("annotation_scale", json!(0.01)),
+    ] {
+        f.run(
+            "core.draft.viewport.modify",
+            json!({"objects": [viewport.to_string()], "field": field, "value": value}),
+        )
+        .unwrap();
+    }
+    f.run(
+        "core.draft.wipeout.create",
+        json!({"owner": space.to_string(), "boundary": square, "frame": true}),
+    )
+    .unwrap();
+    let styles = f.run("core.draft.style.defaults", json!({})).unwrap();
+    let text = styles["created"][0].as_str().unwrap().to_owned();
+    let table = styles["created"][3].as_str().unwrap().to_owned();
+    f.run(
+        "core.draft.style.modify",
+        json!({"objects": [table], "field": "header", "value": [text, 3.5, "left", false, "0.00"]}),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -76,8 +138,9 @@ fn every_entity_kind_survives_save_and_reopen() {
                "scale": [2.0, -1.0, 1.0], "rotation": 0.5, "attributes": {"NO": "7"}, "layer": layer.to_string()}),
     )
     .unwrap();
+    add_sheet_objects(&mut f, space, layer, dashed);
     let before = f.document.snapshot();
-    assert_eq!(before.len(), 16);
+    assert_eq!(before.len(), 24);
 
     let dir = std::env::temp_dir().join(format!("arc-draft-roundtrip-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
