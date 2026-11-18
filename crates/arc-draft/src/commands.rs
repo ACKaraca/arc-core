@@ -1,0 +1,887 @@
+//! The drafting commands (`core.draft.*`), registered with [`register_commands`].
+//!
+//! Every command is undoable, has the permission class `edit` and changes the document only
+//! through its transaction. Creating commands select and return the new object. Modify commands
+//! set one field of one or more objects from its canonical JSON form ([`field_value`]); `null`
+//! makes an optional field absent. Each modify command accepts only objects of its family.
+
+use std::collections::BTreeMap;
+
+use arc_base::id::Identifier;
+use arc_base::math::{Point2, Vector3};
+use arc_base::{Color, Error, ObjectId, Result};
+use arc_command::{CommandSpec, Context, IdParam, Permission, Registry, UndoBehavior};
+use arc_doc::relationship::ReferenceField;
+use arc_doc::{
+    ColorSource, ColorValue, FieldPath, GeometryBytes, Header, Snapshot, Value, ValueType,
+};
+use arc_geom::Curve2;
+use arc_geom::encoding::GeomCodec;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::error::codes;
+use crate::order::{Place, reorder};
+use crate::types::{
+    self, BLOCK, BLOCK_REF, CONTAINERS, ENTITIES, ElementKind, LAYER, LINETYPE, SPACE, SpaceKind,
+    SpaceUnit, entity, layer, table,
+};
+
+/// The deepest nesting of lists, maps and records [`field_value`] reads.
+const MAX_JSON_DEPTH: u32 = 16;
+
+struct Names {
+    id: &'static str,
+    message_id: &'static str,
+    description: Description,
+}
+
+struct Description {
+    message_id: &'static str,
+}
+
+const NAMES: &[Names] = &[
+    Names {
+        id: "core.draft.space.create",
+        message_id: "draft-command-space-create",
+        description: Description {
+            message_id: "draft-command-space-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.space.modify",
+        message_id: "draft-command-space-modify",
+        description: Description {
+            message_id: "draft-command-space-modify-description",
+        },
+    },
+    Names {
+        id: "core.draft.entity.create",
+        message_id: "draft-command-entity-create",
+        description: Description {
+            message_id: "draft-command-entity-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.entity.modify",
+        message_id: "draft-command-entity-modify",
+        description: Description {
+            message_id: "draft-command-entity-modify-description",
+        },
+    },
+    Names {
+        id: "core.draft.entity.delete",
+        message_id: "draft-command-entity-delete",
+        description: Description {
+            message_id: "draft-command-entity-delete-description",
+        },
+    },
+    Names {
+        id: "core.draft.layer.create",
+        message_id: "draft-command-layer-create",
+        description: Description {
+            message_id: "draft-command-layer-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.layer.modify",
+        message_id: "draft-command-layer-modify",
+        description: Description {
+            message_id: "draft-command-layer-modify-description",
+        },
+    },
+    Names {
+        id: "core.draft.layer.delete",
+        message_id: "draft-command-layer-delete",
+        description: Description {
+            message_id: "draft-command-layer-delete-description",
+        },
+    },
+    Names {
+        id: "core.draft.linetype.load",
+        message_id: "draft-command-linetype-load",
+        description: Description {
+            message_id: "draft-command-linetype-load-description",
+        },
+    },
+    Names {
+        id: "core.draft.linetype.modify",
+        message_id: "draft-command-linetype-modify",
+        description: Description {
+            message_id: "draft-command-linetype-modify-description",
+        },
+    },
+    Names {
+        id: "core.draft.block.define",
+        message_id: "draft-command-block-define",
+        description: Description {
+            message_id: "draft-command-block-define-description",
+        },
+    },
+    Names {
+        id: "core.draft.block.modify",
+        message_id: "draft-command-block-modify",
+        description: Description {
+            message_id: "draft-command-block-modify-description",
+        },
+    },
+    Names {
+        id: "core.draft.block.insert",
+        message_id: "draft-command-block-insert",
+        description: Description {
+            message_id: "draft-command-block-insert-description",
+        },
+    },
+    Names {
+        id: "core.draft.order.front",
+        message_id: "draft-command-order-front",
+        description: Description {
+            message_id: "draft-command-order-front-description",
+        },
+    },
+    Names {
+        id: "core.draft.order.back",
+        message_id: "draft-command-order-back",
+        description: Description {
+            message_id: "draft-command-order-back-description",
+        },
+    },
+    Names {
+        id: "core.draft.order.above",
+        message_id: "draft-command-order-above",
+        description: Description {
+            message_id: "draft-command-order-above-description",
+        },
+    },
+    Names {
+        id: "core.draft.order.below",
+        message_id: "draft-command-order-below",
+        description: Description {
+            message_id: "draft-command-order-below-description",
+        },
+    },
+];
+
+/// The result of a creating command.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct Created {
+    /// The new object.
+    pub id: IdParam,
+}
+
+/// Parameters of `core.draft.space.create`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateSpace {
+    /// The name.
+    #[schemars(length(max = 255))]
+    pub name: String,
+    /// Model space or layout.
+    pub kind: SpaceKind,
+    /// The unit; `unitless` for a model space and `millimeter` for a layout when absent.
+    #[serde(default)]
+    pub unit: Option<SpaceUnit>,
+}
+
+/// Parameters of `core.draft.entity.create`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateEntity {
+    /// The space or block definition the entity belongs to.
+    pub owner: IdParam,
+    /// The geometry: an `arc-geom` curve in its JSON form (`kind` `segment`, `ray`, `line`,
+    /// `circle`, `arc`, `ellipse`, `elliptical_arc` or `polyline`), or
+    /// `{"kind": "point", "position": [x, y]}`.
+    pub geometry: serde_json::Value,
+    /// The layer, if any.
+    #[serde(default)]
+    pub layer: Option<IdParam>,
+}
+
+/// Parameters of the modify commands.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetField {
+    /// The objects to change.
+    #[schemars(length(min = 1, max = 10000))]
+    pub objects: Vec<IdParam>,
+    /// The field name.
+    #[schemars(length(max = 64))]
+    pub field: String,
+    /// The value in canonical JSON form; `null` for absent.
+    pub value: serde_json::Value,
+}
+
+/// Parameters of the delete commands.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Delete {
+    /// The objects to delete.
+    #[schemars(length(min = 1, max = 10000))]
+    pub objects: Vec<IdParam>,
+}
+
+/// Parameters of `core.draft.layer.create`; the other layer fields take their defaults.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateLayer {
+    /// The name, unique among layers.
+    #[schemars(length(max = 255))]
+    pub name: String,
+    /// The linear RGBA color; opaque white when absent.
+    #[serde(default)]
+    pub color: Option<[f32; 4]>,
+    /// The linetype; continuous when absent.
+    #[serde(default)]
+    pub linetype: Option<IdParam>,
+    /// The lineweight in millimeters; the default lineweight when absent.
+    #[serde(default)]
+    pub lineweight: Option<f64>,
+}
+
+/// One element of `core.draft.linetype.load`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ElementParam {
+    /// The kind.
+    pub kind: ElementKind,
+    /// The length in pattern units.
+    #[serde(default)]
+    pub length: f64,
+    /// The text or shape name of a text or shape element.
+    #[serde(default)]
+    pub content: Option<String>,
+    /// The text style or shape file name.
+    #[serde(default)]
+    pub style: Option<String>,
+    /// The size factor of a text or shape element.
+    #[serde(default)]
+    pub scale: Option<f64>,
+    /// The rotation in radians of a text or shape element.
+    #[serde(default)]
+    pub rotation: Option<f64>,
+    /// The offset of a text or shape element.
+    #[serde(default)]
+    pub offset: Option<[f64; 2]>,
+}
+
+/// Parameters of `core.draft.linetype.load`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoadLinetype {
+    /// The name, unique among linetypes.
+    #[schemars(length(max = 255))]
+    pub name: String,
+    /// The description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The pattern.
+    #[schemars(length(min = 1, max = 256))]
+    pub elements: Vec<ElementParam>,
+}
+
+/// One attribute definition of `core.draft.block.define`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AttributeParam {
+    /// The tag.
+    #[schemars(length(max = 255))]
+    pub tag: String,
+    /// The prompt.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// The default value.
+    #[serde(default)]
+    pub default: Option<String>,
+    /// The value is fixed by the definition.
+    #[serde(default)]
+    pub constant: bool,
+    /// The value is not displayed.
+    #[serde(default)]
+    pub invisible: bool,
+    /// The default is taken without asking.
+    #[serde(default)]
+    pub preset: bool,
+    /// The value has several lines.
+    #[serde(default)]
+    pub multiline: bool,
+    /// The position in definition coordinates.
+    #[serde(default)]
+    pub position: [f64; 2],
+}
+
+/// Parameters of `core.draft.block.define`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DefineBlock {
+    /// The name, unique among block definitions.
+    #[schemars(length(max = 255))]
+    pub name: String,
+    /// The base point.
+    #[serde(default)]
+    pub base_point: [f64; 2],
+    /// The unit; `unitless` when absent.
+    #[serde(default)]
+    pub unit: Option<SpaceUnit>,
+    /// The attribute definitions.
+    #[serde(default)]
+    #[schemars(length(max = 1024))]
+    pub attributes: Vec<AttributeParam>,
+    /// Entities moved into the new definition.
+    #[serde(default)]
+    #[schemars(length(max = 10000))]
+    pub objects: Vec<IdParam>,
+}
+
+/// Parameters of `core.draft.block.insert`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InsertBlock {
+    /// The space or block definition the reference belongs to.
+    pub owner: IdParam,
+    /// The block definition.
+    pub block: IdParam,
+    /// The insertion point.
+    pub position: [f64; 2],
+    /// The per-axis scale; 1 when absent.
+    #[serde(default)]
+    pub scale: Option<[f64; 3]>,
+    /// The rotation in radians.
+    #[serde(default)]
+    pub rotation: f64,
+    /// Attribute values by tag; other attributes take their definition's default.
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
+    /// The layer, if any.
+    #[serde(default)]
+    pub layer: Option<IdParam>,
+}
+
+/// Parameters of `core.draft.order.front` and `core.draft.order.back`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Order {
+    /// The entities to move, all in one container.
+    #[schemars(length(min = 1, max = 10000))]
+    pub objects: Vec<IdParam>,
+}
+
+/// Parameters of `core.draft.order.above` and `core.draft.order.below`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OrderRelative {
+    /// The entities to move, all in the container of `reference`.
+    #[schemars(length(min = 1, max = 10000))]
+    pub objects: Vec<IdParam>,
+    /// The entity to place them next to.
+    pub reference: IdParam,
+}
+
+fn wrong_type(id: ObjectId) -> Error {
+    Error::new(codes::OBJECT_WRONG_TYPE).with_detail("id", id.to_string())
+}
+
+fn field_invalid(field: &str) -> Error {
+    Error::new(codes::FIELD_INVALID).with_arg("field", field)
+}
+
+/// The type key of the live object `id`.
+fn key_of(snapshot: &Snapshot, id: ObjectId) -> Result<String> {
+    let handle = snapshot.resolve(id)?;
+    Ok(snapshot
+        .type_key(handle)
+        .map(|k| k.as_str().to_owned())
+        .unwrap_or_default())
+}
+
+/// Fails with `draft.object.wrong_type` unless `id` is live and of one of `keys`.
+fn expect(snapshot: &Snapshot, id: ObjectId, keys: &[&str]) -> Result<String> {
+    let key = key_of(snapshot, id)?;
+    if keys.contains(&key.as_str()) {
+        Ok(key)
+    } else {
+        Err(wrong_type(id))
+    }
+}
+
+fn values_of(snapshot: &Snapshot, id: ObjectId) -> Result<Vec<Option<Value>>> {
+    Ok(snapshot.get(snapshot.resolve(id)?)?.values.clone())
+}
+
+/// The entities of `container` with their draw-order keys.
+fn members(snapshot: &Snapshot, container: ObjectId) -> Vec<(ObjectId, i64)> {
+    snapshot
+        .referrers(container)
+        .filter(|r| r.field == ReferenceField::Owner)
+        .filter_map(|r| {
+            let handle = snapshot.resolve(r.source).ok()?;
+            let key = snapshot.type_key(handle)?;
+            if !ENTITIES.contains(&key.as_str()) {
+                return None;
+            }
+            match snapshot.get(handle).ok()?.values.get(entity::DRAW_ORDER) {
+                Some(Some(Value::I64(k))) => Some((r.source, *k)),
+                _ => Some((r.source, 0)),
+            }
+        })
+        .collect()
+}
+
+fn set_order(ctx: &mut Context<'_>, changes: Vec<(ObjectId, i64)>) -> Result<()> {
+    let txn = ctx.txn()?;
+    for (id, key) in changes {
+        txn.modify(id, FieldPath::new("draw_order"), Some(Value::I64(key)))?;
+    }
+    Ok(())
+}
+
+fn point2([x, y]: [f64; 2]) -> Value {
+    Value::Point2(Point2::new(x, y))
+}
+
+fn color([r, g, b, a]: [f32; 4]) -> Value {
+    Value::Color(Box::new(ColorValue {
+        rgba: Color::new(r, g, b, a),
+        source: None,
+    }))
+}
+
+fn set(values: &mut [Option<Value>], index: usize, value: Option<Value>) {
+    if let Some(slot) = values.get_mut(index) {
+        *slot = value;
+    }
+}
+
+/// Creates an object of `key` owned by `owner` from `values` and selects it.
+fn create(
+    ctx: &mut Context<'_>,
+    key: &str,
+    owner: Option<ObjectId>,
+    values: Vec<Option<Value>>,
+) -> Result<ObjectId> {
+    let id: ObjectId = ctx.new_id();
+    let header = Header {
+        owner,
+        ..Header::default()
+    };
+    ctx.txn()?.create(key, id, header, values)?;
+    ctx.set_selection_after(vec![id]);
+    Ok(id)
+}
+
+/// Creates the entity of `key` in `owner` on top of the container's draw order.
+fn create_entity(
+    ctx: &mut Context<'_>,
+    key: &str,
+    owner: ObjectId,
+    layer: Option<IdParam>,
+    kind: Vec<(usize, Value)>,
+) -> Result<Created> {
+    let snapshot = ctx.txn()?.snapshot().clone();
+    expect(&snapshot, owner, CONTAINERS)?;
+    let mut values = types::defaults(snapshot.registry(), key);
+    set(
+        &mut values,
+        entity::LAYER,
+        layer.map(|IdParam(l)| Value::Reference(l)),
+    );
+    for (index, value) in kind {
+        set(&mut values, index, Some(value));
+    }
+    // Placed with a provisional identifier, then created on top.
+    let mut current = members(&snapshot, owner);
+    let provisional = ObjectId::from_u128(0);
+    current.push((provisional, 0));
+    let mut changes = reorder(&current, &[provisional], Place::Front)?;
+    let key_of_new = changes
+        .iter()
+        .find(|(i, _)| *i == provisional)
+        .map_or(0, |(_, k)| *k);
+    changes.retain(|(i, _)| *i != provisional);
+    set(
+        &mut values,
+        entity::DRAW_ORDER,
+        Some(Value::I64(key_of_new)),
+    );
+    let id = create(ctx, key, Some(owner), values)?;
+    set_order(ctx, changes)?;
+    Ok(Created { id: IdParam(id) })
+}
+
+fn create_entity_command(ctx: &mut Context<'_>, p: CreateEntity) -> Result<Created> {
+    let invalid = || field_invalid("geometry");
+    if p.geometry.get("kind").and_then(serde_json::Value::as_str) == Some("point") {
+        let position: [f64; 2] = p
+            .geometry
+            .get("position")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .ok_or_else(invalid)?;
+        return create_entity(
+            ctx,
+            types::POINT,
+            p.owner.0,
+            p.layer,
+            vec![(entity::KIND, point2(position))],
+        );
+    }
+    let curve: Curve2 = serde_json::from_value(p.geometry).map_err(|_| invalid())?;
+    let key = match &curve {
+        Curve2::Segment(_) => types::LINE,
+        Curve2::Ray(_) => types::RAY,
+        Curve2::Line(_) => types::CONSTRUCTION_LINE,
+        Curve2::Circle(_) => types::CIRCLE,
+        Curve2::Arc(_) => types::ARC,
+        Curve2::Ellipse(_) => types::ELLIPSE,
+        Curve2::EllipticalArc(_) => types::ELLIPTICAL_ARC,
+        Curve2::Polyline(_) => types::POLYLINE,
+    };
+    let bytes = Value::Geometry(GeometryBytes(curve.encode()));
+    create_entity(ctx, key, p.owner.0, p.layer, vec![(entity::KIND, bytes)])
+}
+
+fn numbers<const N: usize>(json: &serde_json::Value) -> Option<[f64; N]> {
+    let list: Vec<f64> = json
+        .as_array()?
+        .iter()
+        .map(serde_json::Value::as_f64)
+        .collect::<Option<_>>()?;
+    list.try_into().ok()
+}
+
+/// The value of a field of type `value_type` from its canonical JSON form: as `arc-doc`
+/// serializes values, except that an enum also accepts its variant name, a color also accepts
+/// `[r, g, b, a]`, and a geometry is an `arc-geom` curve in its JSON form. Lists, maps and
+/// records nest at most 16 levels. `None` when the JSON does not fit.
+#[must_use]
+pub fn field_value(value_type: &ValueType, json: &serde_json::Value) -> Option<Value> {
+    from_json(value_type, json, 0)
+}
+
+fn from_json(value_type: &ValueType, json: &serde_json::Value, depth: u32) -> Option<Value> {
+    if depth > MAX_JSON_DEPTH {
+        return None;
+    }
+    Some(match value_type {
+        ValueType::Bool => Value::Bool(json.as_bool()?),
+        ValueType::I64 => Value::I64(json.as_i64()?),
+        ValueType::F64 => Value::F64(json.as_f64()?),
+        ValueType::String => Value::String(json.as_str()?.to_owned()),
+        ValueType::Enum(variants) => Value::Enum(match json.as_str() {
+            Some(name) => variants.iter().find(|v| v.name == name)?.code,
+            None => u32::try_from(json.as_u64()?).ok()?,
+        }),
+        ValueType::Point2 => {
+            let [x, y] = numbers(json)?;
+            Value::Point2(Point2::new(x, y))
+        }
+        ValueType::Vector3 => {
+            let [x, y, z] = numbers(json)?;
+            Value::Vector3(Vector3::new(x, y, z))
+        }
+        ValueType::Color => {
+            let (rgba, source) = match json.get("rgba") {
+                Some(rgba) => (rgba, json.get("source").cloned()),
+                None => (json, None),
+            };
+            let [r, g, b, a] = numbers::<4>(rgba)?;
+            let narrow = |x: f64| {
+                #[expect(clippy::cast_possible_truncation, reason = "colors are stored as f32")]
+                let y = x as f32;
+                y
+            };
+            let source: Option<ColorSource> = match source {
+                None | Some(serde_json::Value::Null) => None,
+                Some(s) => Some(serde_json::from_value(s).ok()?),
+            };
+            Value::Color(Box::new(ColorValue {
+                rgba: Color::new(narrow(r), narrow(g), narrow(b), narrow(a)),
+                source,
+            }))
+        }
+        ValueType::Reference(_) => Value::Reference(json.as_str()?.parse().ok()?),
+        ValueType::Geometry(_) => {
+            let curve: Curve2 = serde_json::from_value(json.clone()).ok()?;
+            Value::Geometry(GeometryBytes(curve.encode()))
+        }
+        ValueType::List(element) => Value::List(
+            json.as_array()?
+                .iter()
+                .map(|item| from_json(element, item, depth + 1))
+                .collect::<Option<_>>()?,
+        ),
+        ValueType::Map(element) => Value::Map(
+            json.as_object()?
+                .iter()
+                .map(|(k, v)| Some((k.clone(), from_json(element, v, depth + 1)?)))
+                .collect::<Option<_>>()?,
+        ),
+        ValueType::Record(fields) => {
+            let items = json.as_array()?;
+            if items.len() != fields.len() {
+                return None;
+            }
+            Value::Record(
+                fields
+                    .iter()
+                    .zip(items)
+                    .map(|(field, item)| match item {
+                        serde_json::Value::Null => Some(None),
+                        _ => from_json(&field.value_type, item, depth + 1).map(Some),
+                    })
+                    .collect::<Option<_>>()?,
+            )
+        }
+        _ => return None,
+    })
+}
+
+/// Sets `field` of every listed object, each of one of `family`.
+fn modify(ctx: &mut Context<'_>, p: SetField, family: &[&str]) -> Result<()> {
+    let txn = ctx.txn()?;
+    for IdParam(id) in p.objects {
+        let snapshot = txn.snapshot();
+        let key = expect(snapshot, id, family)?;
+        let value_type = snapshot
+            .registry()
+            .get(&key)
+            .and_then(|decl| decl.schema.fields.iter().find(|f| f.name == p.field))
+            .map(|f| f.value_type.clone())
+            .ok_or_else(|| field_invalid(&p.field))?;
+        let value = match &p.value {
+            serde_json::Value::Null => None,
+            json => Some(field_value(&value_type, json).ok_or_else(|| field_invalid(&p.field))?),
+        };
+        txn.modify(id, FieldPath::new(p.field.as_str()), value)?;
+    }
+    Ok(())
+}
+
+fn delete(ctx: &mut Context<'_>, p: Delete, family: &[&str]) -> Result<()> {
+    let limits = *ctx.limits();
+    let txn = ctx.txn()?;
+    for IdParam(id) in p.objects {
+        expect(txn.snapshot(), id, family)?;
+        txn.delete(id)?;
+    }
+    txn.apply_delete_rules(&limits)?;
+    Ok(())
+}
+
+fn create_space(ctx: &mut Context<'_>, p: CreateSpace) -> Result<Created> {
+    let unit = p.unit.unwrap_or(match p.kind {
+        SpaceKind::Model => SpaceUnit::Unitless,
+        SpaceKind::Layout => SpaceUnit::Millimeter,
+    });
+    let values = vec![
+        Some(Value::String(p.name)),
+        Some(Value::Enum(p.kind as u32)),
+        Some(Value::Enum(unit.code())),
+    ];
+    Ok(Created {
+        id: IdParam(create(ctx, SPACE, None, values)?),
+    })
+}
+
+fn create_layer(ctx: &mut Context<'_>, p: CreateLayer) -> Result<Created> {
+    let mut values = types::defaults(ctx.snapshot().registry(), LAYER);
+    set(&mut values, layer::NAME, Some(Value::String(p.name)));
+    if let Some(c) = p.color {
+        set(&mut values, layer::COLOR, Some(color(c)));
+    }
+    set(
+        &mut values,
+        layer::LINETYPE,
+        p.linetype.map(|IdParam(l)| Value::Reference(l)),
+    );
+    set(&mut values, layer::LINEWEIGHT, p.lineweight.map(Value::F64));
+    Ok(Created {
+        id: IdParam(create(ctx, LAYER, None, values)?),
+    })
+}
+
+fn load_linetype(ctx: &mut Context<'_>, p: LoadLinetype) -> Result<Created> {
+    let elements = p
+        .elements
+        .into_iter()
+        .map(|e| {
+            Value::Record(vec![
+                Some(Value::Enum(e.kind as u32)),
+                Some(Value::F64(e.length)),
+                e.content.map(Value::String),
+                e.style.map(Value::String),
+                Some(Value::F64(e.scale.unwrap_or(1.0))),
+                Some(Value::F64(e.rotation.unwrap_or(0.0))),
+                e.offset.map(point2),
+            ])
+        })
+        .collect();
+    let values = vec![
+        Some(Value::String(p.name)),
+        p.description.map(Value::String),
+        Some(Value::List(elements)),
+    ];
+    Ok(Created {
+        id: IdParam(create(ctx, LINETYPE, None, values)?),
+    })
+}
+
+fn define_block(ctx: &mut Context<'_>, p: DefineBlock) -> Result<Created> {
+    let attributes = p
+        .attributes
+        .into_iter()
+        .map(|a| {
+            Value::Record(vec![
+                Some(Value::String(a.tag)),
+                a.prompt.map(Value::String),
+                a.default.map(Value::String),
+                Some(Value::Bool(a.constant)),
+                Some(Value::Bool(a.invisible)),
+                Some(Value::Bool(a.preset)),
+                Some(Value::Bool(a.multiline)),
+                Some(point2(a.position)),
+            ])
+        })
+        .collect();
+    let values = vec![
+        Some(Value::String(p.name)),
+        Some(point2(p.base_point)),
+        Some(Value::Enum(p.unit.unwrap_or(SpaceUnit::Unitless).code())),
+        None,
+        Some(Value::List(attributes)),
+    ];
+    let block = create(ctx, BLOCK, None, values)?;
+    let txn = ctx.txn()?;
+    for IdParam(id) in p.objects {
+        expect(txn.snapshot(), id, ENTITIES)?;
+        txn.relink(id, Some(block))?;
+    }
+    Ok(Created { id: IdParam(block) })
+}
+
+fn insert_block(ctx: &mut Context<'_>, p: InsertBlock) -> Result<Created> {
+    let snapshot = ctx.txn()?.snapshot().clone();
+    expect(&snapshot, p.block.0, &[BLOCK])?;
+    let definition = values_of(&snapshot, p.block.0)?;
+    let mut attributes = BTreeMap::new();
+    if let Some(Some(Value::List(list))) = definition.get(table::BLOCK_ATTRIBUTES) {
+        for attribute in list {
+            if let Value::Record(fields) = attribute
+                && let Some(tag) = types::text_at(fields, 0)
+            {
+                let default = types::text_at(fields, 2).unwrap_or_default();
+                attributes.insert(tag.to_owned(), Value::String(default.to_owned()));
+            }
+        }
+    }
+    for (tag, value) in p.attributes {
+        if !attributes.contains_key(&tag) {
+            return Err(Error::new(codes::BLOCK_ATTRIBUTE_UNKNOWN).with_arg("tag", tag));
+        }
+        attributes.insert(tag, Value::String(value));
+    }
+    let [sx, sy, sz] = p.scale.unwrap_or([1.0; 3]);
+    let kind = vec![
+        (entity::KIND, Value::Reference(p.block.0)),
+        (entity::REF_POSITION, point2(p.position)),
+        (entity::REF_SCALE, Value::Vector3(Vector3::new(sx, sy, sz))),
+        (entity::REF_ROTATION, Value::F64(p.rotation)),
+        (entity::REF_ATTRIBUTES, Value::Map(attributes)),
+    ];
+    create_entity(ctx, BLOCK_REF, p.owner.0, p.layer, kind)
+}
+
+/// Moves `objects`, which must share one container, to `place`.
+fn order(ctx: &mut Context<'_>, objects: Vec<IdParam>, place: Place) -> Result<()> {
+    let snapshot = ctx.txn()?.snapshot().clone();
+    let mut container = None;
+    let anchor = match place {
+        Place::Above(r) | Place::Below(r) => Some(r),
+        Place::Front | Place::Back => None,
+    };
+    let ids: Vec<ObjectId> = objects.into_iter().map(|IdParam(id)| id).collect();
+    for id in ids.iter().chain(anchor.as_ref()) {
+        expect(&snapshot, *id, ENTITIES)?;
+        let owner = snapshot.get(snapshot.resolve(*id)?)?.header.owner;
+        if container.is_some_and(|c| Some(c) != owner) {
+            return Err(
+                Error::new(codes::ORDER_CONTAINER_MISMATCH).with_detail("id", id.to_string())
+            );
+        }
+        container = Some(owner.ok_or_else(|| wrong_type(*id))?);
+    }
+    let Some(container) = container else {
+        return Ok(());
+    };
+    let changes = reorder(&members(&snapshot, container), &ids, place)?;
+    set_order(ctx, changes)
+}
+
+fn spec<P, R>(
+    id: &'static str,
+    run: impl Fn(&mut Context<'_>, P) -> Result<R> + Send + Sync + 'static,
+) -> CommandSpec
+where
+    P: serde::de::DeserializeOwned + JsonSchema,
+    R: Serialize + JsonSchema,
+{
+    let names = NAMES.iter().find(|n| n.id == id);
+    let label = names.map_or(id, |n| n.message_id);
+    let description = names.map_or(id, |n| n.description.message_id);
+    CommandSpec::new(id, label, description, run)
+        .with_undo(UndoBehavior::Undoable)
+        .with_permissions([Permission::Edit])
+}
+
+fn family(id: &'static str, keys: &'static [&'static str]) -> CommandSpec {
+    spec(id, move |ctx, p: SetField| modify(ctx, p, keys))
+}
+
+/// Registers every drafting command into `registry`.
+///
+/// # Errors
+///
+/// `cmd.duplicate` when one of the identifiers is already registered.
+pub fn register_commands(registry: &mut Registry) -> Result<()> {
+    let specs = [
+        spec("core.draft.space.create", create_space).with_example(
+            serde_json::json!({"name": "model", "kind": "model", "unit": "millimeter"}),
+        ),
+        family("core.draft.space.modify", &[SPACE]),
+        spec("core.draft.entity.create", create_entity_command),
+        family("core.draft.entity.modify", ENTITIES),
+        spec("core.draft.entity.delete", |ctx, p: Delete| {
+            delete(ctx, p, ENTITIES)
+        }),
+        spec("core.draft.layer.create", create_layer)
+            .with_example(serde_json::json!({"name": "walls"})),
+        family("core.draft.layer.modify", &[LAYER]),
+        spec("core.draft.layer.delete", |ctx, p: Delete| {
+            delete(ctx, p, &[LAYER])
+        }),
+        spec("core.draft.linetype.load", load_linetype).with_example(serde_json::json!({
+            "name": "dashed",
+            "elements": [{"kind": "dash", "length": 0.5}, {"kind": "gap", "length": 0.25}]
+        })),
+        family("core.draft.linetype.modify", &[LINETYPE]),
+        spec("core.draft.block.define", define_block)
+            .with_example(serde_json::json!({"name": "door"})),
+        family("core.draft.block.modify", &[BLOCK]),
+        spec("core.draft.block.insert", insert_block),
+        spec("core.draft.order.front", |ctx, p: Order| {
+            order(ctx, p.objects, Place::Front)
+        }),
+        spec("core.draft.order.back", |ctx, p: Order| {
+            order(ctx, p.objects, Place::Back)
+        }),
+        spec("core.draft.order.above", |ctx, p: OrderRelative| {
+            order(ctx, p.objects, Place::Above(p.reference.0))
+        }),
+        spec("core.draft.order.below", |ctx, p: OrderRelative| {
+            order(ctx, p.objects, Place::Below(p.reference.0))
+        }),
+    ];
+    for spec in specs {
+        registry.register(spec)?;
+    }
+    Ok(())
+}

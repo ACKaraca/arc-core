@@ -21,6 +21,7 @@ arc-doc = { path = "crates/arc-doc" }
 arc-mesh = { path = "crates/arc-mesh" }
 arc-solve = { path = "crates/arc-solve" }
 arc-command = { path = "crates/arc-command" }
+arc-draft = { path = "crates/arc-draft" }
 arc-app = { path = "crates/arc-app" }
 arc-shell-sample = { path = "crates/arc-shell-sample" }
 arc-gpu = { path = "crates/arc-gpu" }

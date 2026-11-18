@@ -151,6 +151,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-draft"
+version = "0.1.0"
+dependencies = [
+ "arc-base",
+ "arc-command",
+ "arc-doc",
+ "arc-geom",
+ "proptest",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "arc-geom"
 version = "0.1.0"
 dependencies = [
