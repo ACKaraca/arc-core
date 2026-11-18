@@ -52,7 +52,7 @@ use arc_base::{Error, Limits, Result, Tolerance};
 
 use crate::error::codes;
 use crate::mesh::{AttributeKey, Channel, TriMesh};
-use crate::{angle_between, unit};
+use crate::{angle_between, length, unit};
 
 /// The normal of a vertex that no non-degenerate triangle contributes to: +Z.
 pub const FALLBACK_NORMAL: [f32; 3] = [0.0, 0.0, 1.0];
@@ -559,7 +559,9 @@ impl TriMesh {
             .zip(u_sum.iter().zip(&v_sum))
             .map(|(n, (u, v))| {
                 let n = unit(&to_f64(n)).unwrap_or_else(|| to_f64(&FALLBACK_NORMAL));
-                let tangent = unit(&(u - n * n.dot(u)));
+                let residual = u - n * n.dot(u);
+                // Below this share of |u| the residual is rounding noise, not a direction.
+                let tangent = unit(&residual).filter(|_| length(&residual) > PARALLEL * length(u));
                 let (t, w) = match tangent {
                     Some(t) => (t, if n.cross(&t).dot(v) < 0.0 { -1.0 } else { 1.0 }),
                     None => (fallback_tangent(&n), 1.0),
@@ -578,6 +580,10 @@ impl TriMesh {
         })
     }
 }
+
+/// Relative size below which a tangent sum counts as parallel to the normal (`u` is exact to
+/// about 1e-16, so the orthogonalized remainder keeps at least eight digits above that).
+const PARALLEL: f64 = 1e-8;
 
 /// The coordinate axis least aligned with the unit normal `n`, made orthogonal to it.
 fn fallback_tangent(n: &Vector3) -> Vector3 {
@@ -814,6 +820,40 @@ mod tests {
         // A zero normal is treated as +Z.
         assert_eq!(tangents[1], [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(tangents[2], [0.0, 1.0, 0.0, 1.0]);
+    }
+
+    /// arc-core #50: huge edges next to tiny ones with huge UV deltas once broke the frame.
+    #[test]
+    fn tangent_frames_survive_extreme_edges_and_uv_deltas() {
+        let mut positions = vec![Point3::origin(); 17];
+        positions[1] = Point3::new(0.0, -1.851_751_582_032_504e71, 0.0);
+        positions[7] = Point3::new(0.0, 0.0, -59.232_837_913_994_37);
+        positions[10] = Point3::new(5.886_688_892_696_375e64, 3.887_473_012_328_774e66, 0.0);
+        positions[14] = Point3::new(-72.664_668_130_336_1, 0.0, 0.0);
+        let mut uvs = vec![[0.0_f32; 2]; 17];
+        uvs[1] = [-8.851_156, 8.765_436];
+        uvs[2] = [1.937_496_8e25, -8.503_627];
+        uvs[7] = [0.0, -66_355.15];
+        uvs[10] = [5.953_736, -7.175_503_7];
+        let mesh = TriMeshBuilder::new(positions, vec![[2, 10, 7], [7, 1, 2]])
+            .channel(AttributeKey::Uv(3), Channel::Vec2(uvs))
+            .build(&Limits::STRICT)
+            .unwrap()
+            .with_normals(
+                NormalWeighting::Angle,
+                FRAC_PI_4,
+                &Tolerance::DEFAULT,
+                &Limits::DEFAULT,
+            )
+            .unwrap()
+            .with_tangents(3, &Tolerance::DEFAULT)
+            .unwrap();
+        for (n, t) in mesh.normals().unwrap().iter().zip(mesh.tangents().unwrap()) {
+            let tangent = Vector3::new(f64::from(t[0]), f64::from(t[1]), f64::from(t[2]));
+            assert!((tangent.norm() - 1.0).abs() < 1e-6, "{t:?}");
+            assert!(v(n).dot(&tangent).abs() < 1e-6, "{n:?} {t:?}");
+            assert!(t[3] == 1.0 || t[3] == -1.0);
+        }
     }
 
     /// A cone of `k` faces around an apex at (0, 0, 1) over the unit circle.

@@ -169,7 +169,8 @@ magnitude, so a small triangle far from the origin keeps its precision and coord
   determinant `Δu₁Δv₂ − Δu₂Δv₁` is not zero, the unit directions of increasing `u` and `v` are
   summed at its three vertices, weighted by the interior angle. The tangent is the `u` sum made
   orthogonal to the vertex normal and normalized; the handedness is −1 when normal × tangent
-  points against the `v` sum and 1 otherwise. Where the `u` sum is zero or parallel to the normal,
+  points against the `v` sum and 1 otherwise. Where the `u` sum is zero or parallel to the normal (the part of it orthogonal to the normal is
+  shorter than 1e-8 of its length),
   the tangent is the coordinate axis least aligned with the normal (the first of x, y, z on ties)
   made orthogonal to it, with handedness 1. A zero normal counts as +Z. No value is NaN.
 
