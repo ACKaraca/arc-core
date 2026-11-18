@@ -453,13 +453,15 @@ the process that owns stdin and stdout is the [headless runner](#headless-runner
 - The result: `protocolVersion`; `server` with `name`, `version` (the product's) and
   `arcCore` (this crate's version); `permissions` (granted, sorted); `roots` with `read` and
   `write` (canonical paths; read roots only with `file_read` or `file_write` granted, write
-  roots only with `file_write`); `capabilities` (`methods`, `batch: false`, `preview: false`,
-  `notifications: ["event.notify"]`); `limits` (`messageBytes`, `nestingDepth`, `queuedRuns`).
+  roots only with `file_write`); `capabilities` (`methods`, `batch: false`, `preview: true`,
+  `notifications: ["event.notify"]`, `events`: the event names that can be subscribed to);
+  `limits` (`messageBytes`, `nestingDepth`, `queuedRuns`, `pageSize`, `eventQueue`).
   `arc.capabilities` returns the same `capabilities`; `arc.ping` returns `{}`.
 - `arc.shutdown` cancels running and waiting commands, waits until each is answered, answers
   `null` and ends the session; nothing after it is read. The end of the input stream cancels
-  the same way. The documented methods of later capabilities (documents, queries, events,
-  selection, views) are -32001 (`cmd.protocol.method_unsupported`).
+  the same way. The documented methods of later capabilities (documents, views, and the
+  methods `query.object`, `query.compare`, `query.derived`, `selection.add` and
+  `selection.remove`) are -32001 (`cmd.protocol.method_unsupported`).
 
 ### Command methods
 
@@ -468,7 +470,7 @@ the process that owns stdin and stdout is the [headless runner](#headless-runner
 | `command.list` | optional `document` | `commands`: the catalog entry of every command exposed on `automation`, in identifier order |
 | `command.describe` | `command` (identifier or alias), optional `document` | that command's entry |
 | `command.validate` | `command`, `params` (default `{}`) | `valid`, `violations` (pointer and kind, as in parameter validation) |
-| `command.run` | `document`, `command`, `params` (default `{}`), optional `expectedRevision`, `preview` (default `false`), `seed` (default 0) | `command` (identifier), `revision`, `value`, `diagnostics` |
+| `command.run` | `document`, `command`, `params` (default `{}`), optional `expectedRevision`, `preview` (default `false`), `seed` (default 0) | `command` (identifier), `revision`, `value`, `diagnostics`, `preview`, `summary`, and for a preview `baseRevision` |
 | `command.cancel` | `id`, the request id of a `command.run` | `cancelled`: whether a running or waiting run was found |
 
 - An entry is the catalog entry plus `permitted` (the granted classes cover the command's).
@@ -483,11 +485,11 @@ the process that owns stdin and stdout is the [headless runner](#headless-runner
   exposure, permissions, limits, schema and predicate are checked as for every surface.
   `expectedRevision` is compared with the snapshot the command runs on, inside its job, so no
   other change slips in between; a mismatch is -32006 (`cmd.revision.mismatch`, details
-  `expected`, `current`) and nothing runs. Preview runs are CORE-CMD-006, a later row: `preview:
-  true` is -32001 (`cmd.preview.unsupported`) and never runs the command.
+  `expected`, `current`) and nothing runs. Previews are described in [Queries, events,
+  selection and preview as implemented](#queries-events-selection-and-preview-as-implemented).
 - Diagnostics have `severity` (`error` or `warning`), `code`, `category`, `messageId`,
-  `arguments`, `details` and `objects`. The result names no created identifiers yet; the
-  change summary arrives with previews.
+  `arguments`, `details` and `objects`. `summary` names the objects the run created, modified
+  and deleted ([Change summary](#change-summary)).
 - **Concurrency**: the caller's thread reads and answers requests; one worker per session runs
   `command.run` requests one at a time in arrival order; a writer thread owns the output. Every
   other request, `command.cancel` included, is answered while a command runs. At most 64 runs
@@ -498,8 +500,8 @@ the process that owns stdin and stdout is the [headless runner](#headless-runner
   reading holds the session back rather than growing its memory. Without threads (WebAssembly) `serve` fails with `Unsupported`.
 - **Progress**: a run's progress, forwarded by the invoker only after 300 ms, is sent as the
   notification `event.notify` with `params` `{"event": "command.progress", "requestId",
-  "fraction", "messageId"}` before the run's response. Subscriptions are CORE-CMD-024; until
-  then every session receives progress of its own runs.
+  "fraction", "messageId"}` before the run's response. A session receives the progress of its
+  own runs until it unsubscribes from `command.progress` ([Events](#events)).
 
 ### Errors
 
@@ -715,7 +717,11 @@ gives `validate <file>` the package check, so parameter validation is the separa
 | `cmd.protocol.version_unsupported` | `unsupported` | No supported protocol version lies in the client's range; the detail `supported` lists them |
 | `cmd.document.unknown` | `not_found` | The session has no document of that identifier |
 | `cmd.revision.mismatch` | `conflict` | The expected revision is not the document's current revision |
-| `cmd.preview.unsupported` | `unsupported` | Preview runs are not provided yet |
+| `cmd.preview.unsupported` | `unsupported` | The command controls undo (undo, redo, groups) and cannot run as a preview |
+| `cmd.preview.rollback_failed` | `internal` | A preview ran but its changes could not be rolled back; they remain as an undoable step |
+| `cmd.query.cursor_invalid` | `invalid_input` | The cursor is not one this server issued for these parameters |
+| `cmd.query.cursor_stale` | `conflict` | The document is at another revision than the one the cursor was issued for; the details `expected` and `current` name them |
+| `cmd.selection.unknown` | `not_found` | A selected identifier names no object of the document; the detail `unknown` lists them |
 | `cmd.roots.invalid` | `invalid_input` | A root to grant is not an existing directory |
 | `cmd.path.rejected` | `invalid_input` | The path is not acceptable; the detail `reason` says why |
 | `cmd.path.too_long` | `limit_exceeded` | The path is longer than the platform allows |
@@ -726,6 +732,155 @@ gives `validate <file>` the package check, so parameter validation is the separa
 | `cmd.macro.malformed` | `invalid_input` | A macro or batch line is not well formed; the details `line` and `reason` say where and why |
 | `cmd.macro.version_unsupported` | `unsupported` | A macro header names a format version that is not read; the detail `version` names it |
 | `cmd.macro.limit_exceeded` | `limit_exceeded` | A macro, one of its lines or a recording exceeds a limit; the detail `limit` names it |
+
+## Queries, events, selection and preview as implemented
+
+The modules are `protocol::query`, `protocol::events` and `protocol::run` (CORE-CMD-006,
+CORE-CMD-023, CORE-CMD-024, CORE-CMD-025, CORE-CMD-028). The methods belong to the methods of
+the architecture's family table for protocol 1.0, which the server already named and answered
+with `cmd.protocol.method_unsupported`; implementing them adds methods, optional result fields
+and notification names within version 1.0, as the versioning rule of the architecture allows,
+and changes no parameter or result field a 1.0 client relies on. The protocol version stays
+`1.0`. `arc.capabilities` lists the methods that exist. `query.object`, `query.compare`,
+`query.derived`, `selection.add` and `selection.remove` stay unsupported: comparison and
+derived-data queries need the change sets and the dependency graph surfaced by later
+capabilities, and the other two are single-object and incremental forms of methods provided
+here.
+
+### Change summary
+
+Every `command.run` result has `summary`: `created`, `modified` and `deleted` (identifiers in
+ascending order, at most 1000 per list), `counts` (complete) and `truncated` (a list was cut, or
+an event covered more objects than it lists). It is the net effect of the run's journal
+record: an object created and deleted in the same transaction appears in no list, one deleted
+and created again counts as modified. A run that changed nothing has empty lists.
+
+### Preview
+
+`command.run` with `preview: true` runs the command and rolls it back. The server opens an undo
+group on the document, runs the command in it and closes the group with
+`Document::fail_group`, which commits the inverse of the run. Afterwards the document's objects
+are equal to those before, the open groups and the undo steps are as before, and the result
+has `preview: true`, `summary`, `baseRevision` (the revision the command ran on) and `revision`
+(the document's revision after the rollback, which is the value to pass as `expectedRevision`
+to the real run).
+
+- The rollback is a transaction, so the revision advances by two (the run and its rollback;
+  not at all when the command changed nothing) and both transactions stay in the journal
+  (`query.history` lists them). An undoable command that changed the document clears the redo
+  stack, like any change.
+- The identifiers a command generates are seeded with the revision, so a later real run
+  creates other identifiers than its preview did; the summary of the preview names the
+  identifiers of the preview.
+- `expectedRevision`, permissions, the predicate and parameter validation apply as for a run.
+  A command that fails or faults leaves nothing to roll back. A command with undo behavior
+  `undo_control` cannot run inside a group: `cmd.preview.unsupported` (-32001).
+- If the rollback does not commit, the group is closed so that later changes do not join it,
+  the previewed changes remain as one undoable step, and the answer is -32012
+  (`cmd.preview.rollback_failed`).
+- Runs through one server are mutually exclusive per document: a preview's group takes in
+  every transaction committed while it is open. A transaction committed by code that does not
+  go through the server while a preview runs joins the group and is rolled back with it; the
+  host must not change a document that has a preview in flight.
+- Subscribers to `document.changed` do not receive the preview's two transactions as long as
+  their events arrive uncoalesced.
+
+### Queries
+
+All query methods need the permission class `read` (`cmd.permission_denied` otherwise) and name
+the revision they read (`revision`, the revision of the snapshot taken at the start of the
+request). They take `document`, optional `limit` (the page size) and optional `cursor`.
+
+| Method | Parameters besides the page | Result |
+|---|---|---|
+| `query.objects` | optional `types` (type keys; an unregistered key is `doc.type.unknown`), `ids`, `owner`, `fields` | `objects`, `nextCursor` |
+| `query.references` | `id`, optional `direction` (`outgoing`, `incoming`, `both`; default `both`) | `id`, `references`, `nextCursor` |
+| `query.diagnostics` | optional `severity` (`error`, `warning`) | `diagnosticsVersion`, `dropped`, `diagnostics`, `nextCursor` |
+| `query.history` | none | `transactions`, `nextCursor` |
+
+- **Filters** combine with and. `types` lists type keys, `owner` an identifier whose owned objects
+  match, `ids` identifiers (an identifier named twice is visited once, one that names no object
+  matches nothing). Order is by type key and then store slot, or the order of `ids`.
+- **Entries**: an object has `id`, `type`, `fields` and, when present, `owner`, `name` and
+  `partition`. `fields` holds every top-level field by name when `fields` is omitted, and
+  otherwise the listed paths. A path is a field name, `.name` for a record field, `[index]` for
+  a list element and `["key"]` for a map entry, the form `FieldPath` prints, at most 256 bytes
+  and 16 steps; a malformed path is `cmd.protocol.invalid_params` with reason `fields`. A path
+  that addresses no value of an object (absent, out of range, of another type) is `null`. A
+  value is the canonical JSON `arc-doc` serializes a field value as (`serde_json::to_value` of
+  `arc_doc::Value`, the form the package inspection prints). A reference entry has
+  `direction`, `object` (the other end), `field` (the path, or `(owner)`) and `type`. A
+  diagnostic has the members of a run's diagnostics. A transaction has `id`, `revision`,
+  `command` and `label` (identifier and message identifier, `null` for transactions that carry
+  none), `time` (milliseconds), `kind` (`normal`, `undo_of`, `redo_of`, `merge`, `migration`,
+  `link_reload`), `target` (the transaction an undo or redo concerns), `group` and `counts`;
+  history lists the journal oldest first.
+- **Pages**: `limit` defaults to 100 and is at most `limits.pageSize`, the smaller of 1000 and
+  the session's `array_length`; more is -32008 (`limit` `page_size`), 0 is
+  `cmd.protocol.invalid_params`. `nextCursor` is `null` after the last page. A cursor is
+  opaque; it encodes the revision (for diagnostics also the diagnostics version), the
+  position and a digest of the method and its parameters other than the page. A cursor that is
+  malformed or belongs to other parameters is -32002 (`cmd.query.cursor_invalid`); one
+  issued at another revision is -32006 (`cmd.query.cursor_stale`, details `expected` and
+  `current`), and the client starts again. Skipping to a position walks the matching objects,
+  so a page costs time proportional to its position.
+- `ids`, `types` and `fields` hold at most the session's `array_length` entries (-32008, `limit`
+  `array_length`).
+- A document's diagnostics list is the document's own (validator findings, load findings,
+  failed nodes); it changes without a revision, which the diagnostics version covers.
+
+### Events
+
+`event.subscribe` and `event.unsubscribe` take `events` (one to three of `command.progress`,
+`document.changed`, `selection.changed`) and optional `document` (omitted: every document) and
+answer `subscriptions`, the session's subscriptions. Both need `read`; both are idempotent. The
+notifications are `event.notify` with these `params`:
+
+| `event` | Members | Sent |
+|---|---|---|
+| `command.progress` | `requestId`, `fraction`, `messageId` | for the session's own runs |
+| `document.changed` | `document`, `revision`, `transaction`, `commits`, `changes` (a change summary) | after a commit of the document, whoever made it |
+| `selection.changed` | `document`, `revision`, `source` (`client` or `command`), `objects` | when the session's selection of the document changes |
+| `events.dropped` | `dropped` | before the next notification, when `dropped` notifications were lost |
+
+- A session receives `command.progress` for its own runs from the start, so clients that never
+  subscribe are unaffected; unsubscribing stops it. A run's events, progress included, are
+  written before its response. A newer progress notification of a run replaces an unsent one
+  of the same run.
+- Document events come from the document's event bus. A subscription sees commits after
+  it was made. Events that the bus coalesced (more than 64 unread) arrive as one event with
+  `commits` above 1 and the union of the changes, and a change set larger than the bus holds
+  is `truncated`. A subscription ignores the other bus events (regeneration, diagnostics,
+  saves, link states).
+- Each session queues at most `limits.eventQueue` (256) notifications for its client. When
+  the client reads slower than events arrive, the oldest queued notification is dropped, the
+  loss is counted and announced with `events.dropped` ahead of the notifications that follow;
+  the document is never held back. Responses are not subject to this queue.
+
+### Selection
+
+`selection.get` (`document`) and `selection.set` (`document`, `objects`: entries of `id` and
+optional `subObjects`, a list of keys) answer `document`, `revision` and `objects`; both need
+`read`. The selection belongs to the session and the document; it is ordered, repeated
+identifiers merge their keys, and `selection.set` replaces it (an empty list clears it).
+
+- Every identifier must name an object of the latest revision; otherwise nothing changes and
+  the answer is -32005 (`cmd.selection.unknown`, argument `count`, detail `unknown`: the
+  identifiers, at most 1000). At most 10000 objects, 1024 keys of 256 bytes each per object
+  (-32008, `limit` `selection` or `sub_objects`). Keys are opaque to this layer.
+- Commands the session runs receive the identifiers of the selection that still name objects,
+  as their `selection` (`Context::selection`). `selection.get` and runs drop identifiers whose
+  object was deleted.
+- After a command that recorded a selection to restore after it (`set_selection_after`), the
+  session's selection of that document is that selection, without keys, and a `selection.changed`
+  event with `source` `command` is sent. Previews do not change the selection.
+
+### Schema coverage
+
+`schemas/automation/requests.json` and `schemas/automation/responses.json` define `params` and
+`result` of every method in `METHODS` under the method's name; the conformance test fails when
+a method lacks either, or is not exercised by the recorded session, and validates every message
+of that session against them, notifications included.
 
 ## Capabilities
 

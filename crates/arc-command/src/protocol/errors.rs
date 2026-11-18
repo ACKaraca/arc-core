@@ -158,6 +158,11 @@ mod tests {
         assert_eq!(rpc_code(&Error::new(codes::PARAMS_LIMIT_EXCEEDED)), LIMIT);
         assert_eq!(rpc_code(&Error::new(codes::PATH_IO)), FAILED);
         assert_eq!(rpc_code(&Error::new(codes::DOCUMENT_UNKNOWN)), NOT_FOUND);
+        assert_eq!(rpc_code(&Error::new(codes::QUERY_CURSOR_INVALID)), SCHEMA);
+        assert_eq!(rpc_code(&Error::new(codes::QUERY_CURSOR_STALE)), CONFLICT);
+        assert_eq!(rpc_code(&Error::new(codes::SELECTION_UNKNOWN)), NOT_FOUND);
+        assert_eq!(rpc_code(&Error::new(codes::PREVIEW_UNSUPPORTED)), UNKNOWN);
+        assert_eq!(rpc_code(&Error::new(codes::PREVIEW_ROLLBACK_FAILED)), FAULT);
     }
 
     #[test]

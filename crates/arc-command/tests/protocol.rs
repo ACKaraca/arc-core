@@ -12,14 +12,14 @@
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Cursor, Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 
 use arc_base::{Limits, Unit};
-use arc_command::protocol::{PipeReader, PipeWriter, pipe};
+use arc_command::protocol::{METHODS, PipeReader, PipeWriter, pipe};
 use arc_command::schema::{check_schema, validate};
 use arc_command::{
     CommandSpec, Log, LogLevel, NoLog, Permission, Registry, Roots, Server, ServerConfig,
@@ -321,7 +321,11 @@ fn conformance(c: &mut Client) {
     let r = c.call(&initialize(7, "1.0", "1.0", &[]));
     assert_eq!(data_code(&r), "cmd.protocol.already_initialized");
     let r = c.call(&request("caps", "arc.capabilities", json!({})));
-    assert_eq!(r["result"]["preview"], false);
+    assert_eq!(r["result"]["preview"], true);
+    assert_eq!(
+        r["result"]["events"],
+        json!(["command.progress", "document.changed", "selection.changed"])
+    );
     let r = c.call(&request("p", "arc.ping", json!(null)));
     assert_eq!(error_code(&r), -32600, "params must be an object");
     let r = c.call(&request("p", "arc.ping", json!({})));
@@ -433,12 +437,24 @@ fn conformance(c: &mut Client) {
             json!({"document": document, "command": command, "params": params}),
         )
     };
+    // A preview runs the command and rolls it back: the empty document stays empty (the
+    // disabled predicate below still holds), but the revision moved by the run and the rollback.
     let mut preview = create(33, None);
+    preview["params"]["document"] = json!("empty");
     preview["params"]["preview"] = json!(true);
     let r = c.call(&preview);
+    assert_eq!(r["result"]["preview"], true);
     assert_eq!(
-        (error_code(&r), data_code(&r)),
-        (-32001, "cmd.preview.unsupported")
+        (
+            r["result"]["baseRevision"].clone(),
+            r["result"]["revision"].clone()
+        ),
+        (json!(0), json!(2))
+    );
+    assert_eq!(r["result"]["summary"]["counts"]["created"], 1);
+    assert_eq!(
+        r["result"]["summary"]["created"][0],
+        r["result"]["value"]["id"]
     );
     let r = c.call(&run(34, "nope", "test.item.summary", json!({})));
     assert_eq!(error_code(&r), -32005);
@@ -493,6 +509,144 @@ fn conformance(c: &mut Client) {
         (error_code(&r), data_code(&r)),
         (-32001, "cmd.protocol.method_unsupported")
     );
+    let r = c.call(&request(46, "query.compare", json!({})));
+    assert_eq!(error_code(&r), -32001);
+
+    // Queries: pages, cursors, projection, references, diagnostics and history.
+    let r = c.call(&request(
+        60,
+        "query.objects",
+        json!({"document": "main", "limit": 1, "fields": ["name", "length", "missing"]}),
+    ));
+    let first = r["result"]["objects"][0].clone();
+    assert_eq!(first["type"], "test.item");
+    assert_eq!(first["fields"]["name"], "a");
+    assert_eq!(first["fields"]["missing"], Value::Null);
+    let cursor = r["result"]["nextCursor"].as_str().unwrap().to_owned();
+    let revision = r["result"]["revision"].clone();
+    let r = c.call(&request(
+        61,
+        "query.objects",
+        json!({"document": "main", "fields": ["name", "length", "missing"], "cursor": cursor}),
+    ));
+    assert_eq!(r["result"]["revision"], revision);
+    assert_eq!(r["result"]["nextCursor"], Value::Null);
+    let r = c.call(&request(
+        62,
+        "query.objects",
+        json!({"document": "main", "types": ["no.type"]}),
+    ));
+    assert_eq!(
+        (error_code(&r), data_code(&r)),
+        (-32005, "doc.type.unknown")
+    );
+    let r = c.call(&request(
+        63,
+        "query.objects",
+        json!({"document": "main", "cursor": "not-a-cursor"}),
+    ));
+    assert_eq!(
+        (error_code(&r), data_code(&r)),
+        (-32002, "cmd.query.cursor_invalid")
+    );
+    let r = c.call(&request(
+        64,
+        "query.references",
+        json!({"document": "main", "id": first["id"], "direction": "both"}),
+    ));
+    assert_eq!(r["result"]["references"], json!([]));
+    let r = c.call(&request(
+        65,
+        "query.diagnostics",
+        json!({"document": "main", "severity": "error"}),
+    ));
+    assert_eq!(r["result"]["diagnostics"], json!([]));
+    let r = c.call(&request(
+        66,
+        "query.history",
+        json!({"document": "main", "limit": 2}),
+    ));
+    assert_eq!(
+        r["result"]["transactions"][0]["command"],
+        "test.item.create"
+    );
+    assert_eq!(r["result"]["transactions"][0]["counts"]["created"], 1);
+    let stale = r["result"]["nextCursor"].as_str().unwrap().to_owned();
+    c.call(&create(67, None));
+    let r = c.call(&request(
+        68,
+        "query.history",
+        json!({"document": "main", "limit": 2, "cursor": stale}),
+    ));
+    assert_eq!(
+        (error_code(&r), data_code(&r)),
+        (-32006, "cmd.query.cursor_stale")
+    );
+    let r = c.call(&request(69, "query.history", json!({"document": "nope"})));
+    assert_eq!(error_code(&r), -32005);
+    let r = c.call(&request(
+        70,
+        "query.history",
+        json!({"document": "main", "limit": 100000}),
+    ));
+    assert_eq!(error_code(&r), -32008);
+
+    // Selection.
+    let r = c.call(&request(
+        80,
+        "selection.set",
+        json!({"document": "main",
+        "objects": [{"id": first["id"], "subObjects": ["edge-1", "edge-1", "edge-2"]}]}),
+    ));
+    assert_eq!(
+        r["result"]["objects"][0]["subObjects"],
+        json!(["edge-1", "edge-2"])
+    );
+    let r = c.call(&request(81, "selection.get", json!({"document": "main"})));
+    assert_eq!(r["result"]["objects"][0]["id"], first["id"]);
+    let ghost = "0190f3c4-0a11-7c2e-8f00-5d6e7f8a9b0c";
+    let r = c.call(&request(
+        82,
+        "selection.set",
+        json!({"document": "main",
+        "objects": [{"id": first["id"]}, {"id": ghost}]}),
+    ));
+    assert_eq!(
+        (error_code(&r), data_code(&r)),
+        (-32005, "cmd.selection.unknown")
+    );
+    assert_eq!(r["error"]["data"]["details"]["unknown"], json!([ghost]));
+    let r = c.call(&request(83, "selection.get", json!({"document": "main"})));
+    assert_eq!(
+        r["result"]["objects"].as_array().unwrap().len(),
+        1,
+        "a refused set changes nothing"
+    );
+
+    // Event subscriptions (the notifications themselves are tested in `events.rs`).
+    let r = c.call(&request(
+        90,
+        "event.unsubscribe",
+        json!({"events": ["command.progress"]}),
+    ));
+    assert_eq!(r["result"]["subscriptions"], json!([]));
+    let r = c.call(&request(
+        91,
+        "event.subscribe",
+        json!({"events": ["command.progress"]}),
+    ));
+    assert_eq!(
+        r["result"]["subscriptions"],
+        json!([{"event": "command.progress"}])
+    );
+    let r = c.call_invalid(&request(92, "event.subscribe", json!({"events": ["nope"]})));
+    assert_eq!(error_code(&r), -32602);
+    let r = c.call(&request(
+        93,
+        "event.subscribe",
+        json!({"events": ["document.changed"], "document": "nope"}),
+    ));
+    assert_eq!(error_code(&r), -32005);
 
     // Hostile framing; the stream stays synchronized.
     let r = c.call(&json!({"jsonrpc": "2.0", "id": 50, "method": "arc.ping", "params": [1]}));
@@ -543,7 +697,40 @@ fn conformance(c: &mut Client) {
 #[test]
 fn conformance_transcript() {
     let transcript = session(conformance);
+    // Every method the server implements is exercised by the recorded session.
+    let used: BTreeSet<String> = transcript
+        .iter()
+        .filter_map(|line| line.strip_prefix("> "))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|message| message["method"].as_str().map(str::to_owned))
+        .collect();
+    for method in METHODS {
+        assert!(
+            used.contains(*method),
+            "{method} is not in the conformance session"
+        );
+    }
     insta::assert_snapshot!("conformance", transcript.join("\n"));
+}
+
+#[test]
+fn every_method_has_a_request_and_a_response_schema() {
+    let (requests, responses) = (schema(REQUESTS), schema(RESPONSES));
+    for method in METHODS {
+        for (root, kind) in [(&requests, "request"), (&responses, "response")] {
+            assert!(
+                root["$defs"].get(*method).is_some(),
+                "{method} has no {kind} schema"
+            );
+        }
+    }
+    // The definitions of both files name nothing but methods, shared parts and notifications.
+    for method in arc_command::protocol::LATER_METHODS {
+        assert!(
+            requests["$defs"].get(*method).is_none(),
+            "{method} is not implemented"
+        );
+    }
 }
 
 #[test]
@@ -749,8 +936,18 @@ fn templates(id: &str) -> Vec<Value> {
         ),
         request(id, "command.cancel", json!({"id": "none"})),
         request(id, "query.objects", json!({})),
+        request(id, "query.objects", json!({"document": "main", "limit": 2})),
+        request(id, "query.history", json!({"document": "main"})),
+        request(id, "selection.get", json!({"document": "main"})),
+        request(
+            id,
+            "event.subscribe",
+            json!({"events": ["command.progress"]}),
+        ),
     ]
 }
+
+const TEMPLATES: usize = 11;
 
 #[derive(Debug, Clone)]
 enum Line {
@@ -763,8 +960,8 @@ fn line() -> impl Strategy<Value = Line> {
     prop_oneof![
         prop::collection::vec(any::<u8>(), 0..300).prop_map(Line::Garbage),
         prop::collection::vec(any::<u8>(), 4000..5000).prop_map(Line::Garbage),
-        (0..7_usize).prop_map(Line::Valid),
-        (0..7_usize, any::<usize>(), any::<u8>(), 0..3_u8)
+        (0..TEMPLATES).prop_map(Line::Valid),
+        (0..TEMPLATES, any::<usize>(), any::<u8>(), 0..3_u8)
             .prop_map(|(t, at, b, op)| Line::Mutated(t, at, b, op)),
     ]
 }

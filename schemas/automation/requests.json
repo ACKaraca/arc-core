@@ -163,6 +163,218 @@
         "id"
       ],
       "additionalProperties": true
+    },
+    "event.subscribe": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "command.progress",
+              "document.changed",
+              "selection.changed"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 3
+        },
+        "document": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "events"
+      ],
+      "additionalProperties": true
+    },
+    "event.unsubscribe": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "command.progress",
+              "document.changed",
+              "selection.changed"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 3
+        },
+        "document": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "events"
+      ],
+      "additionalProperties": true
+    },
+    "query.objects": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "owner": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "document"
+      ],
+      "additionalProperties": true
+    },
+    "query.references": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "direction": {
+          "enum": [
+            "both",
+            "outgoing",
+            "incoming"
+          ]
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "document",
+        "id"
+      ],
+      "additionalProperties": true
+    },
+    "query.diagnostics": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "document"
+      ],
+      "additionalProperties": true
+    },
+    "query.history": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "document"
+      ],
+      "additionalProperties": true
+    },
+    "selection.get": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "document"
+      ],
+      "additionalProperties": true
+    },
+    "selection.set": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "objects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "subObjects": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "additionalProperties": true
+          }
+        }
+      },
+      "required": [
+        "document",
+        "objects"
+      ],
+      "additionalProperties": true
     }
   }
 }

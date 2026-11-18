@@ -12,8 +12,12 @@
 //! a further `command.run` waits its turn. The rules are specified in
 //! `docs/crates/arc-command.md`.
 
+mod encode;
 pub mod errors;
+mod events;
 mod framing;
+mod query;
+mod run;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
@@ -29,7 +33,9 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
+pub use events::{EVENT_QUEUE, EVENTS, MAX_SELECTED};
 pub use framing::{PipeReader, PipeWriter, pipe};
+pub use query::MAX_PAGE;
 
 use crate::context::{Clock, FixedClock, Probe, ProgressSink, Session};
 use crate::error::codes;
@@ -39,7 +45,9 @@ use crate::registry::Registry;
 use crate::roots::Roots;
 use crate::schema::text_depth;
 use crate::spec::{CommandSpec, Permission, Surface};
+use events::Hub;
 use framing::{Frame, next_frame};
+use run::{DocState, Target};
 
 /// The protocol's largest message, in bytes, newline excluded.
 pub const MAX_MESSAGE_BYTES: u64 = 64 << 20;
@@ -52,6 +60,9 @@ pub const MAX_QUEUED_RUNS: usize = 64;
 
 /// The most messages waiting for the writer.
 const OUTPUT_QUEUE: usize = 256;
+
+/// How long the event pump of a session sleeps when nothing happened.
+const EVENT_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// The nesting the message envelope adds above command parameters (the message and its
 /// `params`).
@@ -68,6 +79,14 @@ pub const METHODS: &[&str] = &[
     "command.list",
     "command.run",
     "command.validate",
+    "event.subscribe",
+    "event.unsubscribe",
+    "query.diagnostics",
+    "query.history",
+    "query.objects",
+    "query.references",
+    "selection.get",
+    "selection.set",
 ];
 
 /// The protocol methods of later capabilities, answered with code -32001.
@@ -79,17 +98,9 @@ pub const LATER_METHODS: &[&str] = &[
     "document.saveAs",
     "document.close",
     "document.info",
-    "query.objects",
     "query.object",
-    "query.references",
-    "query.diagnostics",
-    "query.history",
     "query.compare",
     "query.derived",
-    "event.subscribe",
-    "event.unsubscribe",
-    "selection.get",
-    "selection.set",
     "selection.add",
     "selection.remove",
     "view.list",
@@ -201,6 +212,8 @@ impl ServerConfig {
 pub struct Server<'a> {
     registry: &'a Registry,
     documents: &'a BTreeMap<String, Document>,
+    /// What every session shares about each document.
+    states: BTreeMap<String, Arc<DocState>>,
     config: ServerConfig,
     log: &'a dyn Log,
     recorder: Option<&'a Recorder>,
@@ -235,9 +248,12 @@ enum Reply {
 struct Job<'a> {
     id: Value,
     key: String,
+    doc_id: String,
     document: &'a Document,
+    state: Arc<DocState>,
     session: Session,
     invocation: Invocation,
+    preview: bool,
 }
 
 type Pending = Mutex<BTreeMap<String, Cancel>>;
@@ -381,58 +397,22 @@ fn capabilities() -> Value {
     json!({
         "methods": METHODS,
         "batch": false,
-        "preview": false,
+        "preview": true,
         "notifications": ["event.notify"],
+        "events": EVENTS,
     })
 }
 
-/// Sends progress of one run as `event.notify` notifications.
+/// Queues the progress of one run for its session's `event.notify` notifications.
 struct Progress {
-    out: SyncSender<String>,
+    hub: Arc<Hub>,
     id: Value,
 }
 
 impl ProgressSink for Progress {
     fn progress(&self, fraction: f64, message_id: &str) {
-        let note = json!({
-            "jsonrpc": "2.0",
-            "method": "event.notify",
-            "params": {
-                "event": "command.progress",
-                "requestId": self.id,
-                "fraction": fraction,
-                "messageId": message_id,
-            },
-        });
-        // A closed output ends the session anyway.
-        let _ = self.out.send(text(&note));
+        self.hub.progress(&self.id, fraction, message_id);
     }
-}
-
-fn run_result(outcome: &Outcome) -> Value {
-    let diagnostics: Vec<Value> = outcome
-        .diagnostics
-        .iter()
-        .map(|d| {
-            let mut entry = errors::error_data(&d.error, Map::new());
-            if let Some(map) = entry.as_object_mut() {
-                let severity = match d.severity {
-                    arc_doc::Severity::Error => "error",
-                    arc_doc::Severity::Warning => "warning",
-                };
-                map.insert("severity".into(), json!(severity));
-                let objects: Vec<String> = d.objects.iter().map(ToString::to_string).collect();
-                map.insert("objects".into(), json!(objects));
-            }
-            entry
-        })
-        .collect();
-    json!({
-        "command": outcome.command,
-        "revision": outcome.revision,
-        "value": outcome.value,
-        "diagnostics": diagnostics,
-    })
 }
 
 fn write_lines<W: Write>(
@@ -468,6 +448,10 @@ impl<'a> Server<'a> {
         Self {
             registry,
             documents,
+            states: documents
+                .keys()
+                .map(|id| (id.clone(), Arc::default()))
+                .collect(),
             config,
             log,
             recorder: None,
@@ -500,6 +484,8 @@ impl<'a> Server<'a> {
         let pending = Pending::default();
         let closed_flag = AtomicBool::new(false);
         let closed = &closed_flag;
+        let stop_flag = AtomicBool::new(false);
+        let stop = &stop_flag;
         // Bounded, so a client that stops reading slows the session down instead of growing it.
         let (out, lines) = sync_channel::<String>(OUTPUT_QUEUE);
         let (jobs, queue) = channel::<Job<'_>>();
@@ -507,31 +493,64 @@ impl<'a> Server<'a> {
             let writer = thread::Builder::new()
                 .name("arc-protocol-writer".into())
                 .spawn_scoped(scope, move || write_lines(&lines, &mut output, closed))?;
+            let hub = Arc::new(Hub::new(out.clone()));
             let worker_out = out.clone();
             let pending_ref = &pending;
+            let worker_hub = Arc::clone(&hub);
             let worker = thread::Builder::new()
                 .name("arc-protocol-worker".into())
-                .spawn_scoped(scope, move || self.work(&queue, &worker_out, pending_ref));
+                .spawn_scoped(scope, move || {
+                    self.work(&queue, &worker_out, pending_ref, &worker_hub);
+                });
+            let pump_hub = Arc::clone(&hub);
+            let pump = worker.is_ok().then(|| {
+                thread::Builder::new()
+                    .name("arc-protocol-events".into())
+                    .spawn_scoped(scope, move || {
+                        while !stop.load(Ordering::Acquire) {
+                            if !pump_hub.pump(false) {
+                                thread::park_timeout(EVENT_POLL);
+                            }
+                        }
+                    })
+            });
             let mut reader = Reader {
                 server: self,
                 out,
+                hub: Arc::clone(&hub),
                 jobs: Some(jobs),
                 pending: &pending,
                 closed,
                 session: None,
                 current: None,
             };
-            let result = match worker {
-                Ok(worker) => {
+            let result = match (worker, pump) {
+                (Ok(worker), Some(Ok(pump))) => {
                     let result = reader.run(&mut input);
                     reader.finish();
                     let _ = worker.join();
+                    // The notifications still queued precede the shutdown response.
+                    hub.pump(true);
+                    stop.store(true, Ordering::Release);
+                    pump.thread().unpark();
+                    let _ = pump.join();
                     reader.shutdown_reply();
                     result
                 }
-                Err(e) => Err(e),
+                (worker, pump) => {
+                    stop.store(true, Ordering::Release);
+                    reader.finish();
+                    if let Ok(worker) = worker {
+                        let _ = worker.join();
+                    }
+                    if let Some(Ok(pump)) = pump {
+                        let _ = pump.join();
+                    }
+                    Err(io::Error::other("session threads"))
+                }
             };
             drop(reader);
+            drop(hub);
             let written = writer
                 .join()
                 .unwrap_or_else(|_| Err(io::Error::other("writer fault")));
@@ -539,20 +558,36 @@ impl<'a> Server<'a> {
         })
     }
 
-    fn work(&self, queue: &Receiver<Job<'_>>, out: &SyncSender<String>, pending: &Pending) {
+    fn work(
+        &self,
+        queue: &Receiver<Job<'_>>,
+        out: &SyncSender<String>,
+        pending: &Pending,
+        hub: &Hub,
+    ) {
         for job in queue {
             let Job {
                 id,
                 key,
+                doc_id,
                 document,
+                state,
                 session,
                 invocation,
+                preview,
             } = job;
             let answer = catch_unwind(AssertUnwindSafe(|| {
-                if invocation.cancel.is_cancelled() {
-                    return Err(Error::new(codes::CANCELLED).into());
-                }
-                self.invoke(document, &session, invocation)
+                self.run_job(
+                    Some(hub),
+                    &Target {
+                        id: &doc_id,
+                        document,
+                        state: &state,
+                    },
+                    &session,
+                    invocation,
+                    preview,
+                )
             }))
             .unwrap_or_else(|payload| {
                 self.log.log(
@@ -566,6 +601,8 @@ impl<'a> Server<'a> {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .remove(&key);
+            // The events of the run, its progress among them, precede its response.
+            hub.pump(true);
             let _ = out.send(response(&id, answer));
         }
     }
@@ -586,14 +623,21 @@ impl<'a> Server<'a> {
             };
             match method {
                 "command.run" => decode::<RunParams>(method, params).and_then(|p| {
-                    if p.preview {
-                        return Err(Error::new(codes::PREVIEW_UNSUPPORTED).into());
-                    }
-                    let document = self.document(&p.document)?;
+                    let (document, state) = self.document_state(&p.document)?;
                     let mut invocation = Invocation::new(p.command, p.params);
                     invocation.seed = p.seed;
                     invocation.expected_revision = p.expected_revision;
-                    self.invoke(document, &session, invocation)
+                    self.run_job(
+                        None,
+                        &Target {
+                            id: &p.document,
+                            document,
+                            state: &state,
+                        },
+                        &session,
+                        invocation,
+                        p.preview,
+                    )
                 }),
                 _ => self.query(&session, method, params),
             }
@@ -641,17 +685,28 @@ impl<'a> Server<'a> {
                 let violations = spec.validate(&p.params, &session.limits)?;
                 Ok(json!({"valid": violations.is_empty(), "violations": violations}))
             }),
+            "query.objects" | "query.references" | "query.diagnostics" | "query.history" => {
+                self.read_method(session, method, params)
+            }
             _ => Err(Error::new(codes::PROTOCOL_METHOD_UNKNOWN)
                 .with_arg("method", method)
                 .into()),
         }
     }
 
-    /// Runs `invocation` through the invoker and logs the panic of a faulted command.
-    fn invoke(&self, document: &Document, session: &Session, invocation: Invocation) -> Answer {
+    /// Runs `invocation` through the invoker, records it when `record` is set (a preview is
+    /// not recorded) and logs the panic of a faulted command.
+    fn invoke(
+        &self,
+        document: &Document,
+        session: &Session,
+        invocation: Invocation,
+        record: bool,
+    ) -> Result<Outcome, Failure> {
         // Runs are one at a time per session, so this is the revision the command runs on.
         let recorded = self
             .recorder
+            .filter(|_| record)
             .map(|recorder| (recorder, invocation.clone(), document.snapshot().revision()));
         match Invoker::new(self.registry).invoke(document, session, invocation) {
             Ok(outcome) => {
@@ -661,7 +716,7 @@ impl<'a> Server<'a> {
                     self.log
                         .log(LogLevel::Warning, "macro.record", error.code());
                 }
-                Ok(run_result(&outcome))
+                Ok(outcome)
             }
             Err(error) => {
                 if let Some(panic) = error.details().get("panic") {
@@ -671,6 +726,12 @@ impl<'a> Server<'a> {
                 Err(Failure::from(error))
             }
         }
+    }
+
+    fn document_state(&self, id: &str) -> Result<(&'a Document, Arc<DocState>), Failure> {
+        let document = self.document(id)?;
+        let state = self.states.get(id).map(Arc::clone).unwrap_or_default();
+        Ok((document, state))
     }
 
     fn document(&self, id: &str) -> Result<&'a Document, Failure> {
@@ -738,6 +799,7 @@ impl<'a> Server<'a> {
 struct Reader<'s, 'a> {
     server: &'s Server<'a>,
     out: SyncSender<String>,
+    hub: Arc<Hub>,
     jobs: Option<std::sync::mpsc::Sender<Job<'a>>>,
     pending: &'s Pending,
     closed: &'s AtomicBool,
@@ -884,8 +946,23 @@ impl<'a> Reader<'_, 'a> {
             "arc.shutdown" => return Reply::Shutdown,
             "arc.ping" => Ok(json!({})),
             "arc.capabilities" => Ok(capabilities()),
-            "command.list" | "command.describe" | "command.validate" => {
+            "command.list" | "command.describe" | "command.validate" | "query.objects"
+            | "query.references" | "query.diagnostics" | "query.history" => {
                 server.query(&session, method, params)
+            }
+            "event.subscribe" | "event.unsubscribe" => self.hub.subscribe(
+                server,
+                &session.permissions,
+                method,
+                params,
+                method == "event.subscribe",
+            ),
+            "selection.get" => self.hub.selection_get(server, &session.permissions, params),
+            "selection.set" => {
+                let answer = self.hub.selection_set(server, &session.permissions, params);
+                // Like a run's events, the selection event precedes the answer.
+                self.hub.pump(true);
+                answer
             }
             "command.run" => match decode::<RunParams>(method, params) {
                 Ok(p) => return self.run_command(id, session, p),
@@ -972,6 +1049,8 @@ impl<'a> Reader<'_, 'a> {
                 "messageBytes": config.max_line(),
                 "nestingDepth": config.limits.nesting_depth,
                 "queuedRuns": MAX_QUEUED_RUNS,
+                "pageSize": query::max_page(&config.limits),
+                "eventQueue": EVENT_QUEUE,
             },
         });
         self.session = Some(config.session(granted));
@@ -979,11 +1058,8 @@ impl<'a> Reader<'_, 'a> {
     }
 
     fn run_command(&mut self, id: &Value, session: Session, p: RunParams) -> Reply {
-        if p.preview {
-            return Reply::Now(Err(Error::new(codes::PREVIEW_UNSUPPORTED).into()));
-        }
-        let document = match self.server.document(&p.document) {
-            Ok(document) => document,
+        let (document, state) = match self.server.document_state(&p.document) {
+            Ok(found) => found,
             Err(failure) => return Reply::Now(Err(failure)),
         };
         let key = text(id);
@@ -1003,15 +1079,18 @@ impl<'a> Reader<'_, 'a> {
         invocation.cancel = cancel;
         invocation.expected_revision = p.expected_revision;
         invocation.progress = Some(Arc::new(Progress {
-            out: self.out.clone(),
+            hub: Arc::clone(&self.hub),
             id: id.clone(),
         }));
         let job = Job {
             id: id.clone(),
             key: key.clone(),
+            doc_id: p.document,
             document,
+            state,
             session,
             invocation,
+            preview: p.preview,
         };
         let sent = self
             .jobs

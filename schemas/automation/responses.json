@@ -59,7 +59,7 @@
           "const": "event.notify"
         },
         "params": {
-          "$ref": "#/$defs/progress"
+          "$ref": "#/$defs/notification"
         }
       },
       "required": [
@@ -194,6 +194,12 @@
           "type": "boolean"
         },
         "notifications": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "events": {
           "type": "array",
           "items": {
             "type": "string"
@@ -420,12 +426,22 @@
             "queuedRuns": {
               "type": "integer",
               "minimum": 0
+            },
+            "pageSize": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "eventQueue": {
+              "type": "integer",
+              "minimum": 1
             }
           },
           "required": [
             "messageBytes",
             "nestingDepth",
-            "queuedRuns"
+            "queuedRuns",
+            "pageSize",
+            "eventQueue"
           ],
           "additionalProperties": false
         }
@@ -518,13 +534,25 @@
           "items": {
             "$ref": "#/$defs/diagnostic"
           }
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "summary": {
+          "$ref": "#/$defs/changeSummary"
+        },
+        "baseRevision": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "required": [
         "command",
         "revision",
         "value",
-        "diagnostics"
+        "diagnostics",
+        "preview",
+        "summary"
       ],
       "additionalProperties": false
     },
@@ -578,6 +606,538 @@
         "messageId",
         "arguments",
         "details",
+        "objects"
+      ],
+      "additionalProperties": false
+    },
+    "notification": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/progress"
+        },
+        {
+          "$ref": "#/$defs/documentChanged"
+        },
+        {
+          "$ref": "#/$defs/selectionChanged"
+        },
+        {
+          "$ref": "#/$defs/eventsDropped"
+        }
+      ]
+    },
+    "documentChanged": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "const": "document.changed"
+        },
+        "document": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "transaction": {
+          "type": "string"
+        },
+        "commits": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "changes": {
+          "$ref": "#/$defs/changeSummary"
+        }
+      },
+      "required": [
+        "event",
+        "document",
+        "revision",
+        "transaction",
+        "commits",
+        "changes"
+      ],
+      "additionalProperties": false
+    },
+    "selectionChanged": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "const": "selection.changed"
+        },
+        "document": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source": {
+          "enum": [
+            "client",
+            "command"
+          ]
+        },
+        "objects": {
+          "$ref": "#/$defs/selected"
+        }
+      },
+      "required": [
+        "event",
+        "document",
+        "revision",
+        "source",
+        "objects"
+      ],
+      "additionalProperties": false
+    },
+    "eventsDropped": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "const": "events.dropped"
+        },
+        "dropped": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "event",
+        "dropped"
+      ],
+      "additionalProperties": false
+    },
+    "changeSummary": {
+      "type": "object",
+      "properties": {
+        "created": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "modified": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deleted": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "created": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "modified": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "deleted": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "created",
+            "modified",
+            "deleted"
+          ],
+          "additionalProperties": false
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "created",
+        "modified",
+        "deleted",
+        "counts",
+        "truncated"
+      ],
+      "additionalProperties": false
+    },
+    "selected": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "subObjects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "event.subscribe": {
+      "$ref": "#/$defs/subscriptions"
+    },
+    "event.unsubscribe": {
+      "$ref": "#/$defs/subscriptions"
+    },
+    "subscriptions": {
+      "type": "object",
+      "properties": {
+        "subscriptions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "event": {
+                "enum": [
+                  "command.progress",
+                  "document.changed",
+                  "selection.changed"
+                ]
+              },
+              "document": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "event"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "subscriptions"
+      ],
+      "additionalProperties": false
+    },
+    "query.objects": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "objects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "type": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "owner": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "partition": {
+                "type": "string"
+              },
+              "fields": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "id",
+              "type",
+              "fields"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "document",
+        "revision",
+        "objects",
+        "nextCursor"
+      ],
+      "additionalProperties": false
+    },
+    "query.references": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "id": {
+          "type": "string"
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "direction": {
+                "enum": [
+                  "outgoing",
+                  "incoming"
+                ]
+              },
+              "object": {
+                "type": "string"
+              },
+              "field": {
+                "type": "string"
+              },
+              "type": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "direction",
+              "object",
+              "field",
+              "type"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "document",
+        "revision",
+        "id",
+        "references",
+        "nextCursor"
+      ],
+      "additionalProperties": false
+    },
+    "query.diagnostics": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "diagnosticsVersion": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dropped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/diagnostic"
+          }
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "document",
+        "revision",
+        "diagnosticsVersion",
+        "dropped",
+        "diagnostics",
+        "nextCursor"
+      ],
+      "additionalProperties": false
+    },
+    "query.history": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "transactions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "command": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "time": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "kind": {
+                "enum": [
+                  "normal",
+                  "undo_of",
+                  "redo_of",
+                  "merge",
+                  "migration",
+                  "link_reload"
+                ]
+              },
+              "target": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "group": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "counts": {
+                "type": "object",
+                "properties": {
+                  "created": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "modified": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "deleted": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "created",
+                  "modified",
+                  "deleted"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "revision",
+              "command",
+              "label",
+              "time",
+              "kind",
+              "target",
+              "group",
+              "counts"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "document",
+        "revision",
+        "transactions",
+        "nextCursor"
+      ],
+      "additionalProperties": false
+    },
+    "selection.get": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "objects": {
+          "$ref": "#/$defs/selected"
+        }
+      },
+      "required": [
+        "document",
+        "revision",
+        "objects"
+      ],
+      "additionalProperties": false
+    },
+    "selection.set": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "objects": {
+          "$ref": "#/$defs/selected"
+        }
+      },
+      "required": [
+        "document",
+        "revision",
         "objects"
       ],
       "additionalProperties": false

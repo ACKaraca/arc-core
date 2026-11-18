@@ -274,11 +274,35 @@ pub mod codes {
         category: Category::Conflict,
         message_id: "cmd-revision-mismatch",
     };
-    /// Preview runs are not provided by this implementation.
+    /// The command controls undo (undo, redo, groups), which a preview cannot run and roll back.
     pub const PREVIEW_UNSUPPORTED: ErrorCode = ErrorCode {
         code: "cmd.preview.unsupported",
         category: Category::Unsupported,
         message_id: "cmd-preview-unsupported",
+    };
+    /// A preview ran but its changes could not be rolled back; they remain as an undoable step.
+    pub const PREVIEW_ROLLBACK_FAILED: ErrorCode = ErrorCode {
+        code: "cmd.preview.rollback_failed",
+        category: Category::Internal,
+        message_id: "cmd-preview-rollback-failed",
+    };
+    /// The cursor is not one this server issued for these filters.
+    pub const QUERY_CURSOR_INVALID: ErrorCode = ErrorCode {
+        code: "cmd.query.cursor_invalid",
+        category: Category::InvalidInput,
+        message_id: "cmd-query-cursor-invalid",
+    };
+    /// The document is at another revision than the one the cursor was issued for.
+    pub const QUERY_CURSOR_STALE: ErrorCode = ErrorCode {
+        code: "cmd.query.cursor_stale",
+        category: Category::Conflict,
+        message_id: "cmd-query-cursor-stale",
+    };
+    /// A selected identifier names no object of the document.
+    pub const SELECTION_UNKNOWN: ErrorCode = ErrorCode {
+        code: "cmd.selection.unknown",
+        category: Category::NotFound,
+        message_id: "cmd-selection-unknown",
     };
     /// A root to grant is not an existing directory.
     pub const ROOTS_INVALID: ErrorCode = ErrorCode {
@@ -392,6 +416,10 @@ pub mod codes {
         DOCUMENT_UNKNOWN,
         REVISION_MISMATCH,
         PREVIEW_UNSUPPORTED,
+        PREVIEW_ROLLBACK_FAILED,
+        QUERY_CURSOR_INVALID,
+        QUERY_CURSOR_STALE,
+        SELECTION_UNKNOWN,
         ROOTS_INVALID,
         PATH_REJECTED,
         PATH_TOO_LONG,
