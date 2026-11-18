@@ -16,6 +16,10 @@ struct View {
     highlight: vec4<f32>,
     // x: the highlight mask code.
     codes: vec4<u32>,
+    background: vec4<f32>,
+    paper: vec4<f32>,
+    // x: 1 when lineweights are displayed; y: pixels per item unit at clip w = 1.
+    draft: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -93,8 +97,19 @@ fn shade(base: vec4<f32>, normal: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(mix(base.rgb, lit, view.shading.x), base.a * view.shading.y);
 }
 
+// Instance flags: bit 0 paints the background color, bit 1 the paper color, both unlit
+// (wipeout masks and sheet backgrounds).
+const PAINT_BACKGROUND: u32 = 1u;
+const PAINT_PAPER: u32 = 2u;
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    if ((in.misc.y & PAINT_BACKGROUND) != 0u) {
+        return vec4<f32>(view.background.rgb, 1.0);
+    }
+    if ((in.misc.y & PAINT_PAPER) != 0u) {
+        return vec4<f32>(view.paper.rgb, 1.0);
+    }
     // Meshes without normals use the face normal from screen-space derivatives.
     let face = cross(dpdx(in.relative), dpdy(in.relative));
     let smooth_length = length(in.normal);

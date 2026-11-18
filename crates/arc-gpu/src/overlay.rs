@@ -279,15 +279,17 @@ impl Builder<'_> {
             [narrow(a[0]), narrow(a[1]), 0.0],
             [narrow(b[0]), narrow(b[1]), 0.0],
         );
-        for v in [a, b, a, b].iter().flatten() {
-            self.out.segments.extend_from_slice(&v.to_le_bytes());
-        }
-        for v in [color.r, color.g, color.b, color.a, width, 4.0] {
-            self.out.segments.extend_from_slice(&v.to_le_bytes());
-        }
-        for v in [SCREEN_BITS, 0] {
-            self.out.segments.extend_from_slice(&v.to_le_bytes());
-        }
+        crate::scene::put_segment(
+            &mut self.out.segments,
+            [a, b, a, b],
+            [color.r, color.g, color.b, color.a],
+            [width, width],
+            4.0,
+            SCREEN_BITS,
+            0,
+            [0.0, 0.0],
+            &crate::scene::SOLID,
+        );
         self.out.segment_count += 1;
         Ok(())
     }

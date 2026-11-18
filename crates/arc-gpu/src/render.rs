@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use arc_base::math::Matrix4;
 use arc_base::{Color, Error, ObjectId, Result};
-use arc_geom::view::ViewFrame;
+use arc_geom::view::{Projection, ViewFrame};
 
 use crate::adapter::Gpu;
 use crate::camera::{camera_data, depth_origin, region_window, sphere_depth};
@@ -149,7 +149,20 @@ pub struct RenderSettings {
     pub tint: f32,
     /// The outline width in pixels, at most [`MAX_OUTLINE_PX`]; 0 draws no outline.
     pub outline_px: u32,
+    /// Whether lineweights are displayed; when off, lines whose width is a lineweight draw
+    /// one pixel wide. Switching writes no scene buffer.
+    pub lineweights: bool,
+    /// The paper color of sheets: sheet backgrounds and the wipeout masks on a sheet.
+    pub paper: Color,
+    /// The chord tolerance of curve flattening in pixels, in `[MIN_CURVE_TOLERANCE_PX,
+    /// MAX_CURVE_TOLERANCE_PX]`.
+    pub curve_tolerance_px: f32,
 }
+
+/// The smallest chord tolerance of curve flattening, in pixels.
+pub const MIN_CURVE_TOLERANCE_PX: f32 = 0.01;
+/// The largest chord tolerance of curve flattening, in pixels.
+pub const MAX_CURVE_TOLERANCE_PX: f32 = 16.0;
 
 impl RenderSettings {
     /// The default settings.
@@ -167,6 +180,9 @@ impl RenderSettings {
         hover_color: Color::new(1.0, 0.6, 0.0, 1.0),
         tint: 0.35,
         outline_px: 2,
+        lineweights: true,
+        paper: Color::WHITE,
+        curve_tolerance_px: 0.5,
     };
 
     pub(crate) fn validate(&self) -> Result<()> {
@@ -176,6 +192,7 @@ impl RenderSettings {
             self.edge_color,
             self.selection_color,
             self.hover_color,
+            self.paper,
         ];
         let valid = matches!(self.sample_count, 1 | 4)
             && unit(self.ambient)
@@ -184,6 +201,7 @@ impl RenderSettings {
             && self.outline_px <= MAX_OUTLINE_PX
             && self.plot_scale > 0.0
             && self.plot_scale.is_finite()
+            && (MIN_CURVE_TOLERANCE_PX..=MAX_CURVE_TOLERANCE_PX).contains(&self.curve_tolerance_px)
             && colors
                 .iter()
                 .all(|c| [c.r, c.g, c.b, c.a].iter().all(|v| v.is_finite()));
@@ -347,7 +365,7 @@ fn color4(c: Color) -> [f32; 4] {
     [c.r, c.g, c.b, c.a]
 }
 
-/// The view uniform shared by all scene shaders (160 bytes).
+/// The view uniform shared by all scene shaders (208 bytes).
 #[derive(Debug, Clone, Copy)]
 struct ViewUniform {
     view_proj: [f32; 16],
@@ -357,11 +375,15 @@ struct ViewUniform {
     edge_color: [f32; 4],
     highlight: [f32; 4],
     codes: [u32; 4],
+    background: [f32; 4],
+    paper: [f32; 4],
+    /// x: lineweight display; y: pixels per item unit at clip w = 1.
+    draft: [f32; 4],
 }
 
 impl ViewUniform {
     fn bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(160);
+        let mut out = Vec::with_capacity(208);
         for v in self
             .view_proj
             .iter()
@@ -374,6 +396,9 @@ impl ViewUniform {
             out.extend_from_slice(&v.to_le_bytes());
         }
         for v in self.codes {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in self.background.iter().chain(&self.paper).chain(&self.draft) {
             out.extend_from_slice(&v.to_le_bytes());
         }
         out
@@ -488,7 +513,7 @@ impl Renderer {
         settings: &RenderSettings,
         window: &Matrix4,
         viewport: (u32, u32),
-    ) -> Result<(arc_base::math::Point3, ViewUniform)> {
+    ) -> Result<(arc_base::math::Point3, ViewUniform, f64)> {
         let aspect = f64::from(width) / f64::from(height);
         let bounds = scene
             .items()
@@ -496,7 +521,8 @@ impl Renderer {
             .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
         let (eye, depth) = depth_origin(frame, bounds);
         let camera = camera_data(frame, aspect, depth, window)?;
-        let paper = narrow(settings.plot_scale * camera.y_scale * f64::from(height) * 0.5);
+        let unit_px = camera.y_scale * f64::from(height) * 0.5;
+        let paper = narrow(settings.plot_scale * unit_px);
         let smoothing = if settings.line_smoothing { 1.0 } else { 0.0 };
         let mode = settings.mode;
         #[allow(clippy::cast_precision_loss)] // Sides are at most the texture limit.
@@ -530,8 +556,16 @@ impl Renderer {
             edge_color: color4(settings.edge_color),
             highlight: [0.0; 4],
             codes: [0; 4],
+            background: color4(settings.background),
+            paper: color4(settings.paper),
+            draft: [
+                if settings.lineweights { 1.0 } else { 0.0 },
+                narrow(unit_px),
+                0.0,
+                0.0,
+            ],
         };
-        Ok((eye, uniform))
+        Ok((eye, uniform, unit_px))
     }
 
     /// Renders `scene` seen through `frame` into an image of `width × height` pixels in the
@@ -598,7 +632,7 @@ impl Renderer {
         readback: bool,
     ) -> Result<(wgpu::Texture, Option<Vec<u8>>)> {
         let samples = self.check(scene, width, height, settings)?;
-        let (eye, base) = Self::view_uniform(
+        let (eye, base, unit_px) = Self::view_uniform(
             scene,
             frame,
             width,
@@ -631,8 +665,14 @@ impl Renderer {
                 .filter(|id| !scene.object_items(id).is_empty()),
             overlay,
         };
+        let clips = Clips {
+            frame,
+            image: (width, height),
+            region: (0, 0, width, height),
+        };
         let gpu = self.gpu.clone();
         gpu.scoped(|| {
+            refresh_curves(scene, frame, unit_px, settings)?;
             scene.prepare_frame(&eye)?;
             let faces = settings.mode.faces();
             let mut kinds = vec![Kind::Line];
@@ -655,7 +695,7 @@ impl Renderer {
                 kinds.extend([Kind::OverlayLine, Kind::OverlayFill]);
             }
             self.ensure(samples, settings.cull_back_faces, &kinds);
-            let (texture, encoder) = self.encode_color(scene, &plan)?;
+            let (texture, encoder) = self.encode_color(scene, &plan, &clips)?;
             if readback {
                 let rgba8 = read_texture(&self.gpu, encoder, &texture, width, height)?;
                 return Ok((texture, Some(rgba8)));
@@ -671,6 +711,7 @@ impl Renderer {
         &self,
         scene: &Scene,
         plan: &ColorFrame<'_>,
+        clips: &Clips<'_>,
     ) -> Result<(wgpu::Texture, wgpu::CommandEncoder)> {
         let device = self.gpu.device();
         let settings = plan.settings;
@@ -750,7 +791,7 @@ impl Renderer {
                     pass.set_pipeline(self.pipeline(Kind::MeshMask)?);
                     draw_meshes(&mut pass, scene, items(), false)?;
                     pass.set_pipeline(self.pipeline(Kind::LineMask)?);
-                    draw_lines(&mut pass, scene, items())?;
+                    draw_lines(&mut pass, scene, items(), clips)?;
                 }
             }
             Some(self.outline_bind_group(&mask, settings)?)
@@ -798,7 +839,7 @@ impl Renderer {
                     }
                     Pass::Lines => {
                         pass.set_pipeline(self.pipeline(Kind::Line)?);
-                        draw_lines(&mut pass, scene, scene.items())?;
+                        draw_lines(&mut pass, scene, scene.items(), clips)?;
                     }
                     Pass::Tint => {
                         if !highlighted {
@@ -816,7 +857,7 @@ impl Renderer {
                             pass.set_pipeline(self.pipeline(kind)?);
                             draw_meshes(&mut pass, scene, items(), edges)?;
                             pass.set_pipeline(self.pipeline(Kind::LineTint)?);
-                            draw_lines(&mut pass, scene, items())?;
+                            draw_lines(&mut pass, scene, items(), clips)?;
                         }
                         pass.set_bind_group(0, &base, &[]);
                     }
@@ -940,7 +981,7 @@ impl Renderer {
             (width, height),
             (region.x, region.y, region.width, region.height),
         );
-        let (eye, mut uniform) = Self::view_uniform(
+        let (eye, mut uniform, unit_px) = Self::view_uniform(
             scene,
             frame,
             width,
@@ -950,15 +991,21 @@ impl Renderer {
             (region.width, region.height),
         )?;
         uniform.shading[3] = tolerance;
+        let clips = Clips {
+            frame,
+            image: (width, height),
+            region: (region.x, region.y, region.width, region.height),
+        };
         let gpu = self.gpu.clone();
         let values = gpu.scoped(|| {
+            refresh_curves(scene, frame, unit_px, settings)?;
             scene.prepare_frame(&eye)?;
             self.ensure(
                 samples,
                 settings.cull_back_faces,
                 &[Kind::MeshPick, Kind::LinePick],
             );
-            self.encode_pick(scene, &uniform, region)
+            self.encode_pick(scene, &uniform, region, &clips)
         })?;
         let mut found: Vec<u32> = values
             .chunks_exact(4)
@@ -991,6 +1038,7 @@ impl Renderer {
         scene: &Scene,
         uniform: &ViewUniform,
         region: &PickRegion,
+        clips: &Clips<'_>,
     ) -> Result<Vec<u8>> {
         let device = self.gpu.device();
         let size = (region.width, region.height);
@@ -1029,7 +1077,7 @@ impl Renderer {
             pass.set_pipeline(self.pipeline(Kind::MeshPick)?);
             draw_meshes(&mut pass, scene, scene.items(), false)?;
             pass.set_pipeline(self.pipeline(Kind::LinePick)?);
-            draw_lines(&mut pass, scene, scene.items())?;
+            draw_lines(&mut pass, scene, scene.items(), clips)?;
         }
         read_texture(&self.gpu, encoder, &target, region.width, region.height)
     }
@@ -1146,11 +1194,13 @@ fn draw_meshes<'a>(
     Ok(())
 }
 
-/// Draws the line items in `items`. The pipeline and bind group are set by the caller.
+/// Draws the line and curve items in `items`, each clipped item inside its scissor
+/// rectangle. The pipeline and bind group are set by the caller.
 fn draw_lines<'a>(
     pass: &mut wgpu::RenderPass<'_>,
     scene: &Scene,
     items: impl Iterator<Item = &'a ItemEntry>,
+    clips: &Clips<'_>,
 ) -> Result<()> {
     let buffers = scene.buffers();
     let Some(translations) = buffers.segment_translations else {
@@ -1158,6 +1208,8 @@ fn draw_lines<'a>(
     };
     pass.set_vertex_buffer(0, buffers.segments.slice(..));
     pass.set_vertex_buffer(1, translations.slice(..));
+    let (_, _, width, height) = clips.region;
+    let mut scissored = false;
     for item in items {
         if !matches!(item.gpu, ItemGpu::Lines { .. }) {
             continue;
@@ -1165,9 +1217,129 @@ fn draw_lines<'a>(
         let Some(range) = scene.instance_range(item.gpu) else {
             continue;
         };
+        match clips.scissor(item) {
+            Scissor::Empty => continue,
+            Scissor::Rect([x, y, w, h]) => {
+                pass.set_scissor_rect(x, y, w, h);
+                scissored = true;
+            }
+            Scissor::Full if scissored => {
+                pass.set_scissor_rect(0, 0, width, height);
+                scissored = false;
+            }
+            Scissor::Full => {}
+        }
         pass.draw(0..6, to_u32(range)?);
     }
+    if scissored {
+        pass.set_scissor_rect(0, 0, width, height);
+    }
     Ok(())
+}
+
+/// Flattens again the curve items whose zoom left the factor-of-two band (CORE-GPU-010).
+/// `unit_px` is the pixels per unit at view distance 1.
+fn refresh_curves(
+    scene: &mut Scene,
+    frame: &ViewFrame,
+    unit_px: f64,
+    settings: &RenderSettings,
+) -> Result<()> {
+    let perspective = matches!(frame.projection(), Projection::Perspective { .. });
+    let (eye, forward, near) = (frame.eye(), frame.forward(), frame.near());
+    let scale = |origin: &arc_base::math::Point3, radius: f64| {
+        if perspective {
+            // The zoom at the item's nearest depth in front of the near plane.
+            let depth = ((origin - eye).dot(&forward) - radius).max(near);
+            unit_px / depth
+        } else {
+            unit_px
+        }
+    };
+    let hint = (!perspective).then_some(unit_px);
+    scene.refresh_curves(scale, settings.curve_tolerance_px, hint)
+}
+
+/// The scissor of an item in a target.
+enum Scissor {
+    /// The whole target.
+    Full,
+    /// `[x, y, width, height]` in target pixels.
+    Rect([u32; 4]),
+    /// Nothing of the item is inside the target.
+    Empty,
+}
+
+/// Maps item clip rectangles to scissor rectangles of a target showing the pixel region
+/// `region` (`x, y, width, height`) of an image of `image` pixels.
+struct Clips<'a> {
+    frame: &'a ViewFrame,
+    image: (u32, u32),
+    region: (u32, u32, u32, u32),
+}
+
+impl Clips<'_> {
+    /// The scissor of `item`: the pixels whose centers are inside its clip rectangle, when the
+    /// view maps the rectangle to an image-aligned one (orthographic views); otherwise the
+    /// whole target.
+    fn scissor(&self, item: &ItemEntry) -> Scissor {
+        let Some([low, high]) = Scene::clip_of(item) else {
+            return Scissor::Full;
+        };
+        let Projection::Orthographic { height } = self.frame.projection() else {
+            return Scissor::Full;
+        };
+        let (w, h) = (f64::from(self.image.0), f64::from(self.image.1));
+        let half = height / 2.0;
+        let pixel = |x: f64, y: f64| {
+            let world = item.origin + arc_base::math::Vector3::new(x, y, 0.0);
+            let v = self.frame.world_to_view_point(&world);
+            [
+                (v.x / half / (w / h) * 0.5 + 0.5) * w,
+                (0.5 - v.y / half * 0.5) * h,
+            ]
+        };
+        let corners = [
+            pixel(low.x, low.y),
+            pixel(high.x, low.y),
+            pixel(high.x, high.y),
+            pixel(low.x, high.y),
+        ];
+        let fold = |axis: usize, f: fn(f64, f64) -> f64, start: f64| {
+            corners.iter().map(|c| c[axis]).fold(start, f)
+        };
+        let (x0, x1) = (
+            fold(0, f64::min, f64::INFINITY),
+            fold(0, f64::max, f64::NEG_INFINITY),
+        );
+        let (y0, y1) = (
+            fold(1, f64::min, f64::INFINITY),
+            fold(1, f64::max, f64::NEG_INFINITY),
+        );
+        let near = |v: f64, a: f64, b: f64| (v - a).abs() < 1e-3 || (v - b).abs() < 1e-3;
+        let aligned = corners
+            .iter()
+            .all(|c| near(c[0], x0, x1) && near(c[1], y0, y1));
+        if !(aligned && [x0, x1, y0, y1].iter().all(|v| v.is_finite())) {
+            return Scissor::Full;
+        }
+        // Pixels whose centers are inside, relative to the region, clamped to it.
+        let (rx, ry, rw, rh) = self.region;
+        let span = |low: f64, high: f64, offset: u32, size: u32| {
+            let first = ((low - 0.5).ceil() - f64::from(offset)).clamp(0.0, f64::from(size));
+            let end = ((high - 0.5).floor() + 1.0 - f64::from(offset)).clamp(0.0, f64::from(size));
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Clamped above.
+            let range = (first as u32, end.max(first) as u32);
+            range
+        };
+        let (left, right) = span(x0, x1, rx, rw);
+        let (top, bottom) = span(y0, y1, ry, rh);
+        if right <= left || bottom <= top {
+            Scissor::Empty
+        } else {
+            Scissor::Rect([left, top, right - left, bottom - top])
+        }
+    }
 }
 
 fn build_shared(device: &wgpu::Device) -> Shared {
@@ -1426,11 +1598,20 @@ fn build_pipeline(
     let translation = attributes(7, &[Float32x3]);
     let vertex = attributes(0, &[Float32x3, Float32x3]);
     let instance = attributes(2, &[Float32x4, Float32x4, Float32x4, Float32x4, Uint32x4]);
-    let segment = attributes(
+    let mut segment = attributes(
         0,
         &[
             Float32x3, Float32x3, Float32x3, Float32x3, Float32x4, Float32x2, Uint32x2,
         ],
+    );
+    // The width at the end, pattern positions and period, and the pattern intervals.
+    segment.extend(
+        attributes(8, &[Float32x4, Float32x4, Float32x4])
+            .into_iter()
+            .map(|mut a| {
+                a.offset += 80;
+                a
+            }),
     );
     let fill = attributes(0, &[Float32x2, Float32x4]);
     let layout = |stride, step_mode, attributes| {

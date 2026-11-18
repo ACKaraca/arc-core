@@ -16,6 +16,12 @@
 //! (CORE-GPU-003) and viewports rendered on their own thread (CORE-GPU-029) that draw only when
 //! an input changed (CORE-GPU-030).
 //!
+//! The fourth part adds curve items: exact curves flattened for the current zoom and flattened
+//! again only when the zoom changes by more than a factor of two (CORE-GPU-010), with polyline
+//! widths, a lineweight display switch and dash patterns evaluated in the line shader by the
+//! position along each path (CORE-GPU-009). With the feature `draft`, the module [`draft`]
+//! extracts `arc-draft` display lists of spaces, entities and sheets (CORE-GPU-013).
+//!
 //! Typical use: create a [`Gpu`] from [`GpuSettings`], a [`Scene`] on it, upload geometry with
 //! [`Scene::add_geometry`], set items with [`Scene::update`], and render with
 //! [`Renderer::render_to_image`].
@@ -28,6 +34,9 @@ mod block;
 
 pub mod adapter;
 pub mod camera;
+pub mod curve;
+#[cfg(feature = "draft")]
+pub mod draft;
 pub mod error;
 pub mod extract;
 pub mod navigation;
@@ -38,6 +47,7 @@ pub mod scene;
 pub mod viewport;
 
 pub use adapter::{AdapterKind, AdapterReport, BackendKind, Gpu, GpuSettings, ReducedFeature};
+pub use curve::{CurveItem, CurvePath, CurveShape, DashPattern, MAX_DASH_INTERVALS};
 pub use extract::{
     ApplyReport, Extraction, ExtractionDriver, ExtractionResult, Extractor, ExtractorRegistry,
     Outcome,

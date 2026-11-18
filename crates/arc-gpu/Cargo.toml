@@ -11,13 +11,20 @@ publish.workspace = true
 [dependencies]
 arc-base = { workspace = true }
 arc-doc = { workspace = true }
+arc-draft = { workspace = true, optional = true }
 arc-geom = { workspace = true }
 arc-mesh = { workspace = true }
 wgpu = { workspace = true }
 
+[features]
+# The shared extractor of `arc-draft` display lists (CORE-GPU-013).
+draft = ["dep:arc-draft"]
+
 [dev-dependencies]
+arc-command = { workspace = true }
 image = { workspace = true }
 proptest = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

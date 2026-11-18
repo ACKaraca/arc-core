@@ -58,6 +58,7 @@ fn style(width: LineWidth, cap: LineCap, join: LineJoin) -> LineStyle {
         cap,
         join,
         miter_limit: 4.0,
+        lineweight: false,
     }
 }
 

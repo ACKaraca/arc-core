@@ -106,7 +106,7 @@ fn updating_one_of_ten_thousand_objects_writes_only_its_ranges() {
     assert_eq!(
         scene.pending_writes(),
         WriteCounters {
-            line_segment: 160,
+            line_segment: 256,
             ..WriteCounters::default()
         }
     );
@@ -159,7 +159,7 @@ fn memory_is_reported_and_compaction_keeps_the_picture() {
     let (objects, _) = grid(&mut scene);
     let full = scene.memory();
     assert_eq!(full.mesh_instance.used_bytes, 5000 * 80);
-    assert_eq!(full.line_segment.used_bytes, 10_000 * 80);
+    assert_eq!(full.line_segment.used_bytes, 10_000 * 128);
     assert_eq!(full.translation.used_bytes, 15_000 * 12);
     assert_eq!(full.vertex.used_bytes, 4 * 24);
     // Two triangles and the square's four boundary edges.

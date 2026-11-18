@@ -18,6 +18,7 @@ use arc_mesh::TriMesh;
 
 use crate::adapter::Gpu;
 use crate::camera::relative_translation;
+use crate::curve::{CurveItem, CurveState, Flattened};
 use crate::error::codes;
 use crate::pool::{AllocId, Pool, PoolUsage};
 
@@ -28,7 +29,7 @@ pub const INDEX_STRIDE: u64 = 4;
 /// Bytes per mesh instance.
 pub const MESH_INSTANCE_STRIDE: u64 = 80;
 /// Bytes per line segment instance.
-pub const SEGMENT_STRIDE: u64 = 80;
+pub const SEGMENT_STRIDE: u64 = 128;
 /// Bytes per camera-relative translation.
 pub const TRANSLATION_STRIDE: u64 = 12;
 
@@ -189,10 +190,13 @@ pub struct LineStyle {
     pub join: LineJoin,
     /// The longest miter as a multiple of half the width, at least 1.
     pub miter_limit: f32,
+    /// Whether the width is a lineweight: drawn one pixel wide while
+    /// [`crate::RenderSettings::lineweights`] is off.
+    pub lineweight: bool,
 }
 
 impl LineStyle {
-    /// A style with round caps and joins.
+    /// A style with round caps and joins that is not a lineweight.
     #[must_use]
     pub fn round(width: LineWidth) -> Self {
         Self {
@@ -200,6 +204,7 @@ impl LineStyle {
             cap: LineCap::Round,
             join: LineJoin::Round,
             miter_limit: 4.0,
+            lineweight: false,
         }
     }
 }
@@ -234,6 +239,8 @@ pub enum RenderItem {
     Mesh(MeshItem),
     /// Lines.
     Lines(LineItem),
+    /// Exact curves, flattened for the current zoom, optionally dashed and clipped.
+    Curves(CurveItem),
 }
 
 /// Bytes written to GPU buffers per category.
@@ -400,6 +407,10 @@ pub(crate) struct ItemEntry {
     pub(crate) origin: Point3,
     pub(crate) radius: f64,
     translation_dirty: bool,
+    /// The cumulative segment count at the end of each path of a line or curve item.
+    path_ends: Vec<u32>,
+    /// The retained curves of a curve item and the zoom they were flattened for.
+    pub(crate) curve: Option<Box<CurveState>>,
 }
 
 #[derive(Debug)]
@@ -426,6 +437,11 @@ pub struct Scene {
     last_frame: WriteCounters,
     last_eye: Option<Point3>,
     all_translations_dirty: bool,
+    /// The pixels per item unit of the last frame's orthographic view, the zoom new curve
+    /// items are first flattened for.
+    zoom_hint: Option<f64>,
+    /// The chord tolerance in pixels of the last frame.
+    curve_tolerance_px: f32,
     /// The applied extraction stamp and owned geometries of each extracted object.
     pub(crate) extracted: crate::extract::Applied,
 }
@@ -442,7 +458,7 @@ fn put_u32(out: &mut Vec<u8>, values: &[u32]) {
     }
 }
 
-fn finite(values: &[f32]) -> Result<()> {
+pub(crate) fn finite(values: &[f32]) -> Result<()> {
     if values.iter().all(|v| v.is_finite()) {
         Ok(())
     } else {
@@ -450,7 +466,7 @@ fn finite(values: &[f32]) -> Result<()> {
     }
 }
 
-fn finite_point(p: &Point3) -> Result<()> {
+pub(crate) fn finite_point(p: &Point3) -> Result<()> {
     if p.iter().all(|v| v.is_finite()) {
         Ok(())
     } else {
@@ -458,21 +474,30 @@ fn finite_point(p: &Point3) -> Result<()> {
     }
 }
 
-fn limit(detail: &'static str) -> Error {
+pub(crate) fn limit(detail: &'static str) -> Error {
     Error::new(codes::LIMIT_EXCEEDED).with_detail("limit", detail)
 }
 
-fn color_array(c: Color) -> [f32; 4] {
+pub(crate) fn color_array(c: Color) -> [f32; 4] {
     [c.r, c.g, c.b, c.a]
 }
 
-fn length3(v: [f32; 3]) -> f64 {
+pub(crate) fn length3(v: [f32; 3]) -> f64 {
     let [x, y, z] = v.map(f64::from);
     x.hypot(y).hypot(z)
 }
 
+/// Style bit 7: the width is a lineweight, one pixel while lineweight display is off.
+pub(crate) const BIT_LINEWEIGHT: u32 = 1 << 7;
+/// Style bit 8: the segment is dashed by the pattern in its instance.
+pub(crate) const BIT_DASHED: u32 = 1 << 8;
+/// Style bit 9: the widths are in item units (polyline widths), converted through the view;
+/// free ends are cut flat.
+pub(crate) const BIT_WORLD_WIDTH: u32 = 1 << 9;
+
 /// The style bits of a segment: bit 0 square cap; bits 1–2 join (0 round, 1 miter, 2 bevel);
-/// bit 3 has a previous segment; bit 4 has a next segment; bit 5 paper width.
+/// bit 3 has a previous segment; bit 4 has a next segment; bit 5 paper width; bit 7
+/// lineweight.
 fn style_bits(style: &LineStyle, prev: bool, next: bool) -> u32 {
     let mut bits = u32::from(style.cap == LineCap::Square);
     bits |= match style.join {
@@ -483,71 +508,212 @@ fn style_bits(style: &LineStyle, prev: bool, next: bool) -> u32 {
     bits |= u32::from(prev) << 3;
     bits |= u32::from(next) << 4;
     bits |= u32::from(matches!(style.width, LineWidth::Paper(_))) << 5;
+    if style.lineweight {
+        bits |= BIT_LINEWEIGHT;
+    }
     bits
 }
 
-/// The segments of a line item as instance bytes, and their count and bounding radius.
-fn encode_lines(item: &LineItem, limits: &SceneLimits, slot: u32) -> Result<(Vec<u8>, u32, f64)> {
-    let style = &item.style;
-    let width = match style.width {
-        LineWidth::Screen(w) | LineWidth::Paper(w) => w,
-    };
-    finite(&[width, style.miter_limit])?;
-    finite(&color_array(item.color))?;
-    if !(width > 0.0 && style.miter_limit >= 1.0) || item.paths.is_empty() {
-        return Err(Error::new(codes::ITEM_INVALID));
+/// What a segment carries beyond its end points.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct SegmentExtra {
+    /// Full widths in item units at the start and end (polyline widths); `None` uses the
+    /// style width.
+    pub(crate) widths: Option<[f32; 2]>,
+    /// The pattern positions at the start and end, the start within one period.
+    pub(crate) phase: [f32; 2],
+}
+
+/// A path vertex and the extra data of the segment that starts at it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PathVertex {
+    pub(crate) point: [f32; 3],
+    pub(crate) out: SegmentExtra,
+}
+
+/// The appearance shared by the segments of one item.
+pub(crate) struct Look<'a> {
+    pub(crate) style: &'a LineStyle,
+    pub(crate) color: [f32; 4],
+    /// The pattern: period, then four `(start, end)` intervals (unused ones negative); `None`
+    /// is solid.
+    pub(crate) pattern: Option<[f32; 9]>,
+    pub(crate) slot: u32,
+}
+
+/// Segment instance bytes being built for one item.
+#[derive(Debug, Default)]
+pub(crate) struct Encoded {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) count: u32,
+    pub(crate) radius: f64,
+    /// The cumulative segment count at the end of each path.
+    pub(crate) path_ends: Vec<u32>,
+}
+
+/// The bytes of one segment instance (see the layout in the specification).
+#[allow(clippy::too_many_arguments)] // One field of the instance layout each.
+pub(crate) fn put_segment(
+    out: &mut Vec<u8>,
+    ends: [[f32; 3]; 4],
+    color: [f32; 4],
+    widths: [f32; 2],
+    miter: f32,
+    bits: u32,
+    slot: u32,
+    phase: [f32; 2],
+    pattern: &[f32; 9],
+) {
+    for p in ends {
+        put_f32(out, &p);
     }
-    if matches!(style.width, LineWidth::Screen(w) if w > limits.max_line_width_px) {
-        return Err(limit("max_line_width_px"));
-    }
-    let max = limits.max_segments_per_item;
-    let mut bytes = Vec::new();
-    let mut count: u32 = 0;
-    let mut radius: f64 = 0.0;
-    for path in &item.paths {
-        let mut points: Vec<[f32; 3]> = Vec::with_capacity(path.points.len());
-        for p in &path.points {
-            finite(p)?;
-            if points.last() != Some(p) {
-                points.push(*p);
+    put_f32(out, &color);
+    put_f32(out, &[widths[0], miter]);
+    put_u32(out, &[bits, slot]);
+    put_f32(out, &[widths[1], phase[0], phase[1]]);
+    put_f32(out, pattern);
+}
+
+/// A solid pattern: period 0 and no intervals.
+pub(crate) const SOLID: [f32; 9] = [0.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0];
+
+impl Encoded {
+    /// Appends the segments of one path. Consecutive equal points merge (the merged vertex
+    /// keeps the extra data of the later one); a closed path whose last point repeats its
+    /// first drops it.
+    pub(crate) fn path(
+        &mut self,
+        vertices: impl IntoIterator<Item = PathVertex>,
+        closed: bool,
+        look: &Look<'_>,
+        limits: &SceneLimits,
+    ) -> Result<()> {
+        let style = look.style;
+        let width = match style.width {
+            LineWidth::Screen(w) | LineWidth::Paper(w) => w,
+        };
+        let mut points: Vec<PathVertex> = Vec::new();
+        for v in vertices {
+            finite(&v.point)?;
+            if let Some(w) = v.out.widths {
+                finite(&w)?;
             }
-            radius = radius.max(length3(*p));
+            finite(&v.out.phase)?;
+            self.radius = self.radius.max(length3(v.point));
+            match points.last_mut() {
+                Some(last) if last.point == v.point => last.out = v.out,
+                _ => points.push(v),
+            }
         }
-        if path.closed && points.len() > 2 && points.first() == points.last() {
+        if closed
+            && points.len() > 2
+            && points.first().map(|p| p.point) == points.last().map(|p| p.point)
+        {
             points.pop();
         }
         let n = points.len();
         if n == 0 {
             return Err(Error::new(codes::ITEM_INVALID));
         }
-        let closed = path.closed && n > 2;
+        let closed = closed && n > 2;
         let segment_count = match n {
             1 => 1,
             _ if closed => n,
             _ => n - 1,
         };
-        let at = |i: usize| points.get(i % n).copied().unwrap_or_default();
+        let at = |i: usize| points.get(i % n).copied();
+        let pattern = look.pattern.unwrap_or(SOLID);
         for i in 0..segment_count {
-            count = count
+            self.count = self
+                .count
                 .checked_add(1)
-                .filter(|c| *c <= max)
+                .filter(|c| *c <= limits.max_segments_per_item)
                 .ok_or_else(|| limit("max_segments_per_item"))?;
-            let a = at(i);
-            let b = if n == 1 { a } else { at(i + 1) };
+            let (Some(va), Some(vb)) = (at(i), at(if n == 1 { i } else { i + 1 })) else {
+                return Err(Error::new(codes::ITEM_INVALID));
+            };
+            let (a, b) = (va.point, vb.point);
             let has_prev = closed || i > 0;
             let has_next = closed || i + 2 < n;
-            let prev = if has_prev { at(i + n - 1) } else { a };
-            let next = if has_next { at(i + 2) } else { b };
-            put_f32(&mut bytes, &a);
-            put_f32(&mut bytes, &b);
-            put_f32(&mut bytes, &prev);
-            put_f32(&mut bytes, &next);
-            put_f32(&mut bytes, &color_array(item.color));
-            put_f32(&mut bytes, &[width, style.miter_limit]);
-            put_u32(&mut bytes, &[style_bits(style, has_prev, has_next), slot]);
+            let prev = if has_prev {
+                at(i + n - 1).map_or(a, |v| v.point)
+            } else {
+                a
+            };
+            let next = if has_next {
+                at(i + 2).map_or(b, |v| v.point)
+            } else {
+                b
+            };
+            let mut bits = style_bits(style, has_prev, has_next);
+            let widths = match va.out.widths {
+                Some(w) => {
+                    bits = (bits & !(BIT_LINEWEIGHT | (1 << 5))) | BIT_WORLD_WIDTH;
+                    w
+                }
+                None => [width, width],
+            };
+            if look.pattern.is_some() {
+                bits |= BIT_DASHED;
+            }
+            put_segment(
+                &mut self.bytes,
+                [a, b, prev, next],
+                look.color,
+                widths,
+                style.miter_limit,
+                bits,
+                look.slot,
+                va.out.phase,
+                &pattern,
+            );
         }
+        self.path_ends.push(self.count);
+        Ok(())
     }
-    Ok((bytes, count, radius))
+}
+
+/// Validates a line style and color.
+pub(crate) fn check_style(style: &LineStyle, color: Color, limits: &SceneLimits) -> Result<()> {
+    let width = match style.width {
+        LineWidth::Screen(w) | LineWidth::Paper(w) => w,
+    };
+    finite(&[width, style.miter_limit])?;
+    finite(&color_array(color))?;
+    if !(width > 0.0 && style.miter_limit >= 1.0) {
+        return Err(Error::new(codes::ITEM_INVALID));
+    }
+    if matches!(style.width, LineWidth::Screen(w) if w > limits.max_line_width_px) {
+        return Err(limit("max_line_width_px"));
+    }
+    Ok(())
+}
+
+/// The segments of a line item.
+fn encode_lines(item: &LineItem, limits: &SceneLimits, slot: u32) -> Result<Encoded> {
+    check_style(&item.style, item.color, limits)?;
+    if item.paths.is_empty() {
+        return Err(Error::new(codes::ITEM_INVALID));
+    }
+    let look = Look {
+        style: &item.style,
+        color: color_array(item.color),
+        pattern: None,
+        slot,
+    };
+    let mut out = Encoded::default();
+    for path in &item.paths {
+        out.path(
+            path.points.iter().map(|p| PathVertex {
+                point: *p,
+                out: SegmentExtra::default(),
+            }),
+            path.closed,
+            &look,
+            limits,
+        )?;
+    }
+    Ok(out)
 }
 
 impl Scene {
@@ -621,6 +787,8 @@ impl Scene {
                 last_frame: WriteCounters::default(),
                 last_eye: None,
                 all_translations_dirty: true,
+                zoom_hint: None,
+                curve_tolerance_px: crate::render::RenderSettings::DEFAULT.curve_tolerance_px,
                 extracted: crate::extract::Applied::default(),
             })
         })
@@ -838,6 +1006,7 @@ impl Scene {
                         finite_point(&lines.origin)?;
                         encode_lines(lines, &self.limits, 0)?;
                     }
+                    RenderItem::Curves(curves) => crate::curve::validate(curves, &self.limits)?,
                 }
             }
         }
@@ -922,21 +1091,25 @@ impl Scene {
                         origin: mesh.origin,
                         radius,
                         translation_dirty: true,
+                        path_ends: Vec::new(),
+                        curve: None,
                     }
                 }
                 RenderItem::Lines(lines) => {
-                    let (bytes, count, radius) = encode_lines(lines, &self.limits, slot)?;
-                    let (segments, moved) =
-                        self.segments
-                            .insert(&device, &queue, u64::from(count), &bytes)?;
-                    self.all_translations_dirty |= moved;
-                    self.pending.line_segment += bytes.len() as u64;
-                    ItemEntry {
-                        gpu: ItemGpu::Lines { segments, count },
-                        origin: lines.origin,
-                        radius,
-                        translation_dirty: true,
-                    }
+                    let encoded = encode_lines(lines, &self.limits, slot)?;
+                    self.line_entry(lines.origin, encoded, None)?
+                }
+                RenderItem::Curves(curves) => {
+                    let scale = self
+                        .zoom_hint
+                        .unwrap_or_else(|| crate::curve::initial_scale(curves));
+                    let flattened = Flattened {
+                        scale,
+                        tolerance_px: self.curve_tolerance_px,
+                    };
+                    let encoded = crate::curve::encode(curves, flattened, &self.limits, slot)?;
+                    let state = CurveState::new(curves.clone(), flattened);
+                    self.line_entry(curves.origin, encoded, Some(Box::new(state)))?
                 }
             };
             if let Some(o) = self.objects.get_mut(&object) {
@@ -944,6 +1117,116 @@ impl Scene {
             }
         }
         Ok(())
+    }
+
+    /// Uploads the segments of a line or curve item.
+    fn line_entry(
+        &mut self,
+        origin: Point3,
+        encoded: Encoded,
+        curve: Option<Box<CurveState>>,
+    ) -> Result<ItemEntry> {
+        let (device, queue) = (self.gpu.device().clone(), self.gpu.queue().clone());
+        let (segments, moved) =
+            self.segments
+                .insert(&device, &queue, u64::from(encoded.count), &encoded.bytes)?;
+        self.all_translations_dirty |= moved;
+        self.pending.line_segment += encoded.bytes.len() as u64;
+        Ok(ItemEntry {
+            gpu: ItemGpu::Lines {
+                segments,
+                count: encoded.count,
+            },
+            origin,
+            radius: encoded.radius,
+            translation_dirty: true,
+            path_ends: encoded.path_ends,
+            curve,
+        })
+    }
+
+    /// Flattens again the curve items whose zoom changed by more than a factor of two since
+    /// they were flattened, or whose chord tolerance changed (CORE-GPU-010). `scale` gives the
+    /// pixels per item unit for an item's origin and radius; `hint` is the zoom new items are
+    /// flattened for. Only the re-flattened items' segments are written.
+    pub(crate) fn refresh_curves(
+        &mut self,
+        scale: impl Fn(&Point3, f64) -> f64,
+        tolerance_px: f32,
+        hint: Option<f64>,
+    ) -> Result<()> {
+        self.zoom_hint = hint.filter(|h| h.is_finite() && *h > 0.0);
+        self.curve_tolerance_px = tolerance_px;
+        let (device, queue) = (self.gpu.device().clone(), self.gpu.queue().clone());
+        let limits = self.limits;
+        for entry in self.objects.values_mut() {
+            for item in &mut entry.items {
+                let Some(state) = item.curve.as_mut() else {
+                    continue;
+                };
+                let now = scale(&item.origin, item.radius);
+                let Some(flattened) = state.refresh(now, tolerance_px) else {
+                    continue;
+                };
+                // A flattening that fails keeps the previous segments; it is not retried until
+                // the zoom leaves the band again.
+                let encoded = crate::curve::encode(&state.item, flattened, &limits, entry.slot);
+                state.flattened = flattened;
+                let Ok(encoded) = encoded else {
+                    continue;
+                };
+                if let ItemGpu::Lines { segments, .. } = item.gpu {
+                    self.segments.free(segments);
+                }
+                let (segments, moved) = self.segments.insert(
+                    &device,
+                    &queue,
+                    u64::from(encoded.count),
+                    &encoded.bytes,
+                )?;
+                self.all_translations_dirty |= moved;
+                self.pending.line_segment += encoded.bytes.len() as u64;
+                item.gpu = ItemGpu::Lines {
+                    segments,
+                    count: encoded.count,
+                };
+                item.radius = item.radius.max(encoded.radius);
+                item.path_ends = encoded.path_ends;
+                item.translation_dirty = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// The path of a picked element: for a line or curve item the index of the path (curve)
+    /// holding segment `hit.element`, for a mesh item the instance index. `None` for an
+    /// unknown item or element.
+    #[must_use]
+    pub fn path_of(&self, hit: &crate::PickHit) -> Option<u32> {
+        let entry = self
+            .object_items(&hit.key.object)
+            .get(hit.key.sub as usize)?;
+        match entry.gpu {
+            ItemGpu::Mesh { count, .. } => (hit.element < count).then_some(hit.element),
+            ItemGpu::Lines { .. } => {
+                let at = entry.path_ends.partition_point(|end| *end <= hit.element);
+                (at < entry.path_ends.len()).then(|| u32::try_from(at).unwrap_or(u32::MAX))
+            }
+        }
+    }
+
+    /// The pixels per unit and chord tolerance a curve item is currently flattened for, or
+    /// `None` for an unknown key or another kind of item.
+    #[must_use]
+    pub fn flattening(&self, key: ItemKey) -> Option<(f64, f32)> {
+        let entry = self.object_items(&key.object).get(key.sub as usize)?;
+        let f = entry.curve.as_ref()?.flattened;
+        Some((f.scale, f.tolerance_px))
+    }
+
+    /// The clip rectangle of an item (curve items only), in item coordinates.
+    pub(crate) fn clip_of(item: &ItemEntry) -> Option<[arc_base::math::Point2; 2]> {
+        item.curve.as_ref().and_then(|c| c.item.clip)
     }
 
     /// Compacts every pool now, regardless of the compaction rule.
@@ -1177,11 +1460,12 @@ mod tests {
             points: vec![[0.0; 3], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
             closed: false,
         };
-        let (bytes, count, _) = encode_lines(&item(vec![open]), &SceneLimits::DEFAULT, 7).unwrap();
+        let e = encode_lines(&item(vec![open]), &SceneLimits::DEFAULT, 7).unwrap();
+        let (bytes, count) = (e.bytes, e.count);
         assert_eq!(count, 2, "the repeated point is merged");
-        assert_eq!(bytes.len(), 160);
+        assert_eq!(bytes.len(), 256);
         let bits = |segment: usize| {
-            let at = segment * 80 + 72;
+            let at = segment * 128 + 72;
             u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
         };
         assert_eq!(bits(0) & 0b11000, 0b10000, "first: next only");
@@ -1190,15 +1474,17 @@ mod tests {
             points: vec![[0.0; 3], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0; 3]],
             closed: true,
         };
-        let (_, count, _) = encode_lines(&item(vec![closed]), &SceneLimits::DEFAULT, 0).unwrap();
+        let count = encode_lines(&item(vec![closed]), &SceneLimits::DEFAULT, 0)
+            .unwrap()
+            .count;
         assert_eq!(count, 3, "a repeated closing point is dropped");
         let dot = LinePath {
             points: vec![[2.0; 3]],
             closed: false,
         };
-        let (_, count, radius) = encode_lines(&item(vec![dot]), &SceneLimits::DEFAULT, 0).unwrap();
-        assert_eq!(count, 1);
-        assert!((radius - 12_f64.sqrt()).abs() < 1e-9);
+        let e = encode_lines(&item(vec![dot]), &SceneLimits::DEFAULT, 0).unwrap();
+        assert_eq!((e.count, e.path_ends), (1, vec![1]));
+        assert!((e.radius - 12_f64.sqrt()).abs() < 1e-9);
     }
 
     fn mesh(positions: &[[f64; 3]], triangles: Vec<[u32; 3]>) -> TriMesh {

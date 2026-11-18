@@ -185,7 +185,7 @@ error-scope results are awaited for at most 30 seconds, image readback for at mo
   [Shading modes and edges](#shading-modes-and-edges)) and stores them as index pairs in the
   index pool, counted as index writes.
 - Vertex, index, mesh-instance and line-segment data live in four pools: one buffer each, divided
-  into units of a fixed stride (24, 4, 80 and 80 bytes). Allocation is first-fit from a sorted,
+  into units of a fixed stride (24, 4, 80 and 128 bytes). Allocation is first-fit from a sorted,
   coalesced free list. When no free block fits, the pool compacts if its total free space
   suffices, and otherwise grows to at least twice its capacity, up to `max_pool_bytes` and the
   device's buffer size limit. After each update a pool compacts when at least 25 % of it is free
@@ -204,9 +204,12 @@ error-scope results are awaited for at most 30 seconds, image readback for at mo
 Instance layouts are little-endian: a mesh instance is the three transform rows (12 `f32`), the
 color (4 `f32`), then material, flags, the object's identifier slot (kept for the picking pass)
 and a reserved `u32`. A line segment is its start, end, previous and next points (3 `f32` each;
-the neighbors equal the ends when absent), the color, the width and the miter limit (`f32`), the
-style bits (bit 0 square cap; bits 1–2 join: 0 round, 1 miter, 2 bevel; bit 3 has a previous
-segment; bit 4 has a next segment; bit 5 paper width) and the identifier slot.
+the neighbors equal the ends when absent), the color, the width at the start and the miter limit
+(`f32`), the style bits (bit 0 square cap; bits 1–2 join: 0 round, 1 miter, 2 bevel; bit 3 has a
+previous segment; bit 4 has a next segment; bit 5 paper width; bit 6 pixel positions, for
+overlays; bit 7 the width is a lineweight; bit 8 dashed; bit 9 widths in item units), the
+identifier slot, then the width at the end, the pattern positions at the start and end and the
+pattern period (`f32`), and four `(start, end)` pattern intervals (8 `f32`, unused ones −1).
 
 ### Camera-relative precision and depth
 
@@ -456,7 +459,7 @@ The codes `arc-gpu` owns. A code is never reused for a different meaning; messag
 | Code | Category | Raised when |
 |---|---|---|
 | `gpu.adapter.not_found` | `not_found` | No adapter matches the settings, or none is available |
-| `gpu.settings.invalid` | `invalid_input` | A settings value is out of range: a sample count other than 1 or 4, a negative or non-finite ambient term or plot scale, an X-ray opacity or tint outside [0, 1], an outline wider than 8 pixels, a non-finite color, or a limit of zero |
+| `gpu.settings.invalid` | `invalid_input` | A settings value is out of range: a sample count other than 1 or 4, a negative or non-finite ambient term or plot scale, an X-ray opacity or tint outside [0, 1], an outline wider than 8 pixels, a curve tolerance outside [0.01, 16] pixels, a non-finite color, or a limit of zero |
 | `gpu.device.request_failed` | `failed_operation` | The adapter refused to create a device with the required features and limits |
 | `gpu.device.lost` | `failed_operation` | The device was lost or destroyed; the scene and renderer must be recreated on a new device |
 | `gpu.out_of_memory` | `limit_exceeded` | The device ran out of memory while creating a resource or executing work |
@@ -465,7 +468,7 @@ The codes `arc-gpu` owns. A code is never reused for a different meaning; messag
 | `gpu.readback.failed` | `failed_operation` | Reading a rendered image back from the device failed |
 | `gpu.limit.exceeded` | `limit_exceeded` | A count or size exceeds the scene limits or the device limits |
 | `gpu.value.not_finite` | `invalid_input` | A coordinate, origin, transform, color or width is NaN or infinite |
-| `gpu.item.invalid` | `invalid_input` | A render item is empty (no instances, no points) or a line width or miter limit is out of range |
+| `gpu.item.invalid` | `invalid_input` | A render item is empty (no instances, no points) or a line width or miter limit is out of range, or a curve item has an unbounded curve, an invalid dash pattern or an empty clip rectangle |
 | `gpu.geometry.invalid` | `invalid_input` | A mesh has no triangles |
 | `gpu.geometry.not_found` | `not_found` | An item or call refers to a geometry handle the scene does not hold |
 | `gpu.geometry.in_use` | `conflict` | A geometry is removed while render items still refer to it |
@@ -474,3 +477,120 @@ The codes `arc-gpu` owns. A code is never reused for a different meaning; messag
 | `gpu.navigation.invalid` | `invalid_input` | A navigation parameter is out of range: a non-finite value, a zero or negative zoom factor or image size, a negative radius, or a pan anchor at or behind the eye |
 | `gpu.extractor.panicked` | `internal` | A product extractor panicked; the object keeps its previous items |
 | `gpu.thread.failed` | `failed_operation` | A worker or render thread could not be started, or the render thread stopped unexpectedly |
+
+## Drafting display as implemented
+
+The fourth part implements CORE-GPU-009, CORE-GPU-010 and CORE-GPU-013 for the drafting
+primitives that exist in `arc-draft` (points, curves, polylines with widths, fills, wipeout
+masks and block references). Text and hatches wait for their `arc-draft` units.
+
+### Curve items (CORE-GPU-010)
+
+A `RenderItem::Curves` (`CurveItem`) holds exact `arc-geom` curves (segments, circles, arcs,
+ellipses, elliptical arcs, polylines; rays and lines are `gpu.item.invalid`) and points relative
+to an `f64` origin, in the plane `z = origin.z`, with a line style, a color, an optional
+`DashPattern` and an optional clip rectangle. The scene keeps the curves and flattens them into
+line segments:
+
+- The chord tolerance is `curve_tolerance_px / (2 · s₀)` item units (`RenderSettings::
+  curve_tolerance_px`, 0.5 by default, 0.01 to 16), where `s₀` is the zoom in pixels per item
+  unit the item was flattened for; arcs and ellipses also turn at most `CURVE_ANGLE_STEP` (45°)
+  per segment.
+- Before each frame and pick, every curve item compares its current zoom `s` (orthographic: the
+  view's pixels per unit; perspective: at the item's nearest depth in front of the near plane)
+  with `s₀`. It is flattened again only when `s / s₀` leaves `[1/2, 2]` or the tolerance setting
+  changed, and only its segments are written (counted as line-segment writes). Until then the
+  chord error is at most `curve_tolerance_px · s / (2 · s₀) ≤ curve_tolerance_px` pixels.
+  Panning an orthographic view never changes `s`, so it never flattens again. Items without
+  arcs or ellipses never depend on the zoom.
+- A new item is flattened for the zoom of the last orthographic frame, or, before the first
+  frame, for its extent over 1000 pixels.
+- When the tolerance needs more segments than `max_segments_per_item` or a finer resolution than
+  `f64` gives at the curve, the chord is doubled until the flattening succeeds, so at extreme
+  zooms the error may exceed the tolerance instead of failing the frame. A flattening that still
+  fails keeps the previous segments until the zoom leaves the band again. Validation checks that
+  the coarsest flattening fits the segment limit.
+- `Scene::flattening(key)` reports the zoom and tolerance an item is flattened for;
+  `Scene::path_of(hit)` maps a picked segment to the path of its item.
+
+### Widths and lineweight display
+
+- Polyline widths (in item units, linear along each segment, arcs included) replace the style
+  width of the segments that have them: they are converted to pixels through the view, with a
+  one-pixel minimum, and free ends are cut flat.
+- A style whose `lineweight` flag is set draws one pixel wide while `RenderSettings::lineweights`
+  is off. The switch is a per-frame uniform: toggling it writes no scene buffer and needs no
+  re-extraction.
+
+### Dash patterns (CORE-GPU-009)
+
+- A `DashPattern` is a period and at most `MAX_DASH_INTERVALS` (4) drawn intervals
+  `(start, end)` within it, in item units; an interval of length zero is a dot. Every path has a
+  starting phase and may restart the pattern at position 0 at each polyline vertex after the
+  first.
+- Every flattened vertex carries the exact arc length along its curve (arcs and circles are
+  divided into equal parts; ellipses are integrated between vertices). Each segment carries the
+  pattern position at its start, reduced to one period in `f64`, and at its end.
+- The fragment shader interpolates the position linearly in the image between the segment's
+  ends, so dashes continue across vertices and stay fixed in the document while the view pans
+  (exact for orthographic views). A fragment is drawn where the position is inside a dash (ends
+  cut flat, antialiased over one pixel) or within the half width of a dot. Picking and the
+  highlight mask ignore the pattern and cover the whole path.
+- Division of labor with `arc_draft::linetype::dashes`: the viewport evaluates patterns with at
+  most four drawn elements on the GPU; display lists for the viewport are therefore built without
+  dash generation. Longer patterns and plot output use the CPU pieces. Both start the pattern at
+  the start of the curve with the same scale, so the rendered dash ends agree with the CPU ends
+  to within a pixel.
+
+### The shared extractor (CORE-GPU-013)
+
+With the feature `draft` (off by default, so products that draw no drawings do not depend on
+`arc-draft`), the module `arc_gpu::draft` maps `arc-draft` display lists to render items.
+`display_options` turns dash generation off (`max_dashes` 0), so strokes are whole or cut only
+by clips and wipeouts.
+
+- **Strokes and points** become paths of curve items in the primitive's color, its alpha
+  multiplied by one minus the transparency. The width is the lineweight (the default lineweight
+  is `DraftOptions::default_lineweight_mm`, 0.25 mm), marked as a lineweight: in a model space
+  in screen pixels (`lineweight_px_per_mm`, 96 per inch by default), on a sheet in paper
+  millimeters through the plot scale. Caps and joins are round; polyline widths are kept.
+  Consecutive primitives of one source object with the same appearance share one item.
+  Unbounded curves that no clip bounded are not drawn.
+- **Linetypes**: the pattern scale is the entity's linetype scale times the scale of the map
+  from the drawing entity to the list, measured as the ratio of the curve's length in the list
+  to its length in the entity (exact for similarities). Each drawn piece starts at the pattern
+  position of its start on the whole curve (from the start of its polyline segment when the
+  pattern restarts at vertices). Patterns with more than four drawn elements are generated on
+  the CPU, intersected with the drawn pieces in parameter space, and drawn solid.
+- **Fills and wipeout masks** become meshes triangulated from the boundary
+  (`arc_geom::triangulate` with the display tolerance). A fill is drawn in its color; a mask is
+  painted unlit in the background color in a model space (instance flag `PAINT_BACKGROUND`) and
+  in `RenderSettings::paper` on a sheet (`PAINT_PAPER`), so changing either color needs no
+  re-extraction. Wipeouts cut the curves beneath them on the CPU in the assembled lists; masks
+  and lines are not ordered on the GPU. Masks and the paper are faces, so the `Wireframe` and
+  `HiddenLine` modes do not paint them; drawings are drawn in the `Shaded` or
+  `ConsistentColors` mode.
+- **Source and sub-object.** Items are keyed by the primitive's source object;
+  `DraftExtraction::sub_objects` gives the source, nested path and part of every path of every
+  item, and `Scene::path_of` the path of a picked segment, so picking and highlights resolve the
+  block reference and the member.
+- **Entry points.** `extract_entity` extracts one entity by itself (its own list, primitives on
+  off or frozen layers left out, nothing for entities of block definitions) and
+  `register_extractors` registers it for every drafting entity type in an `ExtractorRegistry`.
+  Wipeouts cut other entities only in assembled lists: `space_extractions` extracts a space from
+  `space_list`, one extraction per source object. `apply` applies extractions to a scene with
+  stamps newer than what it holds.
+- **Sheets.** `sheet_extractions` draws a layout space: the paper rectangle from `(0, 0)` to the
+  sheet size in the paper color (keyed by the layout settings object), the printable area inside
+  the margins as a one-pixel gray outline, every viewport's `viewport_list` as one object keyed
+  by the viewport, and the layout's own entities; it returns the sheet size and the plot scale
+  (sheet units per paper millimeter) to render it with. Lineweights stay in paper millimeters.
+- **Viewport clips.** Curves and points are already cut by the viewport list. When the clip is an
+  axis-aligned rectangle, the viewport's curve items carry it, and the GPU limits them to the
+  pixels whose centers are inside it by a scissor rectangle when the view maps it to an
+  image-aligned rectangle (orthographic views); this also cuts line widths and caps that reach
+  past the boundary. Fills and masks that the list marks as needing a clip are intersected with
+  the clip boundary on the CPU for any clip shape: both regions are triangulated and every
+  pair of triangles is clipped with the Sutherland–Hodgman algorithm against the convex clip
+  triangle. For a clip that is not a rectangle, the half width of a line that reaches the
+  boundary is not clipped.
