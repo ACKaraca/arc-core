@@ -92,7 +92,7 @@ pub(crate) fn layout(
         shared: false,
         system_fonts: false,
     });
-    let mut faces: BTreeMap<u64, (String, u32)> = BTreeMap::new();
+    let mut faces: BTreeMap<u64, crate::fonts::OutlineFont> = BTreeMap::new();
     for font in registered.values() {
         let blob = Blob::new(Arc::new(Arc::clone(&font.data)));
         let found = collection.register_fonts(
@@ -107,7 +107,7 @@ pub(crate) fn layout(
                 Error::new(codes::FONT_OUTLINE_INVALID).with_arg("family", font.family.clone())
             );
         }
-        faces.insert(blob.id(), (font.family.clone(), font.index));
+        faces.insert(blob.id(), font.clone());
     }
     let mut font_cx = FontContext {
         collection,
@@ -187,10 +187,12 @@ pub(crate) fn layout(
                 };
                 let run_index = glyph_run.style().brush;
                 let font = glyph_run.run().font();
-                let (family, index) = faces
-                    .get(&font.data.id())
-                    .cloned()
-                    .unwrap_or_else(|| (base_font.family.clone(), font.index));
+                let face = faces.get(&font.data.id()).cloned().unwrap_or_else(|| {
+                    crate::fonts::OutlineFont {
+                        index: font.index,
+                        ..base_font.clone()
+                    }
+                });
                 let glyphs: Vec<PositionedGlyph> = glyph_run
                     .positioned_glyphs()
                     .map(|g| PositionedGlyph {
@@ -228,8 +230,7 @@ pub(crate) fn layout(
                     run: run_index,
                     color,
                     kind: RunKind::Outline {
-                        family,
-                        index,
+                        font: face,
                         size,
                         glyphs,
                     },

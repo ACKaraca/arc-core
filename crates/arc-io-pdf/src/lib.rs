@@ -38,6 +38,7 @@
 mod command;
 mod common;
 pub mod error;
+mod font;
 pub mod loss;
 mod path;
 mod pdf;

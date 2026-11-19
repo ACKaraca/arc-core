@@ -80,8 +80,11 @@ pub fn glyphs(source: ObjectId) -> Item {
     item(
         source,
         ItemKind::Glyphs {
-            family: "Sample".into(),
-            index: 0,
+            font: arc_draft::fonts::OutlineFont {
+                family: "Sample".into(),
+                data: std::sync::Arc::from(&[][..]),
+                index: 0,
+            },
             size: 3.0,
             glyphs: vec![],
             placement: Transform2::identity(),

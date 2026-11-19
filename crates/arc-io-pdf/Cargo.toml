@@ -17,6 +17,7 @@ arc-geom = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+skrifa = { workspace = true }
 
 [features]
 # PNG output of `core.draft.plot` through the raster output of `arc-draft`. Off by default;
@@ -25,7 +26,7 @@ raster = ["arc-draft/raster"]
 
 [dev-dependencies]
 arc-doc = { workspace = true }
-arc-draft = { workspace = true, features = ["raster"] }
+arc-draft = { workspace = true, features = ["raster", "outline-text"] }
 arc-draft-dxf = { workspace = true }
 image = { workspace = true }
 proptest = { workspace = true }

@@ -4,13 +4,16 @@
 io-pdf-option-invalid = The option { $option } is out of range or malformed.
 io-pdf-stream-invalid = The plot stream cannot be written: { $what } is out of range.
 io-pdf-loss-items-written = { $count } plot items were written without change.
-io-pdf-loss-glyphs-dropped = { $count } outline text runs were not written; only stroke text is supported.
+io-pdf-loss-glyphs-dropped = { $count } outline text runs were not written to SVG; only stroke text is supported there.
 io-pdf-loss-nurbs-flattened = { $count } spline curves were written as line segments within { $tolerance_mm } mm.
 io-pdf-loss-arcs-approximated = { $count } arcs were written as Bezier curves within { $tolerance_mm } mm.
 io-pdf-loss-polyline-width-approximated = { $count } polylines with varying width were drawn with one width.
 io-pdf-loss-items-failed = { $count } plot items could not be written.
 io-pdf-loss-sources-failed = { $count } entities were already left out of the plot because they could not be plotted.
 io-pdf-loss-layers-dropped = { $count } layers were not written because SVG has no layers.
+io-pdf-loss-font-restricted = { $count } outline text runs were not written because their font does not permit embedding.
+io-pdf-loss-font-unsupported = { $count } outline text runs were not written because their font has outlines that cannot be embedded (CFF).
+io-pdf-loss-font-invalid = { $count } outline text runs were not written because their font cannot be read.
 io-pdf-raster-unavailable = PNG output needs a build with the feature raster.
 io-pdf-plot-params-invalid = The plot parameter { $what } is missing, inconsistent or out of range.
 io-pdf-loss-items-skipped = { $count } plot items were not drawn in the image.

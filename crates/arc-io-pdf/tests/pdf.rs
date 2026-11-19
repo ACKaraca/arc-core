@@ -330,7 +330,7 @@ fn glyph_runs_nurbs_and_failures_are_reported() {
     assert_eq!(
         reasons(&out.report),
         [
-            "io.pdf.glyphs_dropped",
+            "io.pdf.font_invalid",
             "io.pdf.nurbs_flattened",
             "io.pdf.sources_failed"
         ]

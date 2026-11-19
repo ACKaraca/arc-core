@@ -38,6 +38,7 @@
 //! reaches the boundary).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use arc_base::math::{Matrix3, Point2, Point3, Transform2};
 use arc_base::{Cancel, Color, Error, Limits, ObjectId, Result};
@@ -47,6 +48,7 @@ use arc_draft::clip::{Piece, piece};
 use arc_draft::display::{
     DisplayList, DisplayOptions, Lists, Primitive, Shape, entity_list, space_list, viewport_list,
 };
+use arc_draft::fonts::OutlineFont;
 use arc_draft::hatch::HATCH;
 use arc_draft::layout::{LAYOUT, VIEWPORT, settings, sheet_size};
 use arc_draft::linetype::{DashOptions, Dashes, Pattern, dashes};
@@ -605,8 +607,8 @@ struct Builder<'a> {
     mask: u32,
     clip: Option<&'a Clip>,
     out: DraftExtraction,
-    /// The geometry of each glyph of this extraction: (family, face, glyph).
-    glyph_geometries: BTreeMap<(String, u32, u32), GeometryId>,
+    /// The geometry of each glyph of this extraction: (address of the font bytes, face, glyph).
+    glyph_geometries: BTreeMap<(usize, u32, u32), GeometryId>,
 }
 
 impl Builder<'_> {
@@ -618,12 +620,11 @@ impl Builder<'_> {
         };
         match &p.shape {
             Shape::Glyphs {
-                family,
-                index,
+                font,
                 size,
                 glyphs,
                 placement,
-            } => self.glyphs(p, (family, *index), *size, glyphs, placement, &sub),
+            } => self.glyphs(p, font, *size, glyphs, placement, &sub),
             Shape::Fill(boundary) | Shape::Mask(boundary) => {
                 let tris = triangles(boundary, self.options)?;
                 self.region_primitive(p, tris, sub)
@@ -655,17 +656,13 @@ impl Builder<'_> {
     fn glyphs(
         &mut self,
         p: &Primitive,
-        (family, index): (&String, u32),
+        font: &OutlineFont,
         size: f64,
         glyphs: &[PositionedGlyph],
         placement: &Transform2,
         sub: &SubObject,
     ) -> Result<()> {
-        let provider = &self.options.display.fonts.provider;
-        let Some(font) = provider.outline_font(family) else {
-            self.out.skipped_glyphs += glyphs.len();
-            return Ok(());
-        };
+        // The font the shape carries: a provider lookup by family name could pick another file.
         let mut groups: Vec<(u32, Vec<Point2>)> = Vec::new();
         for g in glyphs {
             let at = placement * g.position;
@@ -683,7 +680,7 @@ impl Builder<'_> {
         ];
         let color = color_of(p);
         for (id, positions) in groups {
-            let mesh = match self.options.glyphs.glyph(&font, index, id) {
+            let mesh = match self.options.glyphs.glyph(font, font.index, id) {
                 Glyph::Empty => continue,
                 Glyph::Skipped => {
                     self.out.skipped_glyphs += positions.len();
@@ -691,7 +688,11 @@ impl Builder<'_> {
                 }
                 Glyph::Mesh(mesh) => mesh,
             };
-            let key = (family.clone(), index, id);
+            let key = (
+                Arc::as_ptr(&font.data).cast::<u8>() as usize,
+                font.index,
+                id,
+            );
             let geometry = match self.glyph_geometries.get(&key) {
                 Some(g) => *g,
                 None => {

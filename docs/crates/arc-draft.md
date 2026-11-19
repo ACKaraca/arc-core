@@ -472,8 +472,22 @@ be deleted. A text style's `vertical` flag is stored and not applied.
 
 - A `FontProvider` gives stroke fonts by name and outline font bytes (with a face index) by
   family name. `FontRegistry` is the provider of this crate; `FontRegistry::with_builtin` holds
-  the shipped font *Arc Stroke*. Products register further fonts in it or implement the trait.
-  Layout reads fonts only from the provider, never from the system.
+  the shipped font *Arc Stroke* and, with the feature `outline-text`, the bundled outline family
+  *Noto Sans* (below). Products register further fonts in it or implement the trait. Layout reads
+  fonts only from the provider, never from the system.
+- **Bundled outline family.** *Noto Sans*, regular weight only (no bold or italic face), is the
+  default outline family. `fonts::bundled_outline()` returns it; the file
+  `crates/arc-draft/fonts/NotoSans-Regular.ttf` is compiled in with `include_bytes!` behind the
+  feature `outline-text`, so builds without the feature do not contain it. Its license is the SIL
+  Open Font License 1.1 (`crates/arc-draft/fonts/NotoSans-OFL.txt`); the notice is in
+  `THIRD_PARTY_NOTICES.md`. The family covers Latin, Greek and Cyrillic characters only; any other
+  character draws the font's missing glyph and is counted as missing, as with any font.
+- **Substitution to the bundled family.** A requested outline font whose bytes do not
+  parse as a font (checked with `skrifa` when the name is resolved) is replaced by the bundled
+  family, and the substitution is labeled `SubstitutedBy::Bundled` (a warning
+  `draft.font.substituted` with `used` *Noto Sans*). The parse check and the layout engine (`parley`) may
+  disagree: a font that parses but that the engine rejects still fails with
+  `draft.font.outline_invalid`, as before, and is not replaced.
 - `Fonts` bundles the provider, the per-user substitution table (data the product supplies) and
   the name of the default stroke font (*Arc Stroke*). `DisplayOptions::fonts` carries it.
 - The per-document table is the `core.draft.font_table` object with the fixed identifier
@@ -486,7 +500,9 @@ be deleted. A text style's `vertical` flag is stored and not applied.
   when the feature `outline-text` is enabled; without it outline bytes count as unavailable);
   otherwise the document table's substitute, if the provider has it; otherwise the user table's,
   if the provider has it; otherwise the default stroke font. Each step after the first is a
-  `Substitution` (requested, used, and `Document`, `User` or `Default`). Names compare after
+  `Substitution` (requested, used, and `Document`, `User`, `Default`, `Bundled` or `Base`). An
+  outline font whose bytes do not parse as a font is replaced by the bundled outline family, a
+  `Bundled` substitution (feature `outline-text`). Names compare after
   trimming and Unicode lowercasing. A provider without the default stroke font fails with
   `draft.font.default_missing` when it is needed.
 - `fonts::substitutions` lists the substitutions a document needs: one per distinct font name of
@@ -548,7 +564,8 @@ evaluates it for an entity from a snapshot.
   edges or middle; `baseline` takes the first baseline.
 - **Output.** A stroke run gives exact curves: polylines, circular arcs, and elliptical arcs
   under a width factor; slanted arcs are mapped by the `arc-geom` transform. An outline run gives
-  the provider family name, face index, size and glyph identifiers with pen positions.
+  the font (provider family name, face index and the font bytes, which the PDF writer embeds),
+  size and glyph identifiers with pen positions.
 - **Determinism.** Fonts come only from the provider and the stroke engine uses no hash order or
   system state. Upright text with a width factor of 1 uses only the four arithmetic operations,
   so its output is identical on every platform; slanted arcs depend on the platform's
@@ -563,8 +580,9 @@ names, and lays out each paragraph with `parley`: shaping, bidirectional reorder
 breaking at the width and the paragraph alignment. A run's height is its em size. Bold runs ask
 for weight 700 and italic runs for the italic style of the family. Decorations are stroke
 segments. Stacked fractions are shaped as `numerator/denominator`, and columns and the
-paragraph's tab stops are not applied. Bytes the collection cannot read fail with
-`draft.font.outline_invalid`.
+paragraph's tab stops are not applied. Bytes that parse as a font but that the collection rejects
+fail with `draft.font.outline_invalid`; bytes that do not parse as a font are replaced by the
+bundled family (see fonts and substitution), and the two checks may disagree on a font.
 
 Stroke fonts have no right-to-left glyphs; the stroke engine lays out in logical order from left
 to right and does not reorder bidirectional text.
@@ -574,8 +592,8 @@ to right and does not reorder bidirectional text.
 Text entities contribute to their `core.draft.display` node. A stroke run gives one `Stroke`
 primitive per curve, mapped from text space by translation to `position`, rotation and the mirror
 flags of the style (`backwards` mirrors x, `upside_down` mirrors y); an outline run gives one
-`Glyphs` primitive with the family, face index, size, glyph positions and that map as
-`placement`. Text strokes are continuous whatever the linetype (linetype source `Object`, value
+`Glyphs` primitive with the font (family, face index and bytes), size, glyph positions and that
+map as `placement`. Text strokes are continuous whatever the linetype (linetype source `Object`, value
 none). A run with its own color takes it with the source `Object`; the other values resolve as
 for every entity. Glyph primitives are not cut by clips or wipeouts; the consumer clips them like
 fills. The node reads the entity, its text style's fields and the font table, so a change of the
@@ -873,7 +891,7 @@ source, lineweight, linetype, transparency, plot style name) to a pen:
 `area` is the part of the page that may be drawn on. Each `Item` has its source entity, part and
 layer, an optional index into `clips` (a closed polyline on the page) and one of: a point, a
 stroke (the exact curve and, when it is not drawn whole, its pieces), a fill, a wipeout mask, or a
-glyph run (family, face, size, glyph positions and the map to the page), with a `Pen` (color, width
+glyph run (font, size, glyph positions and the map to the page), with a `Pen` (color, width
 in millimeters, end style, join style, linetype) for everything but masks.
 
 - **Content and order.** A layout stream holds, in this order, the display list of each viewport

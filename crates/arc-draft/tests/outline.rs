@@ -213,16 +213,10 @@ fn outline_text_shapes_reorders_wraps_and_is_deterministic() {
     let fonts = fonts();
     let out = lay(&[run("abc")], 0.0, &fonts);
     assert_eq!(glyph_ids(&out), vec![vec![1, 2, 3]]);
-    let RunKind::Outline {
-        family,
-        size,
-        glyphs,
-        ..
-    } = &out.runs[0].kind
-    else {
+    let RunKind::Outline { font, size, glyphs } = &out.runs[0].kind else {
         panic!()
     };
-    assert_eq!(family, "Test Sans");
+    assert_eq!(font.family, "Test Sans");
     assert!((size - 10.0).abs() < 1e-6);
     assert!((glyphs[1].position.x - glyphs[0].position.x - 6.0).abs() < 1e-4);
     // Right-to-left characters are reordered: the visual order reverses the logical one.
@@ -253,7 +247,7 @@ fn outline_text_shapes_reorders_wraps_and_is_deterministic() {
 }
 
 #[test]
-fn outline_bytes_that_do_not_parse_fail_with_a_code() {
+fn unreadable_outline_bytes_fall_back_to_the_bundled_font() {
     let mut registry = FontRegistry::with_builtin().unwrap();
     registry.add_outline("Broken", Arc::from(vec![0_u8, 1, 0, 0, 9, 9]), 0);
     let fonts = Fonts {
@@ -281,8 +275,20 @@ fn outline_bytes_that_do_not_parse_fail_with_a_code() {
         tolerance: Tolerance::DEFAULT,
         max_items: 10,
     };
-    let error = layout(&input, &Substitutions::default(), &fonts, &options).unwrap_err();
-    assert_eq!(error.code(), "draft.font.outline_invalid");
+    let out = layout(&input, &Substitutions::default(), &fonts, &options).unwrap();
+    let bundled = arc_draft::fonts::BUNDLED_OUTLINE_FAMILY;
+    assert_eq!(
+        out.substitutions,
+        vec![arc_draft::fonts::Substitution {
+            requested: "Broken".into(),
+            used: bundled.into(),
+            by: arc_draft::fonts::SubstitutedBy::Bundled,
+        }]
+    );
+    assert!(matches!(
+        &out.runs[0].kind,
+        RunKind::Outline { font, .. } if font.family == bundled
+    ));
 }
 
 #[test]
@@ -317,7 +323,7 @@ fn outline_text_entities_contribute_glyph_primitives() {
         .collect();
     assert_eq!(glyphs.len(), 1);
     let Shape::Glyphs {
-        family,
+        font,
         glyphs: g,
         placement,
         ..
@@ -325,7 +331,7 @@ fn outline_text_entities_contribute_glyph_primitives() {
     else {
         panic!("{:?}", glyphs[0].shape)
     };
-    assert_eq!(family, "Test Sans");
+    assert_eq!(font.family, "Test Sans");
     assert_eq!(g.len(), 3);
     let origin = placement * arc_base::math::Point2::origin();
     assert!((origin.x - 100.0).abs() < 1e-9);

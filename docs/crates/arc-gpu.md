@@ -844,17 +844,16 @@ by clips and wipeouts.
   and not with the size on the screen.
 - **The glyph cache** (`arc_gpu::glyph::GlyphCache`, held by `DraftOptions::glyphs`; clones
   share it) maps a font (its bytes and face index) and a glyph identifier to a triangle mesh in
-  em units. Outlines are read with `skrifa` from the bytes of the font that
-  `FontProvider::outline_font` returns for the primitive's family, at the font's default
-  location. Quadratic and cubic segments are flattened once, in em units, with the chord
+  em units. Outlines are read with `skrifa` from the bytes of the font the plot primitive carries
+  (its family, bytes and face index), at the font's default location; the provider is not
+  consulted, so two files under one family name draw their own glyphs. Quadratic and cubic segments are flattened once, in em units, with the chord
   tolerance `GLYPH_CHORD_EM` (1/2048 em), not by the zoom rule of curve items: one mesh serves
   every size and view, so the flattening error in pixels is the em size in pixels over 2048
   (0.5 px at an em of 1024 px, more beyond). The contours become a region with
   `arc_geom::build_region` (nesting parity) and are triangulated with `arc_geom::triangulate`.
   A glyph with contours that overlap or touch, an unreadable outline or more than 65,536
-  flattened points is not drawn and is counted in `DraftExtraction::skipped_glyphs`, as is every
-  glyph of a family the provider does not have; a space or a glyph without contours is not
-  counted. The cache holds at most 65,536 glyphs and is emptied when full.
+  flattened points is not drawn and is counted in `DraftExtraction::skipped_glyphs`; a space or a
+  glyph without contours is not counted. The cache holds at most 65,536 glyphs and is emptied when full.
 - **Items.** A glyph run becomes one mesh item for each distinct glyph of the run, whose
   instances are its occurrences: the transform maps em units to the list through the run's
   placement, the em size and the pen position (relative to the item origin in `f32`, the

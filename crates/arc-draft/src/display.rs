@@ -36,7 +36,7 @@ use crate::error::codes;
 use crate::external::{
     self, DEFAULT_MAX_EXPANSIONS, Memo, ReferenceProblem, Scope, WorkBudget, WorkUse,
 };
-use crate::fonts::{Fonts, Substitutions, font_table_id};
+use crate::fonts::{Fonts, OutlineFont, Substitutions, font_table_id};
 use crate::layout::{Overrides, view};
 use crate::leader::{LEADER, MULTILEADER};
 use crate::linetype::{DEFAULT_MAX_DASHES, DashOptions, Dashes, Pattern, dashes};
@@ -141,10 +141,8 @@ pub enum Shape {
     /// Outline text glyphs for the renderer and plot stream: glyph positions in text space,
     /// mapped to the list's coordinates by `placement`.
     Glyphs {
-        /// The family name the font provider registered the font under.
-        family: String,
-        /// The face index.
-        index: u32,
+        /// The font: family, bytes and face index.
+        font: OutlineFont,
         /// The em size in text space.
         size: f64,
         /// The glyphs.
@@ -668,14 +666,12 @@ pub(crate) fn transform_shape(shape: &Shape, t: &Transform2, tol: &Tolerance) ->
         Shape::Mask(p) => Shape::Mask(transform_polyline(p, t, tol)?),
         Shape::Region(r) => Shape::Region(r.transformed(t, tol)?),
         Shape::Glyphs {
-            family,
-            index,
+            font,
             size,
             glyphs,
             placement,
         } => Shape::Glyphs {
-            family: family.clone(),
-            index: *index,
+            font: font.clone(),
             size: *size,
             glyphs: glyphs.clone(),
             placement: t * placement,
@@ -1162,15 +1158,9 @@ pub(crate) fn text_primitives(
                     });
                 }
             }
-            RunKind::Outline {
-                family,
-                index,
-                size,
-                glyphs,
-            } => out.push(Primitive {
+            RunKind::Outline { font, size, glyphs } => out.push(Primitive {
                 shape: Shape::Glyphs {
-                    family: family.clone(),
-                    index: *index,
+                    font: font.clone(),
                     size: *size,
                     glyphs: glyphs.clone(),
                     placement,

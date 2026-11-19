@@ -59,6 +59,7 @@ third_party = [
   "schemars",
   "rusqlite",
   "serde",
+  "skrifa",
   "serde_json",
   "skrifa",
   "spade",

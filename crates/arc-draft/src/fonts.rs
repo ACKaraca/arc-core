@@ -43,6 +43,26 @@ pub fn font_table_id() -> ObjectId {
     ObjectId::from_u128(FONT_TABLE_ID)
 }
 
+/// The family name of the bundled outline font (feature `outline-text`).
+#[cfg(feature = "outline-text")]
+pub const BUNDLED_OUTLINE_FAMILY: &str = "Noto Sans";
+
+/// The bundled outline font: Noto Sans, regular weight only, under the SIL Open Font License 1.1
+/// (`fonts/NotoSans-OFL.txt`). It is the substitute for an outline font whose bytes cannot be
+/// read, and the default outline family of [`FontRegistry::with_builtin`].
+#[cfg(feature = "outline-text")]
+#[must_use]
+pub fn bundled_outline() -> OutlineFont {
+    static BYTES: std::sync::OnceLock<Arc<[u8]>> = std::sync::OnceLock::new();
+    let data =
+        BYTES.get_or_init(|| Arc::from(&include_bytes!("../fonts/NotoSans-Regular.ttf")[..]));
+    OutlineFont {
+        family: BUNDLED_OUTLINE_FAMILY.to_owned(),
+        data: Arc::clone(data),
+        index: 0,
+    }
+}
+
 /// Outline font bytes registered under a family name.
 #[derive(Clone, PartialEq, Eq)]
 pub struct OutlineFont {
@@ -84,7 +104,8 @@ pub struct FontRegistry {
 }
 
 impl FontRegistry {
-    /// A registry holding the shipped stroke font under [`BUILTIN_NAME`].
+    /// A registry holding the shipped stroke font under [`BUILTIN_NAME`] and, with the feature
+    /// `outline-text`, the bundled outline font under [`BUNDLED_OUTLINE_FAMILY`].
     ///
     /// # Errors
     ///
@@ -92,6 +113,11 @@ impl FontRegistry {
     pub fn with_builtin() -> Result<Self> {
         let mut registry = Self::default();
         registry.add_stroke(BUILTIN_NAME, builtin()?);
+        #[cfg(feature = "outline-text")]
+        {
+            let bundled = bundled_outline();
+            registry.add_outline(&bundled.family, bundled.data, bundled.index);
+        }
         Ok(registry)
     }
 
@@ -279,6 +305,9 @@ pub enum SubstitutedBy {
     User,
     /// The default stroke font.
     Default,
+    /// The bundled outline family, which stands in for an outline font whose bytes do not parse
+    /// as a font (feature `outline-text`).
+    Bundled,
     /// The text's base font: a text lays out with one kind of font (stroke or outline), the
     /// kind of its base font, so a run naming the other kind uses the base font.
     Base,
@@ -318,6 +347,32 @@ fn available(fonts: &Fonts, name: &str) -> Option<FontSource> {
     None
 }
 
+/// The bundled outline font in place of the requested outline font `source` when its bytes do not
+/// parse (the provider's font cannot be loaded); `None` when it reads or the feature is off.
+#[cfg(feature = "outline-text")]
+fn unreadable(requested: &str, source: &FontSource) -> Option<Resolution> {
+    let FontSource::Outline(font) = source else {
+        return None;
+    };
+    if skrifa::FontRef::from_index(&font.data, font.index).is_ok() {
+        return None;
+    }
+    Some(Resolution {
+        name: BUNDLED_OUTLINE_FAMILY.to_owned(),
+        source: FontSource::Outline(bundled_outline()),
+        substitution: Some(Substitution {
+            requested: requested.to_owned(),
+            used: BUNDLED_OUTLINE_FAMILY.to_owned(),
+            by: SubstitutedBy::Bundled,
+        }),
+    })
+}
+
+#[cfg(not(feature = "outline-text"))]
+fn unreadable(_: &str, _: &FontSource) -> Option<Resolution> {
+    None
+}
+
 /// Resolves `requested` (absent or blank: the default stroke font, with no substitution) through
 /// the document table `document`, then the user table, then the default stroke font. A table
 /// entry whose substitute is not available is skipped.
@@ -350,6 +405,9 @@ pub fn resolve(
         });
     };
     if let Some(source) = available(fonts, requested) {
+        if let Some(bundled) = unreadable(requested, &source) {
+            return Ok(bundled);
+        }
         return Ok(Resolution {
             name: requested.to_owned(),
             source,

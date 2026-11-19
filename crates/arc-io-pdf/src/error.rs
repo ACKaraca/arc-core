@@ -75,7 +75,8 @@ pub mod reasons {
         severity: Severity::Info,
         message_id: "io-pdf-loss-items-written",
     };
-    /// Outline glyph runs were not written; stroke text is the supported path.
+    /// Outline glyph runs are not written by the SVG writer; stroke text is the supported path
+    /// there.
     pub const GLYPHS_DROPPED: Reason = Reason {
         code: "io.pdf.glyphs_dropped",
         outcome: Outcome::Dropped,
@@ -137,6 +138,30 @@ pub mod reasons {
         message_id: "io-pdf-loss-items-skipped",
     };
 
+    /// Outline glyph runs whose font forbids embedding: the glyphs are not written.
+    pub const FONT_RESTRICTED: Reason = Reason {
+        code: "io.pdf.font_restricted",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-pdf-loss-font-restricted",
+    };
+    /// Outline glyph runs whose font has outlines this writer does not embed (CFF): the glyphs
+    /// are not written.
+    pub const FONT_UNSUPPORTED: Reason = Reason {
+        code: "io.pdf.font_unsupported",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-pdf-loss-font-unsupported",
+    };
+    /// Outline glyph runs whose font bytes cannot be read, exceed the limits or lack a drawn
+    /// glyph: the glyphs are not written.
+    pub const FONT_INVALID: Reason = Reason {
+        code: "io.pdf.font_invalid",
+        outcome: Outcome::Failed,
+        severity: Severity::Error,
+        message_id: "io-pdf-loss-font-invalid",
+    };
+
     /// Every reason of this crate, for the registry check.
     pub const ALL: &[Reason] = &[
         ITEMS_SKIPPED,
@@ -148,6 +173,9 @@ pub mod reasons {
         ITEMS_FAILED,
         SOURCES_FAILED,
         LAYERS_DROPPED,
+        FONT_RESTRICTED,
+        FONT_UNSUPPORTED,
+        FONT_INVALID,
     ];
 }
 

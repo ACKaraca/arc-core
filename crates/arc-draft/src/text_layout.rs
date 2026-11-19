@@ -149,10 +149,8 @@ pub enum RunKind {
     Stroke(Vec<Curve2>),
     /// Outline text for the renderer and plot stream.
     Outline {
-        /// The family name the provider registered the font under.
-        family: String,
-        /// The face index.
-        index: u32,
+        /// The font the glyphs are drawn from: family, bytes and face index.
+        font: crate::fonts::OutlineFont,
         /// The font size (em size) in drawing units.
         size: f64,
         /// The glyphs.

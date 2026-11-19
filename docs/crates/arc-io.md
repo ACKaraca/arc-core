@@ -153,7 +153,7 @@ memory limit and emits an invalid package, each asserting that the document is u
 
 | ID | Capability | Behavior | Tier | Phase |
 |---|---|---|---|---|
-| CORE-IO-037 | PDF output | Writes plot streams to vector PDF with embedded subset fonts, layers as optional content groups, hyperlinks and multiple pages; PDF/A-2b on request. | T1 | 1 |
+| CORE-IO-037 | PDF output | Writes plot streams to vector PDF with outline text as text over embedded subset TrueType fonts, layers as optional content groups and multiple pages. | T1 | 1 |
 | CORE-IO-038 | SVG output | Writes plot streams to SVG with exact arcs, lineweights, linetypes and text. | T1 | 1 |
 | CORE-IO-039 | PDF vector import | Reads vector content of PDF pages (paths, fills, text runs) into neutral 2D geometry with page transforms. | T2 | 2 |
 | CORE-IO-040 | PDF raster underlays | Rasterizes PDF pages in `arc-worker` at requested resolution and region for underlay display. | T2 | 2 |
@@ -551,9 +551,13 @@ stream's units are millimeters from the lower left corner of the page.
   (`io.pdf.polyline_width_approximated`).
 - **Color.** The pen's linear color is converted to 8-bit sRGB; alpha is written as stroke and
   fill opacity (SVG) or an extended graphics state (PDF). Masks and the paper are opaque.
-- **Text.** Stroke text is stroke items and is written like any stroke. Outline glyph runs are not
-  written: each is a loss item (`io.pdf.glyphs_dropped`, `dropped`). Embedded subset fonts and
-  PDF/A-2b are not provided; PDF/A is not requestable.
+- **Text.** Stroke text is stroke items and is written like any stroke. Outline glyph runs are
+  written as text over embedded subset fonts (see Fonts below) and count as mapped items. A run
+  whose font forbids embedding, or whose outlines are not TrueType glyph data, is not written and
+  is a loss item (`io.pdf.font_restricted` or `io.pdf.font_unsupported`, `dropped`); a run whose
+  font bytes cannot be read is `io.pdf.font_invalid` (`failed`). PDF/A-2b is not provided; PDF/A is
+  not requestable. The SVG writer writes no outline glyph runs: each is a loss item
+  (`io.pdf.glyphs_dropped`, `dropped`).
 - **Curves.** Segments are lines, polylines are lines and arcs, circles and ellipses are arcs
   (a full turn is split in half arcs), NURBS curves are flattened with `chord_mm` and a turning
   angle of 15 degrees (`io.pdf.nurbs_flattened`, argument `tolerance_mm`). A ray or line without
@@ -583,13 +587,15 @@ the stream's y), so no transform is written and a counterclockwise arc has sweep
 
 The file is PDF 1.7: a header, indirect objects, a cross-reference table with 20-byte entries,
 a trailer without an identifier, and the start of the table. Object order is fixed: catalog,
-page tree, information dictionary, optional content groups, then page and content stream per page.
+page tree, information dictionary, optional content groups, then page and content stream per page,
+then the five objects of each embedded font in the order of its family name and face index.
 
 - **Pages.** The media box is the page in points (1 mm = 72 / 25.4 pt) from the lower left
   corner, the origin of the stream.
 - **Content.** Content streams are not compressed (no encoder is added; the vector content is
   compact and a deflate stream would add a dependency for no capability). Operators are `m`, `l`,
-  `c`, `h`, `re`, `W n`, `S`, `f`, `w`, `J`, `j`, `M`, `RG`, `rg`, `gs`, `q`, `Q`, `BDC`, `EMC`.
+  `c`, `h`, `re`, `W n`, `S`, `f`, `w`, `J`, `j`, `M`, `RG`, `rg`, `gs`, `q`, `Q`, `BDC`, `EMC`,
+  and for outline text `BT`, `ET`, `Tf`, `Tm`, `Tj`.
 - **Arcs.** PDF has no arc operator. An arc or ellipse is cubic Bezier pieces with control points
   from the tangents (factor 4/3 tan(a/4) for a piece of angle a). The piece count is the least
   that keeps the radial error of a circle of radius r below `chord_mm`, using the error
@@ -597,6 +603,33 @@ page tree, information dictionary, optional content groups, then page and conten
   per arc; for an ellipse r is the larger semi-axis, which bounds the error. The count of arcs
   written this way is a loss item (`io.pdf.arcs_approximated`, `approximated`, argument
   `tolerance_mm`).
+- **Fonts.** Each font that an outline glyph run draws with is embedded once for the document, in
+  the order of its family name, face index, byte length and digest, as five objects: a composite
+  font (`Type0`, `Identity-H`), its `CIDFontType2` descendant with `CIDToGIDMap /Identity` and the
+  `W` array of the drawn glyphs' advances, the font descriptor, the `FontFile2` stream, and a
+  `ToUnicode` CMap that maps each drawn glyph to the lowest Unicode scalar value the font's character
+  map gives it; code points that are not scalar values (surrogates) are skipped, and a glyph with no
+  such value has no entry. Two files under one family name are two embedded fonts. The font file is
+  a TrueType subset with the font's glyph identifiers: drawn glyphs and the components of composite
+  glyphs keep their outlines, every other glyph is empty. The copied outline bytes never exceed the
+  length of the font's glyph data, so overlapping glyph ranges cannot grow the file. Its tables are
+  `head`, `hhea`, `maxp`, `hmtx`, `loca`, `glyf`, and `cvt `, `fpgm` and `prep` when present. The base
+  font name is a six-letter tag, a digest of the subset bytes, `+`, and the family name in ASCII
+  letters and digits, cut so that the name stays within 127 bytes (the family part at 120
+  characters). The descriptor takes its bounding box, ascent, descent and italic angle from `head`,
+  `hhea` and `post`, and its cap height from `OS/2` (`sCapHeight`), in 1/1000 em. The `W` entries and
+  the descriptor values are rounded half away from zero, not truncated. Each glyph is one text object
+  (`BT`, `Tf`, `Tm`, `Tj`, `ET`) whose text matrix carries the placement, the size and the pen
+  position. The embedding permission is the `OS/2` `fsType` field: a font with the restricted-license
+  bit (`0x0002`), the no-subsetting bit (`0x0100`) or the bitmap-only bit (`0x0200`) is not embedded
+  (`io.pdf.font_restricted`); an `OS/2` table too short to hold `fsType` is malformed
+  (`io.pdf.font_invalid`). A font with CFF outlines is `io.pdf.font_unsupported`. Every other problem
+  is `io.pdf.font_invalid`: bytes that do not parse, a size above `input_bytes` or a glyph count above
+  `array_length` of the limits profile, a glyph identifier the font lacks, a missing glyph table, more
+  than 1,000,000 component references followed for one subset (`COMPONENT_BUDGET`), or more than
+  2,000,000 character map entries read for one ToUnicode map (`MAPPING_BUDGET`). A malformed font
+  is a loss item for its runs, not an error of the document. A run whose glyphs are not drawn is
+  neither written nor lost.
 - **Layers.** Each distinct layer of the items of all pages is an optional content group named
   by the layer's object identifier, listed in the catalog (`OCProperties`, all on), ordered by
   identifier, and used per page through `Properties`. Consecutive items with the same clip and
@@ -605,7 +638,7 @@ page tree, information dictionary, optional content groups, then page and conten
 - **Information.** `Producer` is `Arc arc-io-pdf`; `Title` is a literal string for printable
   ASCII and UTF-16 hexadecimal otherwise; `CreationDate` is written only when
   `creation_date` is set.
-- Not written: hyperlinks, embedded fonts, PDF/A-2b, compression, a file identifier.
+- Not written: hyperlinks, PDF/A-2b, compression, a file identifier.
 
 ### The plot command
 
@@ -661,6 +694,9 @@ because the layer table does not allow one format crate to depend on another.
 |---|---|
 | `io.pdf.items_written` | `mapped` |
 | `io.pdf.glyphs_dropped` | `dropped` |
+| `io.pdf.font_restricted` | `dropped` |
+| `io.pdf.font_unsupported` | `dropped` |
+| `io.pdf.font_invalid` | `failed` |
 | `io.pdf.items_skipped` | `dropped` |
 | `io.pdf.layers_dropped` | `dropped` |
 | `io.pdf.nurbs_flattened` | `approximated` |

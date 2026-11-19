@@ -29,6 +29,7 @@ use crate::display::{
 };
 use crate::error::codes;
 use crate::external::{Memo, ReferenceProblem, Scope, WorkBudget, WorkUse};
+use crate::fonts::OutlineFont;
 use crate::layout::{LAYOUT, VIEWPORT, settings, sheet_size, view};
 use crate::linetype::{DashOptions, Dashes, Pattern, dashes};
 use crate::plot_style::{
@@ -205,10 +206,8 @@ pub enum ItemKind {
     },
     /// Outline glyphs: positions in text space, mapped to the page by `placement`.
     Glyphs {
-        /// The font family the provider registered the font under.
-        family: String,
-        /// The face index.
-        index: u32,
+        /// The font: family, bytes and face index.
+        font: OutlineFont,
         /// The em size in text space.
         size: f64,
         /// The glyphs.
@@ -735,14 +734,12 @@ fn build(
                 Shape::Region(region) => ItemKind::RegionFill { region, pen },
                 Shape::Mask(region) => ItemKind::Mask { region },
                 Shape::Glyphs {
-                    family,
-                    index,
+                    font,
                     size,
                     glyphs,
                     placement,
                 } => ItemKind::Glyphs {
-                    family,
-                    index,
+                    font,
                     size,
                     glyphs,
                     placement,
@@ -1050,13 +1047,22 @@ impl Out {
     }
 }
 
+/// A 64-bit FNV-1a digest of `bytes`, for the canonical encoding of font data.
+fn digest(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 impl PlotStream {
     /// The canonical bytes of the stream: a header, then every number as its bit pattern and
     /// every curve in the `arc.geom` encoding. Equal streams give equal bytes.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut o = Out(b"ARCP".to_vec());
-        o.u8(1);
+        // Version 2: glyph items carry the font's length and digest, computed once per font.
+        o.u8(2);
+        let mut digests: BTreeMap<(usize, usize), u64> = BTreeMap::new();
         o.f64(self.width);
         o.f64(self.height);
         o.color(self.paper_color);
@@ -1118,16 +1124,21 @@ impl PlotStream {
                     o.bytes(&region.encode());
                 }
                 ItemKind::Glyphs {
-                    family,
-                    index,
+                    font,
                     size,
                     glyphs,
                     placement,
                     pen,
                 } => {
                     o.u8(4);
-                    o.bytes(family.as_bytes());
-                    o.u64(u64::from(*index));
+                    o.bytes(font.family.as_bytes());
+                    o.u64(u64::from(font.index));
+                    o.len(font.data.len());
+                    let key = (
+                        std::sync::Arc::as_ptr(&font.data).cast::<u8>() as usize,
+                        font.data.len(),
+                    );
+                    o.u64(*digests.entry(key).or_insert_with(|| digest(&font.data)));
                     o.f64(*size);
                     o.len(glyphs.len());
                     for g in glyphs {

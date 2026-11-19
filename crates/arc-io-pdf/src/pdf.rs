@@ -4,15 +4,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::{FRAC_PI_2, TAU};
 
+use arc_base::math::Transform2;
 use arc_base::math::{Point2, Vector2};
 use arc_base::{Color, ObjectId, Result};
 use arc_draft::plot::{Item, ItemKind, PlotStream};
 use arc_draft::plot_style::{EndStyle, JoinStyle, Pen};
+use arc_draft::text_layout::PositionedGlyph;
 
 use crate::common::{
     Gate, Output, WriteOptions, check_count, check_stream, pdf_date_of, push_num, srgb,
 };
 use crate::error::reasons;
+use crate::font::{Fonts, OBJECTS_PER_FONT, Program, Refusal};
 use crate::loss::{Argument, Direction, LossHeader, LossLog, Source};
 use crate::path::{
     ArcSeg, Counts, Cx, FillRule, Seg, SubPath, polyline_path, range, region_loops, stroke_paths,
@@ -33,6 +36,8 @@ struct Content {
     chord: f64,
     arcs: u64,
     alphas: BTreeSet<u8>,
+    /// The fonts (indices of the document's font list) the content draws with.
+    fonts: BTreeSet<usize>,
 }
 
 fn pt(mm: f64) -> f64 {
@@ -47,6 +52,7 @@ impl Content {
             chord,
             arcs: 0,
             alphas: BTreeSet::new(),
+            fonts: BTreeSet::new(),
         }
     }
 
@@ -217,6 +223,10 @@ impl Content {
 /// # Errors
 ///
 /// `io.pdf.option_invalid`, `io.pdf.stream_invalid`, `io.limit_exceeded` and `base.cancelled`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the streams, the fonts and the objects of the file"
+)]
 pub fn write_pdf(streams: &[&PlotStream], options: &mut WriteOptions<'_>) -> Result<Output> {
     options.validate()?;
     if streams.is_empty() {
@@ -235,6 +245,7 @@ pub fn write_pdf(streams: &[&PlotStream], options: &mut WriteOptions<'_>) -> Res
         .into_iter()
         .collect();
     let index: BTreeMap<ObjectId, usize> = layers.iter().copied().zip(0..).collect();
+    let fonts = Fonts::collect(streams, &options.limits);
 
     let mut gate = Gate::new(options, total);
     let mut loss = LossLog::bounded();
@@ -242,7 +253,7 @@ pub fn write_pdf(streams: &[&PlotStream], options: &mut WriteOptions<'_>) -> Res
     let mut written = 0usize;
     for stream in streams {
         gate.tick(written)?;
-        let page = page_content(stream, &cx, &index, &mut gate, &mut loss, written)?;
+        let page = page_content(stream, &cx, &index, &fonts, &mut gate, &mut loss, written)?;
         written += page.0.out.len();
         pages.push(page);
     }
@@ -293,12 +304,31 @@ pub fn write_pdf(streams: &[&PlotStream], options: &mut WriteOptions<'_>) -> Res
             format!("<< /Type /OCG /Name {} >>", pdf_string(&id.to_string())).as_bytes(),
         );
     }
+    // The objects of the embedded fonts follow the pages, in list order.
+    let first_font = first_page + 2 * pages.len();
+    let bases: BTreeMap<usize, usize> = fonts
+        .embedded()
+        .zip(0..)
+        .map(|((at, _), n)| (at, first_font + OBJECTS_PER_FONT * n))
+        .collect();
     for (p, (content, used)) in pages.iter().enumerate() {
         if let Some(stream) = streams.get(p) {
-            file.page(first_page + 2 * p, stream, content, used, first_layer);
+            file.page(
+                first_page + 2 * p,
+                stream,
+                content,
+                used,
+                first_layer,
+                &bases,
+            );
         }
     }
-    file.trailer(first_page + 2 * pages.len());
+    for (at, program) in fonts.embedded() {
+        if let Some(base) = bases.get(&at) {
+            file.font(*base, program);
+        }
+    }
+    file.trailer(first_font + OBJECTS_PER_FONT * bases.len());
     gate.finish(file.out.len())?;
     Ok(Output {
         bytes: file.out,
@@ -361,6 +391,53 @@ impl File {
 }
 
 impl File {
+    /// The objects of one embedded font from `base`: the composite font, its descendant font,
+    /// the font descriptor, the font file and the ToUnicode map.
+    fn font(&mut self, base: usize, program: &Program) {
+        let name = &program.name;
+        self.object(
+            base,
+            format!(
+                "<< /Type /Font /Subtype /Type0 /BaseFont /{name} /Encoding /Identity-H /DescendantFonts [{} 0 R] /ToUnicode {} 0 R >>",
+                base + 1,
+                base + 4
+            )
+            .as_bytes(),
+        );
+        self.object(
+            base + 1,
+            format!(
+                "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{name} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {} 0 R /W [{}] /CIDToGIDMap /Identity >>",
+                base + 2,
+                program.widths
+            )
+            .as_bytes(),
+        );
+        self.object(
+            base + 2,
+            format!(
+                "<< /Type /FontDescriptor /FontName /{name} {} /FontFile2 {} 0 R >>",
+                program.descriptor,
+                base + 3
+            )
+            .as_bytes(),
+        );
+        self.stream(
+            base + 3,
+            &format!("/Length1 {}", program.file.len()),
+            &program.file,
+        );
+        self.stream(base + 4, "", &program.to_unicode);
+    }
+
+    /// A stream object `number` with the entries `extra` and the bytes `data`, uncompressed.
+    fn stream(&mut self, number: usize, extra: &str, data: &[u8]) {
+        let mut body = format!("<< /Length {} {extra} >>\nstream\n", data.len()).into_bytes();
+        body.extend_from_slice(data);
+        body.extend_from_slice(b"\nendstream");
+        self.object(number, &body);
+    }
+
     /// The page object `number` and its content stream `number + 1`.
     fn page(
         &mut self,
@@ -369,6 +446,7 @@ impl File {
         content: &Content,
         used: &BTreeSet<usize>,
         first_layer: usize,
+        bases: &BTreeMap<usize, usize>,
     ) {
         let mut resources = String::from("<< ");
         if !content.alphas.is_empty() {
@@ -385,6 +463,15 @@ impl File {
             resources += "/Properties << ";
             for l in used {
                 resources += &format!("/L{l} {} 0 R ", first_layer + l);
+            }
+            resources += ">> ";
+        }
+        if !content.fonts.is_empty() {
+            resources += "/Font << ";
+            for at in &content.fonts {
+                if let Some(base) = bases.get(at) {
+                    resources += &format!("/F{at} {base} 0 R ");
+                }
             }
             resources += ">> ";
         }
@@ -414,6 +501,7 @@ fn page_content(
     stream: &PlotStream,
     cx: &Cx,
     index: &BTreeMap<ObjectId, usize>,
+    fonts: &Fonts,
     gate: &mut Gate<'_, '_>,
     loss: &mut LossLog,
     written: usize,
@@ -454,11 +542,52 @@ fn page_content(
             }
             open = Some(key);
         }
-        item_out(&mut c, item, paper, cx, loss)?;
+        item_out(&mut c, item, paper, cx, fonts, loss)?;
     }
     close_run(&mut c, open);
     c.s("Q\n");
     Ok((c, used))
+}
+
+/// Writes the glyphs of one run as text: one text object per glyph, whose text matrix carries the
+/// placement, the size and the glyph's pen position, so the outlines are positioned exactly.
+fn glyphs_out(
+    c: &mut Content,
+    font: usize,
+    size: f64,
+    glyphs: &[PositionedGlyph],
+    placement: &Transform2,
+    pen: &Pen,
+) -> usize {
+    let closes = c.state(pen.color);
+    c.rgb(pen.color, "rg");
+    c.fonts.insert(font);
+    let m = placement.matrix();
+    let linear = [
+        m[(0, 0)] * size,
+        m[(1, 0)] * size,
+        m[(0, 1)] * size,
+        m[(1, 1)] * size,
+    ];
+    let mut written = 0;
+    for g in glyphs {
+        let Ok(code) = u16::try_from(g.id) else {
+            continue;
+        };
+        let origin = placement * g.position;
+        c.s(&format!("BT /F{font} 1 Tf "));
+        for v in linear {
+            c.raw(pt(v));
+            c.s(" ");
+        }
+        c.xy(origin);
+        c.s(&format!("Tm <{code:04X}> Tj ET\n"));
+        written += 1;
+    }
+    if closes {
+        c.s("Q\n");
+    }
+    written
 }
 
 fn close_run(c: &mut Content, open: Option<(Option<usize>, Option<usize>)>) {
@@ -472,7 +601,18 @@ fn close_run(c: &mut Content, open: Option<(Option<usize>, Option<usize>)>) {
     }
 }
 
-fn item_out(c: &mut Content, item: &Item, paper: Color, cx: &Cx, loss: &mut LossLog) -> Result<()> {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one match over the item kinds, as the other writers"
+)]
+fn item_out(
+    c: &mut Content,
+    item: &Item,
+    paper: Color,
+    cx: &Cx,
+    fonts: &Fonts,
+    loss: &mut LossLog,
+) -> Result<()> {
     let source = || item.source.to_string();
     let name = kind(item);
     let mut counts = Counts::default();
@@ -522,13 +662,53 @@ fn item_out(c: &mut Content, item: &Item, paper: Color, cx: &Cx, loss: &mut Loss
             let path = polyline_path(region, cx)?;
             c.fill(&[path], paper, FillRule::NonZero);
         }
-        ItemKind::Glyphs { .. } => {
-            loss.add(
-                reasons::GLYPHS_DROPPED,
-                name,
-                Some(Source::Text(&source())),
-                1,
-            );
+        ItemKind::Glyphs {
+            font,
+            size,
+            glyphs,
+            placement,
+            pen,
+        } => {
+            let Some((at, used)) = fonts.get(font) else {
+                loss.add(
+                    reasons::FONT_INVALID,
+                    name,
+                    Some(Source::Text(&source())),
+                    1,
+                );
+                return Ok(());
+            };
+            match &used.program {
+                Ok(_) => {
+                    // A run counts as written only with a glyph drawn; the others are lost.
+                    let drawn = glyphs_out(c, at, *size, glyphs, placement, pen);
+                    if drawn > 0 {
+                        loss.add(
+                            reasons::ITEMS_WRITTEN,
+                            name,
+                            Some(Source::Text(&source())),
+                            1,
+                        );
+                    }
+                    let skipped = u64::try_from(glyphs.len() - drawn).unwrap_or(u64::MAX);
+                    if skipped > 0 {
+                        loss.add(
+                            reasons::FONT_INVALID,
+                            name,
+                            Some(Source::Text(&source())),
+                            skipped,
+                        );
+                    }
+                }
+                Err(refusal) => {
+                    let reason = match refusal {
+                        Refusal::Restricted => reasons::FONT_RESTRICTED,
+                        Refusal::Unsupported => reasons::FONT_UNSUPPORTED,
+                        Refusal::Invalid => reasons::FONT_INVALID,
+                    };
+                    loss.add(reason, name, Some(Source::Text(&source())), 1);
+                }
+            }
             return Ok(());
         }
     }

@@ -4,13 +4,16 @@
 io-pdf-option-invalid = { $option } seçeneği aralığın dışında veya hatalı biçimde.
 io-pdf-stream-invalid = Çizim akışı yazılamıyor: { $what } aralığın dışında.
 io-pdf-loss-items-written = { $count } çizim öğesi değişmeden yazıldı.
-io-pdf-loss-glyphs-dropped = { $count } dış çizgili metin dizisi yazılmadı; yalnızca çizgi metni destekleniyor.
+io-pdf-loss-glyphs-dropped = SVG çıktısında { $count } dış çizgili metin dizisi yazılmadı; yalnızca çizgi metni destekleniyor.
 io-pdf-loss-nurbs-flattened = { $count } eğri { $tolerance_mm } mm içinde doğru parçalarına dönüştürülerek yazıldı.
 io-pdf-loss-arcs-approximated = { $count } yay { $tolerance_mm } mm içinde Bezier eğrileri olarak yazıldı.
 io-pdf-loss-polyline-width-approximated = Genişliği değişen { $count } çoklu çizgi tek genişlikle çizildi.
 io-pdf-loss-items-failed = { $count } çizim öğesi yazılamadı.
 io-pdf-loss-sources-failed = { $count } nesne çizilemediği için çizim akışından zaten çıkarılmıştı.
 io-pdf-loss-layers-dropped = SVG katman içermediğinden { $count } katman yazılmadı.
+io-pdf-loss-font-restricted = { $count } dış çizgili metin dizisi yazılmadı; yazı tipi gömülmeye izin vermiyor.
+io-pdf-loss-font-unsupported = { $count } dış çizgili metin dizisi yazılmadı; yazı tipinin ana hatları gömülemiyor (CFF).
+io-pdf-loss-font-invalid = { $count } dış çizgili metin dizisi yazılmadı; yazı tipi okunamadı.
 io-pdf-raster-unavailable = PNG çıktısı için raster özelliğiyle derlenmiş bir yapı gerekir.
 io-pdf-plot-params-invalid = { $what } çizim parametresi eksik, tutarsız veya aralığın dışında.
 io-pdf-loss-items-skipped = { $count } çizim öğesi görüntüye çizilmedi.
