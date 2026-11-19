@@ -14,13 +14,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-#[cfg(unix)]
+#[cfg(windows)]
+use interprocess::os::windows::named_pipe::{PipeStream, pipe_mode};
 use std::io::BufReader;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
 use arc_command::protocol::McpConfig;
-#[cfg(unix)]
 use arc_command::protocol::{LocalSocket, SocketConfig, SocketStop};
 use arc_command::roots::MAX_PATH_LEN;
 use arc_command::{
@@ -701,39 +701,56 @@ impl Gateway for Mcp<'_> {
 }
 
 /// A connection to the local socket, authenticated with its token, one session per call.
-#[cfg(unix)]
 struct Socket {
     path: PathBuf,
     token: String,
 }
 
 #[cfg(unix)]
+fn connect(path: &Path) -> std::io::Result<UnixStream> {
+    UnixStream::connect(path)
+}
+
+#[cfg(windows)]
+fn connect(path: &Path) -> std::io::Result<PipeStream<pipe_mode::Bytes, pipe_mode::Bytes>> {
+    PipeStream::connect_by_path(path.to_str().unwrap_or_default())
+}
+
 impl Socket {
     fn run(&self, command: &str, path: &Path) -> Result<String, String> {
-        let mut stream = UnixStream::connect(&self.path).map_err(|_| "connect".to_owned())?;
+        let mut stream = connect(&self.path).map_err(|_| "connect".to_owned())?;
         let hello = json!({"jsonrpc": "2.0", "id": 0, "method": "arc.authenticate",
                            "params": {"token": self.token}});
         let input = format!("{hello}\n{}\n{}\n", initialize(), run(command, path));
         stream
             .write_all(input.as_bytes())
             .map_err(|_| "write".to_owned())?;
-        let mut replies = Vec::new();
-        let mut lines = BufReader::new(stream);
-        loop {
-            let mut line = String::new();
-            if lines.read_line(&mut line).unwrap() == 0 {
-                break;
+        // The replies are read on a thread, so a server that never answers fails this case
+        // instead of hanging the run; the wait only guards against a hang (named pipes have no
+        // read timeout), so it is generous.
+        let (done, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut replies = Vec::new();
+            let mut lines = BufReader::new(stream);
+            loop {
+                let mut line = String::new();
+                if lines.read_line(&mut line).unwrap() == 0 {
+                    break;
+                }
+                replies.extend_from_slice(line.as_bytes());
+                if serde_json::from_str::<Value>(&line).unwrap()["id"] == json!(2) {
+                    break;
+                }
             }
-            replies.extend_from_slice(line.as_bytes());
-            if serde_json::from_str::<Value>(&line).unwrap()["id"] == json!(2) {
-                break;
-            }
-        }
+            let _ = done.send(replies);
+        });
+        let replies = answer
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| "no answer".to_owned())?;
         outcome(&reply(&replies, 2))
     }
 }
 
-#[cfg(unix)]
 impl Gateway for Socket {
     fn name(&self) -> &'static str {
         "socket"
@@ -747,7 +764,6 @@ impl Gateway for Socket {
 }
 
 /// Runs `body` with every surface. The socket serves the fixture for the duration of `body`.
-#[cfg(unix)]
 fn with_gateways(t: &Tree, fx: &Fixture, body: impl FnOnce(&[&dyn Gateway])) {
     let config = SocketConfig {
         enabled: true,
@@ -777,12 +793,6 @@ fn with_gateways(t: &Tree, fx: &Fixture, body: impl FnOnce(&[&dyn Gateway])) {
         drop(guard);
         served.join().unwrap().unwrap();
     });
-}
-
-#[cfg(not(unix))]
-fn with_gateways(_: &Tree, fx: &Fixture, body: impl FnOnce(&[&dyn Gateway])) {
-    let (stdio, mcp) = (Stdio(fx), Mcp(fx));
-    body(&[&stdio, &mcp]);
 }
 
 /// Links the escape cases need inside the root: each points outside, or nowhere.

@@ -115,6 +115,7 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `robust` | Adaptive exact orientation and in-circle predicates in `arc-geom` | MIT or Apache-2.0 |
 | `rstar` | R*-tree behind the spatial index of `arc-geom`; no `rstar` type appears in a public signature | MIT or Apache-2.0 |
 | `rustix` | Directory-relative opens that never follow a link (`openat` with `O_NOFOLLOW`) behind the file roots of `arc-command`, Unix only (features `std` and `fs`, no default features) | Apache-2.0 WITH LLVM-exception or Apache-2.0 or MIT |
+| `interprocess` | Named pipes of the local automation socket in `arc-command` and of the single-instance channel in `arc-app`, on Windows only (`cfg(windows)` dependencies, no default features, no async feature); the crates contain no `unsafe`. Its dependencies `doctest-file` and `recvmsg` are 0BSD only; `widestring` and `windows-sys` are MIT or Apache-2.0 | 0BSD OR Apache-2.0 |
 | `skrifa` | Reading glyph outlines (feature `std` only, no autohinting) behind the outline text of `arc-gpu` (feature `draft`); no `skrifa` type appears in a public signature; already brought by `parley` | Apache-2.0 or MIT |
 | `spade` | Constrained Delaunay triangulation behind the polygon triangulation of `arc-geom`; no `spade` type appears in a public signature | MIT or Apache-2.0 |
 | `toml` | Reading the layer table and manifests in `xtask` | MIT or Apache-2.0 |

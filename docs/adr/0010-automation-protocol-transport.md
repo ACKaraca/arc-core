@@ -120,3 +120,33 @@ Alternatives rejected:
 
 A required client environment cannot use local sockets or pipes, or measured throughput of
 inline payloads limits a documented workflow.
+
+## Amendment: Windows named-pipe transport
+
+Additive; the protocol version stays 1.0 and the framing, handshake and session behavior are the
+ones above.
+
+- On Windows the local socket is a named pipe `\\.\pipe\arc-<name>-<hash>`. The hash is BLAKE3 of
+  the user identity (`USERDOMAIN`, `USERNAME`) and of the run directory; it separates users and
+  products. The name is not the protection.
+- The protection is the pipe's security descriptor, in the security descriptor string format
+  `D:P(A;;GA;;;OW)`: a protected DACL that grants full access to the owner only. Remote clients are
+  rejected. The first instance is created exclusively, so a name in use is refused.
+- Token files and the single-instance secret stay in the run directory and are protected by the
+  user profile's default access control only. The run directory must therefore lie in the user
+  profile; elsewhere the tokens and the secret are exposed to other users. The owner-only mode of
+  the Unix transport does not exist there.
+- Random values (tokens, the single-instance secret) come from version 4 UUIDs of the operating
+  system's random source on Windows.
+- The single-instance channel (see the application specification) proves the running instance to a
+  starting client before any path is sent: the instance sends a random secret read from a file in
+  the run directory, and acknowledges each queued message. The Unix wire format has no proof.
+- The transport uses the `interprocess` crate (0BSD OR Apache-2.0), a Windows-only dependency
+  without its async features, and `uuid` with its `v4` feature for Windows only. No crate of the
+  suite contains `unsafe` for this transport.
+- A pipe call that is in progress cannot be cancelled with these crates. A connection the server
+  ends therefore stays open for an idle peer until the peer writes or closes, and the threads
+  of such a connection are left behind. The session stops reading and writing at once.
+
+Alternative rejected: a loopback TCP listener with a token. It would open a network port that the
+user did not ask for, and any local process could reach it.

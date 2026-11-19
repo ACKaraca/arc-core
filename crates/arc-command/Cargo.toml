@@ -24,6 +24,14 @@ serde_json = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# The socket path name is a hash of the user identity and the directory (CORE-CMD-020).
+blake3 = { workspace = true }
+interprocess = { workspace = true }
+# Random session tokens and the single-instance proof come from version 4 UUIDs; the feature
+# stays off in the workspace table, so the WebAssembly build gets no random source.
+uuid = { workspace = true, features = ["v4"] }
+
 [dev-dependencies]
 insta = { workspace = true }
 proptest = { workspace = true }

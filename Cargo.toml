@@ -64,6 +64,9 @@ glam = "0.34"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 # Snapshot tests only; default features (terminal colors) stay off.
 insta = { version = "1.49", default-features = false }
+# Named pipes of the local automation socket (`arc-command`) and of the single-instance channel
+# (`arc-app`), Windows only; default features (no async runtime) stay off.
+interprocess = { version = "2.4.9", default-features = false }
 # Raw deflate decompression in `arc-io-common` (the ZIP entry reader), with the streaming API that
 # caps the output; the `with-alloc` feature (no dependencies) is on, `simd` and `std` stay off.
 # Already in the lock through `flate2`.

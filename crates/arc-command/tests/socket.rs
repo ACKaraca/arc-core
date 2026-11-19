@@ -1,20 +1,25 @@
-//! Local socket sessions (CORE-CMD-020): the automation protocol over a user-scoped Unix
-//! socket with token authentication, client and server on threads of one test.
+//! Local socket sessions (CORE-CMD-020): the automation protocol over a user-scoped local socket
+//! (a Unix domain socket, or a named pipe on Windows) with token authentication, client and server
+//! on threads of one test. Assertions about files, modes and the end of a stream the server ended
+//! are Unix-only, see the notes at those tests.
 
 #![allow(clippy::unwrap_used, clippy::panic, reason = "tests")]
-#![cfg(unix)]
 
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Barrier, Mutex};
+#[cfg(windows)]
+use std::thread;
 use std::time::Duration;
 
 use arc_command::protocol::{
@@ -27,6 +32,11 @@ use arc_command::{
 use arc_doc::Document;
 use common::{document, registry};
 use serde_json::{Value, json};
+
+#[cfg(windows)]
+use interprocess::os::windows::named_pipe::{
+    PipeStream, RecvPipeStream, SendPipeStream, pipe_mode,
+};
 
 /// A fresh directory under the system temporary directory, removed on drop.
 struct Temp(PathBuf);
@@ -63,35 +73,122 @@ impl Drop for Temp {
     }
 }
 
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
+#[cfg(unix)]
+type Reader = UnixStream;
+#[cfg(unix)]
+type Writer = UnixStream;
+#[cfg(windows)]
+type Reader = RecvPipeStream<pipe_mode::Bytes>;
+#[cfg(windows)]
+type Writer = SendPipeStream<pipe_mode::Bytes>;
+
+#[cfg(unix)]
+fn connect(path: &Path) -> (Reader, Writer) {
+    let stream = UnixStream::connect(path).unwrap();
+    (stream.try_clone().unwrap(), stream)
+}
+
+#[cfg(windows)]
+fn connect(path: &Path) -> (Reader, Writer) {
+    let pipe =
+        PipeStream::<pipe_mode::Bytes, pipe_mode::Bytes>::connect_by_path(path.to_str().unwrap())
+            .unwrap();
+    pipe.split()
+}
+
+/// How long a Windows client waits for a line before the test fails. Named pipes have no read
+/// timeout, so a reader thread feeds the lines and the wait is bounded here.
+#[cfg(windows)]
+const LINE_WAIT: Duration = Duration::from_secs(5);
+
 struct Conn {
-    reader: BufReader<UnixStream>,
-    stream: UnixStream,
+    #[cfg(unix)]
+    reader: BufReader<Reader>,
+    /// The lines of the reader thread; `None` at the end of the stream.
+    #[cfg(windows)]
+    lines: std::sync::mpsc::Receiver<Option<String>>,
+    writer: Writer,
 }
 
 impl Conn {
+    #[cfg(unix)]
     fn open(socket: &Path) -> Self {
-        let stream = UnixStream::connect(socket).unwrap();
+        let (reader, writer) = connect(socket);
         Self {
-            reader: BufReader::new(stream.try_clone().unwrap()),
-            stream,
+            reader: BufReader::new(reader),
+            writer,
         }
     }
 
-    fn send(&mut self, line: &str) {
-        self.stream.write_all(line.as_bytes()).unwrap();
-        // The server may close a connection that exceeded the handshake limit before the newline.
-        let _ = self.stream.write_all(b"\n");
+    #[cfg(windows)]
+    fn open(socket: &Path) -> Self {
+        let (reader, writer) = connect(socket);
+        let (tx, lines) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(reader);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(n) if n > 0 => {
+                        if tx.send(Some(line)).is_err() {
+                            break;
+                        }
+                    }
+                    _ => {
+                        let _ = tx.send(None);
+                        break;
+                    }
+                }
+            }
+        });
+        Self { lines, writer }
     }
 
+    fn send(&mut self, line: &str) {
+        self.writer.write_all(line.as_bytes()).unwrap();
+        // The server may close a connection that exceeded the handshake limit before the newline.
+        let _ = self.writer.write_all(b"\n");
+    }
+
+    /// Writes bytes as they are, without a newline.
+    fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.writer.write_all(bytes)
+    }
+
+    /// Bounds each read of this connection to five seconds, so a server that does not answer
+    /// fails the test instead of hanging it. Named pipes have no read timeout; a Windows run
+    /// relies on the server answering.
+    #[cfg(unix)]
+    fn bound(&self) {
+        self.reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+    }
+
+    #[cfg(windows)]
+    fn bound(&self) {}
+
     /// The next line, or `None` at the end of the stream.
+    #[cfg(unix)]
     fn read(&mut self) -> Option<Value> {
         let mut line = String::new();
         (self.reader.read_line(&mut line).unwrap() > 0)
             .then(|| serde_json::from_str(&line).unwrap())
+    }
+
+    #[cfg(windows)]
+    fn read(&mut self) -> Option<Value> {
+        match self.lines.recv_timeout(LINE_WAIT) {
+            Ok(Some(line)) => Some(serde_json::from_str(&line).unwrap()),
+            Ok(None) => None,
+            Err(_) => panic!("the server sent no line within the wait"),
+        }
     }
 
     fn call(&mut self, id: u64, method: &str, params: Value) -> Value {
@@ -159,7 +256,17 @@ fn assert_refused_and_closed(conn: &mut Conn) {
     assert_eq!(refusal["error"]["code"], -32004);
     assert_eq!(refusal["id"], Value::Null);
     assert!(refusal.get("result").is_none());
+    expect_end(conn);
+}
+
+/// The server ended the connection: the peer reads the end of the stream. Named pipes give the
+/// peer no end while the server's reader holds the pipe, so this is checked on Unix only (see
+/// the transport notes of the socket module).
+fn expect_end(conn: &mut Conn) {
+    #[cfg(unix)]
     assert!(conn.read().is_none(), "the connection stays open");
+    #[cfg(windows)]
+    let _ = conn;
 }
 
 #[test]
@@ -170,6 +277,7 @@ fn nothing_is_created_unless_automation_is_enabled() {
     assert!(!temp.socket_dir().exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn the_files_are_private_and_removed_with_the_socket() {
     let temp = Temp::new();
@@ -192,6 +300,7 @@ fn the_files_are_private_and_removed_with_the_socket() {
     assert!(!socket_path.exists() && !token_path.exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_directory_others_can_enter_is_refused() {
     let temp = Temp::new();
@@ -216,6 +325,7 @@ fn a_directory_others_can_enter_is_refused() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_live_socket_is_not_taken_over_and_a_stale_one_is_replaced() {
     let temp = Temp::new();
@@ -319,7 +429,7 @@ fn stopping_closes_open_connections() {
         let mut conn = Conn::open(socket.socket_path());
         assert!(conn.authenticate(&token(socket)).is_some());
         socket.stopper().stop();
-        assert!(conn.read().is_none());
+        expect_end(&mut conn);
     });
 }
 
@@ -331,12 +441,14 @@ fn a_failed_bind_leaves_the_first_instance_serving() {
         let error = LocalSocket::bind(&temp.config(true)).unwrap_err();
         assert_eq!(error.code(), "cmd.socket.io");
         assert_eq!(token(socket), before);
+        #[cfg(unix)]
         assert!(socket.socket_path().exists());
         let mut conn = Conn::open(socket.socket_path());
         assert_eq!(conn.authenticate(&before).unwrap()["result"], json!({}));
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn a_failed_bind_removes_only_what_it_created() {
     let temp = Temp::new();
@@ -366,12 +478,8 @@ fn a_handshake_line_is_bounded_and_a_line_at_the_limit_is_read() {
         let good = token(socket);
         // More than the limit without a newline: refused and closed.
         let mut conn = Conn::open(socket.socket_path());
-        conn.stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let _ = conn
-            .stream
-            .write_all(&vec![b'a'; MAX_HANDSHAKE_BYTES + 4096]);
+        conn.bound();
+        let _ = conn.write_raw(&vec![b'a'; MAX_HANDSHAKE_BYTES + 4096]);
         assert_refused_and_closed(&mut conn);
         // A handshake of exactly the limit, newline excluded, is accepted.
         let base = json!({"jsonrpc": "2.0", "id": 1, "method": "arc.authenticate",
@@ -394,20 +502,14 @@ fn the_handshake_has_one_deadline_for_the_whole_line() {
     serve_config(config, 1 << 20, |socket| {
         // One byte, then nothing: the deadline ends the connection.
         let mut silent = Conn::open(socket.socket_path());
-        silent
-            .stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        silent.stream.write_all(b"{").unwrap();
+        silent.bound();
+        silent.write_raw(b"{").unwrap();
         assert_refused_and_closed(&mut silent);
         // Bytes that keep arriving do not extend the deadline.
         let mut trickle = Conn::open(socket.socket_path());
-        trickle
-            .stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        trickle.bound();
         for _ in 0..40 {
-            let _ = trickle.stream.write_all(b"{");
+            let _ = trickle.write_raw(b"{");
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_refused_and_closed(&mut trickle);
@@ -566,6 +668,7 @@ fn each_client_runs_with_its_own_ceiling_and_token() {
         .unwrap();
     let reader_token = std::fs::read_to_string(&reader_file).unwrap();
     let editor_token = std::fs::read_to_string(&editor_file).unwrap();
+    #[cfg(unix)]
     assert_eq!(mode(&reader_file), 0o600);
     assert_ne!(reader_token, editor_token);
     serve_bound(&socket, &NoObserver, |socket| {
@@ -612,10 +715,7 @@ fn each_client_runs_with_its_own_ceiling_and_token() {
 
         // Removing the editor closes its connection, deletes its token and refuses it again.
         assert!(socket.remove_client("editor"));
-        assert!(
-            editor.read().is_none(),
-            "the removed client's connection closes"
-        );
+        expect_end(&mut editor);
         assert!(!editor_file.exists());
         let mut again = Conn::open(socket.socket_path());
         send_hello(&mut again, Some("editor"), &editor_token);
@@ -717,18 +817,13 @@ fn silent_connections_cannot_take_every_connection_slot() {
         let init = json!({"clientName": "a", "protocolVersions": {"min": "1.0", "max": "1.0"}});
         assert_eq!(authed.call(2, "arc.initialize", init).get("error"), None);
         // The handshake share is full of connections that never send a line.
-        let silent: Vec<UnixStream> = (0..MAX_HANDSHAKING)
-            .map(|_| UnixStream::connect(socket.socket_path()).unwrap())
+        let silent: Vec<Conn> = (0..MAX_HANDSHAKING)
+            .map(|_| Conn::open(socket.socket_path()))
             .collect();
         // The next connection is closed at once: its peer reads the end of the stream, no answer.
         let mut late = Conn::open(socket.socket_path());
-        late.stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        assert!(
-            late.read().is_none(),
-            "a connection beyond the share was served"
-        );
+        late.bound();
+        expect_end(&mut late);
         // The connection that already authenticated keeps working.
         assert_eq!(authed.call(3, "arc.ping", json!({}))["result"], json!({}));
         drop(silent);
@@ -861,8 +956,7 @@ fn a_revoked_client_runs_no_request_it_had_already_received() {
                               "params": {"document": "main", "command": "test.item.mark",
                                          "params": {}}});
             // Both requests in one write: the session holds the second while the first runs.
-            conn.stream
-                .write_all(format!("{block}\n{mark}\n").as_bytes())
+            conn.write_raw(format!("{block}\n{mark}\n").as_bytes())
                 .unwrap();
             started_rx.recv().unwrap();
             assert!(socket.remove_client("editor"));
@@ -917,6 +1011,7 @@ fn a_removed_client_name_can_be_added_again_at_once() {
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn client_files_left_by_a_dead_instance_do_not_block_the_name() {
     let temp = Temp::new();
@@ -1027,7 +1122,7 @@ fn a_render_in_flight_writes_nothing_once_its_client_is_revoked() {
         assert!(socket.remove_client("viewer"));
         release_tx.send(()).unwrap();
         // The connection was closed by the revocation, so the session answers nothing.
-        assert!(conn.read().is_none(), "no answer reaches a revoked client");
+        expect_end(&mut conn);
         drop(guard);
         served.join().unwrap().unwrap();
     });

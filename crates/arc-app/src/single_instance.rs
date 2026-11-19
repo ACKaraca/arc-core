@@ -13,8 +13,18 @@
 //! Starts decide and bind under an exclusive lock on `instance.lock` in the same directory, so
 //! two starts cannot both replace a stale socket. `poll` never blocks: it reads what has arrived
 //! and keeps the rest for the next call.
-//! Windows named pipes are not provided yet: there, [`SingleInstance::acquire`] reports that no
-//! running instance exists, so the application starts normally.
+//! Windows uses the named pipe `\\.\pipe\arc-instance-<hash>` in the instance directory, named
+//! from the user identity and the directory (`arc-command`'s `pipe_path`). It has the owner-only
+//! security descriptor of the automation socket, and its first instance is created exclusively.
+//! Before the paths are sent, the running instance proves itself: it writes a random secret to
+//! `instance.secret` in the directory, sends that secret when a client connects, and the client
+//! compares it with the file before it sends anything. The instance acknowledges a queued message
+//! with `ok`; a start that gets no matching secret or no acknowledgment within the deadline is not
+//! forwarded and returns `app.instance.busy`, so it starts as an independent instance. Each
+//! connection has one reader thread: at most 16 readers are within the deadline and at most 64
+//! have passed it without a message; a connection beyond those is closed unread. `poll` never
+//! blocks. The directory's protection is the user profile's access control: a directory outside
+//! the profile exposes the secret to other users.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -47,8 +57,8 @@ pub const MAX_PATHS_PER_SECOND: usize = 256;
 #[cfg(unix)]
 const MAX_ACCEPTS_PER_POLL: usize = 8;
 
-/// The most accepted connections that wait for their message. Beyond it the oldest is dropped.
-#[cfg(unix)]
+/// The most accepted connections that wait for their message. Beyond it the oldest is dropped
+/// (Unix) or the newest is closed unread (Windows, where each waiting connection has a reader).
 const MAX_PENDING: usize = 16;
 
 /// What [`SingleInstance::acquire`] decided.
@@ -70,8 +80,23 @@ pub struct SingleInstance {
     /// Accepted connections whose message is not complete yet, oldest first.
     #[cfg(unix)]
     pending: std::collections::VecDeque<Pending>,
+    /// Messages the reader threads have completed, waiting for `poll`.
+    #[cfg(windows)]
+    inbox: std::sync::mpsc::Receiver<Vec<PathBuf>>,
+    /// Ends the accept loop when the instance is dropped.
+    #[cfg(windows)]
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The pipe name, which the drop connects to so the accept loop wakes up.
+    #[cfg(windows)]
+    path: String,
+    /// The file that holds this instance's proof secret, removed when the instance is dropped.
+    #[cfg(windows)]
+    secret_path: PathBuf,
+    /// The accept loop, joined when the instance is dropped.
+    #[cfg(windows)]
+    accept: Option<std::thread::JoinHandle<()>>,
     /// The start of the current one-second window and the paths returned within it.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     window: Option<(Instant, usize)>,
 }
 
@@ -84,6 +109,19 @@ struct Pending {
     received: Vec<u8>,
     /// The clock value at which the connection was accepted.
     accepted: Instant,
+}
+
+/// The length of a proof secret: 64 hexadecimal digits, as `random_token` makes.
+#[cfg(any(windows, test))]
+const SECRET_LEN: usize = 64;
+
+/// Whether `offered` proves the secret `expected` of a directory. The expected secret must be a
+/// full secret; an empty or short file proves nothing.
+#[cfg(any(windows, test))]
+fn proven(offered: &[u8], expected: &[u8]) -> bool {
+    expected.len() == SECRET_LEN
+        && expected.iter().all(u8::is_ascii_hexdigit)
+        && offered == expected
 }
 
 /// The message for `paths`, one line without the newline.
@@ -104,7 +142,7 @@ fn encode(paths: &[PathBuf]) -> Result<String> {
 
 /// The absolute paths a message names. A message that is not a JSON object with a `paths` array
 /// of at most [`MAX_PATHS`] entries is `None`; entries that are not absolute paths are skipped.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn decode(line: &[u8]) -> Option<Vec<PathBuf>> {
     let value: serde_json::Value = serde_json::from_slice(line).ok()?;
     let items = value.get("paths")?.as_array()?;
@@ -131,13 +169,13 @@ mod unix {
     };
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     use arc_base::{Error, Result};
 
     use super::{
-        Acquisition, DEADLINE, MAX_ACCEPTS_PER_POLL, MAX_MESSAGE_BYTES, MAX_PATHS_PER_POLL,
-        MAX_PATHS_PER_SECOND, MAX_PENDING, Pending, SOCKET_NAME, SingleInstance, decode, encode,
+        Acquisition, DEADLINE, MAX_ACCEPTS_PER_POLL, MAX_MESSAGE_BYTES, MAX_PENDING, Pending,
+        SOCKET_NAME, SingleInstance, decode, encode,
     };
     use crate::codes;
     use crate::run_dir::check_socket_path;
@@ -378,30 +416,6 @@ mod unix {
                 }
             }
         }
-
-        /// Appends the paths of one message to `out` within the per-poll and per-second bounds.
-        fn deliver(&mut self, now: Instant, received: Vec<PathBuf>, out: &mut Vec<PathBuf>) {
-            let (start, used) = match self.window {
-                Some((start, used))
-                    if now.saturating_duration_since(start) < Duration::from_secs(1) =>
-                {
-                    (start, used)
-                }
-                _ => (now, 0),
-            };
-            let room = MAX_PATHS_PER_SECOND
-                .saturating_sub(used)
-                .min(MAX_PATHS_PER_POLL.saturating_sub(out.len()));
-            let take = room.min(received.len());
-            if take < received.len() {
-                tracing::warn!(
-                    dropped = received.len() - take,
-                    "single instance: paths over the bound dropped"
-                );
-            }
-            out.extend(received.into_iter().take(take));
-            self.window = Some((start, used + take));
-        }
     }
 
     impl Drop for SingleInstance {
@@ -411,10 +425,373 @@ mod unix {
     }
 }
 
-#[cfg(not(unix))]
 impl SingleInstance {
-    /// Named pipes are not provided yet, so no running instance is detected: the arguments are
-    /// not forwarded and the caller becomes the instance.
+    /// Appends the paths of one message to `out` within the per-poll and per-second bounds.
+    #[cfg(any(unix, windows))]
+    fn deliver(&mut self, now: Instant, received: Vec<PathBuf>, out: &mut Vec<PathBuf>) {
+        let (start, used) = match self.window {
+            Some((start, used))
+                if now.saturating_duration_since(start) < Duration::from_secs(1) =>
+            {
+                (start, used)
+            }
+            _ => (now, 0),
+        };
+        let room = MAX_PATHS_PER_SECOND
+            .saturating_sub(used)
+            .min(MAX_PATHS_PER_POLL.saturating_sub(out.len()));
+        let take = room.min(received.len());
+        if take < received.len() {
+            tracing::warn!(
+                dropped = received.len() - take,
+                "single instance: paths over the bound dropped"
+            );
+        }
+        out.extend(received.into_iter().take(take));
+        self.window = Some((start, used + take));
+    }
+}
+
+#[cfg(windows)]
+mod windows {
+    use std::collections::BTreeMap;
+    use std::fs::{self, OpenOptions};
+    use std::io::{self, BufRead, BufReader, Read, Write};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::mpsc::{SyncSender, sync_channel};
+    use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use arc_base::{Error, Result};
+    use arc_command::protocol::{pipe_path, random_token};
+    use interprocess::ConnectWaitMode;
+    use interprocess::os::windows::ToWtf16;
+    use interprocess::os::windows::named_pipe::{
+        PipeListener, PipeListenerOptions, PipeStream, pipe_mode,
+    };
+    use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+
+    use super::{
+        Acquisition, DEADLINE, MAX_MESSAGE_BYTES, MAX_PENDING, SingleInstance, decode, encode,
+        proven,
+    };
+    use crate::codes;
+
+    /// The pipe type of the channel: a byte stream.
+    type Pipe = PipeStream<pipe_mode::Bytes, pipe_mode::Bytes>;
+
+    /// The owner-only descriptor, as the automation socket uses it.
+    const OWNER_ONLY: &str = "D:P(A;;GA;;;OW)";
+
+    /// The channel's name in `pipe_path`: `\\.\pipe\arc-instance-<hash>`.
+    const CHANNEL: &str = "instance";
+
+    /// The file of the proof secret, in the instance directory. Its protection is the user
+    /// profile's access control, like the rest of the directory.
+    const SECRET_NAME: &str = "instance.secret";
+
+    /// The most readers that have held their connection past the deadline without a message. They
+    /// count apart from the readers still within the deadline, which are bounded by `MAX_PENDING`.
+    const MAX_ABANDONED: usize = 64;
+
+    /// The time a start waits for each step after the connection: the proof, the write of the
+    /// paths and the acknowledgment. A loaded machine must not turn a healthy primary into busy.
+    const STEP_WAIT: Duration = Duration::from_secs(2);
+
+    fn io_error(e: io::Error) -> Error {
+        Error::new(codes::INSTANCE_IO).with_source(e)
+    }
+
+    /// Not forwarded: the channel was taken by something that did not prove it is the instance,
+    /// or no instance took the message in time. The start then runs as an independent instance.
+    fn busy() -> Error {
+        Error::new(codes::INSTANCE_BUSY)
+    }
+
+    /// Reads one line of at most `MAX_MESSAGE_BYTES`, newline excluded. `None` when the line is
+    /// not complete within the limit or the stream ends first.
+    fn read_line<R: BufRead>(reader: &mut R) -> Option<Vec<u8>> {
+        let mut line = Vec::new();
+        // One byte past the limit: a line without its newline within the limit is refused.
+        let read = (&mut *reader)
+            .take(MAX_MESSAGE_BYTES as u64 + 1)
+            .read_until(b'\n', &mut line);
+        if read.is_ok() && line.last() == Some(&b'\n') {
+            line.pop();
+            Some(line)
+        } else {
+            None
+        }
+    }
+
+    /// Sends `line` to the instance on `name`, after the instance proved the secret of this
+    /// directory and before the message is acknowledged. `Ok(true)` when forwarded, `Ok(false)`
+    /// when no channel of that name exists, and `busy` when the connection, the proof, the write or
+    /// the acknowledgment does not arrive in time, or the proof is wrong. Only a proven channel
+    /// receives the paths.
+    fn forward(dir: &Path, name: &str, line: &str) -> Result<bool> {
+        let pipe =
+            match Pipe::connect_by_path_with_wait_mode(name, ConnectWaitMode::Timeout(DEADLINE)) {
+                Ok(pipe) => pipe,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => return Err(busy()),
+                Err(e) => return Err(io_error(e)),
+            };
+        let (recv, send) = pipe.split();
+        // A thread takes the proof, then writes the paths it is given and reads the
+        // acknowledgment. Every step is reported through a channel, so the start waits with a
+        // deadline; a write that stalls keeps only this thread, which is never joined.
+        let (proof_tx, proof_rx) = sync_channel::<Option<Vec<u8>>>(1);
+        let (go_tx, go_rx) = sync_channel::<Vec<u8>>(1);
+        let (wrote_tx, wrote_rx) = sync_channel::<bool>(1);
+        let (ack_tx, ack_rx) = sync_channel::<Option<Vec<u8>>>(1);
+        thread::Builder::new()
+            .name("arc-instance-proof".into())
+            .spawn(move || {
+                let mut reader = BufReader::new(recv);
+                if proof_tx.send(read_line(&mut reader)).is_err() {
+                    return;
+                }
+                let Ok(payload) = go_rx.recv() else {
+                    return;
+                };
+                let mut out = &send;
+                let wrote = out.write_all(&payload).is_ok();
+                let _ = wrote_tx.send(wrote);
+                if wrote {
+                    let _ = ack_tx.send(read_line(&mut reader));
+                }
+            })
+            .map_err(io_error)?;
+        let offered = proof_rx
+            .recv_timeout(STEP_WAIT)
+            .ok()
+            .flatten()
+            .ok_or_else(busy)?;
+        let expected = fs::read(dir.join(SECRET_NAME)).map_err(|_| busy())?;
+        if !proven(&offered, &expected) {
+            return Err(busy());
+        }
+        let mut payload = line.as_bytes().to_vec();
+        payload.push(b'\n');
+        go_tx.send(payload).map_err(|_| busy())?;
+        if wrote_rx.recv_timeout(STEP_WAIT) != Ok(true) {
+            return Err(busy());
+        }
+        match ack_rx.recv_timeout(STEP_WAIT).ok().flatten() {
+            Some(ack) if ack == b"ok" => Ok(true),
+            _ => Err(busy()),
+        }
+    }
+
+    /// Creates the first instance of the channel with the owner-only descriptor.
+    fn listen(name: &str) -> io::Result<PipeListener<pipe_mode::Bytes, pipe_mode::Bytes>> {
+        let text = OWNER_ONLY
+            .to_wtf_16()
+            .map_err(|_| io::Error::other("descriptor"))?;
+        let descriptor = SecurityDescriptor::deserialize(&text)?;
+        PipeListenerOptions::new()
+            .path(name)
+            .security_descriptor(Some(descriptor))
+            .create_duplex::<pipe_mode::Bytes>()
+    }
+
+    /// Writes the proof secret of this instance, replacing a file a stopped instance left behind.
+    fn write_secret(path: &Path, secret: &str) -> io::Result<()> {
+        let _ = fs::remove_file(path);
+        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        file.write_all(secret.as_bytes())
+    }
+
+    /// The readers the accept loop has started and not finished, with the time each one started.
+    #[derive(Default)]
+    struct Readers {
+        live: Mutex<BTreeMap<u64, Instant>>,
+        next: AtomicU64,
+    }
+
+    impl Readers {
+        fn lock(&self) -> MutexGuard<'_, BTreeMap<u64, Instant>> {
+            self.live.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+
+        /// Admits a new reader unless `MAX_PENDING` readers are still within the deadline or
+        /// `MAX_ABANDONED` readers have passed it without a message.
+        fn admit(&self, now: Instant) -> Option<u64> {
+            let mut live = self.lock();
+            let pending = live
+                .values()
+                .filter(|started| now.saturating_duration_since(**started) < DEADLINE)
+                .count();
+            let abandoned = live.len() - pending;
+            if pending >= MAX_PENDING || abandoned >= MAX_ABANDONED {
+                return None;
+            }
+            let id = self.next.fetch_add(1, Ordering::AcqRel);
+            live.insert(id, now);
+            Some(id)
+        }
+
+        fn finish(&self, id: u64) {
+            self.lock().remove(&id);
+        }
+    }
+
+    /// The server side of one client: it sends the proof secret, reads one message and, once the
+    /// message is queued for `poll`, acknowledges it. A client that does not match or fails a
+    /// step gets no acknowledgment.
+    fn serve_client(pipe: Pipe, secret: &str, inbox: &SyncSender<Vec<PathBuf>>) {
+        let (recv, send) = pipe.split();
+        let mut out = &send;
+        if writeln!(out, "{secret}").is_err() {
+            return;
+        }
+        let mut reader = BufReader::new(recv);
+        let Some(line) = read_line(&mut reader) else {
+            return;
+        };
+        let Some(paths) = decode(&line) else {
+            return;
+        };
+        if inbox.send(paths).is_ok() {
+            let _ = out.write_all(b"ok\n");
+        }
+    }
+
+    /// Accepts clients until stopped. Each admitted client gets a thread; a client beyond the
+    /// reader bounds is closed unread.
+    fn accept_loop(
+        listener: &PipeListener<pipe_mode::Bytes, pipe_mode::Bytes>,
+        inbox: &SyncSender<Vec<PathBuf>>,
+        stop: &AtomicBool,
+        readers: &Arc<Readers>,
+        secret: &str,
+    ) {
+        loop {
+            let accepted = listener.accept();
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            let Ok(pipe) = accepted else {
+                break;
+            };
+            let Some(id) = readers.admit(Instant::now()) else {
+                drop(pipe);
+                continue;
+            };
+            let inbox = inbox.clone();
+            let slot = Arc::clone(readers);
+            let secret = secret.to_owned();
+            let spawned = thread::Builder::new()
+                .name("arc-instance-read".into())
+                .spawn(move || {
+                    serve_client(pipe, &secret, &inbox);
+                    slot.finish(id);
+                });
+            if spawned.is_err() {
+                readers.finish(id);
+            }
+        }
+    }
+
+    impl SingleInstance {
+        /// Forwards `args` to a running instance whose channel lives in `dir`, or becomes that
+        /// instance. Each argument is made absolute before it is sent.
+        ///
+        /// # Errors
+        /// `app.instance.invalid_path` (an argument is not UTF-8), `app.instance.message_too_large`,
+        /// `app.instance.io`, and `app.instance.busy`: a running instance did not take the message
+        /// within the deadline, or the channel's owner did not prove the secret of `dir` or did not
+        /// acknowledge the message. The caller then starts as an independent instance.
+        pub fn acquire(dir: &Path, args: &[PathBuf]) -> Result<Acquisition> {
+            let absolute: Vec<PathBuf> = args
+                .iter()
+                .map(|arg| std::path::absolute(arg).map_err(io_error))
+                .collect::<Result<_>>()?;
+            let line = encode(&absolute)?;
+            fs::create_dir_all(dir).map_err(io_error)?;
+            let path = pipe_path(CHANNEL, dir);
+            let name = path
+                .to_str()
+                .ok_or_else(|| io_error(io::Error::other("path")))?;
+            if forward(dir, name, &line)? {
+                return Ok(Acquisition::Forwarded);
+            }
+            let listener = match listen(name) {
+                Ok(listener) => listener,
+                // Another start created the channel first: its instance takes the message.
+                Err(_) => {
+                    return if forward(dir, name, &line)? {
+                        Ok(Acquisition::Forwarded)
+                    } else {
+                        Err(busy())
+                    };
+                }
+            };
+            // The secret is written before the first client is accepted, so every proof a
+            // client can receive matches the file.
+            let secret = random_token().map_err(io_error)?;
+            let secret_path = dir.join(SECRET_NAME);
+            write_secret(&secret_path, &secret).map_err(io_error)?;
+            let (inbox_tx, inbox_rx) = sync_channel(MAX_PENDING);
+            let stop = Arc::new(AtomicBool::new(false));
+            let readers = Arc::new(Readers::default());
+            let accept_stop = Arc::clone(&stop);
+            let accept = thread::Builder::new()
+                .name("arc-instance-accept".into())
+                .spawn(move || {
+                    accept_loop(&listener, &inbox_tx, &accept_stop, &readers, &secret);
+                })
+                .map_err(io_error)?;
+            Ok(Acquisition::Primary(Self {
+                inbox: inbox_rx,
+                stop,
+                path: name.to_owned(),
+                secret_path,
+                accept: Some(accept),
+                window: None,
+            }))
+        }
+
+        /// Returns the absolute paths of the messages that have arrived, within the per-poll and
+        /// per-second bounds. It never blocks: the threads deliver complete messages through the
+        /// channel.
+        #[must_use]
+        pub fn poll(&mut self, now: Instant) -> Vec<PathBuf> {
+            let mut paths = Vec::new();
+            while let Ok(received) = self.inbox.try_recv() {
+                self.deliver(now, received, &mut paths);
+            }
+            paths
+        }
+    }
+
+    impl Drop for SingleInstance {
+        fn drop(&mut self) {
+            // Removed first, while the channel name is still held: a primary that starts after
+            // this one has released the name writes its own secret, which this must not remove.
+            let _ = fs::remove_file(&self.secret_path);
+            self.stop.store(true, Ordering::Release);
+            // The connection that wakes the accept is held until the accept loop has returned: a
+            // connection closed before the accept takes it can be lost.
+            let wake = Pipe::connect_by_path_with_wait_mode(
+                self.path.as_str(),
+                ConnectWaitMode::Timeout(DEADLINE),
+            );
+            if let (Ok(held), Some(accept)) = (wake, self.accept.take()) {
+                let _ = accept.join();
+                drop(held);
+            }
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+impl SingleInstance {
+    /// No local channel exists on this platform, so no running instance is detected: the arguments
+    /// are not forwarded and the caller becomes the instance.
     ///
     /// # Errors
     /// `app.instance.invalid_path` when an argument is not UTF-8 and cannot be sent; no other
@@ -433,75 +810,294 @@ impl SingleInstance {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    use super::*;
+    use crate::testutil::dir;
+
+    /// An absolute path on this platform, named `name`.
     #[cfg(unix)]
-    mod unix_tests {
+    fn abs(name: &str) -> PathBuf {
+        PathBuf::from(format!("/d/{name}"))
+    }
+
+    #[cfg(windows)]
+    fn abs(name: &str) -> PathBuf {
+        PathBuf::from(format!(r"C:\d\{name}"))
+    }
+
+    /// One complete message naming the absolute paths `paths`, newline included.
+    fn message_for(paths: &[PathBuf]) -> String {
+        let names: Vec<&str> = paths.iter().filter_map(|p| p.to_str()).collect();
+        format!("{}\n", serde_json::json!({ "paths": names }))
+    }
+
+    /// A fresh directory for the channel, private to the user where the platform has modes.
+    fn private(name: &str) -> PathBuf {
+        let run = dir(name).join("run");
+        make_private(&run);
+        run
+    }
+
+    #[cfg(unix)]
+    fn make_private(run: &Path) {
+        use std::fs::DirBuilder;
+        use std::os::unix::fs::DirBuilderExt;
+        DirBuilder::new().mode(0o700).create(run).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn make_private(run: &Path) {
+        std::fs::create_dir(run).unwrap();
+    }
+
+    /// The address of the channel of `run`: the socket file on Unix, the pipe name on Windows.
+    #[cfg(unix)]
+    fn address(run: &Path) -> PathBuf {
+        run.join(SOCKET_NAME)
+    }
+
+    #[cfg(windows)]
+    fn address(run: &Path) -> PathBuf {
+        arc_command::protocol::pipe_path("instance", run)
+    }
+
+    /// A client connected to the channel of `run`.
+    #[cfg(unix)]
+    fn connect(run: &Path) -> std::os::unix::net::UnixStream {
+        std::os::unix::net::UnixStream::connect(address(run)).unwrap()
+    }
+
+    #[cfg(windows)]
+    fn connect(
+        run: &Path,
+    ) -> interprocess::os::windows::named_pipe::DuplexPipeStream<
+        interprocess::os::windows::named_pipe::pipe_mode::Bytes,
+    > {
+        interprocess::os::windows::named_pipe::PipeStream::connect_by_path(
+            address(run).to_str().unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Polls until something arrives: delivery of a sent message is not instant on every
+    /// platform, so a test that expects paths asks again instead of assuming one poll.
+    fn settle(instance: &mut SingleInstance, now: Instant) -> Vec<PathBuf> {
+        for _ in 0..200_000 {
+            let paths = instance.poll(now);
+            if !paths.is_empty() {
+                return paths;
+            }
+            std::thread::yield_now();
+        }
+        Vec::new()
+    }
+
+    fn first(run: &Path) -> SingleInstance {
+        match SingleInstance::acquire(run, &[]).unwrap() {
+            Acquisition::Primary(instance) => instance,
+            Acquisition::Forwarded => panic!("no instance runs in a fresh directory"),
+        }
+    }
+
+    /// One complete message naming `paths`, newline included.
+    fn message(paths: &[&str]) -> String {
+        format!("{}\n", serde_json::json!({ "paths": paths }))
+    }
+
+    #[test]
+    fn a_second_start_forwards_and_the_first_receives_the_paths() {
+        let run = private("inst-forward");
+        let mut running = first(&run);
+        let base = Instant::now();
+        let forwarded = SingleInstance::acquire(&run, &[abs("a.arc"), abs("b.arc")]).unwrap();
+        assert!(matches!(forwarded, Acquisition::Forwarded));
+        assert_eq!(settle(&mut running, base), [abs("a.arc"), abs("b.arc")]);
+        assert!(running.poll(base).is_empty());
+    }
+
+    #[test]
+    fn relative_arguments_are_sent_as_absolute_paths() {
+        let run = private("inst-absolute");
+        let mut running = first(&run);
+        let _ = SingleInstance::acquire(&run, &[PathBuf::from("rel.arc")]).unwrap();
+        let received = settle(&mut running, Instant::now());
+        assert_eq!(received.len(), 1);
+        assert!(received[0].is_absolute() && received[0].ends_with("rel.arc"));
+    }
+
+    #[test]
+    fn two_starts_racing_yield_one_primary_and_one_forwarded() {
+        let run = private("inst-race");
+        let barrier = Arc::new(Barrier::new(2));
+        let starts: Vec<_> = (0..2)
+            .map(|n| {
+                let run = run.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    SingleInstance::acquire(&run, &[abs(&format!("start{n}.arc"))])
+                })
+            })
+            .collect();
+        let outcomes: Vec<Acquisition> = starts
+            .into_iter()
+            .map(|start| start.join().unwrap().unwrap())
+            .collect();
+        let mut primaries = Vec::new();
+        let mut forwarded = 0;
+        for outcome in outcomes {
+            match outcome {
+                Acquisition::Primary(instance) => primaries.push(instance),
+                Acquisition::Forwarded => forwarded += 1,
+            }
+        }
+        assert_eq!(primaries.len(), 1, "exactly one start is the instance");
+        assert_eq!(forwarded, 1, "exactly one start forwards");
+        assert_eq!(settle(&mut primaries[0], Instant::now()).len(), 1);
+    }
+
+    #[test]
+    fn oversize_and_malformed_messages_are_dropped_without_affecting_the_next() {
+        let run = private("inst-hostile");
+        let mut running = first(&run);
+        // The writer runs beside the polls: a pipe or socket buffer smaller than the message
+        // would block a write that nobody reads. The listener drops the connection at its
+        // limit, so the write may end with an error, which is the expected refusal.
+        let mut oversize = connect(&run);
+        let writer = std::thread::spawn(move || {
+            let _ = oversize.write_all(&vec![b'a'; MAX_MESSAGE_BYTES + 100]);
+        });
+        while !writer.is_finished() {
+            assert!(running.poll(Instant::now()).is_empty());
+            std::thread::yield_now();
+        }
+        writer.join().unwrap();
+        let mut malformed = connect(&run);
+        malformed.write_all(b"{not json\n").unwrap();
+        drop(malformed);
+        let _ = SingleInstance::acquire(&run, &[abs("ok.arc")]).unwrap();
+        assert_eq!(settle(&mut running, Instant::now()), [abs("ok.arc")]);
+    }
+
+    #[test]
+    fn poll_returns_immediately_while_a_connection_stays_idle() {
+        let run = private("inst-idle");
+        let mut running = first(&run);
+        let _idle = connect(&run);
+        let base = Instant::now();
+        assert!(running.poll(base).is_empty());
+        assert!(running.poll(base).is_empty());
+    }
+
+    #[test]
+    fn a_message_split_across_two_writes_is_delivered_after_the_second() {
+        let run = private("inst-split");
+        let mut running = first(&run);
+        let base = Instant::now();
+        let mut client = connect(&run);
+        let text = message_for(&[abs("split.arc")]);
+        let (head, tail) = text.split_at(text.len() - 6);
+        client.write_all(head.as_bytes()).unwrap();
+        assert!(running.poll(base).is_empty(), "no newline yet");
+        client.write_all(tail.as_bytes()).unwrap();
+        assert_eq!(settle(&mut running, base), [abs("split.arc")]);
+    }
+
+    #[test]
+    fn a_message_of_one_connection_is_served_next_to_an_idle_one() {
+        let run = private("inst-next");
+        let mut running = first(&run);
+        let _idle = connect(&run);
+        let mut client = connect(&run);
+        client
+            .write_all(message(&["/d/next.arc"]).as_bytes())
+            .unwrap();
+        assert_eq!(settle(&mut running, Instant::now()), [abs("next.arc")]);
+    }
+
+    #[test]
+    fn a_proof_must_be_a_full_secret_and_equal() {
+        let secret = "ab".repeat(32);
+        assert!(proven(secret.as_bytes(), secret.as_bytes()));
+        let other = "cd".repeat(32);
+        assert!(!proven(other.as_bytes(), secret.as_bytes()));
+        // An empty or short expected secret proves nothing, even against an empty offer.
+        assert!(!proven(b"", b""));
+        assert!(!proven(b"", secret.as_bytes()));
+        assert!(!proven(b"xy", b"xy"));
+        assert!(!proven(secret.as_bytes(), b""));
+    }
+
+    #[test]
+    fn decoding_skips_relative_entries_and_refuses_bad_shapes() {
+        let kept = abs("a.arc");
+        let text = serde_json::json!({ "paths": [kept, "b.arc"] }).to_string();
+        assert_eq!(decode(text.as_bytes()), Some(vec![kept]));
+        assert_eq!(decode(br#"{"paths":3}"#), None);
+        assert_eq!(decode(b"[]"), None);
+        let many = serde_json::json!({ "paths": vec!["x"; MAX_PATHS + 1] }).to_string();
+        assert_eq!(decode(many.as_bytes()), None);
+    }
+
+    /// A server that takes the channel name first answers with a wrong proof. The start must not
+    /// send its paths to it and must not report the message as forwarded.
+    #[cfg(windows)]
+    #[test]
+    fn an_impostor_on_the_channel_name_receives_no_path() {
+        use interprocess::os::windows::named_pipe::{PipeListenerOptions, pipe_mode};
+        use std::io::{BufRead, BufReader};
+        let run = private("inst-impostor");
+        let name = address(&run);
+        let listener = PipeListenerOptions::new()
+            .path(name.to_str().unwrap())
+            .create_duplex::<pipe_mode::Bytes>()
+            .unwrap();
+        let (line_tx, lines) = std::sync::mpsc::channel::<String>();
+        thread::spawn(move || {
+            let Ok(pipe) = listener.accept() else {
+                return;
+            };
+            let (recv, mut send) = pipe.split();
+            let _ = writeln!(&mut send, "not the secret");
+            // Every line the start sends is reported; a reader that waits forever is left behind.
+            let mut reader = BufReader::new(recv);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(n) if n > 0 => {
+                        let _ = line_tx.send(line);
+                    }
+                    _ => break,
+                }
+            }
+        });
+        // A valid-length secret other than the impostor's: the mismatch branch is what refuses it.
+        std::fs::write(run.join("instance.secret"), "ab".repeat(32)).unwrap();
+        let outcome = SingleInstance::acquire(&run, &[abs("secret.arc")]);
+        assert!(outcome.is_err(), "an unproven channel is not forwarded to");
+        // A bounded wait: no path line may arrive.
+        assert!(
+            lines.recv_timeout(DEADLINE * 4).is_err(),
+            "no path line reached the impostor"
+        );
+    }
+
+    #[cfg(unix)]
+    mod unix_only {
         use std::fs::{self, DirBuilder};
         use std::io::{Read, Write};
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         use std::os::unix::net::{UnixListener, UnixStream};
-        use std::sync::{Arc, Barrier};
-        use std::thread;
+        use std::time::{Duration, Instant};
 
         use super::super::*;
+        use super::{abs, first, message, private, settle};
         use crate::testutil::dir;
         use arc_command::protocol::SOCKET_PATH_LIMIT;
-
-        fn abs(name: &str) -> PathBuf {
-            PathBuf::from(format!("/d/{name}"))
-        }
-
-        /// A fresh private directory for the channel.
-        fn private(name: &str) -> PathBuf {
-            let run = dir(name).join("run");
-            DirBuilder::new().mode(0o700).create(&run).unwrap();
-            run
-        }
-
-        /// Polls until something arrives: delivery of a sent message is not instant on every
-        /// platform, so a test that expects paths asks again instead of assuming one poll.
-        fn settle(instance: &mut SingleInstance, now: Instant) -> Vec<PathBuf> {
-            for _ in 0..200_000 {
-                let paths = instance.poll(now);
-                if !paths.is_empty() {
-                    return paths;
-                }
-                std::thread::yield_now();
-            }
-            Vec::new()
-        }
-
-        fn first(run: &std::path::Path) -> SingleInstance {
-            match SingleInstance::acquire(run, &[]).unwrap() {
-                Acquisition::Primary(instance) => instance,
-                Acquisition::Forwarded => panic!("no instance runs in a fresh directory"),
-            }
-        }
-
-        /// One complete message naming `paths`, newline included.
-        fn message(paths: &[&str]) -> String {
-            format!("{}\n", serde_json::json!({ "paths": paths }))
-        }
-
-        #[test]
-        fn a_second_start_forwards_and_the_first_receives_the_paths() {
-            let run = private("inst-forward");
-            let mut running = first(&run);
-            let base = Instant::now();
-            let forwarded = SingleInstance::acquire(&run, &[abs("a.arc"), abs("b.arc")]).unwrap();
-            assert!(matches!(forwarded, Acquisition::Forwarded));
-            assert_eq!(settle(&mut running, base), [abs("a.arc"), abs("b.arc")]);
-            assert!(running.poll(base).is_empty());
-        }
-
-        #[test]
-        fn relative_arguments_are_sent_as_absolute_paths() {
-            let run = private("inst-absolute");
-            let mut running = first(&run);
-            let _ = SingleInstance::acquire(&run, &[PathBuf::from("rel.arc")]).unwrap();
-            let received = settle(&mut running, Instant::now());
-            assert_eq!(received.len(), 1);
-            assert!(received[0].is_absolute() && received[0].ends_with("rel.arc"));
-        }
 
         #[test]
         fn a_stale_socket_is_replaced_and_the_caller_becomes_the_instance() {
@@ -514,84 +1110,6 @@ mod tests {
             let mut instance = first(&run);
             let _ = SingleInstance::acquire(&run, &[abs("next.arc")]).unwrap();
             assert_eq!(settle(&mut instance, Instant::now()), [abs("next.arc")]);
-        }
-
-        #[test]
-        fn two_starts_racing_over_a_stale_socket_yield_one_primary_and_one_forwarded() {
-            let run = private("inst-race");
-            drop(UnixListener::bind(run.join(SOCKET_NAME)).unwrap());
-            let barrier = Arc::new(Barrier::new(2));
-            let starts: Vec<_> = (0..2)
-                .map(|n| {
-                    let run = run.clone();
-                    let barrier = Arc::clone(&barrier);
-                    thread::spawn(move || {
-                        barrier.wait();
-                        SingleInstance::acquire(&run, &[abs(&format!("start{n}.arc"))])
-                    })
-                })
-                .collect();
-            let outcomes: Vec<Acquisition> = starts
-                .into_iter()
-                .map(|start| start.join().unwrap().unwrap())
-                .collect();
-            let mut primaries = Vec::new();
-            let mut forwarded = 0;
-            for outcome in outcomes {
-                match outcome {
-                    Acquisition::Primary(instance) => primaries.push(instance),
-                    Acquisition::Forwarded => forwarded += 1,
-                }
-            }
-            assert_eq!(primaries.len(), 1, "exactly one start is the instance");
-            assert_eq!(forwarded, 1, "exactly one start forwards");
-            assert_eq!(settle(&mut primaries[0], Instant::now()).len(), 1);
-        }
-
-        #[test]
-        fn oversize_and_malformed_messages_are_dropped_without_affecting_the_next() {
-            let run = private("inst-hostile");
-            let mut running = first(&run);
-            let socket = run.join(SOCKET_NAME);
-            // The writer runs beside the polls: a socket buffer smaller than the message would
-            // block a write that nobody reads. The listener drops the connection at its limit,
-            // so the write may end with an error, which is the expected refusal.
-            let mut oversize = UnixStream::connect(&socket).unwrap();
-            let writer = std::thread::spawn(move || {
-                let _ = oversize.write_all(&vec![b'a'; MAX_MESSAGE_BYTES + 100]);
-            });
-            while !writer.is_finished() {
-                assert!(running.poll(Instant::now()).is_empty());
-                std::thread::yield_now();
-            }
-            writer.join().unwrap();
-            let mut malformed = UnixStream::connect(&socket).unwrap();
-            malformed.write_all(b"{not json\n").unwrap();
-            drop(malformed);
-            let _ = SingleInstance::acquire(&run, &[abs("ok.arc")]).unwrap();
-            assert_eq!(settle(&mut running, Instant::now()), [abs("ok.arc")]);
-        }
-
-        #[test]
-        fn poll_returns_immediately_while_a_connection_stays_idle() {
-            let run = private("inst-idle");
-            let mut running = first(&run);
-            let _idle = UnixStream::connect(run.join(SOCKET_NAME)).unwrap();
-            let base = Instant::now();
-            assert!(running.poll(base).is_empty());
-            assert!(running.poll(base).is_empty());
-        }
-
-        #[test]
-        fn a_message_split_across_two_writes_is_delivered_after_the_second() {
-            let run = private("inst-split");
-            let mut running = first(&run);
-            let base = Instant::now();
-            let mut client = UnixStream::connect(run.join(SOCKET_NAME)).unwrap();
-            client.write_all(b"{\"paths\":[\"/d/split").unwrap();
-            assert!(running.poll(base).is_empty(), "no newline yet");
-            client.write_all(b".arc\"]}\n").unwrap();
-            assert_eq!(settle(&mut running, base), [abs("split.arc")]);
         }
 
         #[test]
@@ -710,21 +1228,6 @@ mod tests {
             std::os::unix::fs::symlink(&real, &link).unwrap();
             let error = SingleInstance::acquire(&link, &[]).unwrap_err();
             assert_eq!(error.code(), "app.instance.directory");
-        }
-
-        #[test]
-        fn decoding_skips_relative_entries_and_refuses_bad_shapes() {
-            assert_eq!(
-                decode(br#"{"paths":["/a.arc","b.arc"]}"#),
-                Some(vec![PathBuf::from("/a.arc")])
-            );
-            assert_eq!(decode(br#"{"paths":3}"#), None);
-            assert_eq!(decode(b"[]"), None);
-            let many = format!(
-                "{{\"paths\":[{}]}}",
-                vec!["\"/x\""; MAX_PATHS + 1].join(",")
-            );
-            assert_eq!(decode(many.as_bytes()), None);
         }
     }
 }

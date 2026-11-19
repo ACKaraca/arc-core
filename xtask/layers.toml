@@ -43,6 +43,7 @@ third_party = [
   "glam",
   "image",
   "insta",
+  "interprocess",
   "miniz_oxide",
   "muda",
   "nalgebra",

@@ -804,7 +804,7 @@ gives `validate <file>` the package check, so parameter validation is the separa
 | `cmd.transparent.refused` | `conflict` | A transparent command cannot run beside the active prompt; the detail `reason` says why |
 | `cmd.socket.disabled` | `permission_denied` | The user has not enabled automation, so no socket is served |
 | `cmd.socket.unauthorized` | `permission_denied` | A connection did not present the session token |
-| `cmd.socket.unsupported` | `unsupported` | Local sockets are not available on this platform yet |
+| `cmd.socket.unsupported` | `unsupported` | No local socket transport exists on this platform (neither Unix nor Windows) |
 | `cmd.socket.directory` | `invalid_input` | The socket directory is not a private directory of the user, or its owner is not the owner of the token file; the detail `reason` says why |
 | `cmd.socket.path_too_long` | `invalid_input` | The socket path (the directory, a separator, `<name>.sock`) is longer than `SOCKET_PATH_LIMIT`, 103 bytes on every Unix platform; the arguments `length` and `limit` give the byte counts and the path is not reported. Nothing is created |
 | `cmd.socket.io` | `io` | The system refused an operation on the socket or its token; the detail `reason` says which |
@@ -943,8 +943,30 @@ after [ADR-0010](../adr/0010-automation-protocol-transport.md).
   when none) and when it ends for any reason (`closed`). Both calls run on the connection's own
   thread and hold no lock of the socket. A refused handshake reports nothing. `serve` is
   `serve_observed` with a `NoObserver`.
-- **Platforms**: Unix domain sockets on Linux and macOS. Named pipes for Windows are not
-  provided: `bind` there is `cmd.socket.unsupported` (after the enabled check).
+- **Platforms**: on Unix (Linux and macOS) the socket is a Unix domain socket, and the owner check
+  of the token files applies. On Windows the socket is the named pipe `\\.\pipe\arc-<name>-<hash>`,
+  where the hash is BLAKE3 of `USERDOMAIN`, `USERNAME` and the directory. The name is not the
+  protection. The protection is the pipe's security descriptor, `D:P(A;;GA;;;OW)`: full access for
+  the owner only, remote clients rejected, and the first instance created exclusively, so a name in
+  use is refused. Token files stay in the run directory and are protected by the user profile's
+  default access control only: a run directory outside the user profile exposes the tokens, and no
+  owner check applies. When the creating process runs elevated, the pipe owner can be the
+  Administrators group, and the descriptor then admits that group.
+- **Windows connections**: each connection has a reader thread and a writer thread. `end` ends the
+  session's side within one poll step: its reads and writes fail, and no request is read after it.
+  A pipe call already in progress cannot be cancelled, so the thread that is in it is left behind,
+  never joined. A connection that the server ended therefore stays open for an idle peer until the
+  peer writes or closes. A reply is queued to the writer thread in chunks; once a reply has started,
+  it is queued whole while the peer reads, and a queue that stays full for one second after the end
+  gives up. Stopping the socket is bounded with respect to peers that do not read or write: a
+  session that is inside a running command finishes that command first, and its reply then follows
+  the rules above. The live reader threads are capped at 32 (twice the connection limit); a client
+  accepted beyond that is closed unread. The stop keeps its own connection to the pipe until `serve`
+  returns, and makes up to five connection attempts to reach the pipe, so the accept it wakes is
+  not lost. A client must not wait for end-of-stream after a refusal on Windows: the refusal line is
+  the whole answer, and the connection may stay open until the client closes it.
+- On platforms with neither transport `bind` is `cmd.socket.unsupported` (after the enabled check).
+  Random tokens come from the operating system on every platform.
 
 ## View rendering as implemented
 

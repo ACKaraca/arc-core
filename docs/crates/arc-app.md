@@ -265,7 +265,8 @@ standard error. Windows uses the data directory.
 ### Single instance (CORE-APP-008)
 
 - `SingleInstance::acquire(dir, args)` returns `Acquisition::Primary(instance)` or
-  `Acquisition::Forwarded`. The channel is `instance.sock` in `dir`, a Unix domain socket. `dir` is
+  `Acquisition::Forwarded`. On Unix the channel is `instance.sock` in `dir`, a Unix domain socket
+  (on Windows see below). `dir` is
   created with mode 0700 when missing. An existing `dir` is refused (`app.instance.directory`) when
   it is a symbolic link, is not a directory, has any group or other permission, or when the socket
   this process creates in it has another owner.
@@ -301,8 +302,29 @@ standard error. Windows uses the data directory.
 - The receiving side opens each path with `Application::open`, so the application's own checks
   apply. The reference shell polls every 250 ms while its listener exists; a forwarded file
   therefore opens within a quarter of a second.
-- Non-Unix: `acquire` returns `Primary` and `poll` returns nothing, so the application starts
-  normally. Windows named pipes are open.
+- Windows: the channel is the named pipe `\\.\pipe\arc-instance-<hash>` (the name scheme of
+  `arc-command`'s pipe naming, with the instance directory in the hash), with the owner-only
+  security descriptor `D:P(A;;GA;;;OW)`. Its first instance is created exclusively; a start that
+  finds the name taken forwards instead. The running instance proves itself before a start sends
+  its paths: it writes a random secret to `instance.secret` in the directory when it starts
+  listening, and sends the secret as one line when a client connects. The client reads that line
+  within 2 s, compares it with the file (a file that is empty or not a full 64-digit secret proves
+  nothing), and only then sends `{"paths":[...]}`, which it writes within 2 s. The instance answers
+  `ok` once the message is queued for `poll`; the client waits for that line within 2 s. The
+  connection itself is waited for within 500 ms. If the proof does not arrive, does not match, the
+  write does not finish, or the `ok` does not arrive within its deadline, the start is not a
+  forward: it returns `app.instance.busy` and runs as an independent instance. This holds even when
+  the primary is slow to acknowledge, and the paths are never sent to a server that failed the
+  proof. A start that gets `busy` after its paths were written cannot know whether the primary
+  opened them; the paths may be opened once by the primary and once by the start. Each connection has one reader thread. At most 16 readers are
+  within the deadline and at most 64 have passed it without a message; a connection beyond those
+  is closed unread. The message bounds of Unix apply. `poll` never blocks. The 500 ms deadline is
+  not enforced on the reader threads: a silent connection keeps its reader until its peer writes or
+  closes. The instance directory is protected by the user profile's access control only; a
+  directory outside the profile exposes the secret to other users. The Unix wire format is
+  unchanged: the proof and the acknowledgment exist on Windows only.
+- A platform with neither channel: `acquire` returns `Primary` and `poll` returns nothing, so the
+  application starts normally.
 - Decisions: a start with no file arguments also forwards and exits, so a second launch focuses
   the running instance's open flow; the rejected alternative starts a second instance without
   files. Paths are made absolute without resolving symbolic links, which needs no file to exist;
@@ -479,7 +501,7 @@ The codes `arc-app` owns; messages are in `locales/en-US/arc-app.ftl`.
 | `app.thumbnail.io` | `io` | A thumbnail file cannot be written, read as a directory or removed |
 | `app.instance.directory` | `permission_denied` | The instance directory is a symbolic link, not a directory, open to other users, or owned by another user than the socket |
 | `app.instance.io` | `io` | The single-instance socket cannot be created, connected, configured or read |
-| `app.instance.busy` | `conflict` | A running instance exists but did not take the message within the deadline |
+| `app.instance.busy` | `conflict` | A running instance exists but did not take the message, prove itself or acknowledge it in time, or failed the proof; the start runs as an independent instance |
 | `app.instance.invalid_path` | `invalid_input` | A file argument is not valid UTF-8 and cannot be sent |
 | `app.instance.message_too_large` | `limit_exceeded` | More than 64 file arguments, or a message above 64 KiB |
 | `app.instance.path_too_long` | `invalid_input` | The socket path of the single-instance channel is longer than the platform allows (103 bytes on Unix); the arguments `length` and `limit` give the byte counts, and the path is not reported. Nothing is created or connected to |

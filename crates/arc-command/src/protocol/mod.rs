@@ -40,6 +40,9 @@ pub use events::{EVENT_QUEUE, EVENTS, MAX_SELECTED};
 pub use framing::{PipeReader, PipeWriter, pipe};
 pub use mcp::{MCP_FIXED_TOOLS, MCP_VERSIONS, McpConfig, tool_name};
 pub use query::MAX_PAGE;
+#[cfg(windows)]
+pub use socket::pipe_path;
+pub use socket::random_token;
 pub use socket::{
     ConnectionObserver, HANDSHAKE_TIMEOUT, LocalSocket, MAX_CLIENT_NAME_BYTES, MAX_CLIENTS,
     MAX_CONNECTIONS, MAX_HANDSHAKE_BYTES, MAX_HANDSHAKING, NoObserver, SOCKET_PATH_LIMIT,
