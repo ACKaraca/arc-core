@@ -33,6 +33,10 @@ pub const MAX_CONNECTIONS: usize = 16;
 /// every slot until their handshake deadline.
 pub const MAX_HANDSHAKING: usize = MAX_CONNECTIONS / 2;
 
+/// The most bytes a Unix socket path may hold, terminator excluded. Linux allows 107 and macOS
+/// 103. The smaller limit applies on every Unix platform, so a path accepted here binds everywhere.
+pub const SOCKET_PATH_LIMIT: usize = 103;
+
 /// The most clients a client table holds; `add_client` beyond it is refused.
 pub const MAX_CLIENTS: usize = 256;
 
@@ -118,6 +122,22 @@ fn io_error(reason: &'static str) -> Error {
     Error::new(codes::SOCKET_IO).with_detail("reason", reason)
 }
 
+/// Refuses a socket path longer than [`SOCKET_PATH_LIMIT`] bytes. The path is not reported: it
+/// names the user's folders, and the lengths say what is wrong.
+#[cfg(unix)]
+fn check_path_length(path: &std::path::Path) -> Result<(), Error> {
+    let length = path.as_os_str().len();
+    if length <= SOCKET_PATH_LIMIT {
+        return Ok(());
+    }
+    Err(Error::new(codes::SOCKET_PATH_TOO_LONG)
+        .with_arg("length", i64::try_from(length).unwrap_or(i64::MAX))
+        .with_arg(
+            "limit",
+            i64::try_from(SOCKET_PATH_LIMIT).unwrap_or(i64::MAX),
+        ))
+}
+
 fn check_enabled(config: &SocketConfig) -> Result<(), Error> {
     if !config.enabled {
         return Err(Error::new(codes::SOCKET_DISABLED));
@@ -153,7 +173,7 @@ mod unix {
     use super::{
         ConnectionObserver, MAX_CLIENT_NAME_BYTES, MAX_CLIENTS, MAX_CONNECTIONS,
         MAX_HANDSHAKE_BYTES, MAX_HANDSHAKING, NoObserver, SocketConfig, check_enabled,
-        constant_time_eq, directory_error, io_error, name_ok, same_owner,
+        check_path_length, constant_time_eq, directory_error, io_error, name_ok, same_owner,
     };
     use crate::error::codes;
     use crate::protocol::{LogLevel, Server, response};
@@ -376,9 +396,11 @@ mod unix {
         ///
         /// # Errors
         ///
-        /// `cmd.socket.disabled` when automation is not enabled; `cmd.socket.directory` (detail
-        /// `reason`: `name`, `not_directory`, `not_private`, `create`, `owner`); `cmd.socket.io`
-        /// (`in_use` when a live socket of that name exists, `exists`, `bind`, `token`).
+        /// `cmd.socket.disabled` when automation is not enabled; `cmd.socket.path_too_long` when
+        /// the socket path exceeds [`SOCKET_PATH_LIMIT`] bytes, before anything is created;
+        /// `cmd.socket.directory` (detail `reason`: `name`, `not_directory`, `not_private`,
+        /// `create`, `owner`); `cmd.socket.io` (`in_use` when a live socket of that name exists,
+        /// `exists`, `bind`, `token`).
         pub fn bind(config: &SocketConfig) -> Result<Self, Error> {
             Self::bind_as(config, false)
         }
@@ -398,8 +420,9 @@ mod unix {
 
         fn bind_as(config: &SocketConfig, clients: bool) -> Result<Self, Error> {
             check_enabled(config)?;
-            private_directory(&config.directory)?;
             let socket_path = config.directory.join(format!("{}.sock", config.name));
+            check_path_length(&socket_path)?;
+            private_directory(&config.directory)?;
             let token_path = config.directory.join(format!("{}.token", config.name));
             match fs::symlink_metadata(&socket_path) {
                 Ok(meta) if meta.file_type().is_socket() => {
@@ -947,6 +970,87 @@ mod tests {
         assert_eq!(
             LocalSocket::bind(&config).unwrap_err().code(),
             "cmd.socket.disabled"
+        );
+    }
+
+    /// A path of exactly `len` bytes below `base`, built from components of at most 16 bytes, or
+    /// `None` when `base` is already longer than `len` or the path cannot be made exactly that long.
+    #[cfg(unix)]
+    fn padded(base: &std::path::Path, len: usize) -> Option<PathBuf> {
+        let mut path = base.to_path_buf();
+        while path.as_os_str().len() < len {
+            let room = len - path.as_os_str().len();
+            if room == 1 {
+                return None;
+            }
+            // Each component costs its name plus a separator; never leave exactly one byte over.
+            let mut n = (room - 1).min(16);
+            if room - 1 - n == 1 {
+                n -= 1;
+            }
+            path.push("x".repeat(n));
+        }
+        (path.as_os_str().len() == len).then_some(path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_path_of_exactly_the_limit_binds() {
+        use std::fs::DirBuilder;
+        use std::os::unix::fs::DirBuilderExt;
+
+        // The socket file is "s.sock": seven bytes after the directory and its separator.
+        let base = std::env::temp_dir().join(format!("cs{}e", std::process::id()));
+        let Some(dir) = padded(&base, SOCKET_PATH_LIMIT - 7) else {
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                b"skipped: the temporary directory is too long for an exact-fit socket path\n",
+            );
+            return;
+        };
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .unwrap();
+        let config = SocketConfig {
+            enabled: true,
+            directory: dir,
+            name: "s".into(),
+            handshake_timeout: Duration::from_secs(10),
+        };
+        let socket = LocalSocket::bind(&config).unwrap();
+        assert_eq!(socket.socket_path().as_os_str().len(), SOCKET_PATH_LIMIT);
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_path_one_byte_over_the_limit_is_refused_and_nothing_is_created() {
+        let base = std::env::temp_dir().join(format!("cs{}l", std::process::id()));
+        let long = padded(&base, SOCKET_PATH_LIMIT - 6)
+            .unwrap_or_else(|| base.join("y".repeat(SOCKET_PATH_LIMIT)));
+        let config = SocketConfig {
+            enabled: true,
+            directory: long.clone(),
+            name: "s".into(),
+            handshake_timeout: Duration::from_secs(10),
+        };
+        let error = LocalSocket::bind(&config).unwrap_err();
+        assert_eq!(error.code(), "cmd.socket.path_too_long");
+        assert!(!long.exists());
+        // The arguments are the two byte counts; the path is not among them.
+        let arguments = error.arguments();
+        assert_eq!(arguments.len(), 2);
+        let limit = i64::try_from(SOCKET_PATH_LIMIT).unwrap_or(i64::MAX);
+        assert!(matches!(
+            arguments.get("length"),
+            Some(arc_base::error::Value::Int(length)) if *length > limit
+        ));
+        assert_eq!(
+            arguments.get("limit"),
+            Some(&arc_base::error::Value::Int(limit))
         );
     }
 }

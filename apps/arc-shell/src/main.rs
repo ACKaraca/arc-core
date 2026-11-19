@@ -4,15 +4,17 @@
 //! reported on standard error with a non-zero exit code.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_app::application::{AppConfig, Application};
+use arc_app::locale::Localizer;
 use arc_app::managed;
 use arc_app::recent::RecentFiles;
+use arc_app::run_dir::{self, RunInputs};
 use arc_app::shell::UserFiles;
 use arc_app::shell::event_loop::{self, Startup};
 use arc_app::single_instance::{Acquisition, SingleInstance};
@@ -105,6 +107,38 @@ fn managed_settings_path() -> PathBuf {
     }
 }
 
+/// Writes a start-up problem that does not stop the shell to standard error, once.
+fn report(error: &Error, localizer: &Localizer) {
+    let _ = writeln!(
+        std::io::stderr(),
+        "{}",
+        arc_shell::describe(error, Some(localizer))
+    );
+}
+
+/// The run directory of the sockets (see `arc_app::run_dir`), or `None` after the reason has been
+/// reported. The environment is read here and passed in.
+fn run_directory(data: &Path, localizer: &Localizer) -> Option<PathBuf> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let temp = std::env::temp_dir();
+    let chosen = run_dir::choose(&RunInputs {
+        app: "arc-shell",
+        runtime_dir: runtime.as_deref(),
+        data_dir: data,
+        temp_dir: &temp,
+        sockets: &["instance/instance.sock", "automation/automation.sock"],
+    });
+    match chosen {
+        Ok(run) => Some(run),
+        Err(e) => {
+            report(&e, localizer);
+            None
+        }
+    }
+}
+
 /// Runs the shell; the error is the start-up failure as a line for standard error.
 fn start() -> Result<(), String> {
     let fail = |e: Error| arc_shell::describe(&e, None);
@@ -128,20 +162,21 @@ fn start() -> Result<(), String> {
                 .with_source(e),
         )
     })?;
-    // A running instance takes the files and this start ends; without a channel the shell starts
-    // as the only instance.
+    // The shell starts as the only instance without automation when no run directory can be chosen
+    // or the channel cannot be set up: the reason is reported once and the start goes on.
     let files: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
-    let instance = match SingleInstance::acquire(&dir.join("instance"), &files) {
-        Ok(Acquisition::Forwarded) => return Ok(()),
-        Ok(Acquisition::Primary(instance)) => Some(instance),
-        Err(e) => {
-            let _ = writeln!(
-                std::io::stderr(),
-                "{}",
-                arc_shell::describe(&e, Some(&localizer))
-            );
-            None
-        }
+    let run = run_directory(&dir, &localizer);
+    // A running instance takes the files and this start ends.
+    let instance = match &run {
+        None => None,
+        Some(run) => match SingleInstance::acquire(&run.join("instance"), &files) {
+            Ok(Acquisition::Forwarded) => return Ok(()),
+            Ok(Acquisition::Primary(instance)) => Some(instance),
+            Err(e) => {
+                report(&e, &localizer);
+                None
+            }
+        },
     };
     let product = arc_shell::product(Arc::new(SystemClock), owner).map_err(with)?;
     let recent_path = dir.join("recent.toml");
@@ -168,20 +203,12 @@ fn start() -> Result<(), String> {
         if managed::is_fatal(&e) {
             return Err(arc_shell::describe(&e, Some(&localizer)));
         }
-        let _ = writeln!(
-            std::io::stderr(),
-            "{}",
-            arc_shell::describe(&e, Some(&localizer))
-        );
+        report(&e, &localizer);
     }
     for file in &files {
         // A file that cannot be opened is reported and the shell still starts.
         if let Err(e) = app.open(file) {
-            let _ = writeln!(
-                std::io::stderr(),
-                "{}",
-                arc_shell::describe(&e, Some(&localizer))
-            );
+            report(&e, &localizer);
         }
     }
     if app.tabs().is_empty() {
@@ -203,7 +230,7 @@ fn start() -> Result<(), String> {
         os_locales,
         log_dir: Some(dir.join("logs")),
         instance,
-        automation_dir: Some(dir.join("automation")),
+        automation_dir: run.map(|run| run.join("automation")),
     });
     result.map_err(with)
 }

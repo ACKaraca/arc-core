@@ -886,7 +886,7 @@ fn cases(t: &Tree) -> Vec<Case> {
 
 #[test]
 fn every_surface_refuses_every_escape_case_with_the_same_code() {
-    let t = Tree::new("surfaces");
+    let t = Tree::new("sf");
     plant_links(&t);
     let fx = fixture(&t.root);
     with_gateways(&t, &fx, |gateways| {
@@ -917,7 +917,7 @@ fn every_surface_refuses_every_escape_case_with_the_same_code() {
 #[cfg(unix)]
 #[test]
 fn a_file_swapped_for_a_link_is_never_read_on_any_surface() {
-    let t = Tree::new("surfaces-race-file");
+    let t = Tree::new("sf-rf");
     let fx = fixture(&t.root);
     let at = t.root.join("swap");
     fs::write(&at, "inside").unwrap();
@@ -961,7 +961,7 @@ fn a_file_swapped_for_a_link_is_never_read_on_any_surface() {
 #[cfg(unix)]
 #[test]
 fn a_directory_swapped_for_a_link_receives_no_file_on_any_surface() {
-    let t = Tree::new("surfaces-race-dir");
+    let t = Tree::new("sf-rd");
     let fx = fixture(&t.root);
     let at = t.root.join("d");
     fs::create_dir(&at).unwrap();

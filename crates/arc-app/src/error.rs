@@ -178,6 +178,13 @@ pub mod codes {
         category: Category::LimitExceeded,
         message_id: "app-instance-message-too-large",
     };
+    /// The socket path of the single-instance channel, or of the run directory chosen for it, is
+    /// longer than the platform allows; the arguments `length` and `limit` give the byte counts.
+    pub const INSTANCE_PATH_TOO_LONG: ErrorCode = ErrorCode {
+        code: "app.instance.path_too_long",
+        category: Category::InvalidInput,
+        message_id: "app-instance-path-too-long",
+    };
     /// The automation socket cannot start its serving thread.
     pub const AUTOMATION_FAILED: ErrorCode = ErrorCode {
         code: "app.automation.failed",
@@ -307,6 +314,7 @@ pub mod codes {
         INSTANCE_BUSY,
         INSTANCE_INVALID_PATH,
         INSTANCE_MESSAGE_TOO_LARGE,
+        INSTANCE_PATH_TOO_LONG,
         AUTOMATION_FAILED,
         AUTOMATION_CLIENT_INVALID,
         RECENT_NOT_FOUND,

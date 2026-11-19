@@ -19,6 +19,7 @@ pub mod product;
 pub mod recent;
 #[cfg(feature = "render")]
 pub mod render;
+pub mod run_dir;
 pub mod settings;
 pub mod settings_editor;
 pub mod settings_file;
@@ -42,5 +43,25 @@ pub(crate) mod testutil {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A path of exactly `len` bytes below `base`, built from components of at most 16 bytes.
+    /// `None` when `base` is already longer than `len` or the length cannot be reached.
+    #[cfg(unix)]
+    pub(crate) fn padded(base: &std::path::Path, len: usize) -> Option<PathBuf> {
+        let mut path = base.to_path_buf();
+        while path.as_os_str().len() < len {
+            let room = len - path.as_os_str().len();
+            if room == 1 {
+                return None;
+            }
+            // Each component costs its name plus a separator; never leave exactly one byte over.
+            let mut n = (room - 1).min(16);
+            if room - 1 - n == 1 {
+                n -= 1;
+            }
+            path.push("x".repeat(n));
+        }
+        (path.as_os_str().len() == len).then_some(path)
     }
 }

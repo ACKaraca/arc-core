@@ -70,6 +70,7 @@ cmd-socket-disabled = Automation is not enabled.
 cmd-socket-unauthorized = The connection was refused.
 cmd-socket-unsupported = Local automation connections are not available on this platform yet.
 cmd-socket-directory = The folder for the automation connection is not private to you.
+cmd-socket-path-too-long = The automation connection folder is too long: the socket path is { $length } bytes and the limit is { $limit } bytes.
 cmd-socket-io = The automation connection could not be set up.
 cmd-render-unavailable = No renderer is available to draw a view.
 cmd-render-size-exceeded = The requested size is above the limit; the detail { $limit } names it.

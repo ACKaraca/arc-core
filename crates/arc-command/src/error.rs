@@ -394,6 +394,13 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "cmd-socket-directory",
     };
+    /// The path of the local socket is longer than the platform allows; the arguments `length`
+    /// and `limit` give the byte counts. The path itself is not reported.
+    pub const SOCKET_PATH_TOO_LONG: ErrorCode = ErrorCode {
+        code: "cmd.socket.path_too_long",
+        category: Category::InvalidInput,
+        message_id: "cmd-socket-path-too-long",
+    };
     /// The system refused an operation on the local socket or its token; the detail `reason`
     /// says which.
     pub const SOCKET_IO: ErrorCode = ErrorCode {
@@ -505,6 +512,7 @@ pub mod codes {
         SOCKET_UNAUTHORIZED,
         SOCKET_UNSUPPORTED,
         SOCKET_DIRECTORY,
+        SOCKET_PATH_TOO_LONG,
         SOCKET_IO,
         RENDER_UNAVAILABLE,
         RENDER_SIZE_EXCEEDED,

@@ -34,6 +34,7 @@ app-instance-io = The channel to the running application could not be used.
 app-instance-busy = The running application did not answer in time.
 app-instance-invalid-path = A file name cannot be sent to the running application because it is not valid text.
 app-instance-message-too-large = Too many files were given to send to the running application.
+app-instance-path-too-long = The folder for the running application's channel is too long for a local socket: the socket path is { $length } bytes and the limit is { $limit } bytes.
 app-setting-automation-enabled = Allows other programs to control the application through the local automation socket.
 app-setting-automation-grants = The automation clients and their grants, kept in the user settings and not edited here.
 app-automation-failed = The automation socket could not be started.

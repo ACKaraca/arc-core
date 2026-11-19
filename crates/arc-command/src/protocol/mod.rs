@@ -42,7 +42,8 @@ pub use mcp::{MCP_FIXED_TOOLS, MCP_VERSIONS, McpConfig, tool_name};
 pub use query::MAX_PAGE;
 pub use socket::{
     ConnectionObserver, HANDSHAKE_TIMEOUT, LocalSocket, MAX_CLIENT_NAME_BYTES, MAX_CLIENTS,
-    MAX_CONNECTIONS, MAX_HANDSHAKE_BYTES, MAX_HANDSHAKING, NoObserver, SocketConfig, SocketStop,
+    MAX_CONNECTIONS, MAX_HANDSHAKE_BYTES, MAX_HANDSHAKING, NoObserver, SOCKET_PATH_LIMIT,
+    SocketConfig, SocketStop,
 };
 pub use view::{
     DEFAULT_DISPLAY_MODE, DEFAULT_SIZE, DEFAULT_VIEW, MAX_INLINE_BYTES, MAX_PIXELS, MAX_SECTIONS,

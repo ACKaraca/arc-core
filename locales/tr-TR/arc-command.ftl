@@ -70,6 +70,7 @@ cmd-socket-disabled = Otomasyon etkinleştirilmemiş.
 cmd-socket-unauthorized = Bağlantı reddedildi.
 cmd-socket-unsupported = Yerel otomasyon bağlantıları bu platformda henüz kullanılamıyor.
 cmd-socket-directory = Otomasyon bağlantısının klasörü yalnızca size ait değil.
+cmd-socket-path-too-long = Otomasyon bağlantısının klasörü çok uzun: soket yolu { $length } bayt, sınır ise { $limit } bayt.
 cmd-socket-io = Otomasyon bağlantısı kurulamadı.
 cmd-render-unavailable = Bir görünümü çizecek işleyici yok.
 cmd-render-size-exceeded = İstenen boyut sınırın üzerinde; { $limit } ayrıntısı hangi sınır olduğunu gösterir.

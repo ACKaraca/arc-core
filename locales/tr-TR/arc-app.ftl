@@ -34,6 +34,7 @@ app-instance-io = Çalışan uygulamaya giden kanal kullanılamadı.
 app-instance-busy = Çalışan uygulama zamanında yanıt vermedi.
 app-instance-invalid-path = Geçerli metin olmadığı için bir dosya adı çalışan uygulamaya gönderilemiyor.
 app-instance-message-too-large = Çalışan uygulamaya gönderilmek için çok fazla dosya verildi.
+app-instance-path-too-long = Çalışan uygulamanın kanalının klasörü yerel soket için çok uzun: soket yolu { $length } bayt, sınır ise { $limit } bayt.
 app-setting-automation-enabled = Diğer programların yerel otomasyon soketi üzerinden uygulamayı denetlemesine izin verir.
 app-setting-automation-grants = Otomasyon istemcileri ve yetkileri; kullanıcı ayarlarında tutulur, burada düzenlenmez.
 app-automation-failed = Otomasyon soketi başlatılamadı.

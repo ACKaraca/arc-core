@@ -140,6 +140,7 @@ mod unix {
         MAX_PATHS_PER_SECOND, MAX_PENDING, Pending, SOCKET_NAME, SingleInstance, decode, encode,
     };
     use crate::codes;
+    use crate::run_dir::check_socket_path;
 
     /// The lock file that serializes the decisions of [`SingleInstance::acquire`].
     const LOCK_NAME: &str = "instance.lock";
@@ -252,11 +253,15 @@ mod unix {
         /// two starts that find the same stale socket cannot both replace it.
         ///
         /// # Errors
-        /// `app.instance.directory` (not a private directory), `app.instance.io`,
-        /// `app.instance.busy` (a running instance did not take the message within the deadline),
+        /// `app.instance.path_too_long` when the socket path exceeds the platform limit (nothing is
+        /// created or connected to), `app.instance.directory` (not a private directory),
+        /// `app.instance.io`, `app.instance.busy` (a running instance did not take the message within the deadline),
         /// `app.instance.invalid_path` (an argument is not UTF-8) and
         /// `app.instance.message_too_large`.
         pub fn acquire(dir: &Path, args: &[PathBuf]) -> Result<Acquisition> {
+            // Checked first: a path the platform cannot bind is refused before anything is created
+            // or connected to, and the caller decides what to do.
+            check_socket_path(&dir.join(SOCKET_NAME))?;
             let absolute: Vec<PathBuf> = args
                 .iter()
                 .map(|arg| {
@@ -439,6 +444,7 @@ mod tests {
 
         use super::super::*;
         use crate::testutil::dir;
+        use arc_command::protocol::SOCKET_PATH_LIMIT;
 
         fn abs(name: &str) -> PathBuf {
             PathBuf::from(format!("/d/{name}"))
@@ -547,11 +553,18 @@ mod tests {
             let run = private("inst-hostile");
             let mut running = first(&run);
             let socket = run.join(SOCKET_NAME);
+            // The writer runs beside the polls: a socket buffer smaller than the message would
+            // block a write that nobody reads. The listener drops the connection at its limit,
+            // so the write may end with an error, which is the expected refusal.
             let mut oversize = UnixStream::connect(&socket).unwrap();
-            oversize
-                .write_all(&vec![b'a'; MAX_MESSAGE_BYTES + 100])
-                .unwrap();
-            drop(oversize);
+            let writer = std::thread::spawn(move || {
+                let _ = oversize.write_all(&vec![b'a'; MAX_MESSAGE_BYTES + 100]);
+            });
+            while !writer.is_finished() {
+                assert!(running.poll(Instant::now()).is_empty());
+                std::thread::yield_now();
+            }
+            writer.join().unwrap();
             let mut malformed = UnixStream::connect(&socket).unwrap();
             malformed.write_all(b"{not json\n").unwrap();
             drop(malformed);
@@ -648,6 +661,36 @@ mod tests {
             client.write_all(message(&refs).as_bytes()).unwrap();
             let next_second = base + Duration::from_secs(1);
             assert_eq!(running.poll(next_second).len(), MAX_PATHS_PER_POLL);
+        }
+
+        #[test]
+        fn a_socket_path_one_byte_over_the_limit_is_refused_before_anything_is_created() {
+            let base = std::env::temp_dir().join(format!("il{}", std::process::id()));
+            let long = crate::testutil::padded(&base, SOCKET_PATH_LIMIT - 13).unwrap();
+            let error = SingleInstance::acquire(&long, &[]).unwrap_err();
+            assert_eq!(error.code(), "app.instance.path_too_long");
+            assert!(!long.exists());
+            assert_eq!(
+                error.arguments().get("length"),
+                Some(&arc_base::error::Value::Int(
+                    i64::try_from(SOCKET_PATH_LIMIT + 1).unwrap_or(0)
+                ))
+            );
+        }
+
+        #[test]
+        fn a_socket_path_of_exactly_the_limit_binds() {
+            let base = std::env::temp_dir().join(format!("ie{}", std::process::id()));
+            let run = crate::testutil::padded(&base, SOCKET_PATH_LIMIT - 14).unwrap();
+            DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&run)
+                .unwrap();
+            let instance = first(&run);
+            assert!(run.join(SOCKET_NAME).exists());
+            drop(instance);
+            let _ = fs::remove_dir_all(&base);
         }
 
         #[test]

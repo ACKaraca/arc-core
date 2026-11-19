@@ -797,6 +797,7 @@ gives `validate <file>` the package check, so parameter validation is the separa
 | `cmd.socket.unauthorized` | `permission_denied` | A connection did not present the session token |
 | `cmd.socket.unsupported` | `unsupported` | Local sockets are not available on this platform yet |
 | `cmd.socket.directory` | `invalid_input` | The socket directory is not a private directory of the user, or its owner is not the owner of the token file; the detail `reason` says why |
+| `cmd.socket.path_too_long` | `invalid_input` | The socket path (the directory, a separator, `<name>.sock`) is longer than `SOCKET_PATH_LIMIT`, 103 bytes on every Unix platform; the arguments `length` and `limit` give the byte counts and the path is not reported. Nothing is created |
 | `cmd.socket.io` | `io` | The system refused an operation on the socket or its token; the detail `reason` says which |
 | `cmd.render.unavailable` | `unsupported` | No renderer is attached, so a view cannot be rendered |
 | `cmd.render.size_exceeded` | `limit_exceeded` | The requested width, height or pixel count is above the bound; the detail `limit` names it (`side` or `pixels`) |
@@ -874,6 +875,11 @@ after [ADR-0010](../adr/0010-automation-protocol-transport.md).
   exists is `cmd.socket.io` with reason `token`. Dropping the `LocalSocket` removes the two files
   its `bind` created. The application chooses the directory (for example below the user's
   runtime directory); this layer reads no environment.
+- **Path length**: the socket path must hold at most `SOCKET_PATH_LIMIT` (103) bytes, the smaller
+  of the Unix limits (Linux 107, macOS 103), so that a path accepted here binds on every Unix
+  platform. `bind` checks it first, before the directory is created or any connection is made, and
+  answers `cmd.socket.path_too_long`. The client helper of this layer does not exist yet; a client
+  that connects must apply the same limit to the path it connects to.
 - **Token**: 32 bytes from the operating system's random source (`/dev/urandom`), as 64
   hexadecimal digits. It is compared in constant time (equal lengths, every byte folded), and
   never logged, sent, printed by `Debug` or reported in an error.

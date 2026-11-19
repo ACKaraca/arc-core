@@ -214,6 +214,31 @@ reports, Hub) are added in later parts behind settings that default to off.
 - Known gap: the reference shell logs the ignored entries before the log subscriber exists, so
   those records are not written. Logging is installed when the event loop starts.
 
+### Run directory
+
+The single-instance channel and the automation socket live in a short run directory, because a
+Unix socket path holds at most 103 bytes (`SOCKET_PATH_LIMIT` of `arc-command`). `run_dir::choose`
+(Unix) picks it from the candidates that the caller reads (`RunInputs`); it reads no environment
+variable. The order, first match wins:
+
+1. `<runtime>/<app>`, when the runtime directory (`XDG_RUNTIME_DIR`) is set, absolute and not
+   empty, and the folder is a directory that is not a symbolic link, owned by the current user, with
+   mode 0700. A missing folder is created with mode 0700. A folder that fails a check is not used,
+   and the next candidate is tried.
+2. The per-user data directory, when every socket path below it fits the limit.
+3. `<temporary>/<app>-<uid>`, created with mode 0700 when missing. An existing folder must pass the
+   same checks as in step 1 (`app.instance.directory` with reason `not_directory`, `owner` or
+   `not_private`, otherwise `app.instance.io` with reason `create`). A folder whose socket paths do
+   not fit is `app.instance.path_too_long`, and the call fails.
+
+The user id is the owner of a probe file the call creates in the parent folder and removes again,
+so no libc call is needed. The chosen folder holds the sockets' own folders `instance` and
+`automation`, which the socket code creates with its own private-directory checks; those checks
+apply to whatever is chosen. The reference shell passes the choice to `SingleInstance::acquire`
+(`<run>/instance`) and to the automation switch (`<run>/automation`). When no folder is chosen, the
+shell starts as the only instance with automation unavailable and reports the reason once on
+standard error. Windows uses the data directory.
+
 ### Single instance (CORE-APP-008)
 
 - `SingleInstance::acquire(dir, args)` returns `Acquisition::Primary(instance)` or
@@ -221,6 +246,10 @@ reports, Hub) are added in later parts behind settings that default to off.
   created with mode 0700 when missing. An existing `dir` is refused (`app.instance.directory`) when
   it is a symbolic link, is not a directory, has any group or other permission, or when the socket
   this process creates in it has another owner.
+- The socket path `dir/instance.sock` must fit the platform limit (103 bytes on Unix). `acquire`
+  checks it first, before `dir` is created, the lock is taken or any connection is made, and fails
+  with `app.instance.path_too_long`. It does not fall back to "no running instance": the caller
+  decides. The reference shell then starts without single-instance forwarding.
 - A start first connects and writes one line, `{"paths":[...]}`, of absolute paths, then closes its
   write side. A running instance that accepts the line makes the start `Forwarded`; the caller
   exits. Each argument is made absolute with `std::path::absolute` before it is sent. An argument
@@ -430,6 +459,7 @@ The codes `arc-app` owns; messages are in `locales/en-US/arc-app.ftl`.
 | `app.instance.busy` | `conflict` | A running instance exists but did not take the message within the deadline |
 | `app.instance.invalid_path` | `invalid_input` | A file argument is not valid UTF-8 and cannot be sent |
 | `app.instance.message_too_large` | `limit_exceeded` | More than 64 file arguments, or a message above 64 KiB |
+| `app.instance.path_too_long` | `invalid_input` | The socket path of the single-instance channel is longer than the platform allows (103 bytes on Unix); the arguments `length` and `limit` give the byte counts, and the path is not reported. Nothing is created or connected to |
 | `app.product.invalid_id` | `invalid_input` | A panel, tool or extractor identifier is not a dotted key, or a file extension is malformed or can neither be opened nor saved |
 | `app.product.duplicate` | `conflict` | A panel, tool, extractor or file extension is registered twice |
 | `app.product.unknown_type` | `not_found` | An extractor names an object type that is not registered |
