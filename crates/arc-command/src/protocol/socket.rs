@@ -7,8 +7,9 @@
 //! - [`LocalSocket::bind`]: one session token, written to `<name>.token`, admits every client and
 //!   every connection runs with the server's ceiling.
 //! - [`LocalSocket::bind_clients`]: a table of clients, each with its own token file
-//!   (`<name>.<client>.token`) and its own permission ceiling. Clients are added and removed with
+//!   (`<name>@<client>.token`) and its own permission ceiling. Clients are added and removed with
 //!   [`LocalSocket::add_client`] and [`LocalSocket::remove_client`] while the socket serves.
+//!   The `@` separator is outside the name alphabet, so no socket's file can be another's.
 //!
 //! Tokens are random, written with owner-only permissions, compared in constant time and never
 //! logged or sent. The first line of a connection is the transport handshake `arc.authenticate`;
@@ -25,6 +26,14 @@ use crate::error::codes;
 
 /// The most simultaneous connections; further ones are closed at once.
 pub const MAX_CONNECTIONS: usize = 16;
+
+/// The most connections that may wait in their handshake at once. The rest of the connection
+/// slots stay free for clients that already authenticated, so silent connections cannot hold
+/// every slot until their handshake deadline.
+pub const MAX_HANDSHAKING: usize = MAX_CONNECTIONS / 2;
+
+/// The most clients a client table holds; `add_client` beyond it is refused.
+pub const MAX_CLIENTS: usize = 256;
 
 /// The longest handshake line, in bytes.
 pub const MAX_HANDSHAKE_BYTES: usize = 1024;
@@ -141,9 +150,9 @@ mod unix {
     use serde_json::Value;
 
     use super::{
-        ConnectionObserver, MAX_CLIENT_NAME_BYTES, MAX_CONNECTIONS, MAX_HANDSHAKE_BYTES,
-        NoObserver, SocketConfig, check_enabled, constant_time_eq, directory_error, io_error,
-        name_ok, same_owner,
+        ConnectionObserver, MAX_CLIENT_NAME_BYTES, MAX_CLIENTS, MAX_CONNECTIONS,
+        MAX_HANDSHAKE_BYTES, MAX_HANDSHAKING, NoObserver, SocketConfig, check_enabled,
+        constant_time_eq, directory_error, io_error, name_ok, same_owner,
     };
     use crate::error::codes;
     use crate::protocol::{LogLevel, Server, response};
@@ -161,11 +170,16 @@ mod unix {
         token_path: PathBuf,
     }
 
-    /// A connection the socket holds: the client it authenticated as, if any, and a handle that
-    /// ends it.
+    /// A connection the socket holds: the client it authenticated as, if any, a handle that ends
+    /// it, whether it still waits in its handshake, and the flag that revokes its session.
     struct Open {
         client: Option<(String, u64)>,
         stream: UnixStream,
+        handshaking: bool,
+        /// Set when the client is removed or the socket stops. The session then reads no further
+        /// request and starts no queued run; a run already running is cancelled by the end of
+        /// its reader.
+        revoked: Arc<AtomicBool>,
     }
 
     /// The mutable state of a socket, behind one lock that is never held across I/O that waits
@@ -174,6 +188,8 @@ mod unix {
     struct Table {
         clients: BTreeMap<String, Client>,
         open: BTreeMap<u64, Open>,
+        /// The connections in `open` that wait in their handshake.
+        handshaking: usize,
         next_connection: u64,
         next_serial: u64,
     }
@@ -415,7 +431,7 @@ mod unix {
             }
         }
 
-        /// Adds a client of the table: writes its token to `<name>.<client>.token` (owner-only,
+        /// Adds a client of the table: writes its token to `<name>@<client>.token` (owner-only,
         /// created exclusively) and grants it `ceiling`. The connections of the client run with
         /// the intersection of `ceiling` and the server's ceiling.
         ///
@@ -426,7 +442,8 @@ mod unix {
         ///
         /// `cmd.socket.io` with detail `reason`: `single_token` (the socket is in single-token
         /// mode), `client_name` (not 1 to 64 characters of the socket name's alphabet), `exists`
-        /// (the client is in the table already) or `token` (the file could not be written).
+        /// (the client is in the table already), `clients` (the table holds [`MAX_CLIENTS`]
+        /// clients) or `token` (the file could not be written).
         pub fn add_client(
             &self,
             client: &str,
@@ -438,10 +455,13 @@ mod unix {
             if !name_ok(client) {
                 return Err(io_error("client_name"));
             }
-            let token_path = self.directory.join(format!("{}.{client}.token", self.name));
+            let token_path = self.directory.join(format!("{}@{client}.token", self.name));
             let mut table = self.lock();
             if table.clients.contains_key(client) {
                 return Err(io_error("exists"));
+            }
+            if table.clients.len() >= MAX_CLIENTS {
+                return Err(io_error("clients"));
             }
             let token = write_token(&self.directory, &token_path)?;
             let serial = table.next_serial;
@@ -458,26 +478,26 @@ mod unix {
             Ok(token_path)
         }
 
-        /// Removes a client of the table: its connections are closed, its next handshake is
-        /// refused, and its token file is removed. Returns false when no such client exists.
+        /// Removes a client of the table: its connections are revoked and closed, its next
+        /// handshake is refused, and its token file is removed. Returns false when no such client
+        /// exists.
         pub fn remove_client(&self, client: &str) -> bool {
-            let removed = {
-                let mut table = self.lock();
-                let Some(entry) = table.clients.remove(client) else {
-                    return false;
-                };
-                for open in table.open.values() {
-                    let owned = open
-                        .client
-                        .as_ref()
-                        .is_some_and(|(name, serial)| name == client && *serial == entry.serial);
-                    if owned {
-                        let _ = open.stream.shutdown(std::net::Shutdown::Both);
-                    }
-                }
-                entry.token_path
+            let mut table = self.lock();
+            let Some(entry) = table.clients.remove(client) else {
+                return false;
             };
-            let _ = fs::remove_file(removed);
+            for open in table.open.values() {
+                let owned = open
+                    .client
+                    .as_ref()
+                    .is_some_and(|(name, serial)| name == client && *serial == entry.serial);
+                if owned {
+                    open.revoked.store(true, Ordering::Release);
+                    let _ = open.stream.shutdown(std::net::Shutdown::Both);
+                }
+            }
+            // Deleted under the lock, so an add of the same name cannot write its file first.
+            let _ = fs::remove_file(&entry.token_path);
             true
         }
 
@@ -524,20 +544,21 @@ mod unix {
                             break;
                         }
                     };
-                    // Over the limit (or unclonable) the connection is closed unanswered.
-                    let Some(connection) = self.register(&stream) else {
+                    // Over a limit (or unclonable) the connection is closed unanswered.
+                    let Some((connection, revoked)) = self.register(&stream) else {
                         continue;
                     };
                     let spawned = thread::Builder::new()
                         .name("arc-socket-session".into())
                         .spawn_scoped(scope, move || {
-                            self.connection(server, observer, connection, stream);
+                            self.connection(server, observer, connection, revoked, stream);
                         });
                     if spawned.is_err() {
                         self.forget(connection);
                     }
                 }
                 for open in self.lock().open.values() {
+                    open.revoked.store(true, Ordering::Release);
                     let _ = open.stream.shutdown(std::net::Shutdown::Both);
                 }
             });
@@ -548,29 +569,41 @@ mod unix {
             self.table.lock().unwrap_or_else(PoisonError::into_inner)
         }
 
-        /// Records a new connection, unless the limit is reached. The identifier is new for the
-        /// life of the socket.
-        fn register(&self, stream: &UnixStream) -> Option<u64> {
+        /// Records a new connection, unless the connection limit is reached or the handshake
+        /// share is full. The identifier is new for the life of the socket.
+        fn register(&self, stream: &UnixStream) -> Option<(u64, Arc<AtomicBool>)> {
             let mut table = self.lock();
-            if table.open.len() >= MAX_CONNECTIONS {
+            if table.open.len() >= MAX_CONNECTIONS || table.handshaking >= MAX_HANDSHAKING {
                 return None;
             }
             let connection = table.next_connection;
             // An exhausted counter refuses connections rather than reusing an identifier.
             table.next_connection = connection.checked_add(1)?;
             let handle = stream.try_clone().ok()?;
+            let revoked = Arc::new(AtomicBool::new(false));
+            table.handshaking += 1;
             table.open.insert(
                 connection,
                 Open {
                     client: None,
                     stream: handle,
+                    handshaking: true,
+                    revoked: Arc::clone(&revoked),
                 },
             );
-            Some(connection)
+            Some((connection, revoked))
         }
 
+        /// Removes a connection from the table, releasing its handshake slot when it still had one.
         fn forget(&self, connection: u64) {
-            self.lock().open.remove(&connection);
+            let mut table = self.lock();
+            if table
+                .open
+                .remove(&connection)
+                .is_some_and(|open| open.handshaking)
+            {
+                table.handshaking = table.handshaking.saturating_sub(1);
+            }
         }
 
         /// The grant of a handshake that is well formed and authenticates: in single-token mode
@@ -629,24 +662,30 @@ mod unix {
             Some(admitted)
         }
 
-        /// Attaches an admitted handshake to its connection. False when the client was removed
-        /// while the handshake ran, which refuses the connection.
+        /// Attaches an admitted handshake to its connection, which leaves the handshake share.
+        /// False when the client was removed while the handshake ran, which refuses the connection.
         fn admit(&self, connection: u64, admitted: &Admitted) -> bool {
-            let mut table = self.lock();
-            let Some((name, serial)) = &admitted.entry else {
-                return true;
-            };
-            let current = table
-                .clients
-                .get(name)
-                .is_some_and(|client| client.serial == *serial);
-            match table.open.get_mut(&connection) {
-                Some(open) if current => {
-                    open.client = Some((name.clone(), *serial));
-                    true
+            let mut guard = self.lock();
+            let table = &mut *guard;
+            if let Some((name, serial)) = &admitted.entry {
+                let current = table
+                    .clients
+                    .get(name)
+                    .is_some_and(|client| client.serial == *serial);
+                if !current {
+                    return false;
                 }
-                _ => false,
             }
+            let Some(open) = table.open.get_mut(&connection) else {
+                return false;
+            };
+            if let Some((name, serial)) = &admitted.entry {
+                open.client = Some((name.clone(), *serial));
+            }
+            if std::mem::replace(&mut open.handshaking, false) {
+                table.handshaking = table.handshaking.saturating_sub(1);
+            }
+            true
         }
 
         fn connection(
@@ -654,6 +693,7 @@ mod unix {
             server: &Server<'_>,
             observer: &dyn ConnectionObserver,
             connection: u64,
+            revoked: Arc<AtomicBool>,
             stream: UnixStream,
         ) {
             let deadline = Instant::now() + self.handshake_timeout;
@@ -698,7 +738,7 @@ mod unix {
             // The session that follows is not bound by the handshake deadline.
             reader.get_mut().deadline = None;
             if writeln!(out, "{accepted}").is_ok() && stream.set_read_timeout(None).is_ok() {
-                let _ = server.serve_with_ceiling(ceiling, reader, out);
+                let _ = server.serve_with_ceiling(ceiling, reader, out, &revoked);
             }
             let _ = stream.shutdown(std::net::Shutdown::Both);
             observer.closed(connection);

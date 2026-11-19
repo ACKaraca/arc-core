@@ -56,12 +56,16 @@ changes. A client that presents only a token keeps working unchanged.
 - The handshake may carry `params.clientName`: a string of 1 to 256 bytes. In single-token mode it
   is optional and only reported to the host; in client-table mode it is required and selects the
   client whose token is compared. A malformed name refuses the connection like any other error.
-- A socket may hold a table of clients. Each client has a name, its own token (in a file of its
-  own, written owner-only and exclusively) and its own permission ceiling. A connection runs with
-  the intersection of its client's ceiling and the server's ceiling. A presented token is compared
-  only against the named client's token; an unknown name is compared against a dummy token so the
-  answer takes the same time. Clients are added and removed while the socket serves; removing one
-  closes its open connections and refuses its next handshake.
+- A socket may hold a table of clients, at most 256. Each client has a name, its own token (in a
+  file of its own, named `<name>@<client>.token`, written owner-only and exclusively) and its own
+  permission ceiling. The `@` separator is outside the name alphabet, so no two files collide. A
+  connection runs with the intersection of its client's ceiling and the server's ceiling. A
+  presented token is compared only against the named client's token; an unknown name is compared
+  against a dummy token so the answer takes the same time. Clients are added and removed while the
+  socket serves; removing one revokes and closes its open connections, refuses its next handshake
+  and stops their queued requests from running.
+- At most half of the connection slots may wait in their handshake at once, so connections that
+  never authenticate cannot take every slot. A connection beyond that share is closed at once.
 - The host may observe connections: a connection that passes its handshake is reported as opened,
   with an identifier unique for the socket's life, and as closed when it ends for any reason. A
   refused handshake reports nothing.

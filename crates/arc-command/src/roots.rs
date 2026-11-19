@@ -540,6 +540,12 @@ mod native {
             .to_path_buf();
         let held = hold_chain(&root, &parent)?;
         let target = parent.join(name);
+        // A directory of that name is refused as a directory, as on Unix. Without this check the
+        // open below fails inside the operating system with a generic error. The link itself is
+        // inspected, not followed: a link is resolved below like on Unix.
+        if fs::symlink_metadata(&target).is_ok_and(|m| m.is_dir()) {
+            return Err(rejected("not_a_file"));
+        }
         let created = options(true, true).open(&target);
         drop(held);
         let file = match created {

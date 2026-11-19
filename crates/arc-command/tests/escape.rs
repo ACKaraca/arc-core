@@ -481,6 +481,11 @@ const TOO_LONG: &str = "cmd.path.too_long";
 #[cfg(unix)]
 const NOT_FOUND: &str = "cmd.path.not_found";
 
+/// What a read or write of a path that is being swapped may answer besides its content: a path
+/// refusal. Anything else (another code, a transport failure) fails the race tests.
+#[cfg(unix)]
+const REFUSALS: [&str; 4] = [OUTSIDE, REJECTED, TOO_LONG, NOT_FOUND];
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct PathParam {
@@ -655,7 +660,8 @@ fn mcp_run(fx: &Fixture, tool: &str, path: &Path) -> Result<String, String> {
     if result["isError"] == json!(true) {
         Err(value["code"].as_str().unwrap_or("?").to_owned())
     } else {
-        Ok(value.as_str().unwrap_or_default().to_owned())
+        // The text is the run's result, whose `value` is the command's answer.
+        Ok(value["value"].as_str().unwrap_or_default().to_owned())
     }
 }
 
@@ -916,6 +922,15 @@ fn a_file_swapped_for_a_link_is_never_read_on_any_surface() {
     let at = t.root.join("swap");
     fs::write(&at, "inside").unwrap();
     with_gateways(&t, &fx, |gateways| {
+        // The positive control: before the race, each surface reads the file inside the root.
+        for gateway in gateways {
+            assert_eq!(
+                gateway.read(&at),
+                Ok("inside".to_owned()),
+                "{} cannot read a file inside the root",
+                gateway.name()
+            );
+        }
         race(
             &t,
             &at,
@@ -926,8 +941,15 @@ fn a_file_swapped_for_a_link_is_never_read_on_any_surface() {
             },
             || {
                 for gateway in gateways {
-                    if let Ok(text) = gateway.read(&at) {
-                        assert_ne!(text, CANARY, "{} read the canary", gateway.name());
+                    match gateway.read(&at) {
+                        Ok(text) => {
+                            assert_ne!(text, CANARY, "{} read the canary", gateway.name());
+                        }
+                        Err(code) => assert!(
+                            REFUSALS.contains(&code.as_str()),
+                            "{} answered {code}",
+                            gateway.name()
+                        ),
                     }
                 }
             },
@@ -943,8 +965,18 @@ fn a_directory_swapped_for_a_link_receives_no_file_on_any_surface() {
     let fx = fixture(&t.root);
     let at = t.root.join("d");
     fs::create_dir(&at).unwrap();
+    fs::write(at.join("ok.txt"), "inside").unwrap();
     let n = AtomicUsize::new(0);
     with_gateways(&t, &fx, |gateways| {
+        // The positive control: before the race, each surface reads the file inside the root.
+        for gateway in gateways {
+            assert_eq!(
+                gateway.read(&at.join("ok.txt")),
+                Ok("inside".to_owned()),
+                "{} cannot read a file inside the root",
+                gateway.name()
+            );
+        }
         race(
             &t,
             &at,
@@ -956,9 +988,23 @@ fn a_directory_swapped_for_a_link_receives_no_file_on_any_surface() {
             || {
                 let i = n.fetch_add(1, Ordering::SeqCst);
                 for gateway in gateways {
-                    let _ = gateway.write(&at.join(format!("new{i}.txt")));
-                    if let Ok(text) = gateway.read(&at.join("canary.txt")) {
-                        assert_ne!(text, CANARY, "{} read the canary", gateway.name());
+                    match gateway.write(&at.join(format!("new{i}.txt"))) {
+                        Ok(()) => {}
+                        Err(code) => assert!(
+                            REFUSALS.contains(&code.as_str()),
+                            "write: {} answered {code}",
+                            gateway.name()
+                        ),
+                    }
+                    match gateway.read(&at.join("canary.txt")) {
+                        Ok(text) => {
+                            assert_ne!(text, CANARY, "{} read the canary", gateway.name());
+                        }
+                        Err(code) => assert!(
+                            REFUSALS.contains(&code.as_str()),
+                            "read: {} answered {code}",
+                            gateway.name()
+                        ),
                     }
                 }
             },

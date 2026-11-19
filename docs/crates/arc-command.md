@@ -886,20 +886,29 @@ after [ADR-0010](../adr/0010-automation-protocol-transport.md).
   same length, so the answer takes the same time as for a known name.
 - **Serving**: `serve` accepts until `SocketStop::stop` (from `stopper()`, which also wakes the
   accept), serves each authenticated connection as one session of the server on its own thread,
-  allows 16 at once (`MAX_CONNECTIONS`; others are closed unanswered) and closes the open ones
-  when stopped. The protocol, its limits and its framing are those of `Server::serve`
+  allows 16 at once (`MAX_CONNECTIONS`; others are closed unanswered), of which at most 8
+  (`MAX_HANDSHAKING`) wait in their handshake: a connection beyond that share is closed unanswered
+  at once, so connections that never authenticate cannot hold every slot until their deadline.
+  Connections that already authenticated do not count against the share. Stopping revokes and
+  closes the open ones. The protocol, its limits and its framing are those of `Server::serve`
   unchanged.
 - **Client table**: `LocalSocket::bind_clients` binds in client-table mode, which creates no
-  `<name>.token` file. `add_client(name, ceiling)` writes `<name>.<client>.token` (owner-only,
-  exclusive creation, same owner check as the session token) and returns its path; the name
-  follows the socket name rules and is unique in the table. A connection authenticated as a
-  client runs with the intersection of that client's ceiling and the server's ceiling, so the
-  `permissions` a client requests are granted only within both. `remove_client(name)` closes the
-  client's open connections, refuses its next handshake and removes its token file; it returns
-  whether the client existed. Adding a client on a single-token socket is refused. A client file
-  left by a process that died blocks its name until someone removes it: the directory is not
-  swept, since that could delete the token of another socket with a similar name. Dropping the
-  socket removes the client files it wrote.
+  `<name>.token` file. `add_client(name, ceiling)` writes `<name>@<client>.token` (owner-only,
+  exclusive creation, same owner check as the session token) and returns its path. The client
+  name follows the socket name rules, which do not allow `@`, so no client file can be the file
+  of another socket, and it is unique in the table. The table holds at most `MAX_CLIENTS` (256)
+  clients; a further `add_client` is `cmd.socket.io` with reason `clients`. A connection
+  authenticated as a client runs with the intersection of that client's ceiling and the server's
+  ceiling, so the `permissions` a client requests are granted only within both.
+  `remove_client(name)` revokes the client's open connections, closes them, refuses its next
+  handshake and removes its token file before it releases the table, so an `add_client` of the
+  same name right after it succeeds; it returns whether the client existed. A revoked session
+  reads no further request, starts no run it had queued and answers each such run with
+  `cmd.cancelled`; a command already running is cancelled when its session's reader ends. Adding
+  a client on a single-token socket is refused. A client file left by a process that died blocks
+  its name until someone removes it: the directory is not swept, since that could delete the
+  token of another socket with a similar name. Dropping the socket removes the client files it
+  wrote.
 - **Connection events**: `serve_observed(server, observer)` tells a `ConnectionObserver` when a
   connection passes its handshake (`opened`, with a connection identifier unique for the life of
   the socket and the client name the handshake carried, with control characters replaced, empty

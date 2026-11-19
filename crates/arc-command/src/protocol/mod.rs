@@ -40,8 +40,8 @@ pub use framing::{PipeReader, PipeWriter, pipe};
 pub use mcp::{MCP_FIXED_TOOLS, MCP_VERSIONS, McpConfig, tool_name};
 pub use query::MAX_PAGE;
 pub use socket::{
-    ConnectionObserver, HANDSHAKE_TIMEOUT, LocalSocket, MAX_CLIENT_NAME_BYTES, MAX_CONNECTIONS,
-    MAX_HANDSHAKE_BYTES, NoObserver, SocketConfig, SocketStop,
+    ConnectionObserver, HANDSHAKE_TIMEOUT, LocalSocket, MAX_CLIENT_NAME_BYTES, MAX_CLIENTS,
+    MAX_CONNECTIONS, MAX_HANDSHAKE_BYTES, MAX_HANDSHAKING, NoObserver, SocketConfig, SocketStop,
 };
 
 use crate::context::{Clock, FixedClock, Probe, ProgressSink, Session};
@@ -508,16 +508,25 @@ impl<'a> Server<'a> {
     /// A read or write error of the streams, or `Unsupported` when the session threads cannot
     /// be started (WebAssembly without threads).
     pub fn serve<R: BufRead, W: Write + Send>(&self, input: R, output: W) -> io::Result<()> {
-        self.serve_with_ceiling(self.config.ceiling.clone(), input, output)
+        self.serve_with_ceiling(
+            self.config.ceiling.clone(),
+            input,
+            output,
+            &AtomicBool::new(false),
+        )
     }
 
     /// [`serve`](Self::serve) with the session granted at most `ceiling` instead of the
     /// configured ceiling. The local socket uses it to give each client its own grant.
+    ///
+    /// Once `revoked` is set the session reads no further request, starts no queued run that has
+    /// not begun, and ends; a running command is cancelled by the end of its reader.
     pub(super) fn serve_with_ceiling<R: BufRead, W: Write + Send>(
         &self,
         ceiling: BTreeSet<Permission>,
         mut input: R,
         mut output: W,
+        revoked: &AtomicBool,
     ) -> io::Result<()> {
         let pending = Pending::default();
         let closed_flag = AtomicBool::new(false);
@@ -538,7 +547,7 @@ impl<'a> Server<'a> {
             let worker = thread::Builder::new()
                 .name("arc-protocol-worker".into())
                 .spawn_scoped(scope, move || {
-                    self.work(&queue, &worker_out, pending_ref, &worker_hub);
+                    self.work(&queue, &worker_out, pending_ref, &worker_hub, revoked);
                 });
             let pump_hub = Arc::clone(&hub);
             let pump = worker.is_ok().then(|| {
@@ -559,6 +568,7 @@ impl<'a> Server<'a> {
                 jobs: Some(jobs),
                 pending: &pending,
                 closed,
+                revoked,
                 ceiling,
                 session: None,
                 current: None,
@@ -603,6 +613,7 @@ impl<'a> Server<'a> {
         out: &SyncSender<String>,
         pending: &Pending,
         hub: &Hub,
+        revoked: &AtomicBool,
     ) {
         for job in queue {
             let Job {
@@ -615,27 +626,32 @@ impl<'a> Server<'a> {
                 invocation,
                 preview,
             } = job;
-            let answer = catch_unwind(AssertUnwindSafe(|| {
-                self.run_job(
-                    Some(hub),
-                    &Target {
-                        id: &doc_id,
-                        document,
-                        state: &state,
-                    },
-                    &session,
-                    invocation,
-                    preview,
-                )
-            }))
-            .unwrap_or_else(|payload| {
-                self.log.log(
-                    LogLevel::Error,
-                    "protocol.panic",
-                    &panic_text(payload.as_ref()),
-                );
-                Err(Error::new(codes::PROTOCOL_INTERNAL).into())
-            });
+            // A run queued before the revocation never starts: it is answered as cancelled.
+            let answer = if revoked.load(Ordering::Acquire) {
+                Err(Error::new(codes::CANCELLED).into())
+            } else {
+                catch_unwind(AssertUnwindSafe(|| {
+                    self.run_job(
+                        Some(hub),
+                        &Target {
+                            id: &doc_id,
+                            document,
+                            state: &state,
+                        },
+                        &session,
+                        invocation,
+                        preview,
+                    )
+                }))
+                .unwrap_or_else(|payload| {
+                    self.log.log(
+                        LogLevel::Error,
+                        "protocol.panic",
+                        &panic_text(payload.as_ref()),
+                    );
+                    Err(Error::new(codes::PROTOCOL_INTERNAL).into())
+                })
+            };
             pending
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -857,6 +873,8 @@ struct Reader<'s, 'a> {
     jobs: Option<std::sync::mpsc::Sender<Job<'a>>>,
     pending: &'s Pending,
     closed: &'s AtomicBool,
+    /// Set when the session's client is revoked: no further request is read.
+    revoked: &'s AtomicBool,
     /// The most this session may be granted.
     ceiling: BTreeSet<Permission>,
     session: Option<Session>,
@@ -872,7 +890,9 @@ impl<'a> Reader<'_, 'a> {
     fn run<R: BufRead>(&mut self, input: &mut R) -> io::Result<()> {
         let max = self.server.config.max_line();
         let mut buf = Vec::new();
-        while !self.closed.load(Ordering::Acquire) {
+        // Checked before each request: a request already buffered from the stream is not handled
+        // once the session is revoked.
+        while !self.closed.load(Ordering::Acquire) && !self.revoked.load(Ordering::Acquire) {
             match next_frame(input, max, &mut buf)? {
                 Frame::End => return Ok(()),
                 Frame::TooLong => {
@@ -1215,5 +1235,173 @@ mod tests {
         assert_eq!(negotiate((1, 0), (1, 9)), Some((1, 0)));
         assert_eq!(negotiate((0, 1), (0, 9)), None);
         assert_eq!(negotiate((2, 0), (1, 0)), None);
+    }
+
+    /// Input that yields `chunk` at once, then the chunks sent on `gate`. An empty chunk, or a
+    /// dropped gate, is the end of the stream, so the reader never ends before the test says so.
+    struct Gated {
+        chunk: Vec<u8>,
+        pos: usize,
+        gate: std::sync::mpsc::Receiver<Vec<u8>>,
+    }
+
+    impl io::Read for Gated {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            let available = self.fill_buf()?;
+            let n = available.len().min(out.len());
+            out[..n].copy_from_slice(&available[..n]);
+            self.consume(n);
+            Ok(n)
+        }
+    }
+
+    impl BufRead for Gated {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if self.pos >= self.chunk.len() {
+                self.chunk = self.gate.recv().unwrap_or_default();
+                self.pos = 0;
+            }
+            Ok(&self.chunk[self.pos..])
+        }
+
+        fn consume(&mut self, amt: usize) {
+            self.pos += amt;
+        }
+    }
+
+    /// Output that sends every complete line to a channel.
+    struct Lines {
+        sent: std::sync::mpsc::Sender<String>,
+        partial: Vec<u8>,
+    }
+
+    impl Write for Lines {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            for &byte in bytes {
+                if byte == b'\n' {
+                    let line = String::from_utf8_lossy(&self.partial).into_owned();
+                    self.partial.clear();
+                    let _ = self.sent.send(line);
+                } else {
+                    self.partial.push(byte);
+                }
+            }
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The line answering request `id`, waiting for it.
+    fn answer(lines: &std::sync::mpsc::Receiver<String>, id: u64) -> String {
+        loop {
+            let line = lines.recv().unwrap();
+            if serde_json::from_str::<Value>(&line).unwrap()["id"] == json!(id) {
+                return line;
+            }
+        }
+    }
+
+    #[test]
+    fn a_revoked_session_starts_no_run_it_had_queued() {
+        use std::sync::mpsc::{Sender, channel};
+
+        #[derive(Deserialize, schemars::JsonSchema)]
+        #[serde(deny_unknown_fields)]
+        struct Nothing {}
+
+        // `test.item.block` (Read) announces its start and waits for its release; `test.item.mark`
+        // (Edit) announces its start. Both change nothing.
+        let (started_tx, started_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+        let (marked_tx, marked_rx) = channel::<()>();
+        let started_tx = Mutex::new(started_tx);
+        let release_rx = Mutex::new(release_rx);
+        let marked_tx: Mutex<Sender<()>> = Mutex::new(marked_tx);
+        let mut registry = Registry::new();
+        registry
+            .register(
+                CommandSpec::new(
+                    "test.item.block",
+                    "test-block",
+                    "test-block-description",
+                    move |_ctx, _: Nothing| -> Result<String, arc_base::Error> {
+                        let _ = started_tx.lock().unwrap().send(());
+                        let _ = release_rx.lock().unwrap().recv();
+                        Ok(String::from("released"))
+                    },
+                )
+                .with_undo(crate::spec::UndoBehavior::NotUndoable)
+                .with_permissions([Permission::Read]),
+            )
+            .unwrap();
+        registry
+            .register(
+                CommandSpec::new(
+                    "test.item.mark",
+                    "test-mark",
+                    "test-mark-description",
+                    move |_ctx, _: Nothing| -> Result<String, arc_base::Error> {
+                        let _ = marked_tx.lock().unwrap().send(());
+                        Ok(String::from("marked"))
+                    },
+                )
+                .with_undo(crate::spec::UndoBehavior::NotUndoable)
+                .with_permissions([Permission::Edit]),
+            )
+            .unwrap();
+        let document = Document::new(
+            Arc::new(arc_doc::TypeRegistry::new()),
+            Arc::new(arc_doc::graph::Evaluators::new()),
+        )
+        .unwrap();
+        let docs = BTreeMap::from([("main".to_owned(), document)]);
+        let config = ServerConfig::new("arc-test", "0.1.0", [Permission::Read, Permission::Edit]);
+        let server = Server::new(&registry, &docs, config, &NoLog);
+        let run = |id: u64, command: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"command.run","params":{{"document":"main","command":"{command}","params":{{}}}}}}"#
+            )
+        };
+        // The handshake, the blocking run, the mark, and a ping: the ping is answered by the
+        // reader itself, so its answer proves that both runs were queued before the revocation.
+        let chunk = format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"jsonrpc":"2.0","id":1,"method":"arc.initialize","params":{"clientName":"t","protocolVersions":{"min":"1.0","max":"1.0"},"permissions":["read","edit"]}}"#,
+            run(2, "test.item.block"),
+            run(3, "test.item.mark"),
+            r#"{"jsonrpc":"2.0","id":4,"method":"arc.ping","params":{}}"#,
+        );
+        let (gate_tx, gate_rx) = channel::<Vec<u8>>();
+        let input = Gated {
+            chunk: chunk.into_bytes(),
+            pos: 0,
+            gate: gate_rx,
+        };
+        let (sent_tx, sent_rx) = channel::<String>();
+        let output = Lines {
+            sent: sent_tx,
+            partial: Vec::new(),
+        };
+        let revoked = AtomicBool::new(false);
+        let ceiling = BTreeSet::from([Permission::Read, Permission::Edit]);
+        std::thread::scope(|scope| {
+            let served =
+                scope.spawn(|| server.serve_with_ceiling(ceiling, input, output, &revoked));
+            started_rx.recv().unwrap();
+            answer(&sent_rx, 4);
+            revoked.store(true, Ordering::Release);
+            release_tx.send(()).unwrap();
+            // Answers come in order, so the answer of the mark follows whatever it did.
+            answer(&sent_rx, 3);
+            gate_tx.send(Vec::new()).unwrap();
+            served.join().unwrap().unwrap();
+        });
+        assert!(
+            marked_rx.try_recv().is_err(),
+            "a run queued before the revocation started"
+        );
     }
 }

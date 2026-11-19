@@ -12,14 +12,16 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Barrier, Mutex};
 use std::time::Duration;
 
 use arc_command::protocol::{
-    ConnectionObserver, LocalSocket, MAX_HANDSHAKE_BYTES, NoObserver, SocketConfig, SocketStop,
+    ConnectionObserver, LocalSocket, MAX_CLIENTS, MAX_HANDSHAKE_BYTES, MAX_HANDSHAKING, NoObserver,
+    SocketConfig, SocketStop,
 };
-use arc_command::{NoLog, Permission, Server, ServerConfig};
+use arc_command::{CommandSpec, NoLog, Permission, Registry, Server, ServerConfig, UndoBehavior};
 use arc_doc::Document;
 use common::{document, registry};
 use serde_json::{Value, json};
@@ -422,10 +424,19 @@ fn serve_bound(
     observer: &dyn ConnectionObserver,
     client: impl FnOnce(&LocalSocket),
 ) {
+    serve_with(socket, &registry(), &documents(), observer, client);
+}
+
+/// [`serve_bound`] over the given commands and documents, granting the server Read and Edit.
+fn serve_with(
+    socket: &LocalSocket,
+    registry: &Registry,
+    docs: &BTreeMap<String, Document>,
+    observer: &dyn ConnectionObserver,
+    client: impl FnOnce(&LocalSocket),
+) {
     let config = ServerConfig::new("arc-test", "0.1.0", [Permission::Read, Permission::Edit]);
-    let registry = registry();
-    let docs = documents();
-    let server = Server::new(&registry, &docs, config, &NoLog);
+    let server = Server::new(registry, docs, config, &NoLog);
     let stop = socket.stopper();
     std::thread::scope(|scope| {
         let served = scope.spawn(|| socket.serve_observed(&server, observer));
@@ -635,4 +646,271 @@ fn client_table_names_and_duplicates_are_refused() {
         !path.exists(),
         "dropping the socket removes its client files"
     );
+}
+
+#[test]
+fn client_files_do_not_collide_with_a_single_token_socket_of_a_similar_name() {
+    let temp = Temp::new();
+    let config = |name: &str| SocketConfig {
+        enabled: true,
+        directory: temp.socket_dir(),
+        name: name.into(),
+        handshake_timeout: Duration::from_secs(10),
+    };
+    let outer = LocalSocket::bind_clients(&config("x")).unwrap();
+    // The separator is outside the name alphabet, so no client name can make the file of another.
+    assert_eq!(
+        outer.add_client("y@z", BTreeSet::new()).unwrap_err().code(),
+        "cmd.socket.io"
+    );
+    let client_file = outer
+        .add_client("y", BTreeSet::from([Permission::Read]))
+        .unwrap();
+    let client_token = std::fs::read_to_string(&client_file).unwrap();
+    let single = LocalSocket::bind(&config("x.y")).unwrap();
+    assert_ne!(client_file, single.token_path());
+    let single_token = token(&single);
+    drop(outer);
+    assert!(!client_file.exists());
+    assert_eq!(token(&single), single_token);
+    assert_ne!(client_token, single_token);
+    serve_bound(&single, &NoObserver, |socket| {
+        let mut conn = Conn::open(socket.socket_path());
+        assert_eq!(
+            conn.authenticate(&single_token).unwrap()["result"],
+            json!({})
+        );
+    });
+}
+
+#[test]
+fn the_client_table_holds_at_most_max_clients() {
+    let temp = Temp::new();
+    let socket = LocalSocket::bind_clients(&temp.config(true)).unwrap();
+    for i in 0..MAX_CLIENTS {
+        socket
+            .add_client(&format!("c{i}"), BTreeSet::new())
+            .unwrap();
+    }
+    let error = socket.add_client("extra", BTreeSet::new()).unwrap_err();
+    assert_eq!(error.code(), "cmd.socket.io");
+    assert!(format!("{:?}", error.details().get("reason")).contains("clients"));
+    assert!(!socket.token_path().exists());
+    // Removing one client makes room for another.
+    assert!(socket.remove_client("c0"));
+    socket.add_client("extra", BTreeSet::new()).unwrap();
+}
+
+#[test]
+fn silent_connections_cannot_take_every_connection_slot() {
+    let temp = Temp::new();
+    let mut config = temp.config(true);
+    // No deadline in this test is reached: the silent connections are closed at the stop.
+    config.handshake_timeout = Duration::from_secs(3600);
+    let socket = LocalSocket::bind(&config).unwrap();
+    let good = token(&socket);
+    serve_bound(&socket, &NoObserver, |socket| {
+        let mut authed = Conn::open(socket.socket_path());
+        assert_eq!(authed.authenticate(&good).unwrap()["result"], json!({}));
+        let init = json!({"clientName": "a", "protocolVersions": {"min": "1.0", "max": "1.0"}});
+        assert_eq!(authed.call(2, "arc.initialize", init).get("error"), None);
+        // The handshake share is full of connections that never send a line.
+        let silent: Vec<UnixStream> = (0..MAX_HANDSHAKING)
+            .map(|_| UnixStream::connect(socket.socket_path()).unwrap())
+            .collect();
+        // The next connection is closed at once: its peer reads the end of the stream, no answer.
+        let mut late = Conn::open(socket.socket_path());
+        late.stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        assert!(
+            late.read().is_none(),
+            "a connection beyond the share was served"
+        );
+        // The connection that already authenticated keeps working.
+        assert_eq!(authed.call(3, "arc.ping", json!({}))["result"], json!({}));
+        drop(silent);
+    });
+}
+
+#[test]
+fn a_client_is_granted_no_permission_its_server_lacks() {
+    let temp = Temp::new();
+    let socket = LocalSocket::bind_clients(&temp.config(true)).unwrap();
+    let file = socket
+        .add_client(
+            "wide",
+            BTreeSet::from([Permission::Read, Permission::Edit, Permission::FileWrite]),
+        )
+        .unwrap();
+    let token = std::fs::read_to_string(&file).unwrap();
+    // serve_bound grants the server Read and Edit only.
+    serve_bound(&socket, &NoObserver, |socket| {
+        let mut conn = Conn::open(socket.socket_path());
+        send_hello(&mut conn, Some("wide"), &token);
+        assert_eq!(conn.read().unwrap()["result"], json!({}));
+        let init = json!({"clientName": "w", "protocolVersions": {"min": "1.0", "max": "1.0"},
+                          "permissions": ["read", "edit", "file_write"]});
+        assert_eq!(
+            conn.call(2, "arc.initialize", init)["result"]["permissions"],
+            json!(["read", "edit"])
+        );
+    });
+}
+
+/// Closes the observer's channel with the identifier of every connection that ends.
+struct OnClosed(Mutex<Sender<u64>>);
+
+impl ConnectionObserver for OnClosed {
+    fn opened(&self, _: u64, _: String) {}
+
+    fn closed(&self, connection: u64) {
+        let _ = self.0.lock().unwrap().send(connection);
+    }
+}
+
+/// The registry of the tests plus two commands. `test.item.block` (Read) announces that it started
+/// and waits until it is released. `test.item.mark` (Edit) announces that it started and then
+/// creates an item. The announcements come before any cancellation check, so a run that starts
+/// is always observed.
+fn blocking_registry(started: Sender<()>, release: Receiver<()>, marked: Sender<()>) -> Registry {
+    #[derive(serde::Deserialize, schemars::JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    struct Nothing {}
+
+    let started = Mutex::new(started);
+    let release = Mutex::new(release);
+    let marked = Mutex::new(marked);
+    let mut registry = registry();
+    registry
+        .register(
+            CommandSpec::new(
+                "test.item.block",
+                "test-block",
+                "test-block-description",
+                move |_ctx, _: Nothing| -> arc_base::Result<String> {
+                    let _ = started.lock().unwrap().send(());
+                    let _ = release.lock().unwrap().recv();
+                    Ok(String::from("released"))
+                },
+            )
+            .with_undo(UndoBehavior::NotUndoable)
+            .with_permissions([Permission::Read]),
+        )
+        .unwrap();
+    registry
+        .register(
+            CommandSpec::new(
+                "test.item.mark",
+                "test-mark",
+                "test-mark-description",
+                move |ctx, _: Nothing| -> arc_base::Result<String> {
+                    let _ = marked.lock().unwrap().send(());
+                    let id = ctx.new_id();
+                    ctx.txn()?.create(
+                        common::ITEM,
+                        id,
+                        arc_doc::Header::default(),
+                        vec![Some(arc_doc::Value::String("late".into()))],
+                    )?;
+                    Ok(String::from("marked"))
+                },
+            )
+            .with_permissions([Permission::Edit]),
+        )
+        .unwrap();
+    registry
+}
+
+#[test]
+fn a_revoked_client_runs_no_request_it_had_already_received() {
+    let temp = Temp::new();
+    let socket = LocalSocket::bind_clients(&temp.config(true)).unwrap();
+    let file = socket
+        .add_client(
+            "editor",
+            BTreeSet::from([Permission::Read, Permission::Edit]),
+        )
+        .unwrap();
+    let token = std::fs::read_to_string(&file).unwrap();
+    let (started_tx, started_rx) = channel();
+    let (release_tx, release_rx) = channel();
+    let (marked_tx, marked_rx) = channel();
+    let registry = blocking_registry(started_tx, release_rx, marked_tx);
+    let docs = documents();
+    let revision = docs["main"].snapshot().revision();
+    let (closed_tx, closed_rx) = channel();
+    serve_with(
+        &socket,
+        &registry,
+        &docs,
+        &OnClosed(Mutex::new(closed_tx)),
+        |socket| {
+            let mut conn = Conn::open(socket.socket_path());
+            send_hello(&mut conn, Some("editor"), &token);
+            assert_eq!(conn.read().unwrap()["result"], json!({}));
+            let init = json!({"clientName": "e", "protocolVersions": {"min": "1.0", "max": "1.0"},
+                              "permissions": ["read", "edit"]});
+            assert_eq!(conn.call(2, "arc.initialize", init).get("error"), None);
+            let block = json!({"jsonrpc": "2.0", "id": 3, "method": "command.run",
+                               "params": {"document": "main", "command": "test.item.block",
+                                          "params": {}}});
+            let mark = json!({"jsonrpc": "2.0", "id": 4, "method": "command.run",
+                              "params": {"document": "main", "command": "test.item.mark",
+                                         "params": {}}});
+            // Both requests in one write: the session holds the second while the first runs.
+            conn.stream
+                .write_all(format!("{block}\n{mark}\n").as_bytes())
+                .unwrap();
+            started_rx.recv().unwrap();
+            assert!(socket.remove_client("editor"));
+            release_tx.send(()).unwrap();
+            // The session has ended, after its worker finished or dropped every queued run.
+            closed_rx.recv().unwrap();
+        },
+    );
+    assert!(
+        marked_rx.try_recv().is_err(),
+        "the request buffered before the revocation started"
+    );
+    assert_eq!(
+        docs["main"].snapshot().revision(),
+        revision,
+        "a revoked client changed the document"
+    );
+}
+
+#[test]
+fn a_removed_client_name_can_be_added_again_at_once() {
+    let temp = Temp::new();
+    let socket = LocalSocket::bind_clients(&temp.config(true)).unwrap();
+    socket.add_client("again", BTreeSet::new()).unwrap();
+    let barrier = Barrier::new(2);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            for _ in 0..200 {
+                barrier.wait();
+                assert!(socket.remove_client("again"));
+                barrier.wait();
+            }
+        });
+        for _ in 0..200 {
+            barrier.wait();
+            // Each add waits for the removal: it may be refused as existing until the removal
+            // lands, and must succeed after that. Any other refusal is a failure.
+            loop {
+                match socket.add_client("again", BTreeSet::new()) {
+                    Ok(_) => break,
+                    Err(error) => {
+                        assert_eq!(error.code(), "cmd.socket.io");
+                        assert!(
+                            format!("{:?}", error.details().get("reason")).contains("exists"),
+                            "{error:?}"
+                        );
+                    }
+                }
+            }
+            barrier.wait();
+        }
+    });
 }
