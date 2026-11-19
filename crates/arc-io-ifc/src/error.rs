@@ -203,6 +203,57 @@ pub mod reasons {
         message_id: "io-ifc-loss-trailing-bytes",
     };
 
+    /// A representation item, placement or mapping of a kind the geometry evaluation does not
+    /// implement (a boolean result, a swept disk, a curve other than a polyline); nothing is emitted
+    /// for it.
+    pub const GEOMETRY_NOT_EVALUATED: Reason = Reason {
+        code: "io.ifc.geometry_not_evaluated",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-geometry-not-evaluated",
+    };
+    /// A geometry item is degenerate (a zero or negative depth, a zero-area profile or face, a
+    /// zero direction) or has a coordinate that is not finite after unit conversion; the item is
+    /// skipped and nothing is emitted for it.
+    pub const GEOMETRY_DEGENERATE: Reason = Reason {
+        code: "io.ifc.geometry_degenerate",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-geometry-degenerate",
+    };
+    /// An index of a face, loop or polyline is not an integer in the range of its point list; the
+    /// item is skipped.
+    pub const INDEX_INVALID: Reason = Reason {
+        code: "io.ifc.index_invalid",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-index-invalid",
+    };
+    /// Openings (`IfcRelVoidsElement`) are not subtracted from their elements, which are emitted
+    /// solid; the report counts them once per file.
+    pub const OPENING_NOT_SUBTRACTED: Reason = Reason {
+        code: "io.ifc.opening_not_subtracted",
+        outcome: Outcome::Approximated,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-opening-not-subtracted",
+    };
+    /// The unit assignment holds no usable length unit; meters and radians are assumed.
+    pub const UNIT_ASSUMED: Reason = Reason {
+        code: "io.ifc.unit_assumed",
+        outcome: Outcome::Approximated,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-unit-assumed",
+    };
+    /// A geometry item is approximated: a circle is tessellated with fewer segments than its chord
+    /// tolerance asks for, or a face is not planar and is triangulated in the projection onto its
+    /// mean plane.
+    pub const GEOMETRY_APPROXIMATED: Reason = Reason {
+        code: "io.ifc.geometry_approximated",
+        outcome: Outcome::Approximated,
+        severity: Severity::Info,
+        message_id: "io-ifc-loss-geometry-approximated",
+    };
+
     /// Every reason of this crate, for the registry check.
     pub const ALL: &[Reason] = &[
         ENTITY_PRESERVED,
@@ -219,6 +270,12 @@ pub mod reasons {
         TEXT_CONTROL_KEPT,
         BYTES_IGNORED,
         TRAILING_BYTES,
+        GEOMETRY_NOT_EVALUATED,
+        GEOMETRY_DEGENERATE,
+        INDEX_INVALID,
+        OPENING_NOT_SUBTRACTED,
+        UNIT_ASSUMED,
+        GEOMETRY_APPROXIMATED,
     ];
 }
 

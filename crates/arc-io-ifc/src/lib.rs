@@ -30,6 +30,7 @@
 //! ```
 
 pub mod error;
+pub mod geometry;
 pub mod loss;
 pub mod model;
 pub mod options;
@@ -39,6 +40,7 @@ mod text;
 pub mod views;
 
 pub use error::{codes, reasons};
+pub use geometry::{Geometry, GeometryItem, Shape, Units};
 pub use loss::{LossItem, LossReport, Outcome, Severity};
 pub use model::{IfcFile, Instance, Parameter, Record, Schema};
 #[cfg(not(target_arch = "wasm32"))]

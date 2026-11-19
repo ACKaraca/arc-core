@@ -281,6 +281,7 @@ version = "0.1.0"
 dependencies = [
  "arc-base",
  "arc-io-common",
+ "arc-mesh",
  "proptest",
  "serde",
 ]

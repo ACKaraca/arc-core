@@ -44,7 +44,7 @@ product could not map).
 |---|---|---|
 | `arc-io-dxf` | `arc-base`, `arc-geom` | none |
 | `arc-io-dwg` | `arc-base`, `arc-io-dxf` (neutral drawing model, reading options and loss report) | `acadrust` (MPL-2.0, wrapped behind the byte-level reader; see below) |
-| `arc-io-ifc` | `arc-base`, `arc-io-common` | `serde` (loss report only); the STEP physical file reader and the typed views are implemented in the crate from ISO 10303-21 and the published IFC schemas, so no third-party parser is used; the ZIP archive reader is `arc-io-common` |
+| `arc-io-ifc` | `arc-base`, `arc-mesh`, `arc-io-common` | `serde` (loss report only); the STEP physical file reader and the typed views are implemented in the crate from ISO 10303-21 and the published IFC schemas, so no third-party parser is used; the ZIP archive reader is `arc-io-common` |
 | `arc-io-step` | `arc-base`, `arc-brep`, `arc-command` (worker jobs) | none beyond the kernel tier |
 | `arc-io-mesh` | `arc-base`, `arc-mesh` | `serde` (loss report only); OBJ with MTL, STL and PLY are implemented in the crate; `gltf`, `threemf`, `image` and `exr` are for the formats that follow |
 | `arc-io-usd` | `arc-base`, `arc-geom`, `arc-mesh` | `openusd` |
@@ -992,11 +992,11 @@ argument `attribute` of the attribute items names the attribute in the words of 
 STEP physical file of ISO 10303-21 (clear text encoding) or as an IFC-ZIP archive holding one, into a
 neutral entity model and typed views of the spatial structure, the element types, the property sets
 and the quantity sets. It depends on `arc-base`, on `arc-io-common` for the ZIP archive reader (the
-same-layer edge of the ADR-0001 amendment "Shared bounded ZIP and XML readers") and on `serde` for the
-loss report. Its readers take byte buffers and never paths, and the crate builds for
-`wasm32-unknown-unknown`. Geometry evaluation (CORE-IO-015), writing (CORE-IO-016), streaming
-(CORE-IO-017) and IDS (CORE-IO-018) are not implemented; geometry representations stay entity
-instances.
+same-layer edge of the ADR-0001 amendment "Shared bounded ZIP and XML readers"), on `arc-mesh` for the
+triangle meshes of the geometry evaluation (a lower-layer edge) and on `serde` for the loss report. Its
+readers take byte buffers and never paths, and the crate builds for `wasm32-unknown-unknown`. The
+geometry evaluation (CORE-IO-015) is described in [Geometry evaluation as implemented](#geometry-evaluation-as-implemented).
+Writing (CORE-IO-016), streaming (CORE-IO-017) and IDS (CORE-IO-018) are not implemented.
 
 ### Reading
 
@@ -1156,6 +1156,12 @@ reports no mapped records, so the `mapped` count is zero.
 | `io.ifc.text_control_kept` | `preserved` |
 | `io.ifc.bytes_ignored` | `dropped` |
 | `io.ifc.trailing_bytes` | `dropped` |
+| `io.ifc.geometry_not_evaluated` | `dropped` |
+| `io.ifc.geometry_degenerate` | `dropped` |
+| `io.ifc.index_invalid` | `dropped` |
+| `io.ifc.opening_not_subtracted` | `approximated` |
+| `io.ifc.unit_assumed` | `approximated` |
+| `io.ifc.geometry_approximated` | `approximated` |
 
 ### Limits
 
@@ -1183,6 +1189,121 @@ the views; a cancelled read returns `base.cancelled`.
 origin of the source's choosing). The default is `SystemClock`, whose origin is its creation. On
 `wasm32-unknown-unknown` there is no default clock, because the system clock is not available there, so
 the wall-clock limit is not enforced unless the caller supplies a clock. The views do not check time.
+
+### Geometry evaluation as implemented
+
+`IfcFile::geometry(limits, cancel)` evaluates the geometry of the products of the file;
+`IfcFile::geometry_with_tolerance` takes the `arc_base::Tolerance` to use, and `geometry` uses
+`Tolerance::DEFAULT`. The output is a `Geometry`: the items, the units and a loss report of the
+evaluation. The representation items that are not listed below are not evaluated and are reported.
+
+- Products: an instance whose sixth attribute `Representation` (position 6) refers to an
+  `IfcProductDefinitionShape`. Its `ObjectPlacement` (position 5) is the placement; an omitted
+  placement is the identity. The representations are the `Representations` (position 2) of the
+  shape, and the items of a representation are its `Items` (position 3). The representation
+  identifier and type (positions 1 and 2) are kept as text. The representation context and its
+  world coordinate system are not read: the coordinates of a representation are world coordinates.
+- Output: a `GeometryItem` per evaluated piece of a representation item, with `product` and `item`
+  (the instance names of the product and of the representation item, or of the product's mapped item
+  for an item of a mapped representation), `representation_identifier`, `representation_type`, `shape`
+  and `transform`. The `shape` is `Shape::Mesh` (a `TriMesh` whose counterclockwise triangles face
+  outward for a closed solid) or `Shape::Polylines` (polylines of at least two points). The
+  `transform` maps shape coordinates to world coordinates. The shape and the transform are in meters;
+  a point in world coordinates is `transform * point`. A transform may be a reflection, which
+  `GeometryItem::world_mesh(limits)` applies while reversing the winding of the triangles; that method
+  returns `None` for polylines. Items are in product order, then in the order of the representations
+  and of their items.
+- Units: the unit assignment of the project (`IfcProject` attribute `UnitsInContext`, position 8), or
+  else the first `IfcUnitAssignment` of the file. Length units are `IfcSIUnit` with `LENGTHUNIT`,
+  `METRE` and an optional prefix, and `IfcConversionBasedUnit` whose `ConversionFactor` is an
+  `IfcMeasureWithUnit` referring to an `IfcSIUnit`; its value times the factor of that unit is the
+  length unit. Plane angle units (`RADIAN`, or a conversion-based unit such as a degree) give
+  `Units::radians_per_angle_unit`; no evaluated item reads an angle. Each length read (point
+  coordinates, placement locations, profile dimensions, radii, depths) is multiplied by the length unit
+  in meters, and a product that is not finite after the multiplication skips its item. With no usable
+  length unit, meters and radians are assumed and reported once as `io.ifc.unit_assumed`;
+  `Units::length_assumed` is then `true`.
+- Placement: `IfcAxis2Placement3D` (`Location` 0, `Axis` 1, `RefDirection` 2) and `IfcAxis2Placement2D`
+  (`Location` 0, `RefDirection` 1, placed in the plane `z = 0`). An absent axis is (0, 0, 1). An absent
+  reference direction is the first of (1, 0, 0) and (0, 1, 0) that is not parallel to the axis. The
+  reference direction is orthogonalized against the axis, and the second axis is the cross product of
+  the axis and the reference direction. A zero or parallel direction skips the item. `IfcLocalPlacement`
+  (`PlacementRelTo` 0, `RelativePlacement` 1) is composed from the top of the chain down. The chain is
+  walked iteratively with a visited set and the depth bound; a repeated placement is cut and reported
+  as `io.ifc.cycle_cut` with the record kind `IFCLOCALPLACEMENT`. Another placement kind, such as
+  `IfcGridPlacement`, is not evaluated and skips the product's items.
+- Evaluated representation items, with the attribute positions of IFC2X3, IFC4 and IFC4X3:
+
+| Item | Output | Notes |
+|---|---|---|
+| `IfcExtrudedAreaSolid` (`SweptArea` 0, `Position` 1, `ExtrudedDirection` 2, `Depth` 3) | mesh | Caps and sides. The direction is normalized and may be skew to the profile plane. A depth that is not positive, and a direction parallel to the profile plane, skip the item. |
+| `IfcRectangleProfileDef` (`Position` 2, `XDim` 3, `YDim` 4) | loop | Centered on its position; both dimensions positive. |
+| `IfcCircleProfileDef` (`Position` 2, `Radius` 3) | loop | A regular polygon; see Bounds for the segment count. |
+| `IfcArbitraryClosedProfileDef` (`OuterCurve` 2) | loop | |
+| `IfcArbitraryProfileDefWithVoids` (`OuterCurve` 2, `InnerCurves` 3) | loops | Holes are bridged to the outer loop. |
+| `IfcPolyline` (`Points` 0) and `IfcIndexedPolyCurve` (`Points` 0, `Segments` 1) inside a profile | loop | Line segments only; the points must lie in the plane. |
+| `IfcTriangulatedFaceSet` (`Coordinates` 0, `CoordIndex` 3, `PnIndex` 4) | mesh | `Coordinates` is an `IfcCartesianPointList3D`. |
+| `IfcPolygonalFaceSet` (`Coordinates` 0, `Faces` 2, `PnIndex` 3) with `IfcIndexedPolygonalFace` (`CoordIndex` 0) and `IfcIndexedPolygonalFaceWithVoids` (`InnerCoordIndices` 1) | mesh | Each face is triangulated in its plane. |
+| `IfcFacetedBrep` (`Outer` 0) | mesh | The outer `IfcClosedShell` (`CfsFaces` 0). |
+| `IfcFaceBasedSurfaceModel` (`FbsmFaces` 0) and `IfcShellBasedSurfaceModel` (`SbsmBoundary` 0) | mesh | The shells and connected face sets are `IfcClosedShell`, `IfcOpenShell` or `IfcConnectedFaceSet`. |
+| `IfcFace` (`Bounds` 0), `IfcFaceOuterBound` and `IfcFaceBound` (`Bound` 0, `Orientation` 1), `IfcPolyLoop` (`Polygon` 0) | part of a mesh | The outer bound is the first `IfcFaceOuterBound`, or else the first bound. `Orientation` `.F.` reverses the loop. Any other loop type is not evaluated. |
+| `IfcMappedItem` (`MappingSource` 0, `MappingTarget` 1) | the pieces of the mapped representation | `IfcRepresentationMap` (`MappingOrigin` 0, `MappedRepresentation` 1). `MappingTarget` is an `IfcCartesianTransformationOperator3D` or its `...3DnonUniform` form (`Scale` 3, `Scale2` 5, `Scale3` 6, which default to `Scale`). The map's items are composed with `MappingTarget * MappingOrigin`. |
+| `IfcPolyline` (`Points` 0) and `IfcIndexedPolyCurve` (`Points` 0, `Segments` 1) as representation items | polylines | Two or three coordinates per point; a two-dimensional point is at `z = 0`. Line segments only. |
+
+- Not evaluated: every other representation item, profile, curve, loop, shell or placement kind. Each
+  is reported as `io.ifc.geometry_not_evaluated` with the record kind of the entity, one item per kind
+  with its count, and nothing is emitted for it. This covers `IfcBooleanResult`,
+  `IfcBooleanClippingResult` (no operand is emitted in its place), `IfcSweptDiskSolid`,
+  `IfcRevolvedAreaSolid`, `IfcAdvancedBrep`, `IfcExtrudedAreaSolidTapered`, the CSG primitives, the other
+  profile types, `IfcArcIndex` (the indexed poly-curve holding it is skipped), the other curve types and
+  `IfcEdgeLoop`. An item is emitted as a whole or not at all: a shell with any face that cannot be
+  evaluated is not emitted.
+- Openings: `IfcRelVoidsElement` relationships are not subtracted. The report holds one
+  `io.ifc.opening_not_subtracted` item per file whose count is the number of such relationships, and
+  the elements are emitted solid.
+- Skips: an attribute of the wrong type skips its item and is reported as `io.ifc.value_unexpected`. An
+  index outside its list, or a value that is not an index, is `io.ifc.index_invalid`. A degenerate item
+  (zero or negative depth, a loop with zero area, a zero direction, or a result that is not finite) is
+  `io.ifc.geometry_degenerate`. A mapped item whose representation reaches the same mapped item again
+  is cut and reported as `io.ifc.cycle_cut` with the record kind `IFCMAPPEDITEM`. A representation item that
+  is listed twice in one representation is evaluated once and the repeat is counted as
+  `io.ifc.duplicate_placement`. Each reason is reported once per record kind with its count.
+- Shared geometry: the pieces of a representation item are computed once per file and cached by the
+  item's instance name. A mapped item does not copy the pieces of its representation: each piece keeps
+  its `Arc<Shape>` and receives the transform composed from the mapping. Products that map one
+  representation hold the same `Arc`, and the vertices are stored once. The alternative, a copy of the
+  mesh with the transform applied for each use, multiplies the stored geometry by the number of uses.
+- Decisions: planar polygons (profiles and faces) are triangulated by an ear-clipping triangulation with
+  hole bridging, implemented in the crate. The flattening triangulation of `arc-geom` was not used,
+  because it drops every segment no longer than the chord tolerance; two faces that share such an edge
+  could then keep different vertices and the shell would open. The triangulation keeps the input
+  vertices and checks that its triangle areas add up to the area of the loops. Vertices of face sets are
+  welded by their coordinates (the bit pattern, with the sign of zero normalized). A face that is not
+  planar within the linear tolerance is triangulated in the projection onto the mean plane of its outer
+  loop, with the original vertices, and reported as `io.ifc.geometry_approximated`.
+
+#### Bounds
+
+Every allocation is charged to one budget of the call before it is made, against `memory_bytes` minus
+`IfcFile::parsed_bytes()`: 24 bytes per vertex, 12 per triangle, 48 per entry of the vertex index, 96 per
+shape, 160 per mapped piece and 128 per placement. Each evaluated representation item, each mapped piece
+and each emitted item counts one record against `record_count`. A mesh, a polyline or a point list
+longer than `array_length` is refused, and a face set is refused by its declared list length before its
+points are read. Exceeding a limit returns `io.limit_exceeded` with the argument `limit` naming
+`memory_bytes`, `record_count` or `array_length`.
+
+- A circle has `n = ceil(pi / acos(1 - c / r))` segments for the chord tolerance `c` (`tessellation_chord`)
+  and radius `r`, at least 3 and at most 512 (`MAX_CIRCLE_SEGMENTS`). A circle that needs more is
+  tessellated with 512 segments and reported as `io.ifc.geometry_approximated`.
+- A loop of more than 4096 points (`MAX_LOOP_VERTICES`), which the triangulation would process, is not
+  evaluated and is reported as `io.ifc.geometry_not_evaluated`, with the record kind of the curve, loop or
+  solid that holds it. Polylines are not triangulated and have no point limit beyond `array_length`.
+- Placement chains and mapped nesting share one depth counter, capped at the `nesting_depth` of the
+  profile and at 64. A deeper nesting returns `io.limit_exceeded` with `limit` set to `nesting_depth`.
+- Cancellation is checked before each product, and every 1024 steps of the triangulation and of the
+  loops over the lists of the file; a cancelled evaluation returns `base.cancelled`. `wall_clock_seconds` is checked by the
+  parser only.
+- The evaluation adds no error codes. Its loss reasons are listed in the table of the loss reports.
 
 ### Error codes
 
