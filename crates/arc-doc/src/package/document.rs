@@ -97,6 +97,19 @@ impl Package {
         recovery: Option<&RecoveryJournal>,
         progress: &mut dyn FnMut(SaveProgress) -> Result<()>,
     ) -> Result<Saved> {
+        self.save_document_with(document, previews, recovery, progress, false)
+    }
+
+    /// [`Package::save_document`] with [`Strategy::Compact`] when `compact` is set, which
+    /// rewrites the whole file and keeps only the referenced assets (see [`Package::compact_document`]).
+    pub(super) fn save_document_with(
+        &mut self,
+        document: &Document,
+        previews: &[Preview],
+        recovery: Option<&RecoveryJournal>,
+        progress: &mut dyn FnMut(SaveProgress) -> Result<()>,
+        compact: bool,
+    ) -> Result<Saved> {
         let baseline = lock(&document.saved)
             .clone()
             .filter(|b| b.path == self.path && b.save_counter == self.metadata.save_counter);
@@ -112,9 +125,10 @@ impl Package {
         let mut records = stored;
         records.extend(state.fresh.iter().cloned());
         let diagnostics = document.diagnostics_snapshot().diagnostics;
-        let strategy = state
-            .changes
-            .map_or(Strategy::Rewrite, Strategy::Incremental);
+        let strategy = match (compact, state.changes) {
+            (true, _) => Strategy::Compact,
+            (false, changes) => changes.map_or(Strategy::Rewrite, Strategy::Incremental),
+        };
         let metadata = self.metadata.clone();
         let save = Save {
             snapshot: &state.snapshot,

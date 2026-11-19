@@ -1573,6 +1573,119 @@ object for the others. The record of a deleted object stays but does not resolve
 creates a new object, because an identifier is not reused after its object is deleted, and `bind`
 points the record at it.
 
+### Compaction (CORE-DOC-049)
+
+`Package::compact_document(document, previews, recovery, progress)` saves the document by
+`Strategy::Compact` as a full rewrite, as `Package::save_document` does, and returns a
+`Compaction` report:
+
+- `file_bytes_before` and `file_bytes_after`: the size of the package file before and after the
+  rewrite. `reclaimed_bytes` is their difference, or zero when the file did not shrink.
+- `assets_removed`, `chunks_removed` and `journal_records_removed`: the rows of `arc_asset`,
+  `arc_chunk` and `arc_journal` that the rewrite dropped, counted as the difference of the row
+  counts (saturating at zero).
+- `saved`: the `Saved` the rewrite returned.
+
+What is removed follows the rules of the compact strategy and the retention: an asset is kept
+while an object, a held row, a retained journal record or a foreign data row refers to it, and the
+journal keeps the records the `history_retention` metadata allows. Because the create record of an
+object that was later deleted still names its assets, those assets stay until the retention drops
+that record. Kept objects and journal records are written unchanged, so reopening the package gives the
+document saved before.
+
+Decision: the rows are dropped by the full rewrite, which writes only what is kept, and the report
+measures the file with `std::fs::metadata` and the row counts with `count(*)`. The alternative,
+deleting rows in place and running `VACUUM` to return free pages, would need a separate removal
+pass that repeats the reference rules of the rewrite, and `VACUUM` only reclaims pages that are
+already free, so the reported size would depend on the database's free-page state.
+
+### Synchronous ensure in a transaction (CORE-DOC-033)
+
+`ensure::ensure(txn, evaluators, nodes)` lets a command that runs as a job of the executor
+compute derived nodes for its uncommitted state. It returns one `NodeView` per node, in the order
+given, each settled (clean, failed, blocked or cyclic) on the transaction's candidate snapshot
+(`Txn::snapshot`).
+
+- The nodes are evaluated by a new graph over the candidate snapshot, on the calling thread, with
+  the evaluators of the document (the caller passes the same `Arc<Evaluators>`). The document's
+  graph, scheduler and diagnostics list are not touched, so a rolled-back transaction leaves the
+  document's nodes with the values of the committed state.
+- A node whose evaluator returns an error is returned as its failed view. A missing object or
+  an unknown key fails the call with the codes of `Graph::evaluate_now`. An evaluator that
+  unwinds unwinds through the call, and the executor reports `doc.executor.fault`.
+- The graph starts empty, so each call recomputes what it needs. The results are not carried into
+  the commit: after a commit the document's scheduler computes the nodes again for the committed
+  revision.
+- The number of nodes is the caller's; the call allocates one view per node and no more.
+
+Decision: the rejected alternative was an overlay inside the document graph, which would let
+results stay cached across calls. It would make the document's graph hold values for uncommitted
+state, so every other reader and the scheduler would need to know which revision a value belongs
+to, and a rollback would have to remove them. A separate graph keeps the committed graph's
+invariant (every stored result belongs to a committed revision) at the cost of recomputation
+within one transaction.
+
+### External references and links (CORE-DOC-011, CORE-DOC-012)
+
+A `core.doc.link` object ([`link::LINK_TYPE`](../../crates/arc-doc/src/link.rs)) names a linked
+document: `document` (the identifier of the linked document, 16 bytes), `path` (relative to the
+referencing document), `hub_resource` (optional, stored and not used by this crate), `load_mode`
+(`full`, `partition_list` or `not_loaded`), `revision` and `content` (what was last loaded from the
+path: the snapshot revision and the 32-byte BLAKE3 hash of the file's content). An external reference
+value `(link, target)` names an object of the linked document through its link object.
+
+- **Resolver.** The crate reads no paths. `LinkResolver::open(from, path)` turns a path, seen from the
+  document at location `from`, into an `Opened`: the caller's location name, the document identifier,
+  the content hash of the file the caller read and the document's `Snapshot`. A closure of the same
+  signature implements the trait. `link::load(root, root_document, location, resolver, limits)` opens
+  every link of the root and, recursively, the links of each linked document, and returns `Links`:
+  one `LinkState` per link object of the root, and `Links::linked` gives the view of each linked
+  document.
+- **States.** `NotLoaded` for `not_loaded`; `Resolved` when the opened content equals the content
+  the link records; `Outdated` when it differs or nothing was recorded yet; `Unresolved` when the
+  resolver fails or the opened document has another identifier; `Refused` for a nesting limit.
+  `Resolved` and `Outdated` carry the identifier of the linked document. Outdated links are readable
+  from the file as it is now.
+- **Read-only addressing.** `Links::object(&ExternalRef)` returns the target object from the linked
+  snapshot for `Resolved` and `Outdated` links, and fails with `doc.link.unresolved`,
+  `doc.link.too_deep` or `doc.link.not_loaded` otherwise. A linked snapshot is
+  immutable, and no function writes to it.
+- **Limits.** `Limits::nesting_depth` bounds the levels a load opens below the root: a link found at
+  that depth is refused with `doc.link.too_deep`. The walk recurses at most that deep.
+- **Cycles and shared documents.** Each document of a load is opened through the resolver once and
+  walked once. A link to a document the load already holds, including the root and any ancestor on
+  the path, reuses that entry and does not call the resolver. So a cycle of links (A links B, B
+  links A) loads and terminates: the resolver is called once for B and once for A.
+- **Unresolved links** keep the link object and every external reference in the document: `load`
+  changes nothing, and `Links::problems` reports each unresolved link as a warning with
+  `doc.link.unresolved` and the failure's code as its `reason`. `problems` covers the root document's
+  own links; the view of a linked document (`Links::linked`) reports that document's links.
+- **Outdated links** are reported with `doc.link.outdated` (warning). `link::reload(txn, link, from,
+  resolver)` opens the link's path and records the opened revision and content hash in the link
+  object. The transaction has kind `TxnKind::LinkReload` and its changes are two field modifications,
+  so undo restores the recorded content and the link is outdated again. A reload of a `not_loaded`
+  link, or one that names another document, fails and records nothing.
+- **Load mode.** `partition_list` loads the whole linked document until product partitions
+  (CORE-DOC-007) exist; it is not a partial load in this version.
+
+Decisions, with the alternative each one rejected:
+
+1. A resolver returns the opened snapshot and a content hash the caller computed, not the file's bytes.
+   The package format reads a file by path, so bytes would need a second reader; the snapshot is the
+   state the crate needs. The caller can hash the bytes it already reads.
+2. Outdated detection compares the content hash, not the revision. A revision is a counter inside one
+   document and can coincide for two different files. The revision is recorded too, for display.
+3. An outdated link reads the file as it is now, not the last loaded state. The last loaded state is
+   not stored anywhere, and keeping it would copy a document per link into the caller's session.
+4. Link problems are returned by `Links::problems`, not written to `DiagnosticsList`. `Origin` is a
+   closed enum stored in the package's diagnostics rows, and no origin fits a link. Routing the
+   problems into the list and emitting `LinkStateChanged` events is the next step (see the
+   diagnostics section and CORE-DOC-035, CORE-DOC-036).
+5. Links refer to documents by identifier, and a load keeps one map of documents by identifier.
+   The alternative, shared pointers between a document and the documents that link it, cannot express
+   a cycle without reference cycles in memory. Cycles then need no special case: a link to a
+   document already in the map reuses it.
+
 ### Error codes
 
 The codes `arc-doc` owns. A code is never reused for a different meaning; messages are in
@@ -1666,3 +1779,8 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.propset.duplicate` | `conflict` | An object already has an instance of a property set definition |
 | `doc.part.not_found` | `not_found` | A keyed list holds no part with the sub-object key |
 | `doc.part.invalid` | `invalid_input` | A field is not a keyed list, or its parts do not carry valid, distinct keys, or the key space is exhausted |
+| `doc.link.invalid` | `invalid_input` | A `core.doc.link` object is malformed (its fields, its load mode or its document identifier), or a reload names a document other than the one the link records |
+| `doc.link.unresolved` | `not_found` | A link's path does not open a document, or the document it opens is not the one the link names; references through the link are not readable and the link object is kept |
+| `doc.link.outdated` | `conflict` | The linked document changed since the link recorded it; its objects remain readable, and a reload records the new content |
+| `doc.link.too_deep` | `limit_exceeded` | A chain of links is nested deeper than `nesting_depth` allows; the link is refused |
+| `doc.link.not_loaded` | `conflict` | A link with the load mode `not_loaded` has no linked document; its references are not readable |

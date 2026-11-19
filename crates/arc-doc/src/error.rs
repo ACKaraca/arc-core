@@ -539,6 +539,40 @@ pub mod codes {
         message_id: "doc-package-index-mismatch",
     };
 
+    /// A `core.doc.link` object is malformed (its fields, its load mode or its linked document
+    /// identifier), or a reload names a document other than the one the link records.
+    pub const LINK_INVALID: ErrorCode = ErrorCode {
+        code: "doc.link.invalid",
+        category: Category::InvalidInput,
+        message_id: "doc-link-invalid",
+    };
+    /// A link's path does not open a document: the resolver failed, or the document it opened
+    /// is not the one the link names. References through the link are not readable.
+    pub const LINK_UNRESOLVED: ErrorCode = ErrorCode {
+        code: "doc.link.unresolved",
+        category: Category::NotFound,
+        message_id: "doc-link-unresolved",
+    };
+    /// The linked document changed since the link recorded it. Its objects are readable through
+    /// the link; reloading it records the new content.
+    pub const LINK_OUTDATED: ErrorCode = ErrorCode {
+        code: "doc.link.outdated",
+        category: Category::Conflict,
+        message_id: "doc-link-outdated",
+    };
+    /// A chain of links is nested deeper than the document limits allow, so the link is refused.
+    pub const LINK_TOO_DEEP: ErrorCode = ErrorCode {
+        code: "doc.link.too_deep",
+        category: Category::LimitExceeded,
+        message_id: "doc-link-too-deep",
+    };
+    /// A link has the load mode `not_loaded`, so its linked document is not opened.
+    pub const LINK_NOT_LOADED: ErrorCode = ErrorCode {
+        code: "doc.link.not_loaded",
+        category: Category::Conflict,
+        message_id: "doc-link-not-loaded",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         TYPE_DUPLICATE_KEY,
@@ -627,6 +661,11 @@ pub mod codes {
         PROPSET_DUPLICATE,
         PART_NOT_FOUND,
         PART_INVALID,
+        LINK_INVALID,
+        LINK_UNRESOLVED,
+        LINK_OUTDATED,
+        LINK_TOO_DEEP,
+        LINK_NOT_LOADED,
     ];
 }
 

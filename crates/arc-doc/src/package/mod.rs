@@ -10,6 +10,7 @@
 
 mod asset;
 mod background;
+mod compact;
 mod document;
 mod history;
 mod incremental;
@@ -36,6 +37,7 @@ use crate::schema::AssetHash;
 
 pub use asset::{AssetReader, CHUNK_AVG, CHUNK_MAX, CHUNK_MIN, WHOLE_MAX, asset_values};
 pub use background::{BackgroundSave, Finished, SaveRequest};
+pub use compact::Compaction;
 pub(crate) use document::Baseline;
 pub use incremental::{Saved, Strategy, Touch, touched_between};
 pub use inspect::{check, inspect};
