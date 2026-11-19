@@ -383,6 +383,10 @@ and the dash bound.
   the definition's coordinates. A nesting deeper than the bound fails with
   `draft.block.nesting_too_deep`, more primitives than the bound with `draft.display.too_large`,
   and a polyline with arcs or widths under a non-similar map with `geom.transform.not_similarity`.
+  The build recurses once per nesting level, so the stack it uses is bounded as well: a chain at
+  the default bound of 64 levels, of block references, of placed references, or alternating both,
+  lists within a 512 KB thread stack in a debug build (the deepest case, a chain of placed
+  references, measured about 250 KB on Linux). `tests/nesting_stack.rs` checks this bound.
 - **Regeneration.** Editing an entity regenerates its list and, through the nodes that read it,
   the lists of the references inserting its definition. Editing a layer or linetype regenerates
   the lists that read it; a list whose result does not change leaves its readers clean. Editing a

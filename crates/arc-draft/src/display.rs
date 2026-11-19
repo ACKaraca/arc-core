@@ -51,6 +51,11 @@ use crate::types::{
 };
 use crate::validate::DEFAULT_MAX_NESTING;
 
+/// The result of the recursive build of display lists. Its error is boxed: a `Result` that holds
+/// an [`Error`] is as large as the error, and a debug build reserves that size for each such
+/// temporary at every level of nesting.
+pub(crate) type Boxed<T> = std::result::Result<T, Box<Error>>;
+
 /// The derived key of an entity's display list.
 pub const DISPLAY: &str = "core.draft.display";
 
@@ -231,7 +236,7 @@ pub(crate) trait Reader {
     fn type_key(&self, id: ObjectId) -> Option<String>;
     fn owner(&self, id: ObjectId) -> Result<Option<ObjectId>>;
     fn members(&self, container: ObjectId) -> Vec<ObjectId>;
-    fn list(&self, id: ObjectId) -> Result<DerivedValue>;
+    fn list(&self, id: ObjectId) -> Boxed<DerivedValue>;
     /// The dimension styles whose `parent` is `style`.
     fn children(&self, style: ObjectId) -> Vec<ObjectId>;
     /// The resolution of the dimension `id`.
@@ -287,8 +292,8 @@ impl Reader for GraphReader<'_, '_> {
             })
             .collect()
     }
-    fn list(&self, id: ObjectId) -> Result<DerivedValue> {
-        self.ctx.node(&node(id)?)
+    fn list(&self, id: ObjectId) -> Boxed<DerivedValue> {
+        Ok(self.ctx.node(&node(id)?)?)
     }
     fn children(&self, style: ObjectId) -> Vec<ObjectId> {
         let field = parent_field();
@@ -372,16 +377,16 @@ impl Reader for SnapshotReader<'_> {
     fn members(&self, container: ObjectId) -> Vec<ObjectId> {
         members(self.snapshot, container)
     }
-    fn list(&self, id: ObjectId) -> Result<DerivedValue> {
+    fn list(&self, id: ObjectId) -> Boxed<DerivedValue> {
         // A cycle or a chain deeper than the bound stops here instead of recursing.
         if self.depth > self.options.max_nesting {
-            return Err(nesting(self.options.max_nesting));
+            return Err(nesting_boxed(self.options.max_nesting));
         }
         let inner = SnapshotReader {
             depth: self.depth + 1,
             ..*self
         };
-        Ok(Arc::new(build(&inner, id, self.options)?))
+        build(&inner, id, self.options).map(|list| Arc::new(list) as DerivedValue)
     }
     fn children(&self, style: ObjectId) -> Vec<ObjectId> {
         let field = parent_field();
@@ -440,11 +445,23 @@ fn work_exhausted() -> Error {
     Error::new(codes::EXTERNAL_BUDGET_EXCEEDED)
 }
 
+/// The error of a list with more primitives than `limit`, boxed out of line.
+#[cold]
+fn too_large_boxed(limit: usize) -> Box<Error> {
+    Box::new(too_large(limit))
+}
+
 /// The error of a list with more primitives than `limit`, built out of line (see
 /// [`work_exhausted`]).
 #[cold]
 fn too_large(limit: usize) -> Error {
     Error::new(codes::DISPLAY_TOO_LARGE).with_arg("limit", i64::try_from(limit).unwrap_or(i64::MAX))
+}
+
+/// The error of a nesting deeper than `limit`, built out of line for the recursive frames.
+#[cold]
+fn nesting_boxed(limit: u32) -> Box<Error> {
+    Box::new(nesting(limit))
 }
 
 fn nesting(limit: u32) -> Error {
@@ -670,32 +687,62 @@ fn is_space(reader: &dyn Reader, container: Option<ObjectId>) -> bool {
     container.and_then(|c| reader.type_key(c)).as_deref() == Some(SPACE)
 }
 
-/// The list of one entity, as described in the crate specification.
-#[expect(clippy::too_many_lines, reason = "one match over every entity type")]
-fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<EntityList> {
+/// The error of a block reference whose block definition was not read.
+#[cold]
+fn not_a_reference(id: ObjectId) -> Box<Error> {
+    Box::new(Error::new(codes::OBJECT_WRONG_TYPE).with_detail("id", id.to_string()))
+}
+
+/// The state of an entity between its checks and its list. It lives on the heap: the frames that
+/// wait for the lists of nested entities hold a pointer to it, not its fields. A debug build
+/// reserves stack for every temporary of a function, so state on the path of nested references
+/// would be paid once per nesting level.
+struct Pending {
+    id: ObjectId,
+    kind: &'static str,
+    values: Vec<Option<Value>>,
+    base: Primitive,
+    look: Look,
+    top: bool,
+    /// The block definition and the transform of a block reference, read before any recursion.
+    block: Option<(ObjectId, Transform2)>,
+}
+
+/// What [`prepare`] found.
+enum Prepared {
+    /// The entity draws nothing; its list is known.
+    Hidden(EntityList),
+    /// The list is built from the state of the entity.
+    Pending(Box<Pending>),
+}
+
+/// The checks, the common fields and the appearance of `id`, as the first step of [`build`].
+#[inline(never)]
+fn prepare(reader: &dyn Reader, id: ObjectId) -> Boxed<Prepared> {
     // Every entity of a linked drawing that is visited, visible or not, costs one work unit.
     if !visit_allowed(reader) {
-        return Err(work_exhausted());
+        return Err(Box::new(work_exhausted()));
     }
     let key = reader
         .type_key(id)
         .ok_or_else(|| Error::new(arc_doc::error::codes::OBJECT_NOT_FOUND))?;
-    if !ENTITIES.contains(&key.as_str()) {
-        return Err(Error::new(codes::OBJECT_WRONG_TYPE).with_detail("id", id.to_string()));
-    }
+    let Some(&kind) = ENTITIES.iter().find(|k| **k == key.as_str()) else {
+        return Err(Box::new(
+            Error::new(codes::OBJECT_WRONG_TYPE).with_detail("id", id.to_string()),
+        ));
+    };
     let mut values = read(reader, id, &COMMON)?;
     let order = match values.get(entity::DRAW_ORDER) {
         Some(Some(Value::I64(k))) => *k,
         _ => 0,
     };
-    let mut list = EntityList {
-        order,
-        depth: 0,
-        primitives: Vec::new(),
-        problems: Vec::new(),
-    };
     if matches!(values.get(entity::VISIBLE), Some(Some(Value::Bool(false)))) {
-        return Ok(list);
+        return Ok(Prepared::Hidden(EntityList {
+            order,
+            depth: 0,
+            primitives: Vec::new(),
+            problems: Vec::new(),
+        }));
     }
     let look = Look::of(reader, &values)?;
     let top = is_space(reader, reader.owner(id)?);
@@ -715,20 +762,131 @@ fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<
         part: 0,
         annotation_scale: None,
     };
-    let linetype = base.linetype.as_ref().and_then(|l| l.value);
-    match key.as_str() {
+    let mut block = None;
+    match kind {
         BLOCK_REF => {
             values.extend(read(
                 reader,
                 id,
                 &["block", "position", "scale", "rotation"],
             )?);
-            return reference_list(reader, &values, base, &look, top, options);
+            block = Some(reference_head(reader, &values, id)?);
         }
-        EXTERNAL_REF => {
-            values.extend(read(reader, id, &external::FIELD_NAMES)?);
-            return external::list(reader, base, &values, options);
-        }
+        EXTERNAL_REF => values.extend(read(reader, id, &external::FIELD_NAMES)?),
+        _ => {}
+    }
+    Ok(Prepared::Pending(Box::new(Pending {
+        id,
+        kind,
+        values,
+        base,
+        look,
+        top,
+        block,
+    })))
+}
+
+/// The list of one entity, as described in the crate specification.
+fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Boxed<EntityList> {
+    match prepare(reader, id) {
+        Ok(Prepared::Hidden(list)) => Ok(list),
+        Ok(Prepared::Pending(pending)) => dispatch(reader, pending, options),
+        Err(error) => Err(error),
+    }
+}
+
+/// The list of a prepared entity, by its kind.
+#[inline(never)]
+fn dispatch(
+    reader: &dyn Reader,
+    pending: Box<Pending>,
+    options: &DisplayOptions,
+) -> Boxed<EntityList> {
+    match pending.kind {
+        BLOCK_REF => block_list(reader, pending, options),
+        EXTERNAL_REF => external::list(reader, &pending.base, &pending.values, options),
+        crate::array::ARRAY => array_list(reader, pending, options),
+        _ => leaf_list(reader, pending, options),
+    }
+}
+
+/// The list of a block reference. The lists of its members are built first, one nesting level
+/// deeper; the reference's state waits in its box meanwhile.
+#[inline(never)]
+fn block_list(
+    reader: &dyn Reader,
+    pending: Box<Pending>,
+    options: &DisplayOptions,
+) -> Boxed<EntityList> {
+    let Some((block, transform)) = pending.block else {
+        return Err(not_a_reference(pending.id));
+    };
+    match reference_children(reader, block) {
+        Ok(children) => reference_finish(
+            reader,
+            &pending.base,
+            &pending.look,
+            pending.top,
+            &transform,
+            children,
+            options,
+        )
+        .map_err(Box::new),
+        Err(error) => Err(error),
+    }
+}
+
+/// The list of an array.
+#[inline(never)]
+fn array_list(
+    reader: &dyn Reader,
+    pending: Box<Pending>,
+    options: &DisplayOptions,
+) -> Boxed<EntityList> {
+    let Pending {
+        base, look, top, ..
+    } = *pending;
+    crate::array::list(reader, base, &look, top, options).map_err(Box::new)
+}
+
+/// The list of an entity whose primitives come from its own geometry.
+#[inline(never)]
+fn leaf_list(
+    reader: &dyn Reader,
+    pending: Box<Pending>,
+    options: &DisplayOptions,
+) -> Boxed<EntityList> {
+    let Pending {
+        id,
+        kind,
+        base,
+        look,
+        top,
+        ..
+    } = *pending;
+    entity_primitives(reader, id, kind, base, &look, top, options).map_err(Box::new)
+}
+
+/// The primitives of the entity `id` other than the reference kinds, which [`build`] handles.
+#[inline(never)]
+fn entity_primitives(
+    reader: &dyn Reader,
+    id: ObjectId,
+    key: &str,
+    base: Primitive,
+    look: &Look,
+    top: bool,
+    options: &DisplayOptions,
+) -> Result<EntityList> {
+    let mut list = EntityList {
+        order: base.draw_order,
+        depth: 0,
+        primitives: Vec::new(),
+        problems: Vec::new(),
+    };
+    let linetype = base.linetype.as_ref().and_then(|l| l.value);
+    let scale = base.linetype_scale;
+    match key {
         POINT => {
             if let Some(Value::Point2(p)) = reader.field(id, "position")? {
                 list.primitives.push(Primitive {
@@ -738,7 +896,7 @@ fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<
             }
         }
         TEXT | RICH_TEXT => {
-            let layout = text_layout_of(reader, id, &key, options)?;
+            let layout = text_layout_of(reader, id, key, options)?;
             let placement = text_placement(reader, id)?;
             list.primitives = text_primitives(&layout, &placement, &base, &options.tolerance)?;
         }
@@ -746,14 +904,11 @@ fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<
             list.primitives = crate::hatch::primitives(reader, id, &base, options)?;
         }
         crate::table::TABLE => {
-            list.primitives = crate::table::primitives(reader, id, &base, &look, options)?;
-        }
-        crate::array::ARRAY => {
-            return crate::array::list(reader, base, &look, top, options);
+            list.primitives = crate::table::primitives(reader, id, &base, look, options)?;
         }
         DIMENSION | LEADER | MULTILEADER => {
             list.primitives =
-                crate::annotation_display::primitives(reader, id, &key, &base, &look, options)?;
+                crate::annotation_display::primitives(reader, id, key, &base, look, options)?;
         }
         WIPEOUT => {
             let Curve2::Polyline(boundary) = decode_curve(Some(&reader.field(id, "geometry")?))?
@@ -1151,25 +1306,49 @@ fn fill<T: Clone>(slot: &mut Option<Sourced<T>>, own: Option<Sourced<T>>, level:
     }
 }
 
-pub(crate) fn reference_list(
+/// The block definition that the block reference `id` inserts, and the transform of its members.
+fn reference_head(
     reader: &dyn Reader,
     values: &[Option<Value>],
-    base: Primitive,
-    look: &Look,
-    top: bool,
-    options: &DisplayOptions,
-) -> Result<EntityList> {
-    let id = base.source;
+    id: ObjectId,
+) -> Result<(ObjectId, Transform2)> {
     let block = reference(values.get(entity::KIND))
         .ok_or_else(|| Error::new(codes::FIELD_INVALID).with_arg("field", "block"))?;
     if reader.type_key(block).as_deref() != Some(BLOCK) {
         return Err(Error::new(codes::OBJECT_WRONG_TYPE).with_detail("id", block.to_string()));
     }
     let transform = reference_transform(reader, values, block, reader.owner(id)?)?;
+    Ok((block, transform))
+}
+
+/// The lists of the members of `block`: the recursive step of block references, which reads each
+/// member's list through [`Reader::list`].
+#[inline(never)]
+fn reference_children(
+    reader: &dyn Reader,
+    block: ObjectId,
+) -> Boxed<Vec<(ObjectId, DerivedValue)>> {
     let mut children = Vec::new();
     for member in reader.members(block) {
-        children.push((member, reader.list(member)?));
+        match reader.list(member) {
+            Ok(list) => children.push((member, list)),
+            Err(error) => return Err(error),
+        }
     }
+    Ok(children)
+}
+
+/// The list of a block reference from the lists of its members.
+fn reference_finish(
+    reader: &dyn Reader,
+    base: &Primitive,
+    look: &Look,
+    top: bool,
+    transform: &Transform2,
+    children: Vec<(ObjectId, DerivedValue)>,
+    options: &DisplayOptions,
+) -> Result<EntityList> {
+    let id = base.source;
     let mut lists = Vec::with_capacity(children.len());
     for (member, value) in &children {
         let list = value
@@ -1221,7 +1400,7 @@ pub(crate) fn reference_list(
             fill(&mut p.linetype, own_linetype.clone(), level);
             fill(&mut p.lineweight, look.lineweight(), level);
             fill(&mut p.transparency, look.transparency(), level);
-            p.shape = transform_shape(&p.shape, &transform, &options.tolerance)?;
+            p.shape = transform_shape(&p.shape, transform, &options.tolerance)?;
             p.source = id;
             p.draw_order = base.draw_order;
             p.layers.extend(look.layer);
@@ -1239,6 +1418,21 @@ pub(crate) fn reference_list(
     })
 }
 
+/// The list of a block reference, for the callers that build the reference's primitives
+/// themselves (arrays, tables and annotations).
+pub(crate) fn reference_list(
+    reader: &dyn Reader,
+    values: &[Option<Value>],
+    base: Primitive,
+    look: &Look,
+    top: bool,
+    options: &DisplayOptions,
+) -> Result<EntityList> {
+    let (block, transform) = reference_head(reader, values, base.source)?;
+    let children = reference_children(reader, block).map_err(|error| *error)?;
+    reference_finish(reader, &base, look, top, &transform, children, options)
+}
+
 /// The evaluator of [`DISPLAY`] with `options`.
 pub fn evaluator(
     options: DisplayOptions,
@@ -1247,7 +1441,7 @@ pub fn evaluator(
         let id = ctx
             .object_id()
             .ok_or_else(|| Error::new(codes::OBJECT_WRONG_TYPE))?;
-        let list = build(&GraphReader { ctx }, id, &options)?;
+        let list = build(&GraphReader { ctx }, id, &options).map_err(|error| *error)?;
         Ok(Arc::new(list) as DerivedValue)
     }
 }
@@ -1331,6 +1525,7 @@ fn entity_list_at(
         entity,
         options,
     )
+    .map_err(|error| *error)
 }
 
 /// Where assembly takes entity lists from.
@@ -1361,7 +1556,7 @@ fn layer_hidden(snapshot: &Snapshot, layer: ObjectId) -> bool {
     clippy::too_many_arguments,
     reason = "the assembly parameters, passed through"
 )]
-fn gather(
+pub(crate) fn gather(
     snapshot: &Snapshot,
     lists: Lists<'_>,
     scope: Option<Scope<'_>>,
@@ -1372,51 +1567,120 @@ fn gather(
     depth: u32,
     out: &mut DisplayList,
 ) -> Result<(Vec<Primitive>, u32)> {
+    match member_lists(snapshot, lists, scope, space, options, depth, out) {
+        Ok(entries) => Ok(visible_primitives(snapshot, entries, frozen, scale, out)),
+        Err(error) => Err(*error),
+    }
+}
+
+/// The lists of the members of `space` that are gathered, in member order. The members that fail
+/// are recorded in `out`; a build whose lists exceed the limit stops.
+#[inline(never)]
+pub(crate) fn member_lists(
+    snapshot: &Snapshot,
+    lists: Lists<'_>,
+    scope: Option<Scope<'_>>,
+    space: ObjectId,
+    options: &DisplayOptions,
+    depth: u32,
+    out: &mut DisplayList,
+) -> Boxed<Vec<(ObjectId, DerivedValue)>> {
     let mut entries = Vec::new();
     let mut count = 0usize;
     for member in members(snapshot, space) {
-        let external = snapshot
-            .resolve(member)
-            .ok()
-            .and_then(|h| snapshot.type_key(h))
-            .is_some_and(|k| k.as_str() == EXTERNAL_REF);
-        // The graph holds no linked drawings: a block reference that reaches a placed reference is
-        // built directly, as the placed reference is.
-        let direct = external
-            || (matches!(lists, Lists::Graph(_))
-                && scope.is_some_and(|s| reaches_reference(snapshot, member, s.memo)));
-        let list: Option<DerivedValue> = match lists {
-            Lists::Graph(graph) if !direct => graph
-                .evaluate_now(&node(member)?)
-                .ok()
-                .filter(|v| v.state.kind() == StateKind::Clean)
-                .and_then(|v| v.result),
-            _ => entity_list_at(snapshot, scope, member, options, depth)
-                .ok()
-                .map(|l| Arc::new(l) as DerivedValue),
-        };
-        match list {
-            Some(value) => {
-                let Some(primitives) = value
-                    .downcast_ref::<EntityList>()
-                    .map(|l| l.primitives.len())
-                else {
-                    out.failed.push(member);
-                    continue;
-                };
-                // The build stops as soon as the list it gathers would exceed the limit, or, in a
-                // linked build, the primitives left in the budget.
-                count = count.saturating_add(primitives);
-                let over_budget = count > options.max_primitives
-                    || scope.is_some_and(|s| s.linked && count > s.memo.primitives_left());
-                if over_budget {
-                    return Err(too_large(options.max_primitives));
-                }
-                entries.push((member, value));
+        // Members that the graph cannot hold are built directly, one nesting level deeper; this is
+        // the recursive step of placed references in spaces.
+        let value = match lists {
+            Lists::Graph(graph) if !must_build(snapshot, lists, scope, member) => {
+                graph_member(graph, member)
             }
-            None => out.failed.push(member),
+            _ => {
+                let reader = SnapshotReader {
+                    snapshot,
+                    options,
+                    depth,
+                    scope,
+                };
+                Ok(build(&reader, member, options)
+                    .ok()
+                    .map(|l| Arc::new(l) as DerivedValue))
+            }
+        };
+        let value = match value {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                out.failed.push(member);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(primitives) = primitive_count(&value) else {
+            out.failed.push(member);
+            continue;
+        };
+        // The build stops as soon as the list it gathers would exceed the limit, or, in a
+        // linked build, the primitives left in the budget.
+        count = count.saturating_add(primitives);
+        if exceeds_budget(scope, options, count) {
+            return Err(too_large_boxed(options.max_primitives));
         }
+        entries.push((member, value));
     }
+    Ok(entries)
+}
+
+/// The number of primitives of the list `value`, when it is a list.
+fn primitive_count(value: &DerivedValue) -> Option<usize> {
+    value
+        .downcast_ref::<EntityList>()
+        .map(|l| l.primitives.len())
+}
+
+/// Whether `count` gathered primitives exceed the list's limit or, in a linked build, the
+/// primitives left in the budget.
+fn exceeds_budget(scope: Option<Scope<'_>>, options: &DisplayOptions, count: usize) -> bool {
+    count > options.max_primitives
+        || scope.is_some_and(|s| s.linked && count > s.memo.primitives_left())
+}
+
+/// Whether `member` is built directly rather than read from the graph. The graph holds no linked
+/// drawings: a placed reference, and a block reference that reaches one, are built directly.
+#[inline(never)]
+fn must_build(
+    snapshot: &Snapshot,
+    lists: Lists<'_>,
+    scope: Option<Scope<'_>>,
+    member: ObjectId,
+) -> bool {
+    let external = snapshot
+        .resolve(member)
+        .ok()
+        .and_then(|h| snapshot.type_key(h))
+        .is_some_and(|k| k.as_str() == EXTERNAL_REF);
+    external
+        || (matches!(lists, Lists::Graph(_))
+            && scope.is_some_and(|s| reaches_reference(snapshot, member, s.memo)))
+}
+
+/// The list of `member` as the graph evaluates it, when it is clean.
+#[inline(never)]
+fn graph_member(graph: &Graph, member: ObjectId) -> Boxed<Option<DerivedValue>> {
+    Ok(graph
+        .evaluate_now(&node(member)?)
+        .ok()
+        .filter(|v| v.state.kind() == StateKind::Clean)
+        .and_then(|v| v.result))
+}
+
+/// The visible primitives of the gathered `entries`, in draw order, and the deepest nesting of
+/// their lists; the problems of the lists are added to `out`.
+pub(crate) fn visible_primitives(
+    snapshot: &Snapshot,
+    entries: Vec<(ObjectId, DerivedValue)>,
+    frozen: &BTreeSet<ObjectId>,
+    scale: f64,
+    out: &mut DisplayList,
+) -> (Vec<Primitive>, u32) {
     let mut ordered: Vec<(i64, ObjectId, &EntityList)> = entries
         .iter()
         .filter_map(|(id, v)| v.downcast_ref::<EntityList>().map(|l| (l.order, *id, l)))
@@ -1443,7 +1707,7 @@ fn gather(
             }
         }
     }
-    Ok((primitives, deepest))
+    (primitives, deepest)
 }
 
 /// The block definition that the block reference `member` inserts, when `member` is one.
@@ -1676,7 +1940,7 @@ pub(crate) fn assemble(
     depth: u32,
 ) -> Result<(DisplayList, u32)> {
     let mut out = DisplayList::default();
-    let (mut primitives, deepest) = gather(
+    let (primitives, deepest) = gather(
         snapshot,
         lists,
         scope,
@@ -1687,10 +1951,20 @@ pub(crate) fn assemble(
         depth,
         &mut out,
     )?;
+    Ok(finish_assembly(out, primitives, deepest, options))
+}
+
+/// The masks of an assembled list are applied and its failures are deduplicated.
+pub(crate) fn finish_assembly(
+    mut out: DisplayList,
+    mut primitives: Vec<Primitive>,
+    deepest: u32,
+    options: &DisplayOptions,
+) -> (DisplayList, u32) {
     apply_masks(&mut primitives, &options.tolerance, &mut out.failed);
     out.primitives = primitives;
     dedup(&mut out.failed);
-    Ok((out, deepest))
+    (out, deepest)
 }
 
 /// Applies the viewport's appearance overrides to a primitive whose value came from an

@@ -17,7 +17,7 @@
 
 use arc_base::id::Identifier;
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use arc_base::math::{Point2, Vector3};
@@ -29,8 +29,8 @@ use arc_geom::encoding::GeomCodec;
 
 use crate::appearance::{Source, Sourced};
 use crate::display::{
-    DisplayList, DisplayOptions, EntityList, Lists, Primitive, Reader, assemble, boundary_loop,
-    cut_primitive, placement, transform_shape,
+    Boxed, DisplayList, DisplayOptions, EntityList, Lists, Primitive, Reader, boundary_loop,
+    cut_primitive, finish_assembly, member_lists, placement, transform_shape, visible_primitives,
 };
 use crate::error::codes;
 use crate::types::{self, SpaceUnit, entity, table};
@@ -437,39 +437,84 @@ fn expansion(
     if let Some(found) = scope.memo.lookup(key) {
         return found;
     }
-    // The frames of this function lie on the recursion path of nested drawings: keep them small.
     let built = match view.snapshot() {
         Some(snapshot) if scope.memo.spend_expansion() => {
             // The build stops at the primitives left: the build's own list gather is bounded by
             // them through the scope (see `gather`), so a linked space larger than the budget is
             // refused before it is built in full.
             let left = scope.memo.primitives_left();
-            let inner = Scope {
-                links: view,
-                memo: scope.memo,
-                linked: true,
-            };
-            match assemble(snapshot, Lists::Direct, Some(inner), space, options, depth) {
-                _ if scope.memo.overran() => Err(codes::EXTERNAL_BUDGET_EXCEEDED.code),
-                Ok((list, deepest)) if scope.memo.charge_primitives(list.primitives.len()) => {
-                    Ok(Arc::new(Expanded { list, deepest }))
-                }
-                Ok(_) => Err(codes::EXTERNAL_BUDGET_EXCEEDED.code),
-                // The limit that stopped the build was the budget's when it was lower than the bound.
-                Err(error)
-                    if left < options.max_primitives
-                        && error.code() == codes::DISPLAY_TOO_LARGE.code =>
-                {
-                    Err(codes::EXTERNAL_BUDGET_EXCEEDED.code)
-                }
-                Err(error) => Err(error.code()),
-            }
+            let assembled = assemble_linked(scope, view, snapshot, space, options, depth);
+            settle(scope, left, options, assembled)
         }
         Some(_) => Err(codes::EXTERNAL_BUDGET_EXCEEDED.code),
         None => Err(arc_doc::error::codes::LINK_INVALID.code),
     };
     scope.memo.store(key, built.clone());
     built
+}
+
+/// The assembly of the linked space `space` for an expansion. It is part of the recursion of placed
+/// references, so it only gathers the members and finishes the list.
+#[inline(never)]
+fn assemble_linked(
+    scope: Scope<'_>,
+    view: &Links,
+    snapshot: &Snapshot,
+    space: ObjectId,
+    options: &DisplayOptions,
+    depth: u32,
+) -> Boxed<(DisplayList, u32)> {
+    let inner = Scope {
+        links: view,
+        memo: scope.memo,
+        linked: true,
+    };
+    let mut out = DisplayList::default();
+    match member_lists(
+        snapshot,
+        Lists::Direct,
+        Some(inner),
+        space,
+        options,
+        depth,
+        &mut out,
+    ) {
+        Ok(entries) => {
+            let (primitives, deepest) = visible_primitives(
+                snapshot,
+                entries,
+                &BTreeSet::new(),
+                options.annotation_scale,
+                &mut out,
+            );
+            Ok(finish_assembly(out, primitives, deepest, options))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The expansion of an assembly `built` of a linked space, charged to the budget.
+#[inline(never)]
+fn settle(
+    scope: Scope<'_>,
+    left: usize,
+    options: &DisplayOptions,
+    built: Boxed<(DisplayList, u32)>,
+) -> Outcome {
+    match built {
+        _ if scope.memo.overran() => Err(codes::EXTERNAL_BUDGET_EXCEEDED.code),
+        Ok((list, deepest)) if scope.memo.charge_primitives(list.primitives.len()) => {
+            Ok(Arc::new(Expanded { list, deepest }))
+        }
+        Ok(_) => Err(codes::EXTERNAL_BUDGET_EXCEEDED.code),
+        // The limit that stopped the build was the budget's when it was lower than the bound.
+        Err(error)
+            if left < options.max_primitives && error.code() == codes::DISPLAY_TOO_LARGE.code =>
+        {
+            Err(codes::EXTERNAL_BUDGET_EXCEEDED.code)
+        }
+        Err(error) => Err(error.code()),
+    }
 }
 
 /// The appearance of a linked primitive is the object's own: its layer values were resolved in
@@ -496,14 +541,29 @@ fn refusal(base: &Primitive, link: Option<ObjectId>, code: &'static str) -> Enti
     }
 }
 
-/// The expansion of the linked space that the placed reference with `link` and `values` shows,
-/// and the unit of that space. On failure, the code of the problem.
-fn expand_reference(
-    reader: &dyn Reader,
+/// What a placed reference needs to expand its linked space. It is made before the expansion, so
+/// the recursion does not hold the lookup's temporaries.
+struct Plan<'a> {
+    scope: Scope<'a>,
+    view: Links,
+    space: ObjectId,
+    nested: u32,
+    unit: SpaceUnit,
+}
+
+/// The lookup of the linked space that the placed reference with `link` shows: the loaded view,
+/// the space, the nesting depth of its expansion and the unit of the space.
+#[inline(never)]
+fn plan_expansion<'a>(
+    reader: &'a dyn Reader,
     link: ObjectId,
     values: &[Option<Value>],
     options: &DisplayOptions,
-) -> std::result::Result<(Arc<Expanded>, SpaceUnit), &'static str> {
+) -> std::result::Result<Plan<'a>, &'static str> {
+    let (position, scale, rotation) = placement_numbers(values);
+    if non_finite_placement(position, scale, rotation).is_some() {
+        return Err(codes::FIELD_INVALID.code);
+    }
     let Some(scope) = reader.scope() else {
         return Err(codes::EXTERNAL_NO_LINKS.code);
     };
@@ -517,8 +577,14 @@ fn expand_reference(
         .ok_or(arc_doc::error::codes::LINK_INVALID.code)?;
     let space = linked_space(snapshot, values.get(SPACE).and_then(Option::as_ref))
         .map_err(|error| error.code())?;
-    let expanded = expansion(scope, &view, space, options, nested)?;
-    Ok((expanded, unit_of(snapshot, space)))
+    let unit = unit_of(snapshot, space);
+    Ok(Plan {
+        scope,
+        view,
+        space,
+        nested,
+        unit,
+    })
 }
 
 /// The list of the placed reference `base.source`, with `values` holding its fields after the
@@ -536,29 +602,38 @@ fn expand_reference(
 /// another document.
 pub(crate) fn list(
     reader: &dyn Reader,
-    base: Primitive,
+    base: &Primitive,
     values: &[Option<Value>],
     options: &DisplayOptions,
-) -> Result<EntityList> {
+) -> Boxed<EntityList> {
     let link = match values.get(LINK) {
         Some(Some(Value::Reference(link))) => *link,
-        _ => return Ok(refusal(&base, None, codes::EXTERNAL_LINK_INVALID.code)),
+        _ => return refused(base, None, codes::EXTERNAL_LINK_INVALID.code),
     };
-    let (position, scale, rotation) = placement_numbers(values);
-    if non_finite_placement(position, scale, rotation).is_some() {
-        return Ok(refusal(&base, Some(link), codes::FIELD_INVALID.code));
+    let plan = match plan_expansion(reader, link, values, options) {
+        Ok(plan) => plan,
+        Err(code) => return refused(base, Some(link), code),
+    };
+    match expansion(plan.scope, &plan.view, plan.space, options, plan.nested) {
+        Ok(expanded) => {
+            place_copy(reader, base, link, values, options, &expanded, plan.unit).map_err(Box::new)
+        }
+        Err(code) => refused(base, Some(link), code),
     }
-    match expand_reference(reader, link, values, options) {
-        Ok((expanded, unit)) => place_copy(reader, base, link, values, options, &expanded, unit),
-        Err(code) => Ok(refusal(&base, Some(link), code)),
-    }
+}
+
+/// The list of a placed reference that draws nothing for `code`. Built out of line, so that the
+/// frame of [`list`], which waits on the expansion, holds no refusal.
+#[cold]
+fn refused(base: &Primitive, link: Option<ObjectId>, code: &'static str) -> Boxed<EntityList> {
+    Ok(refusal(base, link, code))
 }
 
 /// The placed copy of an expansion: its problems, its clip, its transform and its layer. The copy
 /// is charged to the budget, and so is the clip, per primitive and clip vertex.
 fn place_copy(
     reader: &dyn Reader,
-    base: Primitive,
+    base: &Primitive,
     link: ObjectId,
     values: &[Option<Value>],
     options: &DisplayOptions,
@@ -567,7 +642,7 @@ fn place_copy(
 ) -> Result<EntityList> {
     let id = base.source;
     let Some(scope) = reader.scope() else {
-        return Ok(refusal(&base, Some(link), codes::EXTERNAL_NO_LINKS.code));
+        return Ok(refusal(base, Some(link), codes::EXTERNAL_NO_LINKS.code));
     };
     // One problem per reference: the first one below, or the partial drawing.
     let mut problems = Vec::new();
@@ -586,11 +661,11 @@ fn place_copy(
     }
     let clip = match clip_boundary(values, options) {
         Ok(clip) => clip,
-        Err(error) => return Ok(refusal(&base, Some(link), error.code())),
+        Err(error) => return Ok(refusal(base, Some(link), error.code())),
     };
     if !scope.memo.charge_primitives(expanded.list.primitives.len()) {
         return Ok(refusal(
-            &base,
+            base,
             Some(link),
             codes::EXTERNAL_BUDGET_EXCEEDED.code,
         ));
@@ -603,7 +678,7 @@ fn place_copy(
             .charge_work(primitives.len().saturating_mul(*vertices))
         {
             return Ok(refusal(
-                &base,
+                base,
                 Some(link),
                 codes::EXTERNAL_BUDGET_EXCEEDED.code,
             ));
