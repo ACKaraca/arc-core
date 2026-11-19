@@ -15,6 +15,7 @@ mod arrange;
 pub mod bbox;
 pub mod boolean;
 pub mod closest;
+pub mod corner;
 pub mod curve;
 pub mod edit;
 pub mod encoding;
@@ -41,6 +42,11 @@ pub mod view;
 pub use bbox::{Aabb2, Aabb3};
 pub use boolean::{BooleanOp, boolean};
 pub use closest::{CurvePoint, CurveProject, FootPoint};
+pub use corner::{
+    ChamferSize, CornerMode, CornerPolyline, CornerResult, Replacement, SegmentPick, SkipReason,
+    SkippedVertex, chamfer, chamfer_polyline_segments, chamfer_polyline_vertices, fillet,
+    fillet_polyline_segments, fillet_polyline_vertices,
+};
 pub use curve::Curve2;
 pub use edit::{
     Composite2, CurveEnd, JoinGap, Joined, extend, join, split_at_parameters, split_at_points, trim,

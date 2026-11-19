@@ -563,6 +563,17 @@ The codes `arc-geom` owns. A code is never reused for a different meaning; messa
 | `geom.arrangement.too_large` | `limit_exceeded` | Building a planar arrangement of curves needs more elements, candidate pairs, intersections, vertices or edges than the limit allows |
 | `geom.trace.not_enclosed` | `failed_operation` | No closed boundary of the curves encloses the picked point |
 | `geom.trace.on_boundary` | `invalid_input` | The picked point lies within the linear tolerance of a boundary curve |
+| `geom.corner.radius_invalid` | `invalid_input` | A fillet radius is NaN, infinite or negative |
+| `geom.corner.distance_invalid` | `invalid_input` | A chamfer distance is NaN, infinite or negative, or a chamfer angle is outside (0, π) |
+| `geom.corner.pick_off_curve` | `invalid_input` | A pick point of a corner construction is farther than the linear tolerance from its curve |
+| `geom.corner.pick_no_solution` | `failed_operation` | No corner solution keeps the pick points on the parts that remain, such as a pick inside the removed stretch |
+| `geom.corner.radius_too_large` | `failed_operation` | No fillet circle of the radius is tangent to both supports; reached only when no candidate center exists |
+| `geom.corner.no_intersection` | `failed_operation` | The supports of the two curves do not meet, so they form no corner |
+| `geom.corner.parallel` | `failed_operation` | Two lines are parallel and a chamfer is requested, or a polyline vertex has collinear segments |
+| `geom.corner.coincident` | `invalid_input` | Two curves of a corner construction lie on the same line or circle |
+| `geom.corner.curve_too_short` | `failed_operation` | A part of a curve that a corner construction keeps would be empty or outside the curve |
+| `geom.corner.unsupported_pair` | `unsupported` | A corner construction is not defined for the kinds of its curves |
+| `geom.corner.segment_invalid` | `invalid_input` | A polyline segment index is outside the polyline or the two indices are equal |
 
 ### Spatial index (CORE-GEOM-027)
 
@@ -748,6 +759,70 @@ The property tests sample every result curve of offsets of open and closed bulge
 ellipses and of random NURBS curves, at distances from 1e-3 to 20, and check with round joins
 that every point lies at the offset distance from the curve within 1e-5 (miter and bevel joins:
 at least the distance and at most `limit` times it), which also shows that no loop remains.
+
+### Corner constructions (CORE-GEOM-033)
+
+| ID | Capability | Behavior | Tier | Phase |
+|---|---|---|---|---|
+| CORE-GEOM-033 | Fillets and chamfers | Joins two curves with a fillet arc tangent to both, or a chamfer segment, between a segment, ray, line, arc or circle, a pair of polyline segments, or every vertex of a polyline; trims or extends the inputs to the joint, with a pick point per curve selecting the solution and the part kept. | T1 | 1 |
+
+`fillet(first, first_hint, second, second_hint, radius, mode, tolerance)` returns a
+`CornerResult`: the joint (`Curve2::Arc` for a fillet, `Curve2::Segment` for a chamfer, `None` for a
+sharp corner) and, for each input, a `Replacement`, which is `Trimmed` with the new curve or
+`Unchanged` in `CornerMode::Keep`. A caller replaces its entities atomically with these values.
+
+- The corner point is the intersection of the two supports: the infinite line of a segment, ray or
+  line, or the full circle of an arc or circle. When the supports meet at two points (two circles,
+  or a line and a circle), the point nearest the midpoint of the joint's cuts is used. Supports that
+  do not meet are refused with `geom.corner.no_intersection`; no fillet is built without a corner.
+- A fillet candidate is a circle of the radius tangent to both supports: one for each combination of
+  sides (outside or inside a circle, left or right of a line) that has a center. Its cuts are the
+  tangent points. The candidate whose cuts are nearest to the pick points is chosen among those that
+  keep both pick points on their remaining parts.
+- Each input is cut at its joint point and at the corner point. The remaining part is the part
+  beyond the joint point on the side away from the corner, extended to the corner when the input
+  does not reach it, and it must contain the pick point. A pick point in the removed stretch selects
+  no solution (`geom.corner.pick_no_solution`); a remaining part with no length is refused with
+  `geom.corner.curve_too_short`.
+- The fillet arc is the arc between the cuts whose middle faces the corner point.
+- A full circle keeps the arc between its two cuts that contains the pick point. A cut that
+  coincides with the corner (radius zero, or a zero distance) leaves a full circle unchanged.
+- A radius of zero, or distances of zero on both curves, gives the sharp corner with no joint: each
+  input is trimmed or extended to the corner point, on the side of its pick point.
+- Chamfers take distances `d1` and `d2` from the corner along the first and the second curve, or a
+  distance `d` along the first curve and an angle between the chamfer and that curve, measured
+  inside the corner; the second distance is then determined. The chamfer ends are on the sides of
+  the pick points. Chamfers are defined for segments, rays and lines only; a circular curve is
+  refused with `geom.corner.unsupported_pair`.
+- Parallel, distinct lines (segments, rays or lines, including anti-parallel directions) receive a
+  semicircular end in `fillet`. The joint is a semicircle whose diameter joins the end of the first
+  curve nearest its pick point to the foot of that end on the second line; its radius is half the
+  distance between the lines. The radius argument is ignored for this case, including zero, but a
+  non-finite or negative radius is still refused. The first curve keeps its geometry (a segment
+  keeps its length; a ray keeps its origin and direction). The second curve is trimmed or extended
+  to the foot, keeping the part in the body direction of the first curve, which must contain its
+  pick point. The semicircle bulges away from the kept parts. A line as the first curve has no end
+  and is refused with `geom.corner.unsupported_pair`. Coincident lines are refused with
+  `geom.corner.coincident`. Chamfers of parallel lines are refused with `geom.corner.parallel`, as
+  are collinear adjacent segments at a polyline vertex.
+- `fillet_polyline_segments` and `chamfer_polyline_segments` apply the pair constructions to two
+  segments of one polyline and return each segment's replacement; the caller rebuilds the polyline.
+- `fillet_polyline_vertices` and `chamfer_polyline_vertices` apply one construction at every
+  corner vertex (every vertex of a closed polyline, the inner vertices of an open one) and return a
+  `CornerPolyline`: the rebuilt polyline and the list of `SkippedVertex { index, reason }`.
+  A vertex with a bulged neighbour is left unchanged (`SkipReason::BulgedSegment`), and so is a
+  vertex whose segments are too short for the radius or distance, or whose cut would leave a
+  neighbouring segment with no part (`SkipReason::TooShort`). Corners are applied in vertex order,
+  and each is applied only if both segments it touches keep a part. Bulges of untouched segments are
+  kept. A radius or distance of zero returns the polyline with no vertices skipped. Two collinear
+  adjacent segments refuse the whole call with `geom.corner.coincident` (same line) or
+  `geom.corner.parallel`. Polylines with any width are refused with `geom.corner.unsupported_pair`:
+  widths are not carried through the cuts. Fillet arcs are stored as bulges.
+- Tolerances come from `Tolerance::linear` for distances and `Tolerance::angular` for the parallel
+  test. Every algorithm is closed-form: no iteration is bounded by input size.
+
+Not covered: ellipses, elliptical arcs and NURBS curves (`geom.corner.unsupported_pair`), chamfers of
+arcs, corners of supports that do not meet (`geom.corner.no_intersection`), and polyline widths.
 
 ### Point k-d tree (CORE-GEOM-028)
 

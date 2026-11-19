@@ -362,6 +362,73 @@ pub mod codes {
         message_id: "geom-trace-on-boundary",
     };
 
+    /// A fillet radius is NaN, infinite or negative.
+    pub const CORNER_RADIUS_INVALID: ErrorCode = ErrorCode {
+        code: "geom.corner.radius_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-corner-radius-invalid",
+    };
+    /// A chamfer distance is NaN, infinite or negative, or a chamfer angle is outside (0, π).
+    pub const CORNER_DISTANCE_INVALID: ErrorCode = ErrorCode {
+        code: "geom.corner.distance_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-corner-distance-invalid",
+    };
+    /// A pick hint of a corner construction is farther than the linear tolerance from its curve.
+    pub const CORNER_PICK_OFF_CURVE: ErrorCode = ErrorCode {
+        code: "geom.corner.pick_off_curve",
+        category: Category::InvalidInput,
+        message_id: "geom-corner-pick-off-curve",
+    };
+    /// No solution of a corner construction keeps both pick hints on the parts that remain.
+    pub const CORNER_PICK_NO_SOLUTION: ErrorCode = ErrorCode {
+        code: "geom.corner.pick_no_solution",
+        category: Category::FailedOperation,
+        message_id: "geom-corner-pick-no-solution",
+    };
+    /// No circle of the fillet radius is tangent to both curves on the corner.
+    pub const CORNER_RADIUS_TOO_LARGE: ErrorCode = ErrorCode {
+        code: "geom.corner.radius_too_large",
+        category: Category::FailedOperation,
+        message_id: "geom-corner-radius-too-large",
+    };
+    /// The supports of two curves of a corner construction do not meet.
+    pub const CORNER_NO_INTERSECTION: ErrorCode = ErrorCode {
+        code: "geom.corner.no_intersection",
+        category: Category::FailedOperation,
+        message_id: "geom-corner-no-intersection",
+    };
+    /// Two lines of a corner construction are parallel; no corner point or unique joint exists.
+    pub const CORNER_PARALLEL: ErrorCode = ErrorCode {
+        code: "geom.corner.parallel",
+        category: Category::FailedOperation,
+        message_id: "geom-corner-parallel",
+    };
+    /// Two curves of a corner construction lie on the same line or circle.
+    pub const CORNER_COINCIDENT: ErrorCode = ErrorCode {
+        code: "geom.corner.coincident",
+        category: Category::InvalidInput,
+        message_id: "geom-corner-coincident",
+    };
+    /// A part of a curve that a corner construction keeps would be empty.
+    pub const CORNER_CURVE_TOO_SHORT: ErrorCode = ErrorCode {
+        code: "geom.corner.curve_too_short",
+        category: Category::FailedOperation,
+        message_id: "geom-corner-curve-too-short",
+    };
+    /// A corner construction is not defined for the kinds of its curves.
+    pub const CORNER_UNSUPPORTED_PAIR: ErrorCode = ErrorCode {
+        code: "geom.corner.unsupported_pair",
+        category: Category::Unsupported,
+        message_id: "geom-corner-unsupported-pair",
+    };
+    /// A polyline segment index is outside the polyline, or the two indices are equal.
+    pub const CORNER_SEGMENT_INVALID: ErrorCode = ErrorCode {
+        code: "geom.corner.segment_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-corner-segment-invalid",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         INPUT_NOT_FINITE,
@@ -422,6 +489,17 @@ pub mod codes {
         ARRANGEMENT_TOO_LARGE,
         TRACE_NOT_ENCLOSED,
         TRACE_ON_BOUNDARY,
+        CORNER_RADIUS_INVALID,
+        CORNER_DISTANCE_INVALID,
+        CORNER_PICK_OFF_CURVE,
+        CORNER_PICK_NO_SOLUTION,
+        CORNER_RADIUS_TOO_LARGE,
+        CORNER_NO_INTERSECTION,
+        CORNER_PARALLEL,
+        CORNER_COINCIDENT,
+        CORNER_CURVE_TOO_SHORT,
+        CORNER_UNSUPPORTED_PAIR,
+        CORNER_SEGMENT_INVALID,
     ];
 }
 
