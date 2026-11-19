@@ -11,7 +11,10 @@
 //! Rows are laid out relative to the first visible row, never at an absolute position.
 //!
 //! The view never sorts or edits data itself. A click on a sortable header, or Enter on the
-//! cursor column, returns the intent of [`TableCommands::sort`]. An in-place edit (Enter, F2 or a
+//! cursor column, returns the intent of [`TableCommands::sort`] with the table's sort keys
+//! ([`TableView::sort_keys`]): a plain click sets one key, a click with Ctrl or Cmd adds or toggles
+//! a secondary key. Dragging a header, or Alt with Shift and the horizontal arrows, moves a column
+//! in the order ([`TableView::column_order`]). An in-place edit (Enter, F2 or a
 //! double click on a cell the source reports through [`TableSource::editable`]) shows a text field
 //! over the cell; Enter returns one intent of the edit command named by [`TableView::edit`] with
 //! `row`, `column` and `value`, and Escape cancels. A paste of tab-separated text returns one
@@ -39,6 +42,7 @@ use egui::{
 
 use crate::command::Intent;
 use crate::error::codes;
+use crate::table_model::{self, MAX_SORT_KEYS};
 use crate::text::{Direction, Localize, Message, messages, resolve};
 
 /// The most columns shown; the columns beyond are not drawn.
@@ -120,10 +124,17 @@ pub trait TableSource {
     fn column(&self, index: usize) -> Option<ColumnInfo>;
     /// The texts of the cells in `rows` and `columns`: one entry per row of `rows`, each holding
     /// one text per column of `columns`. The view calls this only for the rows in view, with a
-    /// margin, and for the columns in view and the frozen ones.
+    /// margin, and for the columns in view and the frozen ones. After a reorder those columns
+    /// are not consecutive, so the view makes one call per run of consecutive indices.
     fn cells(&self, rows: Range<usize>, columns: Range<usize>) -> Vec<Vec<String>>;
-    /// The sort the source currently applies, shown in the header.
+    /// The primary sort the source applies. See [`TableSource::sorted_keys`].
     fn sorted(&self) -> Option<Sort>;
+    /// The sort keys the source applies, first key first. The view starts with these keys when
+    /// it has none, and then keeps its own keys, which the user changes with the header. The
+    /// default is [`TableSource::sorted`] alone.
+    fn sorted_keys(&self) -> Vec<Sort> {
+        self.sorted().into_iter().collect()
+    }
     /// Whether cell (`row`, `column`) accepts `text` from a paste.
     fn accepts(&self, row: usize, column: usize, text: &str) -> bool;
     /// Whether cell (`row`, `column`) can be edited in place. The default is read-only.
@@ -132,8 +143,9 @@ pub trait TableSource {
     }
 }
 
-/// The intent names of a table: `sort` takes `column` and `direction`; `paste` takes `cells`, an
-/// array of objects with `row`, `column` and `value`.
+/// The intent names of a table: `sort` takes `column` and `direction` (the key the click set) and
+/// `keys`, an array of objects with `column` and `direction`, the table's keys after the click,
+/// first key first; `paste` takes `cells`, an array of objects with `row`, `column` and `value`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableCommands {
     /// The sort command.
@@ -151,13 +163,14 @@ pub struct CellRef {
     pub column: usize,
 }
 
-/// The selected rectangle, as half-open ranges.
+/// The selected cells: a range of rows and the selected column indices, in drawn order from the
+/// logical start. Columns are not contiguous in the source after a reorder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     /// The selected rows.
     pub rows: Range<usize>,
-    /// The selected columns.
-    pub columns: Range<usize>,
+    /// The selected columns, in the order the table draws them.
+    pub columns: Vec<usize>,
 }
 
 impl Selection {
@@ -190,6 +203,12 @@ pub struct TableView {
     /// in-place editing.
     pub edit: Option<String>,
     widths: Vec<f32>,
+    /// The source column index drawn at each visual position, from the logical start.
+    order: Vec<usize>,
+    /// The sort keys, first key first.
+    sort: Vec<Sort>,
+    /// The column whose header is being dragged.
+    reorder: Option<usize>,
     /// Horizontal scroll in logical points from the first scrolling column's left edge.
     scroll_x: f32,
     /// The first row at the top of the body.
@@ -254,14 +273,38 @@ impl Geometry {
 }
 
 impl TableView {
-    /// The selected rectangle, or `None` when no cell is selected.
+    /// The selected cells, or `None` when no cell is selected.
     #[must_use]
     pub fn selection(&self) -> Option<Selection> {
         let (anchor, cursor) = (self.anchor?, self.cursor?);
+        let (from, to) = (self.visual(anchor.column)?, self.visual(cursor.column)?);
         Some(Selection {
             rows: span(anchor.row, cursor.row),
-            columns: span(anchor.column, cursor.column),
+            columns: self.order.get(span(from, to))?.to_vec(),
         })
+    }
+
+    /// The source column indices in the order the table draws them, from the logical start. Empty
+    /// until the view has drawn the table once.
+    #[must_use]
+    pub fn column_order(&self) -> &[usize] {
+        &self.order
+    }
+
+    /// Moves the column at visual position `from` so that it ends at position `to`. Positions
+    /// count the drawn order from the logical start.
+    ///
+    /// # Errors
+    ///
+    /// `ui.table.column_out_of_range` when a position is not a drawn column.
+    pub fn move_column(&mut self, from: usize, to: usize) -> Result<()> {
+        table_model::move_column(&mut self.order, from, to)
+    }
+
+    /// The sort keys, first key first.
+    #[must_use]
+    pub fn sort_keys(&self) -> &[Sort] {
+        &self.sort
     }
 
     /// The cell with the keyboard focus.
@@ -270,7 +313,7 @@ impl TableView {
         self.cursor
     }
 
-    /// The width of column `index`, once the view has drawn the table.
+    /// The width of source column `index`, once the view has drawn the table.
     #[must_use]
     pub fn column_width(&self, index: usize) -> Option<f32> {
         self.widths.get(index).copied()
@@ -308,6 +351,79 @@ impl TableView {
         }
     }
 
+    /// The source column drawn at visual position `at`.
+    fn logical(&self, at: usize) -> Option<usize> {
+        self.order.get(at).copied()
+    }
+
+    /// The visual position of source column `column`.
+    fn visual(&self, column: usize) -> Option<usize> {
+        self.order.iter().position(|&c| c == column)
+    }
+
+    /// The width of the column drawn at visual position `at`.
+    fn width_at(&self, at: usize) -> f32 {
+        self.logical(at)
+            .and_then(|c| self.widths.get(c).copied())
+            .unwrap_or(DEFAULT_WIDTH)
+    }
+
+    /// Drops the keys of columns the source no longer has, and takes the keys the source applies
+    /// when the view has none yet.
+    fn sync_sort(&mut self, source: &dyn TableSource) {
+        table_model::retain_sort_keys(&mut self.sort, |c| source.column(c).is_some());
+        if self.sort.is_empty() {
+            for key in source.sorted_keys() {
+                let known = source.column(key.column).is_some();
+                let new = !self.sort.iter().any(|s| s.column == key.column);
+                if known && new && self.sort.len() < MAX_SORT_KEYS {
+                    self.sort.push(key);
+                }
+            }
+        }
+    }
+
+    /// The position a column dragged to pointer position `x` lands at, in the order without the
+    /// column itself: the number of other columns that lie before the pointer on the logical
+    /// start side.
+    fn drop_position(&self, g: &Geometry, from: usize, x: f32) -> usize {
+        (0..g.columns)
+            .filter(|&at| at != from)
+            .filter(|&at| {
+                let center = self.column_left(g, at) + self.width_at(at) / 2.0;
+                if g.rtl { center > x } else { center < x }
+            })
+            .count()
+    }
+
+    /// Moves source column `column` to the position under pointer position `x`.
+    fn drop_column(&mut self, g: &Geometry, column: usize, x: f32) {
+        let Some(from) = self.visual(column) else {
+            return;
+        };
+        let to = self.drop_position(g, from, x);
+        // `to` counts the other columns, so it is a position of the order: the move is accepted.
+        let _ = self.move_column(from, to);
+    }
+
+    /// The intent of a click on the header of `column`, or of Enter on its cell. A plain click
+    /// sets the one key; an additive one adds or toggles a key. A refused key gives no intent.
+    fn sort_click(
+        &mut self,
+        source: &dyn TableSource,
+        commands: &TableCommands,
+        column: usize,
+        additive: bool,
+    ) -> Option<Intent> {
+        let columns = source.column_count().min(MAX_COLUMNS);
+        let clicked = if additive {
+            table_model::sort_additive(&mut self.sort, columns, column)
+        } else {
+            table_model::sort_single(&mut self.sort, columns, column)
+        };
+        Some(sort_intent(commands, clicked.ok()?, &self.sort))
+    }
+
     fn click(&mut self, cell: CellRef, extend: bool) {
         if extend {
             self.anchor = self.anchor.or(self.cursor).or(Some(cell));
@@ -330,6 +446,8 @@ impl TableView {
         let rows = source.row_count();
         let columns = source.column_count().min(MAX_COLUMNS);
         self.sync_widths(source, columns);
+        self.order = table_model::reconcile_order(&self.order, columns);
+        self.sync_sort(source);
         self.clamp_selection(rows, columns);
         self.clamp_editing(rows, columns);
         self.show_notices(ui, localize);
@@ -373,7 +491,7 @@ impl TableView {
         row_height: f32,
         rtl: bool,
     ) -> Geometry {
-        let widths: Vec<f32> = self.widths.iter().take(columns).copied().collect();
+        let widths: Vec<f32> = (0..columns).map(|at| self.width_at(at)).collect();
         let offsets = column_offsets(&widths);
         let frozen = self.frozen.min(columns);
         let frozen_width = offsets.get(frozen).copied().unwrap_or(0.0);
@@ -518,7 +636,7 @@ impl TableView {
         first..end.max(first)
     }
 
-    /// The left edge of column `index` on screen. Logical order runs left to right, or right to
+    /// The left edge of the column at visual position `index` on screen. Logical order runs left to right, or right to
     /// left in a right-to-left layout; the frozen columns never scroll.
     fn column_left(&self, g: &Geometry, index: usize) -> f32 {
         let shift = if index < g.frozen { 0.0 } else { self.scroll_x };
@@ -531,8 +649,8 @@ impl TableView {
         }
     }
 
-    /// The horizontal extent a column's cells may be drawn in: the frozen columns at the logical
-    /// start, the others beside them.
+    /// The horizontal extent the cells of the column at visual position `index` may be drawn in:
+    /// the frozen columns at the logical start, the others beside them.
     fn region(&self, g: &Geometry, index: usize) -> (f32, f32) {
         let frozen = index < g.frozen;
         let fw = g.frozen_width;
@@ -582,13 +700,15 @@ impl TableView {
         localize: &dyn Localize,
     ) -> Option<Intent> {
         let mut intent = None;
-        let sort = source.sorted();
-        let columns = (0..g.frozen).chain(self.scroll_columns(g));
-        for index in columns {
-            let left = self.column_left(g, index);
-            let width = self.widths.get(index).copied().unwrap_or(DEFAULT_WIDTH);
+        let positions = (0..g.frozen).chain(self.scroll_columns(g));
+        for at in positions {
+            let Some(index) = self.logical(at) else {
+                continue;
+            };
+            let left = self.column_left(g, at);
+            let width = self.width_at(at);
             let cell = Rect::from_min_size(pos2(left, g.header.top()), vec2(width, g.row_height));
-            let visible = self.clip_to_region(g, index, cell, g.header);
+            let visible = self.clip_to_region(g, at, cell, g.header);
             if !visible.is_positive() {
                 continue;
             }
@@ -597,34 +717,24 @@ impl TableView {
                 width,
                 sortable: false,
             });
-            let sorted = sort.filter(|s| s.column == index);
-            let name = match sorted {
-                Some(s) => {
-                    let direction = match s.direction {
-                        SortDirection::Ascending => messages::TABLE_ASCENDING,
-                        SortDirection::Descending => messages::TABLE_DESCENDING,
-                    };
-                    resolve(
-                        localize,
-                        messages::TABLE_SORTED.message_id,
-                        &[
-                            ("name", Value::Text(info.name.clone())),
-                            ("direction", Value::Text(direction.text(localize))),
-                        ],
-                    )
-                }
-                None => info.name.clone(),
-            };
-            let shown = match sorted {
-                Some(s) if s.direction == SortDirection::Ascending => format!("{} ▲", info.name),
-                Some(_) => format!("{} ▼", info.name),
-                None => info.name.clone(),
-            };
-            let response = ui.interact(visible, id.with(("header", index)), Sense::CLICK);
+            let key = self
+                .sort
+                .iter()
+                .enumerate()
+                .find(|(_, key)| key.column == index)
+                .map(|(rank, key)| (rank, *key));
+            let (name, shown) = self.header_texts(localize, &info.name, key);
+            let response =
+                ui.interact(visible, id.with(("header", index)), Sense::click_and_drag());
             response.widget_info(|| WidgetInfo::labeled(Role::ColumnHeader, true, name.as_str()));
             if response.clicked() && info.sortable {
-                intent = Some(sort_intent(commands, index, sort));
+                let additive = ui.input(|i| i.modifiers.command);
+                intent = self
+                    .sort_click(source, commands, index, additive)
+                    .or(intent);
             }
+            self.reorder_by_drag(ui, g, index, &response);
+
             let painter = ui.painter().with_clip_rect(visible);
             painter.rect_filled(cell, 0.0, ui.visuals().widgets.inactive.weak_bg_fill);
             painter.text(
@@ -634,30 +744,119 @@ impl TableView {
                 TextStyle::Body.resolve(ui.style()),
                 ui.visuals().strong_text_color(),
             );
+            self.resize_grip(ui, g, at, index, cell, id);
+        }
+        self.draw_drop_line(ui, g);
+        intent
+    }
 
-            // The grip sits at the logical end of the column: the right edge, or the left edge
-            // in a right-to-left layout.
-            let end_x = if g.rtl { cell.left() } else { cell.right() };
-            let grip = Rect::from_min_max(
-                pos2(end_x - GRIP_WIDTH / 2.0, g.header.top()),
-                pos2(end_x + GRIP_WIDTH / 2.0, g.header.bottom()),
-            );
-            let grip = self.clip_to_region(g, index, grip, g.header);
-            if grip.is_positive() {
-                let handle = ui.interact(grip, id.with(("grip", index)), Sense::DRAG);
-                if handle.dragged() {
-                    let sign = if g.rtl { -1.0 } else { 1.0 };
-                    let width = self.widths.get(index).copied().unwrap_or(DEFAULT_WIDTH);
-                    if let Some(slot) = self.widths.get_mut(index) {
-                        *slot = clamp_width(width + sign * handle.drag_delta().x);
-                    }
-                }
-                if handle.hovered() || handle.dragged() {
-                    ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
-                }
+    /// The accessible name and the shown text of a header: the name, then the sort direction
+    /// arrow and, with several keys, the key's position.
+    fn header_texts(
+        &self,
+        localize: &dyn Localize,
+        name: &str,
+        key: Option<(usize, Sort)>,
+    ) -> (String, String) {
+        let Some((rank, key)) = key else {
+            return (name.to_owned(), name.to_owned());
+        };
+        let several = self.sort.len() > 1;
+        let (direction, arrow) = match key.direction {
+            SortDirection::Ascending => (messages::TABLE_ASCENDING, "▲"),
+            SortDirection::Descending => (messages::TABLE_DESCENDING, "▼"),
+        };
+        let direction = Value::Text(direction.text(localize));
+        let spoken = if several {
+            resolve(
+                localize,
+                messages::TABLE_SORTED_KEY.message_id,
+                &[
+                    ("name", Value::Text(name.to_owned())),
+                    ("direction", direction),
+                    ("key", count_value(rank + 1)),
+                    ("keys", count_value(self.sort.len())),
+                ],
+            )
+        } else {
+            resolve(
+                localize,
+                messages::TABLE_SORTED.message_id,
+                &[
+                    ("name", Value::Text(name.to_owned())),
+                    ("direction", direction),
+                ],
+            )
+        };
+        let shown = if several {
+            format!("{name} {arrow} {}", rank + 1)
+        } else {
+            format!("{name} {arrow}")
+        };
+        (spoken, shown)
+    }
+
+    /// Starts a reorder when a header drag starts, and moves the column where a drag ends.
+    fn reorder_by_drag(&mut self, ui: &Ui, g: &Geometry, index: usize, response: &egui::Response) {
+        if response.drag_started() {
+            self.reorder = Some(index);
+        }
+        if response.drag_stopped() && self.reorder == Some(index) {
+            self.reorder = None;
+            if let Some(pointer) = ui.input(|i| i.pointer.latest_pos()) {
+                self.drop_column(g, index, pointer.x);
             }
         }
-        intent
+    }
+
+    /// Draws the column width grip at the logical end of a header cell and resizes the column
+    /// while it is dragged.
+    fn resize_grip(
+        &mut self,
+        ui: &mut Ui,
+        g: &Geometry,
+        at: usize,
+        index: usize,
+        cell: Rect,
+        id: Id,
+    ) {
+        // The grip sits at the logical end of the column: the right edge, or the left edge in a
+        // right-to-left layout.
+        let end_x = if g.rtl { cell.left() } else { cell.right() };
+        let grip = Rect::from_min_max(
+            pos2(end_x - GRIP_WIDTH / 2.0, g.header.top()),
+            pos2(end_x + GRIP_WIDTH / 2.0, g.header.bottom()),
+        );
+        let grip = self.clip_to_region(g, at, grip, g.header);
+        if !grip.is_positive() {
+            return;
+        }
+        let handle = ui.interact(grip, id.with(("grip", index)), Sense::DRAG);
+        if handle.dragged() {
+            let sign = if g.rtl { -1.0 } else { 1.0 };
+            if let Some(slot) = self.widths.get_mut(index) {
+                *slot = clamp_width(*slot + sign * handle.drag_delta().x);
+            }
+        }
+        if handle.hovered() || handle.dragged() {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        }
+    }
+
+    /// Draws the line where a dragged header would drop, and ends the reorder once the pointer
+    /// is released.
+    fn draw_drop_line(&mut self, ui: &Ui, g: &Geometry) {
+        if let Some(pointer) = ui.input(|i| i.pointer.latest_pos())
+            && self.reorder.is_some()
+        {
+            let stroke = ui.visuals().selection.stroke;
+            let from = pos2(pointer.x, g.header.top());
+            ui.painter()
+                .line_segment([from, pos2(pointer.x, g.body.bottom())], stroke);
+        }
+        if !ui.input(|i| i.pointer.primary_down()) {
+            self.reorder = None;
+        }
     }
 
     /// The alignment of cell text: from the logical start.
@@ -671,14 +870,16 @@ impl TableView {
 
     fn body(&mut self, ui: &mut Ui, source: &dyn TableSource, g: &Geometry, id: Id) {
         let window = self.window(g);
-        let frozen_cells = if g.frozen > 0 && !window.is_empty() {
-            source.cells(window.clone(), 0..g.frozen)
+        let scroll = self.scroll_columns(g);
+        let frozen_columns: Vec<usize> = (0..g.frozen).filter_map(|at| self.logical(at)).collect();
+        let scroll_columns: Vec<usize> = scroll.clone().filter_map(|at| self.logical(at)).collect();
+        let frozen_cells = if !frozen_columns.is_empty() && !window.is_empty() {
+            fetch(source, window.clone(), &frozen_columns)
         } else {
             Vec::new()
         };
-        let scroll = self.scroll_columns(g);
-        let scroll_cells = if !scroll.is_empty() && !window.is_empty() {
-            source.cells(window.clone(), scroll.clone())
+        let scroll_cells = if !scroll_columns.is_empty() && !window.is_empty() {
+            fetch(source, window.clone(), &scroll_columns)
         } else {
             Vec::new()
         };
@@ -694,30 +895,33 @@ impl TableView {
             if y + g.row_height < g.body.top() || y > g.body.bottom() {
                 continue;
             }
-            for column in (0..g.frozen).chain(scroll.clone()) {
-                let text = if column < g.frozen {
-                    cell_text(&frozen_cells, line, column)
+            for at in (0..g.frozen).chain(scroll.clone()) {
+                let text = if at < g.frozen {
+                    cell_text(&frozen_cells, line, at)
                 } else {
-                    cell_text(&scroll_cells, line, column - scroll.start)
+                    cell_text(&scroll_cells, line, at - scroll.start)
                 };
-                let left = self.column_left(g, column);
-                let width = self.widths.get(column).copied().unwrap_or(DEFAULT_WIDTH);
-                let cell = Rect::from_min_size(pos2(left, y), vec2(width, g.row_height));
-                let visible = self.clip_to_region(g, column, cell, g.body);
+                let Some(column) = self.logical(at) else {
+                    continue;
+                };
+                let left = self.column_left(g, at);
+                let cell =
+                    Rect::from_min_size(pos2(left, y), vec2(self.width_at(at), g.row_height));
+                let visible = self.clip_to_region(g, at, cell, g.body);
                 if !visible.is_positive() {
                     continue;
                 }
-                let at = CellRef { row, column };
+                let target = CellRef { row, column };
                 let response = ui.interact(visible, id.with(("cell", row, column)), Sense::CLICK);
                 response.widget_info(|| WidgetInfo::labeled(Role::Cell, true, text.to_owned()));
                 if response.clicked() {
-                    clicked = Some(at);
+                    clicked = Some(target);
                 }
                 if response.double_clicked() {
-                    double = Some(at);
+                    double = Some(target);
                 }
                 let painter = ui.painter().with_clip_rect(visible);
-                if selection.as_ref().is_some_and(|s| s.contains(at)) {
+                if selection.as_ref().is_some_and(|s| s.contains(target)) {
                     painter.rect_filled(cell, 0.0, visuals.selection.bg_fill);
                 }
                 let shown: String = text.chars().take(MAX_CELL_CHARS).collect();
@@ -728,7 +932,7 @@ impl TableView {
                     font.clone(),
                     visuals.text_color(),
                 );
-                if cursor == Some(at) {
+                if cursor == Some(target) {
                     painter.rect_stroke(
                         cell.shrink(1.0),
                         0.0,
@@ -806,7 +1010,8 @@ impl TableView {
             );
         }
         let cell = self.cell_rect(g, editing.cell);
-        let (lo, hi) = self.region(g, editing.cell.column);
+        let at = self.visual(editing.cell.column).unwrap_or(0);
+        let (lo, hi) = self.region(g, at);
         let area = Rect::from_min_max(
             pos2(cell.left().max(lo), cell.top().max(g.body.top())),
             pos2(cell.right().min(hi), cell.bottom().min(g.body.bottom())),
@@ -834,15 +1039,11 @@ impl TableView {
 
     /// The rectangle of `cell` in screen coordinates, including the part scrolled out of view.
     fn cell_rect(&self, g: &Geometry, cell: CellRef) -> Rect {
-        let left = self.column_left(g, cell.column);
-        let width = self
-            .widths
-            .get(cell.column)
-            .copied()
-            .unwrap_or(DEFAULT_WIDTH);
+        let at = self.visual(cell.column).unwrap_or(0);
+        let left = self.column_left(g, at);
         Rect::from_min_size(
             pos2(left, self.row_top(g, cell.row)),
-            vec2(width, g.row_height),
+            vec2(self.width_at(at), g.row_height),
         )
     }
 
@@ -924,6 +1125,29 @@ impl TableView {
         }
         self.cursor.get_or_insert(CellRef::default());
         self.anchor.get_or_insert(CellRef::default());
+        let mirror: isize = if g.rtl { -1 } else { 1 };
+
+        // Alt with Shift and the horizontal arrows moves the cursor column along the order. It is
+        // read before the resize below, which matches the same arrows without Shift.
+        let (later, earlier) = ui.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowRight),
+                i.consume_key(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowLeft),
+            )
+        });
+        if let Some(cursor) = self.cursor
+            && (later || earlier)
+            && let Some(at) = self.visual(cursor.column)
+        {
+            let direction: isize = if later { 1 } else { -1 };
+            let to = at
+                .checked_add_signed(direction * mirror)
+                .filter(|&to| to < g.columns);
+            if let Some(to) = to {
+                // Both positions are drawn columns, so the move is accepted.
+                let _ = self.move_column(at, to);
+            }
+        }
 
         // Alt with the horizontal arrows resizes the cursor column.
         let (wider, narrower) = ui.input_mut(|i| {
@@ -941,7 +1165,6 @@ impl TableView {
         }
 
         let page = to_steps(g.rows_fit() as f32);
-        let mirror = if g.rtl { -1 } else { 1 };
         for (nav, extend) in ui.input_mut(take_navigation) {
             let Some(cursor) = self.cursor else { break };
             let target = match nav {
@@ -949,10 +1172,14 @@ impl TableView {
                     row: step(cursor.row, d, g.rows),
                     column: cursor.column,
                 },
-                Nav::Columns(d) => CellRef {
-                    row: cursor.row,
-                    column: step(cursor.column, d * mirror, g.columns),
-                },
+                Nav::Columns(d) => {
+                    let at = self.visual(cursor.column).unwrap_or(0);
+                    let to = step(at, d * mirror, g.columns);
+                    CellRef {
+                        row: cursor.row,
+                        column: self.logical(to).unwrap_or(cursor.column),
+                    }
+                }
                 Nav::Pages(d) => CellRef {
                     row: step(cursor.row, d.saturating_mul(page), g.rows),
                     column: cursor.column,
@@ -975,12 +1202,16 @@ impl TableView {
             self.start_edit(source, cursor);
         }
 
-        let enter = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
-        if enter && let Some(cursor) = self.cursor {
-            if self.edit.is_some() && source.editable(cursor.row, cursor.column) {
+        // Ctrl or Cmd with Enter adds or toggles a secondary key; Enter alone edits or sorts.
+        let additive = ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter));
+        let enter = !additive && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+        if (enter || additive)
+            && let Some(cursor) = self.cursor
+        {
+            if enter && self.edit.is_some() && source.editable(cursor.row, cursor.column) {
                 self.start_edit(source, cursor);
             } else if source.column(cursor.column).is_some_and(|c| c.sortable) {
-                intent = Some(sort_intent(commands, cursor.column, source.sorted()));
+                intent = self.sort_click(source, commands, cursor.column, additive);
             }
         }
 
@@ -1009,32 +1240,34 @@ impl TableView {
             self.scroll_offset = 0.0;
         }
         self.settle(g);
-        if cell.column >= g.frozen {
-            let start = g.offsets.get(cell.column).copied().unwrap_or(0.0) - g.frozen_width;
-            let length = self
-                .widths
-                .get(cell.column)
-                .copied()
-                .unwrap_or(DEFAULT_WIDTH);
+        let Some(at) = self.visual(cell.column) else {
+            return;
+        };
+        if at >= g.frozen {
+            let start = g.offsets.get(at).copied().unwrap_or(0.0) - g.frozen_width;
+            let length = self.width_at(at);
             self.scroll_x = scroll_to_show(self.scroll_x, g.scroll_width, start, length);
         }
     }
 
+    /// Copies the selected cells as text. Columns run in the drawn order from the logical start,
+    /// whatever the layout direction; rows run top to bottom.
     fn copy(&mut self, ui: &Ui, source: &dyn TableSource, g: &Geometry) {
         let Some(selection) = self.selection() else {
             return;
         };
         let rows = selection.rows.start.min(g.rows)..selection.rows.end.min(g.rows);
-        let columns = selection.columns.start.min(g.columns)..selection.columns.end.min(g.columns);
-        if rows.len().saturating_mul(columns.len()) > MAX_COPY_CELLS {
+        if rows.len().saturating_mul(selection.columns.len()) > MAX_COPY_CELLS {
             self.notice = Some(messages::TABLE_COPY_TOO_LARGE);
             return;
         }
         self.notice = None;
-        let cells = source.cells(rows, columns);
+        let cells = fetch(source, rows, &selection.columns);
         ui.ctx().copy_text(format_grid(&cells));
     }
 
+    /// Pastes the grid at the top-left corner of the selection. Each pasted column goes to the
+    /// next drawn column, so a paste follows the order.
     fn paste(
         &mut self,
         source: &dyn TableSource,
@@ -1052,20 +1285,24 @@ impl TableView {
             }
         };
         self.notice = None;
-        let origin = self.selection().map_or(CellRef::default(), |s| CellRef {
-            row: s.rows.start,
-            column: s.columns.start,
-        });
+        let (origin_row, origin_at) = match self.selection() {
+            Some(s) => (
+                s.rows.start,
+                s.columns.first().and_then(|&c| self.visual(c)).unwrap_or(0),
+            ),
+            None => (0, 0),
+        };
         let mut accepted = Vec::new();
         let mut refused = Vec::new();
         let mut refused_count = 0usize;
         for (dr, line) in grid.iter().enumerate() {
             for (dc, value) in line.iter().enumerate() {
+                let position = origin_at.saturating_add(dc);
                 let cell = CellRef {
-                    row: origin.row.saturating_add(dr),
-                    column: origin.column.saturating_add(dc),
+                    row: origin_row.saturating_add(dr),
+                    column: self.logical(position).unwrap_or(position),
                 };
-                let in_table = cell.row < g.rows && cell.column < g.columns;
+                let in_table = cell.row < g.rows && position < g.columns;
                 if in_table && source.accepts(cell.row, cell.column, value) {
                     accepted.push(serde_json::json!({
                         "row": cell.row,
@@ -1088,18 +1325,51 @@ impl TableView {
     }
 }
 
-/// The intent of a sort click on `column`: ascending, or descending when the column is already
-/// sorted ascending.
-fn sort_intent(commands: &TableCommands, column: usize, current: Option<Sort>) -> Intent {
-    let direction = match current {
-        Some(s) if s.column == column && s.direction == SortDirection::Ascending => {
-            SortDirection::Descending
-        }
-        _ => SortDirection::Ascending,
-    };
+/// The intent of a sort click: the key the click set (`column`, `direction`) and the table's keys
+/// after it (`keys`, first key first).
+fn sort_intent(commands: &TableCommands, clicked: Sort, keys: &[Sort]) -> Intent {
+    let keys = keys
+        .iter()
+        .map(|key| {
+            serde_json::json!({
+                "column": key.column,
+                "direction": key.direction.as_str(),
+            })
+        })
+        .collect();
     Intent::new(commands.sort.clone())
-        .with("column", column)
-        .with("direction", direction.as_str())
+        .with("column", clicked.column)
+        .with("direction", clicked.direction.as_str())
+        .with("keys", serde_json::Value::Array(keys))
+}
+
+/// A count as a message argument.
+fn count_value(count: usize) -> Value {
+    Value::Int(i64::try_from(count).unwrap_or(i64::MAX))
+}
+
+/// The texts of `rows` in `columns` (source column indices in the order given): one list per row,
+/// one text per column. The source is asked once per run of consecutive indices, so a reordered
+/// table asks for each run of columns and no others.
+fn fetch(source: &dyn TableSource, rows: Range<usize>, columns: &[usize]) -> Vec<Vec<String>> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for &column in columns {
+        match runs.last_mut() {
+            Some((first, count)) if first.saturating_add(*count) == column => *count += 1,
+            _ => runs.push((column, 1)),
+        }
+    }
+    let mut lines: Vec<Vec<String>> = vec![Vec::with_capacity(columns.len()); rows.len()];
+    for (first, count) in runs {
+        let texts = source.cells(rows.clone(), first..first.saturating_add(count));
+        for (line, cells) in lines.iter_mut().enumerate() {
+            let row = texts.get(line);
+            cells.extend(
+                (0..count).map(|k| row.and_then(|r| r.get(k)).cloned().unwrap_or_default()),
+            );
+        }
+    }
+    lines
 }
 
 /// The point where a cell's text starts: inside the left edge, or the right edge in a

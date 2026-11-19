@@ -55,6 +55,7 @@ pub mod quantity;
 pub mod snap;
 pub mod style;
 pub mod table;
+pub mod table_model;
 pub mod text;
 pub mod theme;
 pub mod tree;

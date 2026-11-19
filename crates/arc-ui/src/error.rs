@@ -164,6 +164,18 @@ pub mod codes {
         category: Category::LimitExceeded,
         message_id: "ui-table-too-large",
     };
+    /// A table column index, or a table column position to move to, is not in the table.
+    pub const TABLE_COLUMN_OUT_OF_RANGE: ErrorCode = ErrorCode {
+        code: "ui.table.column_out_of_range",
+        category: Category::InvalidInput,
+        message_id: "ui-table-column-out-of-range",
+    };
+    /// A table would hold more sort keys than [`crate::table_model::MAX_SORT_KEYS`].
+    pub const TABLE_SORT_TOO_MANY: ErrorCode = ErrorCode {
+        code: "ui.table.sort_too_many",
+        category: Category::LimitExceeded,
+        message_id: "ui-table-sort-too-many",
+    };
     /// A style picker was given more entries than the limit.
     pub const STYLE_TOO_MANY: ErrorCode = ErrorCode {
         code: "ui.style.too_many",
@@ -199,6 +211,8 @@ pub mod codes {
         QUANTITY_NOT_INTEGER,
         PROPERTY_TOO_LARGE,
         TABLE_TOO_LARGE,
+        TABLE_COLUMN_OUT_OF_RANGE,
+        TABLE_SORT_TOO_MANY,
         STYLE_TOO_MANY,
     ];
 }

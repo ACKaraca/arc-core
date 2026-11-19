@@ -73,6 +73,9 @@ ui-table-paste-refused = { $count ->
 }
 ui-table-copy-too-large = The selection has too many cells to copy.
 ui-table-too-large = The text is too large to paste.
+ui-table-sorted-key = { $name }, sorted { $direction }, sort key { $key } of { $keys }
+ui-table-column-out-of-range = The table column does not exist.
+ui-table-sort-too-many = The table cannot hold more sort keys.
 ui-style-color = Color
 ui-style-layer = Layer
 ui-style-linetype = Linetype

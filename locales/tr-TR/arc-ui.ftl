@@ -73,6 +73,9 @@ ui-table-paste-refused = { $count ->
 }
 ui-table-copy-too-large = Seçim kopyalamak için çok fazla hücre içeriyor.
 ui-table-too-large = Metin yapıştırmak için çok büyük.
+ui-table-sorted-key = { $name }, { $direction } sıralı, sıralama anahtarı { $key } / { $keys }
+ui-table-column-out-of-range = Tablo sütunu yok.
+ui-table-sort-too-many = Tabloya daha fazla sıralama anahtarı eklenemez.
 ui-style-color = Renk
 ui-style-layer = Katman
 ui-style-linetype = Çizgi türü

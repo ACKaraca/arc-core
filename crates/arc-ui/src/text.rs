@@ -329,6 +329,11 @@ pub mod messages {
     pub const TABLE_SORTED: Message = Message {
         message_id: "ui-table-sorted",
     };
+    /// The accessible name of a column header that is one of several sort keys, with `name`,
+    /// `direction`, `key` (its 1-based position) and `keys` (the number of keys).
+    pub const TABLE_SORTED_KEY: Message = Message {
+        message_id: "ui-table-sorted-key",
+    };
     /// The sort direction name for an ascending sort.
     pub const TABLE_ASCENDING: Message = Message {
         message_id: "ui-table-ascending",
@@ -597,6 +602,7 @@ pub(crate) mod tests {
             messages::VIEW_CORNER,
             messages::TABLE,
             messages::TABLE_SORTED,
+            messages::TABLE_SORTED_KEY,
             messages::TABLE_ASCENDING,
             messages::TABLE_DESCENDING,
             messages::TABLE_PASTE_REFUSED,

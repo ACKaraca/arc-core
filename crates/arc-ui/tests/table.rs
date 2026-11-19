@@ -35,6 +35,13 @@ impl Localize for English {
         Some(match id {
             "ui-table" => "Table".to_owned(),
             "ui-table-sorted" => format!("{}, sorted {}", arg("name"), arg("direction")),
+            "ui-table-sorted-key" => format!(
+                "{}, sorted {}, sort key {} of {}",
+                arg("name"),
+                arg("direction"),
+                arg("key"),
+                arg("keys")
+            ),
             "ui-table-ascending" => "ascending".to_owned(),
             "ui-table-descending" => "descending".to_owned(),
             "ui-table-paste-refused" => format!("{} refused", arg("count")),
@@ -51,6 +58,7 @@ struct Grid {
     rows: usize,
     columns: usize,
     sorted: Option<Sort>,
+    keys: Vec<Sort>,
     refuse: Option<usize>,
     asked: RefCell<Vec<Range<usize>>>,
 }
@@ -61,6 +69,7 @@ impl Grid {
             rows,
             columns,
             sorted: None,
+            keys: Vec::new(),
             refuse: None,
             asked: RefCell::new(Vec::new()),
         }
@@ -89,6 +98,13 @@ impl TableSource for Grid {
     fn sorted(&self) -> Option<Sort> {
         self.sorted
     }
+    fn sorted_keys(&self) -> Vec<Sort> {
+        if self.keys.is_empty() {
+            self.sorted.into_iter().collect()
+        } else {
+            self.keys.clone()
+        }
+    }
     fn accepts(&self, _row: usize, column: usize, _text: &str) -> bool {
         self.refuse != Some(column)
     }
@@ -109,8 +125,21 @@ struct Pass {
 fn pass(
     ctx: &egui::Context,
     events: Vec<egui::Event>,
+    ui_fn: impl FnMut(&mut egui::Ui) -> Option<Intent>,
+) -> (Pass, Option<Intent>) {
+    pass_with(ctx, events, egui::Modifiers::NONE, ui_fn)
+}
+
+/// A pass whose held modifiers are `modifiers`; a click reads them from the frame's state.
+fn pass_with(
+    ctx: &egui::Context,
+    events: Vec<egui::Event>,
+    modifiers: egui::Modifiers,
     mut ui_fn: impl FnMut(&mut egui::Ui) -> Option<Intent>,
 ) -> (Pass, Option<Intent>) {
+    // The held modifiers are a state change at the start of the frame, not a field of the input.
+    let mut events = events;
+    events.insert(0, egui::Event::ModifiersChanged(modifiers));
     let input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
@@ -142,6 +171,19 @@ fn header(pass: &Pass, text: &str) -> Option<accesskit::Node> {
     pass.nodes
         .iter()
         .find(|n| n.role() == accesskit::Role::ColumnHeader && n.label().is_some_and(|l| l == text))
+        .cloned()
+}
+
+/// The header of column `column`, whether or not it shows a sort.
+fn header_of(pass: &Pass, column: &str) -> Option<accesskit::Node> {
+    let prefix = format!("{column},");
+    pass.nodes
+        .iter()
+        .find(|n| {
+            n.role() == accesskit::Role::ColumnHeader
+                && n.label()
+                    .is_some_and(|l| l == column || l.starts_with(&prefix))
+        })
         .cloned()
 }
 
@@ -188,6 +230,64 @@ fn frame(
     pass(ctx, events, |ui| {
         view.show(ui, source, &commands(), &English)
     })
+}
+
+fn key_with(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+    egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }
+}
+
+/// A primary click with `modifiers` held, at `at`.
+fn click_with(at: egui::Pos2, modifiers: egui::Modifiers) -> Vec<egui::Event> {
+    let button = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers,
+    };
+    vec![egui::Event::PointerMoved(at), button(true), button(false)]
+}
+
+/// The three frames of a drag from `from` to `to`: press, move, release.
+fn drag(from: egui::Pos2, to: egui::Pos2) -> [Vec<egui::Event>; 3] {
+    let button = |pos: egui::Pos2, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    [
+        vec![egui::Event::PointerMoved(from), button(from, true)],
+        vec![egui::Event::PointerMoved(to)],
+        vec![egui::Event::PointerMoved(to), button(to, false)],
+    ]
+}
+
+/// Runs one frame of `view` over `source` with `modifiers` held.
+fn frame_with(
+    ctx: &egui::Context,
+    view: &mut TableView,
+    source: &dyn TableSource,
+    events: Vec<egui::Event>,
+    modifiers: egui::Modifiers,
+) -> (Pass, Option<Intent>) {
+    pass_with(ctx, events, modifiers, |ui| {
+        view.show(ui, source, &commands(), &English)
+    })
+}
+
+/// Moves column `C0` of a three column table to the right of `C2`, over three frames.
+fn move_c0_after_c2(ctx: &egui::Context, view: &mut TableView, source: &Grid, first: &Pass) {
+    let from = center(&header(first, "C0").unwrap());
+    let [press, moved, release] = drag(from, egui::pos2(260.0, from.y));
+    let _ = frame(ctx, view, source, press);
+    let _ = frame(ctx, view, source, moved);
+    let _ = frame(ctx, view, source, release);
 }
 
 fn new_context() -> egui::Context {
@@ -243,7 +343,7 @@ fn keyboard_moves_the_selection_and_scrolls_it_into_view() {
     );
     let selection = view.selection().expect("a selection exists");
     assert_eq!(selection.rows, 0..41);
-    assert_eq!(selection.columns, 0..1);
+    assert_eq!(selection.columns, vec![0]);
     assert!(cell(&pass, "r40c0").is_some(), "row 40 scrolled into view");
 
     // Page down moves by a page; Home returns to the first row without Shift.
@@ -756,4 +856,281 @@ fn cell_text_starts_at_the_logical_start_of_its_cell() {
             );
         }
     }
+}
+
+/// The `sort` intent's `keys` parameter as (column, direction) pairs.
+fn sort_keys_of(intent: &Intent) -> Vec<(u64, String)> {
+    intent.params["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| {
+            (
+                k["column"].as_u64().unwrap(),
+                k["direction"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn dragging_a_header_moves_the_column_and_its_cells_follow() {
+    let ctx = new_context();
+    let source = Grid::new(10, 3);
+    let mut view = TableView::default();
+    let (first, _) = frame(&ctx, &mut view, &source, vec![]);
+    move_c0_after_c2(&ctx, &mut view, &source, &first);
+    assert_eq!(view.column_order(), &[1, 2, 0]);
+    let (pass, intent) = frame(&ctx, &mut view, &source, vec![]);
+    assert!(intent.is_none(), "a drag is not a sort");
+    let x = |text: &str| center(&cell(&pass, text).unwrap()).x;
+    assert!(x("r0c1") < x("r0c2") && x("r0c2") < x("r0c0"));
+}
+
+#[test]
+fn alt_shift_arrows_move_the_cursor_column_and_alt_alone_still_resizes() {
+    let ctx = new_context();
+    let source = Grid::new(10, 3);
+    let mut view = TableView::default();
+    let (first, _) = frame(&ctx, &mut view, &source, vec![]);
+    let _ = frame(
+        &ctx,
+        &mut view,
+        &source,
+        click(center(&cell(&first, "r0c0").unwrap())),
+    );
+    let _ = frame(&ctx, &mut view, &source, vec![]);
+    let alt_shift = egui::Modifiers::ALT | egui::Modifiers::SHIFT;
+    let _ = frame(
+        &ctx,
+        &mut view,
+        &source,
+        vec![key_with(egui::Key::ArrowRight, alt_shift)],
+    );
+    assert_eq!(view.column_order(), &[1, 0, 2]);
+    assert_eq!(
+        view.cursor().unwrap().column,
+        0,
+        "the cursor stays on its column"
+    );
+    let _ = frame(
+        &ctx,
+        &mut view,
+        &source,
+        vec![key_with(egui::Key::ArrowLeft, alt_shift)],
+    );
+    assert_eq!(view.column_order(), &[0, 1, 2]);
+    // The move is not taken past either end of the order.
+    let _ = frame(
+        &ctx,
+        &mut view,
+        &source,
+        vec![key_with(egui::Key::ArrowLeft, alt_shift)],
+    );
+    assert_eq!(view.column_order(), &[0, 1, 2]);
+    // Alt without Shift still resizes the cursor column and leaves the order alone.
+    let before = view.column_width(0).unwrap();
+    let _ = frame(
+        &ctx,
+        &mut view,
+        &source,
+        vec![key_with(egui::Key::ArrowRight, egui::Modifiers::ALT)],
+    );
+    assert_eq!(view.column_width(0), Some(before + 8.0));
+    assert_eq!(view.column_order(), &[0, 1, 2]);
+}
+
+#[test]
+fn copy_and_paste_follow_the_column_order() {
+    let ctx = new_context();
+    let source = Grid::new(10, 3);
+    let mut view = TableView::default();
+    let (first, _) = frame(&ctx, &mut view, &source, vec![]);
+    move_c0_after_c2(&ctx, &mut view, &source, &first);
+    let (moved, _) = frame(&ctx, &mut view, &source, vec![]);
+    // Select r0c2 and extend to the right: the selection runs over the drawn order, [2, 0].
+    let _ = frame(
+        &ctx,
+        &mut view,
+        &source,
+        click(center(&cell(&moved, "r0c2").unwrap())),
+    );
+    let _ = frame(&ctx, &mut view, &source, vec![]);
+    let _ = frame(
+        &ctx,
+        &mut view,
+        &source,
+        keys(egui::Key::ArrowRight, 1, true),
+    );
+    assert_eq!(view.selection().unwrap().columns, vec![2, 0]);
+    let (pass, _) = frame(&ctx, &mut view, &source, vec![egui::Event::Copy]);
+    let copied: Vec<&String> = pass
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            egui::output::OutputCommand::CopyText(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(copied, vec!["r0c2\tr0c0\n"]);
+
+    // A paste starts at the selection's left corner and fills the drawn columns to the right.
+    let (_, intent) = frame(
+        &ctx,
+        &mut view,
+        &source,
+        vec![egui::Event::Paste("a\tb\n".to_owned())],
+    );
+    let cells = intent.expect("a paste intent").params["cells"].clone();
+    assert_eq!(
+        cells,
+        serde_json::json!([
+            {"row": 0, "column": 2, "value": "a"},
+            {"row": 0, "column": 0, "value": "b"},
+        ])
+    );
+}
+
+#[test]
+fn a_plain_click_sets_one_key_and_a_modified_click_adds_and_toggles_keys() {
+    let ctx = new_context();
+    let source = Grid::new(10, 5);
+    let mut view = TableView::default();
+    let (first, _) = frame(&ctx, &mut view, &source, vec![]);
+    let ctrl = egui::Modifiers::COMMAND;
+    let at = |pass: &Pass, column: &str| center(&header_of(pass, column).unwrap());
+
+    let (_, intent) = frame(&ctx, &mut view, &source, click(at(&first, "C1")));
+    let intent = intent.expect("sort intent");
+    assert_eq!(sort_keys_of(&intent), vec![(1, "ascending".to_owned())]);
+
+    let (_, intent) = frame_with(
+        &ctx,
+        &mut view,
+        &source,
+        click_with(at(&first, "C0"), ctrl),
+        ctrl,
+    );
+    let intent = intent.expect("a modified click adds a key");
+    assert_eq!(intent.params["column"], 0);
+    assert_eq!(
+        sort_keys_of(&intent),
+        vec![(1, "ascending".to_owned()), (0, "ascending".to_owned())]
+    );
+    let (pass, _) = frame(&ctx, &mut view, &source, vec![]);
+    assert!(header(&pass, "C1, sorted ascending, sort key 1 of 2").is_some());
+    assert!(header(&pass, "C0, sorted ascending, sort key 2 of 2").is_some());
+
+    // A modified click on a key toggles it in place, keeping its place in the keys.
+    let (_, intent) = frame_with(
+        &ctx,
+        &mut view,
+        &source,
+        click_with(at(&pass, "C1"), ctrl),
+        ctrl,
+    );
+    let intent = intent.expect("toggle");
+    assert_eq!(intent.params["direction"], "descending");
+    assert_eq!(
+        sort_keys_of(&intent),
+        vec![(1, "descending".to_owned()), (0, "ascending".to_owned())]
+    );
+
+    // A plain click sets one key: C0 is ascending, so it turns descending and the others go.
+    let (pass, _) = frame(&ctx, &mut view, &source, vec![]);
+    let (_, intent) = frame(&ctx, &mut view, &source, click(at(&pass, "C0")));
+    let intent = intent.expect("plain click");
+    assert_eq!(sort_keys_of(&intent), vec![(0, "descending".to_owned())]);
+    assert_eq!(view.sort_keys().len(), 1);
+}
+
+#[test]
+fn the_key_limit_refuses_a_new_key_without_an_intent_and_still_toggles_keys() {
+    let ctx = new_context();
+    let source = Grid::new(10, 5);
+    let mut view = TableView::default();
+    let (first, _) = frame(&ctx, &mut view, &source, vec![]);
+    let ctrl = egui::Modifiers::COMMAND;
+    let at = |pass: &Pass, column: &str| center(&header_of(pass, column).unwrap());
+    let _ = frame(&ctx, &mut view, &source, click(at(&first, "C1")));
+    for column in ["C0", "C2", "C3"] {
+        let (pass, _) = frame(&ctx, &mut view, &source, vec![]);
+        let _ = frame_with(
+            &ctx,
+            &mut view,
+            &source,
+            click_with(at(&pass, column), ctrl),
+            ctrl,
+        );
+    }
+    let (pass, _) = frame(&ctx, &mut view, &source, vec![]);
+    assert_eq!(view.sort_keys().len(), 4);
+    let (_, refused) = frame_with(
+        &ctx,
+        &mut view,
+        &source,
+        click_with(at(&pass, "C4"), ctrl),
+        ctrl,
+    );
+    assert!(refused.is_none(), "a fifth key gives no intent");
+    assert_eq!(view.sort_keys().len(), 4);
+    assert!(view.sort_keys().iter().all(|k| k.column != 4));
+
+    let (_, toggled) = frame_with(
+        &ctx,
+        &mut view,
+        &source,
+        click_with(at(&pass, "C0"), ctrl),
+        ctrl,
+    );
+    let toggled = toggled.expect("an existing key still toggles at the limit");
+    assert_eq!(sort_keys_of(&toggled).len(), 4);
+    let (pass, _) = frame(&ctx, &mut view, &source, vec![]);
+    assert!(header(&pass, "C0, sorted descending, sort key 2 of 4").is_some());
+}
+
+#[test]
+fn keys_are_seeded_from_the_source_and_survive_a_refresh_until_their_column_vanishes() {
+    let ctx = new_context();
+    let mut source = Grid::new(10, 3);
+    source.keys = vec![
+        Sort {
+            column: 2,
+            direction: SortDirection::Ascending,
+        },
+        Sort {
+            column: 1,
+            direction: SortDirection::Descending,
+        },
+    ];
+    let mut view = TableView::default();
+    let (pass, _) = frame(&ctx, &mut view, &source, vec![]);
+    assert!(header(&pass, "C2, sorted ascending, sort key 1 of 2").is_some());
+    assert!(header(&pass, "C1, sorted descending, sort key 2 of 2").is_some());
+
+    // Rows change: the keys stay.
+    source.rows = 20;
+    let (pass, _) = frame(&ctx, &mut view, &source, vec![]);
+    assert!(header(&pass, "C2, sorted ascending, sort key 1 of 2").is_some());
+
+    // Column 2 vanishes: its key goes, the other key stays and now stands alone.
+    source.columns = 2;
+    let (pass, _) = frame(&ctx, &mut view, &source, vec![]);
+    assert_eq!(view.sort_keys().len(), 1);
+    assert!(header(&pass, "C1, sorted descending").is_some());
+    let (_, intent) = frame_with(
+        &ctx,
+        &mut view,
+        &source,
+        click_with(
+            center(&header(&pass, "C0").unwrap()),
+            egui::Modifiers::COMMAND,
+        ),
+        egui::Modifiers::COMMAND,
+    );
+    let intent = intent.expect("a modified click");
+    assert_eq!(
+        sort_keys_of(&intent),
+        vec![(1, "descending".to_owned()), (0, "ascending".to_owned())]
+    );
 }

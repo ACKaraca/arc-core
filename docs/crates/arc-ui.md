@@ -31,7 +31,7 @@ product needs them.
 | `ViewportWidget` | Hosts a viewport texture and routes input |
 | `PropertySource` | Trait providing categorized fields, values (possibly mixed), editors and override markers |
 | `TreeSource` | Trait providing lazily loaded children, labels, icons and toggles |
-| `TableSource` | Trait providing row counts, row windows, columns, sorting and filtering |
+| `TableSource` | Trait providing row and column counts, cell texts for row windows, column descriptions, the sort keys it applies and paste acceptance |
 | `QuantityField` | Expression-capable numeric input bound to a dimension |
 | `NodeEditor` | Canvas for `arc-nodes` graphs |
 | `Theme` | Token set for colors, spacing, radii, fonts, icon sizes |
@@ -213,6 +213,8 @@ The codes `arc-ui` owns; messages are in `locales/en-US/arc-ui.ftl`.
 | `ui.quantity.not_integer` | `invalid_input` | An entered value is not a whole number where one is needed |
 | `ui.property.too_large` | `limit_exceeded` | The selected objects times their fields exceed 1,000,000 |
 | `ui.table.too_large` | `limit_exceeded` | Clipboard text for a table paste has more than 1 MiB of bytes or 1,000,000 cells |
+| `ui.table.column_out_of_range` | `invalid_input` | A table column index or a column move names a position the table does not draw |
+| `ui.table.sort_too_many` | `limit_exceeded` | A table sort would hold more than 4 keys |
 | `ui.style.too_many` | `limit_exceeded` | A style picker is given more than 4,096 entries (see `StylePicker::check`) |
 
 ## Panels and widgets as implemented
@@ -344,41 +346,69 @@ Objects are listed as hyphenated identifier texts.
 ### Virtualized tables (CORE-UI-013, CORE-UI-014)
 
 - A `TableSource` gives the row and column counts, a column's name, initial width and sortability,
-  the sort it applies, the texts of a window of cells (`cells(rows, columns)`, one list per row)
-  and whether a cell accepts a pasted text. The view draws a `TableView`. It reads cell texts
-  only for the rows in the viewport plus `MARGIN` (2) rows on each side, and for the frozen
-  columns and the columns in the horizontal viewport plus one on each side. A frame therefore
-  asks for the same amount of data for one million rows as for a hundred. At most 256 columns
-  are drawn (`MAX_COLUMNS`); cell text is cut to 256 characters.
+  the sort keys it applies (`sorted_keys`, by default the single `sorted` key), the texts of a
+  window of cells (`cells(rows, columns)`, one list per row) and whether a cell accepts a pasted
+  text. The view draws a `TableView`. It reads cell texts only for the rows in the viewport plus
+  `MARGIN` (2) rows on each side, and for the frozen columns and the columns in the horizontal
+  viewport plus one on each side. After a reorder those columns are not consecutive, so the view
+  asks once per run of consecutive source indices. A frame therefore asks for the same amount of
+  data for one million rows as for a hundred. At most 256 columns are drawn (`MAX_COLUMNS`); cell
+  text is cut to 256 characters.
 - Rows are placed at a fixed height (the spacing's interact height). The vertical position is an
   integer index of the first visible row and an offset below it, below 1 row height; rows are
   placed relative to that row, so a row of a table with 50,000,000 rows is placed exactly. The
   view draws its own vertical and horizontal scroll bars along the right and bottom edges, 10
   points thick, and the wheel scrolls rows; horizontal wheel input, and the Shift key with the
   vertical wheel, scroll the scrolling columns.
-- Leading columns named by the public field `frozen` stay at the logical start: the left edge, or
-  the right edge in a right-to-left layout. The others scroll horizontally with the cursor, the
-  wheel and the horizontal scroll bar.
+- The leading drawn columns, the first `frozen` positions of the column order, stay at the logical
+  start: the left edge, or the right edge in a right-to-left layout. The others scroll
+  horizontally with the cursor, the wheel and the horizontal scroll bar.
+- Column order: `TableView::column_order()` is a permutation of the drawn columns. Entry `p` is the
+  source column drawn at position `p` from the logical start. Dragging a header moves its column to
+  the place under the pointer; the drop position is the number of other columns that lie before
+  the pointer on the logical start side. Alt with Shift and Left or Right moves the cursor column
+  one place, and the cursor stays on it. `TableView::move_column(from, to)` is the model operation
+  both use: the column at `from` ends at `to`, a move to the same position changes nothing, and a
+  position outside the order is refused with `ui.table.column_out_of_range`. When the source's
+  column count changes, the order keeps the known columns in their order and places new ones
+  last. Column widths and sort keys refer to source column indices and move with their columns.
 - Column widths are view state, clamped to 24 to 2,000 points. Dragging the grip at a header's
   right edge resizes the column; Alt with Left or Right resizes the cursor column by 8 points.
-- Selection is a rectangle of cells held by the view (`selection()`, `cursor()`). Arrows move the
-  cursor (Shift extends); Page Up and Page Down move by a page of rows; Home and End move to the
-  first and last row and keep the column. Keyboard moves scroll the cursor into view. Clicks
-  select, Shift-click extends. The table is one focusable widget; cells are labeled widgets for
-  assistive technology, not focus stops.
-- A click on a sortable header, or Enter with the cursor on a sortable column, returns the intent
-  of `TableCommands::sort` with `column` (index) and `direction` (`ascending` or `descending`). A
-  click on a column already sorted ascending asks for descending. The view does not sort; the
-  source reports the sort it applies through `TableSource::sorted`, which the header shows.
+- The selection is held by the view (`selection()`, `cursor()`): a range of rows and the selected
+  source column indices in drawn order, between the anchor and the cursor. Left and Right move
+  the cursor along the drawn order, Up and Down by row (Shift extends); Page Up and Page Down move
+  by a page of rows; Home and End move to the first and last row and keep the column. Keyboard
+  moves scroll the cursor into view. Clicks select, Shift-click extends. The table is one focusable
+  widget; cells are labeled widgets for assistive technology, not focus stops.
+- Sorting: a click on a sortable header, or Enter with the cursor on a sortable column, changes the
+  view's sort keys and returns the intent of `TableCommands::sort`. Its `column` and `direction`
+  are the key the click set, and `keys` is an array of `column` and `direction` objects holding
+  every key after the click, first key first. A plain click, or Enter, sets one key: a column that
+  already has an ascending key turns descending, any other column sorts ascending. A click with
+  Ctrl or Cmd, or Ctrl or Cmd with Enter, adds a secondary key at the end, or toggles the direction
+  of a key the column already has, in place. At most `MAX_SORT_KEYS` (4) keys exist; a click that
+  would add a fifth gives no intent. A key whose column the source no longer reports is dropped
+  at the next frame, and the other keys keep their order and direction, so a data refresh keeps
+  them. The view takes its first keys from `TableSource::sorted_keys` while it has none.
+- The view never sorts data: the source applies the keys. `table_model::sort_rows` is a helper for
+  a source. It orders row indices by a comparison of two rows in one column that the caller
+  supplies, stable for ties and without copying cell data.
+- Accessibility: a header's accessible name is its text, followed by its sort state
+  (`ui-table-sorted`). With several keys it also gives the key's position (`ui-table-sorted-key`).
+  A header shows a direction arrow, and a number when there are several keys. The position of a
+  column in the order is not announced.
 - Copy (`Event::Copy`) puts the selected cells on the clipboard with `Context::copy_text`, through
   `format_grid`: cells separated by tabs, records ended by a line feed. A cell that contains a
   tab, a line feed, a carriage return or a quote is wrapped in quotes with each quote doubled.
-  A selection of more than 100,000 cells is not copied; the table shows a notice.
+  Columns are copied in the column order from the logical start, the same in both layout
+  directions; a right-to-left layout does not reverse them. A selection of more than 100,000 cells
+  is not copied; the table shows a notice.
 - Paste (`Event::Paste`) reads the text with `parse_grid`, the inverse of `format_grid`: a record
   ends at a line feed, a carriage return, or a carriage return with a line feed; a final record
   needs no line feed; empty text has no records. Quoted cells may hold tabs, line breaks and
   doubled quotes. Text over 1 MiB or 1,000,000 cells fails with `ui.table.too_large`. The paste
-  is placed at the top-left corner of the selection. Each cell is offered to
+  is placed at the top-left corner of the selection, and each pasted column goes to the next drawn
+  column. Each cell is offered to
   `TableSource::accepts`; the accepted cells make one intent of `TableCommands::paste` with
   `cells`, an array of objects with `row`, `column` and `value`. Refused cells, including those
   outside the table, are counted by `refused_count()` and listed (at most 100) by `refused()`,
@@ -417,6 +447,32 @@ Objects are listed as hyphenated identifier texts.
   - Enter on an editable cell edits; a sortable column sorts on Enter only when the cell is not
     editable. Focus leaving the editor cancels the edit rather than committing it: a value must be
     committed by an explicit Enter.
+  - The column order is a permutation in view state, and the cursor, anchor and selection keep
+    source column indices, so intents and paste cells name the same source columns after a move.
+    Rejected: moving the source's columns, which would change the index every intent and cell
+    refers to.
+  - The frozen columns are the first drawn positions, so a column moved into them becomes frozen.
+    Rejected: freezing by source index, which would need a separate pinned set and a rule for
+    columns that the user drags across the boundary.
+  - Sort keys are view state, and the source applies the keys it receives in the intent. Rejected:
+    the header reading the source's report on every frame, which shows the old sort until the
+    source has applied the click and makes the next modified click toggle from a stale key.
+    `TableSource::sorted` is kept, and `sorted_keys` seeds the first keys.
+  - A modified click uses Ctrl or Cmd, the modifier the tree uses for additive selection. Rejected:
+    Shift, which the table already uses to extend a selection.
+  - The keys are limited to 4 (`MAX_SORT_KEYS`), since the source's sort cost grows with the keys.
+    A refused key gives no intent and changes nothing; the table does not replace a key silently.
+  - The intent carries the clicked key and the full key list, so a source applies the keys without
+    keeping a second state. Rejected: one intent per key operation, which would make the source
+    replay the operations in order.
+  - Keyboard reordering uses Alt with Shift and the horizontal arrows. Alt with the arrows resizes
+    (existing), and Shift with the arrows extends the selection.
+  - Cells are fetched per run of consecutive source indices, so a reordered table asks only for
+    the columns it draws. Rejected: one call for the span of source indices that covers them, which
+    would ask for columns outside the view.
+  - The comparison of a sort is an argument of `table_model::sort_rows`, not a method of
+    `TableSource`: `TableSource` has no comparison method, and the sort is performed by the source
+    in its own data. Rejected: a new trait method, which would be a second comparison hook.
 - In-place editing: Enter, F2 or a double click on a cell that `TableSource::editable` reports
   opens a text field over the cell with the cell's text. Enter emits one intent of the edit
   command, `TableView::edit`, with `row`, `column` and `value`; Escape cancels, and so does moving
@@ -427,7 +483,8 @@ Objects are listed as hyphenated identifier texts.
   right, cell and header text starts at the right, the resize grip is at the left edge of a
   column, and Left and Right move the cursor in the visual direction. The direction is
   `TableView::layout_direction`, from `TableView::language` unless `TableView::direction` is set.
-- Open items in this unit: column reordering and sorting by several columns.
+- Open items: announcing a column's position in the order to assistive technology; a plain click
+  is the only way to remove keys (it replaces them all), since no gesture removes one key.
 
 ### Style pickers (CORE-UI-015)
 
@@ -730,7 +787,7 @@ highlighted; a focused target is shown by a focus indicator around the whole cub
 | CORE-UI-010 | Property grid | Shows categorized fields for single and multiple selection with mixed-value display, override markers and read-only states; edits emit one command per change. | T1 | 0 |
 | CORE-UI-011 | Numeric and unit input | Accepts expressions with units, shows evaluated values in display units, supports drag scrub, and rejects invalid input inline without changing the value. | T1 | 0 |
 | CORE-UI-012 | Tree and outliner | Displays virtualized hierarchies with lazy children, multi-selection, drag and drop as commands, inline rename, filtering and visibility and lock toggles. | T1 | 0 |
-| CORE-UI-013 | Virtualized tables | Scrolls tables of millions of rows at display rate by fetching row windows, with sorting and filtering in the source, frozen columns, resizable and reorderable columns and in-place editing as commands. | T1 | 1 |
+| CORE-UI-013 | Virtualized tables | Scrolls tables of millions of rows at display rate by fetching row windows, with frozen columns, resizable and reorderable columns, up to four sort keys reported as one command and in-place editing as commands. | T1 | 1 |
 | CORE-UI-014 | Table clipboard | Copies selected cells as tab-separated text and pastes tab-separated text into editable cells as one command. | T2 | 1 |
 | CORE-UI-015 | Style pickers | Provides color, layer, linetype, lineweight and material pickers reading document style tables. | T1 | 1 |
 | CORE-UI-016 | Node editor | Edits `arc-nodes` graphs with typed sockets, link validation, frames, subgraph navigation, inline parameters and node evaluation states. | T2 | 3 |
