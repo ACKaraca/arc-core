@@ -46,7 +46,7 @@ product could not map).
 | `arc-io-dwg` | `arc-base`, `arc-geom`, `arc-command` (worker jobs) | `acadrust` |
 | `arc-io-ifc` | `arc-base`, `arc-geom`, `arc-mesh` | `ifc-lite`, `quick-xml`, `zip` |
 | `arc-io-step` | `arc-base`, `arc-brep`, `arc-command` (worker jobs) | none beyond the kernel tier |
-| `arc-io-mesh` | `arc-base`, `arc-geom`, `arc-mesh` | `gltf`, `tobj`, `stl_io`, `threemf`, `image`, `exr` |
+| `arc-io-mesh` | `arc-base`, `arc-mesh` | `serde` (loss report only); OBJ with MTL, STL and PLY are implemented in the crate; `gltf`, `threemf`, `image` and `exr` are for the formats that follow |
 | `arc-io-usd` | `arc-base`, `arc-geom`, `arc-mesh` | `openusd` |
 | `arc-io-pointcloud` | `arc-base`, `arc-geom`, `arc-doc` (asset storage of octrees) | `las`, `laz`, `e57` |
 | `arc-io-geo` | `arc-base`, `arc-geom` | `proj`, `geo`, `geozero`, `shapefile`, `flatgeobuf`, `rusqlite`, `quick-xml` |
@@ -508,3 +508,105 @@ because the layer table does not allow one format crate to depend on another.
 | `io.pdf.plot_params_invalid` | `invalid_input` | A parameter of `core.draft.plot` is missing, inconsistent or out of range; the argument `what` names it |
 
 `base.cancelled` is returned when the token is cancelled.
+
+## Mesh formats as implemented
+
+`arc-io-mesh` is the OBJ, STL and PLY part of the family. It depends on `arc-base` and `arc-mesh`,
+and on `serde` for the serialization of the loss report. The three formats are implemented in the
+crate from their published descriptions; none needs a third-party crate. Its readers take byte buffers and never paths, and it builds for
+`wasm32-unknown-unknown`. The neutral model is `MeshScene`: named `arc_mesh::TriMesh` parts, each
+with an optional material name, and the materials of an MTL library. Per-vertex normals, texture
+coordinates and colors are the attribute channels `Normal`, `Uv(0)` and `Color` of the mesh.
+
+### Reading
+
+- `obj::read(obj, mtl, options)` takes the OBJ bytes and, as an optional second buffer, the MTL
+  bytes. The `mtllib` statement is ignored. Vertices (`v`), texture coordinates (`vt`) and normals
+  (`vn`) are referred to by one-based indices, or by negative indices counted back from the end of
+  the pool read so far. A part holds one vertex per distinct corner (position, texture coordinate
+  and normal together), so attributes stay per vertex. Polygons are fan-triangulated. Each `o` or
+  `g` statement starts a part, and a `usemtl` statement after faces starts a part too, so every
+  part has one material. A new object or group starts without a material. Smoothing groups (`s`)
+  and `mtllib` are not kept. A backslash at a line end joins the next line, and `#` starts a
+  comment. Other statements (`l`, `p`, curves and surfaces) are skipped and reported.
+- MTL: `newmtl` starts a material. `Ka`, `Kd` and `Ks` take three colors; other forms (spectral or
+  CIE curves) are skipped and reported. `d` (after an optional `-halo`) and `Tr` give the opacity.
+  The statements `map_*`, `bump`, `disp`, `decal`, `refl` and `norm` keep the text after their
+  name as written. Other statements are skipped and reported.
+- `stl::read(bytes, options)` takes a file as binary when its length is 84 bytes plus 50 bytes for
+  each facet, the count being the little-endian `u32` at bytes 80 to 84. Any other file is read as
+  ASCII, one part for each `solid`. Corners with equal coordinates share a vertex. Facet normals
+  and attribute bytes are not kept; a non-zero one is reported.
+- `ply::read(bytes, options)` reads ASCII, binary little-endian and binary big-endian files. The
+  first `vertex` and first `face` elements are read. Positions come from `x y z`, normals from
+  `nx ny nz`, texture coordinates from `s t`, `u v`, `texture_u texture_v` or `texture_s
+  texture_t`, and colors from `red green blue` with an optional `alpha`; integer colors are divided
+  by 255. Faces come from the list `vertex_indices` (or `vertex_index`), are fan-triangulated, and
+  are checked against the vertex count after every element is read. Vertices keep their order. Other
+  elements and properties are skipped and reported. The result is one part with an empty name.
+- Every count, line and total size is checked before it is used. The limits of the profile are
+  enforced as follows:
+
+| Limit | Enforced on |
+|---|---|
+| `input_bytes` | Each input buffer, before any parsing |
+| `string_bytes` | Each line, and each joined OBJ statement |
+| `record_count` | OBJ and MTL statements, STL facets and PLY records over all elements |
+| `array_length` | Corners of a polygon, vertices and triangles of a part, PLY list lengths and header elements |
+
+  A count that the remaining bytes cannot hold fails with `io.mesh.truncated` before any record is
+  read, so a declared count does not drive an allocation.
+
+### Writing
+
+- `obj::write(scene, options)` writes ASCII. Each part writes `o`, then `usemtl` when it has a
+  material, then its positions, normals and texture coordinates when present, then faces with
+  one-based indices. Parts without triangles are skipped and reported. With `mtl_name` set and
+  materials present, the file begins with `mtllib`. The result carries the MTL bytes when the scene
+  has materials; the caller stores them under the name it chose. Names may not contain `#`, a
+  backslash or a line break.
+- `stl::write(scene, options)` writes ASCII, one solid for each part, or little-endian binary with
+  one solid for all parts; binary drops the part names and the division into parts, and both are
+  reported. Positions are rounded to single precision, and each rounded position is reported. Facet
+  normals are the unit normals of the facets, or zero where they are not representable. Big-endian
+  binary fails with `io.mesh.encoding_unsupported`.
+- `ply::write(scene, options)` writes ASCII, binary little-endian or binary big-endian with one
+  `vertex` element for all parts and one `face` element. Positions are `double`; normals are `float`
+  `nx ny nz`; texture coordinates are `float` `s t`; colors are `uchar` `red green blue alpha`,
+  rounded to 8 bits, and each value that changes is reported. An attribute that not every written
+  part has is dropped. Part names and materials have no place in the format and are reported.
+
+Numbers are written in the shortest form that reads back to the same value: plain decimal for
+magnitudes from 0.0001 up to, not including, 10^15, and exponent form otherwise. Output depends
+only on the scene and the options; a writer never writes a timestamp or an identifier.
+
+### Loss reports
+
+| Reason | Outcome |
+|---|---|
+| `io.mesh.element_skipped` | `dropped` |
+| `io.mesh.property_skipped` | `dropped` |
+| `io.mesh.polygon_triangulated` | `approximated` |
+| `io.mesh.attribute_dropped` | `dropped` |
+| `io.mesh.attribute_incomplete` | `dropped` |
+| `io.mesh.precision_reduced` | `approximated` |
+
+The record kind of an item names the element, property, statement or attribute it concerns. The
+argument `attribute` of the attribute items names the attribute in the words of the report.
+
+### Error codes
+
+| Code | Category | Meaning |
+|---|---|---|
+| `io.mesh.truncated` | `corrupt_data` | The input ends inside a line, record, list or declared element |
+| `io.mesh.value_invalid` | `corrupt_data` | A value does not parse as its type, or is not finite |
+| `io.mesh.index_out_of_range` | `corrupt_data` | A face refers to a vertex that does not exist |
+| `io.mesh.face_invalid` | `corrupt_data` | A face has fewer than three corners |
+| `io.mesh.structure_invalid` | `corrupt_data` | Statements, records or blocks are not arranged as the format requires |
+| `io.mesh.header_invalid` | `corrupt_data` | The PLY header is malformed, or names an unknown format or version |
+| `io.mesh.text_invalid` | `corrupt_data` | Text of the file is not valid UTF-8 |
+| `io.mesh.encoding_unsupported` | `unsupported` | The writer was asked for an encoding the format does not have |
+| `io.mesh.write_value_invalid` | `invalid_input` | A value or name cannot be written in the format |
+
+`io.limit_exceeded` is the limit code of the family defined in the DXF section above; its argument
+`limit` names the field of the profile.

@@ -226,6 +226,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-io-mesh"
+version = "0.1.0"
+dependencies = [
+ "arc-base",
+ "arc-mesh",
+ "proptest",
+ "serde",
+]
+
+[[package]]
 name = "arc-io-pdf"
 version = "0.1.0"
 dependencies = [

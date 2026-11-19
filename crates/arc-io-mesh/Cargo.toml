@@ -1,0 +1,20 @@
+[package]
+name = "arc-io-mesh"
+description = "Bounded OBJ with MTL, STL and PLY readers and deterministic writers over a neutral mesh scene, with loss reports."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+arc-base = { workspace = true }
+arc-mesh = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true
