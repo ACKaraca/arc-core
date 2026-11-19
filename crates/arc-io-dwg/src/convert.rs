@@ -1,10 +1,13 @@
-//! Conversions of library values into the neutral model: handles, points, colors and the
-//! properties every entity shares.
+//! Conversions of library values into the neutral model: handles, points, colors, the limits every
+//! copied value is checked against, and the properties every entity shares.
 
 use acadrust::entities::EntityCommon;
-use acadrust::types::{Color, Handle as DwgHandle, Transparency, Vector2, Vector3};
+use acadrust::types::{Color, Handle as DwgHandle, LineWeight, Transparency, Vector2, Vector3};
+use arc_base::{Limits, Result};
 use arc_io_dxf::Handle;
 use arc_io_dxf::model::{EntityProps, Head, P2, P3};
+
+use crate::error::limit;
 
 /// A library handle as a model handle; the null handle is absent.
 pub(crate) fn handle(h: DwgHandle) -> Option<Handle> {
@@ -46,6 +49,47 @@ pub(crate) fn all_finite(values: &[f64]) -> bool {
     values.iter().all(|v| v.is_finite())
 }
 
+/// Checks the number of elements of a collection against `array_length`.
+pub(crate) fn array(len: usize, limits: &Limits) -> Result<()> {
+    let len = u64::try_from(len).unwrap_or(u64::MAX);
+    if len > limits.array_length {
+        return Err(limit("array_length", len));
+    }
+    Ok(())
+}
+
+/// Checks the size of a text value against `string_bytes` and copies it.
+pub(crate) fn text(value: &str, limits: &Limits) -> Result<String> {
+    let len = u64::try_from(value.len()).unwrap_or(u64::MAX);
+    if len > limits.string_bytes {
+        return Err(limit("string_bytes", len));
+    }
+    Ok(value.to_owned())
+}
+
+/// The records of one mapping, counted against `record_count`. Vertices and attributes count as
+/// records, as the records of the DXF reader do.
+pub(crate) struct RecordBudget<'a> {
+    used: &'a mut u64,
+    limit: u64,
+}
+
+impl<'a> RecordBudget<'a> {
+    pub(crate) fn new(used: &'a mut u64, limit: u64) -> Self {
+        Self { used, limit }
+    }
+
+    /// Adds `count` records; `io.limit_exceeded` naming `record_count` once the limit is passed.
+    pub(crate) fn spend(&mut self, count: usize) -> Result<()> {
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
+        *self.used = self.used.saturating_add(count);
+        if *self.used > self.limit {
+            return Err(limit("record_count", *self.used));
+        }
+        Ok(())
+    }
+}
+
 /// The color properties of a color value, and whether part of it was not carried.
 pub(crate) struct ColorValue {
     pub(crate) color: Option<i16>,
@@ -85,6 +129,17 @@ pub(crate) fn color(value: &Color) -> ColorValue {
     }
 }
 
+/// The lineweight of an entity. An entity that takes the lineweight of its layer or the default
+/// has none, as an entity without the lineweight group has none in the DXF reader; by-block keeps
+/// its code.
+pub(crate) fn lineweight(value: LineWeight) -> Option<i16> {
+    match value {
+        LineWeight::ByLayer | LineWeight::Default => None,
+        LineWeight::ByBlock => Some(value.value()),
+        LineWeight::Value(v) => Some(v),
+    }
+}
+
 /// Whether a linetype name means the entity takes the linetype of its layer.
 pub(crate) fn is_by_layer(name: &str) -> bool {
     name.is_empty() || name.eq_ignore_ascii_case("ByLayer")
@@ -93,8 +148,13 @@ pub(crate) fn is_by_layer(name: &str) -> bool {
 /// The shared properties of an entity, and the names of the data the model does not carry.
 ///
 /// The thickness, extrusion and elevation of each kind are set by its own mapping; the rest is
-/// here. A number that is not finite makes the entity invalid; the caller checks it.
-pub(crate) fn props(common: &EntityCommon, paper_space: bool) -> (EntityProps, Vec<&'static str>) {
+/// here. A number that is not finite makes the entity invalid; the caller checks it. Every name
+/// copied from the library is checked against the string limit.
+pub(crate) fn props(
+    common: &EntityCommon,
+    paper_space: bool,
+    limits: &Limits,
+) -> Result<(EntityProps, Vec<&'static str>)> {
     let mut partial = Vec::new();
     let color = color(&common.color);
     if color.partial {
@@ -113,15 +173,24 @@ pub(crate) fn props(common: &EntityCommon, paper_space: bool) -> (EntityProps, V
     if !common.reactors.is_empty() || common.xdictionary_handle.is_some() {
         partial.push("references");
     }
+    let linetype = (!is_by_layer(&common.linetype))
+        .then(|| text(&common.linetype, limits))
+        .transpose()?;
+    let color_name = common
+        .color_name
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .map(|name| text(name, limits))
+        .transpose()?;
     let props = EntityProps {
         paper_space,
         layout: None,
-        layer: common.layer.clone(),
-        linetype: (!is_by_layer(&common.linetype)).then(|| common.linetype.clone()),
+        layer: text(&common.layer, limits)?,
+        linetype,
         color: color.color,
         true_color: color.true_color,
-        color_name: common.color_name.clone().filter(|name| !name.is_empty()),
-        lineweight: Some(common.line_weight.value()),
+        color_name,
+        lineweight: lineweight(common.line_weight),
         transparency: None,
         linetype_scale: (common.linetype_scale != 1.0).then_some(common.linetype_scale),
         invisible: common.invisible,
@@ -129,7 +198,7 @@ pub(crate) fn props(common: &EntityCommon, paper_space: bool) -> (EntityProps, V
         thickness: None,
         extrusion: None,
     };
-    (props, partial)
+    Ok((props, partial))
 }
 
 #[cfg(test)]
@@ -159,5 +228,37 @@ mod tests {
         assert!(is_by_layer("ByLayer"));
         assert!(is_by_layer("BYLAYER"));
         assert!(!is_by_layer("DASHED"));
+    }
+
+    #[test]
+    fn lineweight_is_absent_for_by_layer_and_default() {
+        assert_eq!(lineweight(LineWeight::ByLayer), None);
+        assert_eq!(lineweight(LineWeight::Default), None);
+        assert_eq!(lineweight(LineWeight::ByBlock), Some(-2));
+        assert_eq!(lineweight(LineWeight::Value(25)), Some(25));
+    }
+
+    #[test]
+    fn record_budget_names_the_limit_it_passes() {
+        let mut used = 0;
+        let mut budget = RecordBudget::new(&mut used, 3);
+        assert!(budget.spend(2).is_ok());
+        let err = budget.spend(2).err();
+        assert_eq!(err.map(|e| e.code()), Some("io.limit_exceeded"));
+        assert_eq!(used, 4);
+    }
+
+    #[test]
+    fn long_names_are_refused_by_the_string_limit() {
+        let limits = Limits {
+            string_bytes: 4,
+            ..Limits::CONSTRAINED
+        };
+        let common = EntityCommon {
+            layer: "LONGER_THAN_FOUR".to_owned(),
+            ..EntityCommon::default()
+        };
+        let err = props(&common, false, &limits).err();
+        assert_eq!(err.map(|e| e.code()), Some("io.limit_exceeded"));
     }
 }

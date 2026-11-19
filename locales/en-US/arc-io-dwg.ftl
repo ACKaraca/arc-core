@@ -14,3 +14,4 @@ io-dwg-loss-object-dropped = { $count } non-graphical objects were not carried.
 io-dwg-loss-entity-dropped = { $count } entities of a type the drawing does not keep, or outside any block, were not carried.
 io-dwg-loss-entity-partial = { $count } entities kept some data the drawing does not carry.
 io-dwg-loss-value-skipped = { $count } records were skipped because a value is not a finite number.
+io-dwg-loss-handle-unresolved = { $count } references from a block definition to entities that are not in the file were not carried.

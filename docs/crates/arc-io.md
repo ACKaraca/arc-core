@@ -355,60 +355,84 @@ library's default features off.
   repaired drawing. A budget refusal of the library is reported as `io.limit_exceeded` with the
   argument `limit` set to `decompressed_bytes`; the refusal is recognized by the library's message
   text, and a test of this crate fails if that text changes.
-- The call into the library is wrapped in `std::panic::catch_unwind`. A panic becomes
-  `io.dwg.library_failed`. This does not protect against aborts, stack overflows or unbounded memory
-  use inside the library. Running the call in `arc-worker` is the intended hardening; it is not part
-  of this unit (CORE-IO-013).
-- After the library returns, the model is checked against the profile: `record_count` counts every
-  entity, block entity and table entry; `array_length` bounds the vertices, control and fit points,
-  knots, boundary paths, pattern lines and dashes, linetype elements and preview bytes of each record; `string_bytes` bounds every text value and
-  name. A failure is `io.limit_exceeded` naming the field. These limits bound the mapped model; the
-  library has already allocated the file when they apply.
+- The read, the whole mapping and the drop of the library's document run inside one
+  `catch_unwind` (the isolation boundary of `library.rs`). A panic anywhere in that span, including
+  in a library accessor, a destructor or the progress callback, becomes `io.dwg.library_failed`.
+  Only the neutral drawing and report leave the boundary. Cancellation and limit errors are not
+  panics and keep their own codes. The boundary does not protect against aborts, stack overflows or
+  unbounded memory use inside the library; running the read in `arc-worker` is the intended
+  hardening, and it is required before untrusted files are read (CORE-IO-013).
+- The library bounds some per-record allocations only by the record length times the size of the
+  element, so a small multiline, table or mesh record can make the library reserve memory far larger
+  than the record. This crate cannot prevent that; untrusted files are read only in the worker
+  process (CORE-IO-013).
+- The library's mesh budget is set to zero faces and zero face indices (`with_mesh_limits(0, 0)`):
+  a MESH record is read without its faces and reported as not carried. The library still probes host
+  memory for its default budget, which reserves nothing.
+- The library's decompression budget is the profile's `decompressed_bytes`, as above.
+- After the library returns, the model is checked against the profile. `record_count` counts every
+  entity, block entity, table entry, polyline vertex and insert attribute, as the DXF reader counts
+  its records; vertices and attributes count when they are mapped. `array_length` bounds the
+  vertices, control and fit points, knots, boundary paths, the edges of a boundary path, boundary
+  handles, pattern lines and dashes, linetype elements and preview bytes of each record.
+  `string_bytes` bounds every text value and name, including layer, linetype and color names of
+  entities, and the names of dimension blocks, styles and text. A failure is `io.limit_exceeded`
+  naming the field. These limits bound the mapped model; the library has already allocated the file
+  when they apply.
 - Cancellation is checked before the library call, after it, and before every record of the mapping.
   The library call cannot be cancelled once it has started. Progress is reported while the drawing is
   mapped, every 1024 records and at the end; the total is the number of entities.
-- A number that is not finite is not passed through. The record that holds it is skipped and counted
-  in `io.dwg.value_skipped`.
+- A number that is not finite is not passed through. The record or field that holds it is skipped and
+  counted in `io.dwg.value_skipped`: the header variable `$LTSCALE`, a linetype with a length that is
+  not finite, a text style with a number that is not finite, and the base point of a block (which
+  becomes the origin). An entity with such a number is invalid and is skipped, and an insert with an
+  attribute whose number is not finite is skipped as a whole.
 
 ### Mapping
 
 | Library data | Neutral model |
 |---|---|
 | Header variables `$INSUNITS`, `$LTSCALE`, `$MEASUREMENT`, `$CLAYER` | Header variables with their group codes; all other header variables are counted as one item of `io.dwg.header_dropped` |
-| Layers | LAYER entries: color number (negative when the layer is off), true color, linetype name, plot flag, lineweight; flags frozen (1), frozen in new viewports (2) and locked (4) |
-| Linetypes | LTYPE entries: description, alignment, pattern length and element lengths; complex elements are partial |
-| Text styles | STYLE entries: height, width factor, oblique angle, last height, font names, generation flags |
+| Layers | LAYER entries: color number (negative when the layer is off), true color, linetype name, plot flag, lineweight; flags frozen (1), frozen in new viewports (2) and locked (4). A layer that is off with the by-block color cannot carry the off state in a color number of 0, so the color 7 is used, negated, and the layer is partial (`color`) |
+| Linetypes | LTYPE entries: description, alignment, pattern length and element lengths; complex elements are partial. A linetype with a length that is not finite is skipped |
+| Text styles | STYLE entries: height, width factor, oblique angle in degrees (the library stores radians), last height, font names, generation flags. A style with a number that is not finite is skipped |
 | Application names, dimension style names | APPID and DIMSTYLE entries by name; dimension variables are partial |
-| Block records | BLOCK_RECORD entries: layout handle, explodable and scalable flags, preview bytes |
-| Block definitions | One block for each block record that is not a layout; its entities are the members of the definition |
+| Block records | BLOCK_RECORD entries: layout handle, explodable and scalable flags, preview bytes; the xref load state is partial (`xref_load_state`) |
+| Block definitions | One block for each block record that is not a layout. A layout is a record with a layout handle, or a record named `*Model_Space` or `*Paper_Space`, whatever its handle. The definition holds the block flags (anonymous 1, has attributes 2, xref 4, xref overlay 8, external 16), the base point, and its entities. Block members named by a handle that names no entity of the file are counted in `io.dwg.handle_unresolved` |
 | Model space and paper space | Top-level entities; paper space entities carry the paper-space flag |
 | LINE, RAY, XLINE, CIRCLE, ARC, ELLIPSE, POINT | The same kinds; angles of arcs and points are converted from radians to degrees; ellipse parameters stay in radians, as the DXF model stores them |
-| LWPOLYLINE | Vertices with bulges, widths and ids; closed and plinegen flags |
-| POLYLINE (two-dimensional) | Polyline with its vertices; closed flag; smoothing is partial |
+| Lineweight of an entity | The lineweight is absent when the entity takes the layer's or the default lineweight, as an entity without the lineweight group has none in the DXF reader; by-block is the code -2 and a value is kept |
+| LWPOLYLINE | Vertices with bulges, widths and ids; closed and plinegen flags; the elevation of the entity is the common elevation |
+| POLYLINE (two-dimensional) | Polyline with its vertices, which take the layer and paper-space flag of the polyline. Flags closed (1), curve fit (2), spline fit (4) and linetype generation (128) are kept, and the other flags are partial (`polyline_flags`). The smoothing type is kept as the smooth type. The elevation is the z of the origin point, as the DXF reader keeps it, and not a common property |
 | SPLINE | Knots, weights, control points, fit points, tangents, degree and flags |
-| TEXT, MTEXT | Text with height, rotation, width factor, oblique angle, style, alignments and attachment; MTEXT columns and background are partial |
-| INSERT | Block reference with scales, rotation, array counts and spacings, and its ATTRIB entities |
-| HATCH | Pattern name, solid and associative flags, pattern angle, scale and type, boundary paths, pattern lines and seed points. A path made of one polyline keeps the polyline form; other paths keep line, arc, ellipse and spline edges; polylines inside a multi-edge path become line edges and are partial |
+| TEXT, MTEXT | Text with height, rotation, width factor, oblique angle, style, alignments and attachment; the line spacing style and factor are kept; MTEXT columns and background are partial |
+| INSERT | Block reference with scales, rotation, array counts and spacings, and its ATTRIB entities. Each attribute takes the paper-space flag of its insert and its own normal, which must be finite |
+| HATCH | Pattern name, solid and associative flags, pattern angle, scale and type, boundary paths, pattern lines and seed points. The elevation is the z of the elevation point, not a common property. A path made of one polyline keeps the polyline form, with the bulge of each vertex and `has_bulge` set when a bulge is not zero. Other paths keep line, arc, ellipse and spline edges. Elliptic edges store the circular angle of each end, in degrees, as the file does: the library's ellipse parameter `t` converts to `atan2(ratio sin t, cos t)`. Rational spline edges take their weights from the z of their control points. A polyline inside a multi-edge path becomes line edges, and an arc edge for each bulged segment, and is partial (`hatch_polyline_edges`). Gradient fills are partial (`hatch_gradient`) |
 | DIMENSION | Definition, text and insertion points, type, text, style and block names; the geometry beyond these is partial |
 
 Entity types the model does not carry, and entities outside any block or layout, are counted in
 `io.dwg.entity_dropped` by type name. Objects, classes and notifications are counted in
 `io.dwg.object_dropped`. The view port, view, user coordinate system and VX tables are counted in
-`io.dwg.table_dropped`.
+`io.dwg.table_dropped`. Block members named by a handle that names no entity of the file are counted
+in `io.dwg.handle_unresolved`.
 
 Data of a mapped record that the model does not carry is named in the argument `properties` of the
 partial item for the record kind: `color`, `transparency`, `graphic_data`, `extended_data`,
-`references`, `knot_parameterization`, `smooth_surface`, `dimension_detail`, `mtext_columns`,
+`references`, `knot_parameterization`, `dimension_detail`, `mtext_columns`,
 `mtext_background`, `annotative`, `attribute_mtext`, `hatch_mpolygon`, `hatch_polyline_edges`,
-`plot_style`, `xref`, `true_type_font`, `shape_file`, `vertical`, `complex_elements`, `units`,
-`xref_path`, `description`, `insert_handles`, `dimension_variables`, `large_radial` and `alignment`. Only the first record of the
-group supplies the names; the count covers the whole group.
+`hatch_gradient`, `polyline_flags`, `plot_style`, `xref`, `xref_load_state`, `true_type_font`,
+`shape_file`, `vertical`, `complex_elements`, `units`, `xref_path`, `description`, `insert_handles`,
+`dimension_variables`, `large_radial` and `alignment`. The names of all records of a group are
+merged, in alphabetical order; at most 32 names are listed and any others are summarized as
+`and more`. The count covers the whole group.
 
 ### Loss reports
 
 Every successful read returns a `LossReport` in the form of `schemas/loss-report.schema.json`. The
 header has format `dwg`, the release name as version and the direction `import`. `summary.mapped`
-counts the entities of the model, the top-level and block members, that were carried.
+counts the records the model carries, as the DXF reader counts its kept records: the entities (the
+top-level and block members), the BLOCK and ENDBLK record of each block definition, the six symbol
+tables and every table entry. Objects are not carried, so they are not counted.
 
 | Reason | Outcome |
 |---|---|
@@ -419,6 +443,7 @@ counts the entities of the model, the top-level and block members, that were car
 | `io.dwg.entity_dropped` | `dropped` |
 | `io.dwg.entity_partial` | `approximated` |
 | `io.dwg.value_skipped` | `dropped` |
+| `io.dwg.handle_unresolved` | `dropped` |
 
 ### Error codes
 
@@ -429,7 +454,7 @@ counts the entities of the model, the top-level and block members, that were car
 | `io.dwg.truncated` | `corrupt_data` | The library reached the end of the input inside a structure it needs |
 | `io.dwg.structure_invalid` | `corrupt_data` | The library reports malformed structures, unknown handles or unsupported content |
 | `io.dwg.checksum_mismatch` | `corrupt_data` | A checksum stored in the file does not match its data |
-| `io.dwg.library_failed` | `internal` | The wrapped library panicked; the file was not read |
+| `io.dwg.library_failed` | `internal` | The read or the mapping of the wrapped library panicked; the file was not read |
 
 The shared codes `io.limit_exceeded` (`limit_exceeded`) and `base.cancelled` (`cancelled`) apply as
 in the DXF reader. The limit code names the field of the profile in the argument `limit`.
@@ -440,9 +465,16 @@ The tests are in `crates/arc-io-dwg/tests` and in the modules of the crate. A sa
 in the test with the library's own writer, for each version from R13 to R2018, with layers, lines,
 an arc, text, a polyline, an mtext, a hatch, an unmapped solid and a block with an insert and an
 attribute. Its mapped values, the dropped and partial items, the limit errors, the signature and
-version checks, the truncation and the cancellation are asserted. Property tests read arbitrary
-bytes, bytes that start with a supported signature, and mutations of a valid file, and assert that
-no read unwinds or reports a library panic. No sample file is part of the repository.
+version checks, the truncation and the cancellation are asserted. Further tests build one feature
+with the library's writer (an off layer, a text style with an oblique angle, a two-dimensional
+polyline, a bulged hatch polyline, an elliptic hatch edge with ratio 0.5, a mesh, a model space in
+the R13 version) and assert the mapped value. A writer refusal fails the test. Inputs the writer
+cannot produce, such as a block member that names no entity or a linetype with a number that is not
+finite, are tested on the mapping functions with constructed library values. The isolation boundary
+is tested with a closure that panics and one that panics in a destructor. Property tests read
+arbitrary bytes, bytes that start with a supported signature, and up to 128 mutations of a valid
+file at any position, and assert that no read unwinds or reports a library panic. No sample file is
+part of the repository.
 
 ## SVG and PDF output as implemented
 

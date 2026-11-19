@@ -12,13 +12,17 @@ use arc_io_dxf::model::{
 };
 use arc_io_dxf::{Group, Progress, Version};
 
-use crate::convert::{self, p3};
+use crate::convert::{self, RecordBudget, array, finite3, p3, text};
 use crate::entity::{self, Outcome};
 use crate::error::{limit, reasons};
 use crate::loss::LossLog;
 
 /// How many records pass between two progress reports.
 const PROGRESS_EVERY: u64 = 1024;
+
+/// The symbol tables the drawing model carries; each one is counted as a mapped record, as a table
+/// record of the DXF reader is.
+const CARRIED_TABLES: u64 = 6;
 
 /// Maps one library document, collecting the loss items of the mapping.
 pub(crate) struct Mapper<'a, 'q> {
@@ -66,44 +70,46 @@ impl<'a, 'q> Mapper<'a, 'q> {
         Ok(())
     }
 
+    /// Adds the loss item of a value the model does not accept, which is skipped.
+    fn skipped(&mut self, kind: &str, what: &str) {
+        self.loss.add(
+            reasons::VALUE_SKIPPED,
+            kind,
+            1,
+            vec![("name".to_owned(), Argument::Text(what.to_owned()))],
+        );
+    }
+
     /// The header variables the model carries; the rest of the header is reported as dropped.
+    /// A header variable whose value is not finite is skipped and reported.
     fn header(&mut self, doc: &CadDocument) -> Result<Vec<HeaderVariable>> {
         let h = &doc.header;
-        let layer = entity::text(&h.current_layer_name, self.limits)?;
+        let layer = text(&h.current_layer_name, self.limits)?;
         self.loss.add(reasons::HEADER_DROPPED, "", 1, Vec::new());
-        Ok(vec![
-            HeaderVariable {
-                name: "$INSUNITS".to_owned(),
-                values: vec![Group::int(70, i64::from(h.insertion_units))],
-            },
-            HeaderVariable {
+        let mut variables = vec![HeaderVariable {
+            name: "$INSUNITS".to_owned(),
+            values: vec![Group::int(70, i64::from(h.insertion_units))],
+        }];
+        if h.linetype_scale.is_finite() {
+            variables.push(HeaderVariable {
                 name: "$LTSCALE".to_owned(),
                 values: vec![Group::double(40, h.linetype_scale)],
-            },
-            HeaderVariable {
-                name: "$MEASUREMENT".to_owned(),
-                values: vec![Group::int(70, i64::from(h.measurement))],
-            },
-            HeaderVariable {
-                name: "$CLAYER".to_owned(),
-                values: vec![Group::text(8, layer)],
-            },
-        ])
-    }
-
-    /// Adds the partial-data item of a table entry, when it has any.
-    fn partial_entry(&mut self, kind: &str, partial: &[&'static str]) {
-        if !partial.is_empty() {
-            let names = partial.join(", ");
-            self.loss.add(
-                reasons::TABLE_ENTRY_PARTIAL,
-                kind,
-                1,
-                vec![("properties".to_owned(), Argument::Text(names))],
-            );
+            });
+        } else {
+            self.skipped("HEADER", "$LTSCALE");
         }
+        variables.push(HeaderVariable {
+            name: "$MEASUREMENT".to_owned(),
+            values: vec![Group::int(70, i64::from(h.measurement))],
+        });
+        variables.push(HeaderVariable {
+            name: "$CLAYER".to_owned(),
+            values: vec![Group::text(8, layer)],
+        });
+        Ok(variables)
     }
 
+    /// Adds one kept table entry, with the names of the data it does not carry.
     fn table_entry<T>(
         &mut self,
         kind: &str,
@@ -114,10 +120,12 @@ impl<'a, 'q> Mapper<'a, 'q> {
         partial: &[&'static str],
     ) -> Result<TableEntry<T>> {
         self.record()?;
-        self.partial_entry(kind, partial);
+        self.loss.mapped += 1;
+        self.loss
+            .add_partial(reasons::TABLE_ENTRY_PARTIAL, kind, partial);
         Ok(TableEntry {
             head: convert::head(handle, acadrust::types::Handle::new(0)),
-            name: entity::text(name, self.limits)?,
+            name: text(name, self.limits)?,
             flags,
             data,
             extras: Vec::new(),
@@ -162,6 +170,7 @@ impl<'a, 'q> Mapper<'a, 'q> {
             self.loss
                 .add(reasons::TABLE_DROPPED, kind, count, Vec::new());
         }
+        self.loss.mapped = self.loss.mapped.saturating_add(CARRIED_TABLES);
         Ok(Tables {
             layers: Some(table(layers)),
             linetypes: Some(table(linetypes)),
@@ -197,7 +206,16 @@ impl<'a, 'q> Mapper<'a, 'q> {
             if layer.flags.locked {
                 flags |= 4;
             }
-            let number = color.color.unwrap_or(7);
+            // The model keeps "off" as a negative color number, so a color number of 0 (by block)
+            // cannot carry it: the default color 7 stands in for it and the layer is reported partial.
+            let number = match color.color {
+                Some(0) if layer.flags.off => {
+                    partial.push("color");
+                    7
+                }
+                Some(value) => value,
+                None => 7,
+            };
             let number = if layer.flags.off {
                 number.saturating_neg()
             } else {
@@ -206,7 +224,7 @@ impl<'a, 'q> Mapper<'a, 'q> {
             let data = m::Layer {
                 color: number,
                 true_color: color.true_color,
-                linetype: entity::text(&layer.line_type, self.limits)?,
+                linetype: text(&layer.line_type, self.limits)?,
                 plot: Some(layer.is_plottable),
                 lineweight: Some(layer.line_weight.value()),
                 ..m::Layer::default()
@@ -227,6 +245,12 @@ impl<'a, 'q> Mapper<'a, 'q> {
         let mut linetypes = Vec::new();
         for linetype in doc.line_types.iter() {
             array(linetype.elements.len(), self.limits)?;
+            if !linetype.pattern_length.is_finite()
+                || !linetype.elements.iter().all(|e| e.length.is_finite())
+            {
+                self.skipped("LTYPE", &linetype.name);
+                continue;
+            }
             let mut partial = Vec::new();
             let mut elements = Vec::with_capacity(linetype.elements.len());
             for element in &linetype.elements {
@@ -247,7 +271,7 @@ impl<'a, 'q> Mapper<'a, 'q> {
                 }
             };
             let data = m::Linetype {
-                description: entity::text(&linetype.description, self.limits)?,
+                description: text(&linetype.description, self.limits)?,
                 alignment,
                 pattern_length: linetype.pattern_length,
                 elements,
@@ -267,6 +291,16 @@ impl<'a, 'q> Mapper<'a, 'q> {
     fn text_styles(&mut self, doc: &CadDocument) -> Result<Vec<TableEntry<m::TextStyle>>> {
         let mut styles = Vec::new();
         for style in doc.text_styles.iter() {
+            let numbers = [
+                style.height,
+                style.width_factor,
+                style.oblique_angle,
+                style.last_height,
+            ];
+            if !numbers.iter().all(|v| v.is_finite()) {
+                self.skipped("STYLE", &style.name);
+                continue;
+            }
             let mut partial = Vec::new();
             for (flag, name) in [
                 (!style.true_type_font.is_empty(), "true_type_font"),
@@ -284,12 +318,13 @@ impl<'a, 'q> Mapper<'a, 'q> {
             let data = m::TextStyle {
                 height: style.height,
                 width_factor: style.width_factor,
-                oblique: style.oblique_angle,
+                // The library stores the oblique angle in radians; the model keeps degrees.
+                oblique: style.oblique_angle.to_degrees(),
                 generation,
                 last_height: style.last_height,
-                font: entity::text(&style.font_file, self.limits)?,
+                font: text(&style.font_file, self.limits)?,
                 big_font: (!style.big_font_file.is_empty())
-                    .then(|| entity::text(&style.big_font_file, self.limits))
+                    .then(|| text(&style.big_font_file, self.limits))
                     .transpose()?,
             };
             styles.push(self.table_entry("STYLE", &style.name, style.handle, data, 0, &partial)?);
@@ -306,6 +341,7 @@ impl<'a, 'q> Mapper<'a, 'q> {
                 (!record.xref_path.is_empty(), "xref_path"),
                 (!record.description.is_empty(), "description"),
                 (!record.insert_handles.is_empty(), "insert_handles"),
+                (record.flags.is_xref_unloaded, "xref_load_state"),
             ] {
                 if flag {
                     partial.push(name);
@@ -339,18 +375,12 @@ impl<'a, 'q> Mapper<'a, 'q> {
     ) -> Result<()> {
         self.record()?;
         let kind = entity::type_name(entity);
-        match entity::map(entity, paper_space, self.limits)? {
+        let mut budget = RecordBudget::new(&mut self.records, self.limits.record_count);
+        match entity::map(entity, paper_space, self.limits, &mut budget)? {
             Outcome::Mapped { entity, partial } => {
                 self.loss.mapped += 1;
-                if !partial.is_empty() {
-                    let names = partial.join(", ");
-                    self.loss.add(
-                        reasons::ENTITY_PARTIAL,
-                        kind,
-                        1,
-                        vec![("properties".to_owned(), Argument::Text(names))],
-                    );
-                }
+                self.loss
+                    .add_partial(reasons::ENTITY_PARTIAL, kind, &partial);
                 out.push(*entity);
             }
             Outcome::Unsupported => self.loss.add(reasons::ENTITY_DROPPED, kind, 1, Vec::new()),
@@ -367,8 +397,17 @@ impl<'a, 'q> Mapper<'a, 'q> {
         }
         let mut blocks = Vec::new();
         let mut top = Vec::new();
+        let mut unresolved = 0_u64;
         for record in doc.block_records.iter() {
-            if record.is_layout() {
+            let resolved = doc.entities_in_block(&record.name).count();
+            unresolved = unresolved.saturating_add(
+                u64::try_from(record.entity_handles.len().saturating_sub(resolved))
+                    .unwrap_or(u64::MAX),
+            );
+            // A layout is a record with a layout handle, or one of the model and paper space
+            // records by name; the paper-space flag follows the name.
+            let layout = record.is_layout() || record.is_model_space() || record.is_paper_space();
+            if layout {
                 let paper_space = !record.is_model_space();
                 for entity in doc.entities_in_block(&record.name) {
                     self.entity(entity, paper_space, &mut top)?;
@@ -379,27 +418,56 @@ impl<'a, 'q> Mapper<'a, 'q> {
             for entity in doc.entities_in_block(&record.name) {
                 self.entity(entity, false, &mut members)?;
             }
+            let base = if finite3(record.base_point) {
+                p3(record.base_point)
+            } else {
+                self.skipped("BLOCK", &record.name);
+                [0.0; 3]
+            };
+            let flags = {
+                let block = record.flags;
+                [
+                    (block.anonymous, 1_i16),
+                    (block.has_attributes, 2),
+                    (block.is_xref, 4),
+                    (block.is_xref_overlay, 8),
+                    (block.is_external, 16),
+                ]
+                .into_iter()
+                .filter(|(set, _)| *set)
+                .fold(0_i16, |bits, (_, bit)| bits | bit)
+            };
             let begin_kind = EntityKind::Block(m::BlockBegin {
-                name: entity::text(&record.name, self.limits)?,
-                flags: 0,
-                base: p3(record.base_point),
+                name: text(&record.name, self.limits)?,
+                flags,
+                base,
                 alt_name: None,
                 xref_path: (!record.xref_path.is_empty())
-                    .then(|| entity::text(&record.xref_path, self.limits))
+                    .then(|| text(&record.xref_path, self.limits))
                     .transpose()?,
                 description: (!record.description.is_empty())
-                    .then(|| entity::text(&record.description, self.limits))
+                    .then(|| text(&record.description, self.limits))
                     .transpose()?,
             });
             let mut begin = Entity::new(begin_kind);
             begin.head = convert::head(record.block_entity_handle, acadrust::types::Handle::new(0));
             let mut end = Entity::new(EntityKind::BlockEnd(m::SeqEnd::default()));
             end.head = convert::head(record.block_end_handle, acadrust::types::Handle::new(0));
+            // The BLOCK and ENDBLK records are kept records, as they are in the DXF reader.
+            self.loss.mapped = self.loss.mapped.saturating_add(2);
             blocks.push(Block {
                 begin,
                 entities: members,
                 end,
             });
+        }
+        if unresolved > 0 {
+            self.loss.add(
+                reasons::HANDLE_UNRESOLVED,
+                "BLOCK_RECORD",
+                unresolved,
+                Vec::new(),
+            );
         }
         for entity in doc.entities() {
             if !owned.contains(&entity.common().handle.value()) {
@@ -464,10 +532,232 @@ fn table<T>(entries: Vec<TableEntry<T>>) -> Table<T> {
     }
 }
 
-fn array(len: usize, limits: &Limits) -> Result<()> {
-    let len = u64::try_from(len).unwrap_or(u64::MAX);
-    if len > limits.array_length {
-        return Err(limit("array_length", len));
+#[cfg(test)]
+mod tests {
+    use acadrust::CadDocument;
+    use acadrust::entities::EntityType;
+    use acadrust::tables::{BlockRecord, Layer, LineType, LineTypeElement, TextStyle};
+    use acadrust::types::{Color, DxfVersion, Handle};
+    use arc_base::{Cancel, Limits};
+    use arc_io_dxf::loss::Argument;
+
+    use super::*;
+
+    fn mapper_report(doc: &CadDocument) -> (Tables, LossReport) {
+        let limits = Limits::CONSTRAINED;
+        let cancel = Cancel::new();
+        let mut mapper = Mapper::new(&limits, &cancel, None, 0);
+        let tables = match mapper.tables(doc) {
+            Ok(tables) => tables,
+            Err(err) => panic!("the tables are mapped: {}", err.code()),
+        };
+        let header = LossHeader {
+            format: "dwg".to_owned(),
+            version: "R2018".to_owned(),
+            direction: arc_io_dxf::loss::Direction::Import,
+            file_name: None,
+            file_hash: None,
+            application: None,
+            application_version: None,
+            time: None,
+            limits: None,
+        };
+        (tables, mapper.finish(header))
     }
-    Ok(())
+
+    fn layer_color(tables: &Tables, name: &str) -> Option<i16> {
+        tables
+            .layers
+            .as_ref()
+            .and_then(|t| t.entries.iter().find(|e| e.name == name))
+            .map(|e| e.data.color)
+    }
+
+    #[test]
+    fn an_off_layer_with_a_by_block_color_stays_off() {
+        let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+        let mut layer = Layer::new("OFF");
+        layer.color = Color::ByBlock;
+        layer.turn_off();
+        doc.layers.add_or_replace(layer);
+        let mut on = Layer::new("ON");
+        on.color = Color::ByBlock;
+        doc.layers.add_or_replace(on);
+        let (tables, report) = mapper_report(&doc);
+        assert_eq!(layer_color(&tables, "OFF"), Some(-7));
+        assert_eq!(layer_color(&tables, "ON"), Some(0));
+        let partial = report.items.iter().any(|i| {
+            i.reason == "io.dwg.table_entry_partial" && i.record_kind.as_deref() == Some("LAYER")
+        });
+        assert!(partial, "the stand-in color of the off layer is reported");
+    }
+
+    #[test]
+    fn a_non_finite_linetype_length_skips_the_linetype_and_reports_it() {
+        let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+        let mut linetype = LineType::new("BROKEN");
+        linetype.elements.push(LineTypeElement::dash(f64::NAN));
+        doc.line_types.add_or_replace(linetype);
+        let (tables, report) = mapper_report(&doc);
+        let names: Vec<&str> = tables
+            .linetypes
+            .as_ref()
+            .map(|t| t.entries.iter().map(|e| e.name.as_str()).collect())
+            .unwrap_or_default();
+        assert!(!names.contains(&"BROKEN"));
+        assert!(
+            report
+                .items
+                .iter()
+                .any(|i| i.reason == "io.dwg.value_skipped"
+                    && i.arguments.get("name") == Some(&Argument::Text("BROKEN".to_owned())))
+        );
+    }
+
+    #[test]
+    fn a_non_finite_text_style_number_skips_the_style() {
+        let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+        let mut style = TextStyle::new("BROKEN");
+        style.width_factor = f64::INFINITY;
+        doc.text_styles.add_or_replace(style);
+        let (tables, _) = mapper_report(&doc);
+        let styles = tables.styles.as_ref().map(|t| t.entries.len()).unwrap_or(0);
+        let broken = tables
+            .styles
+            .as_ref()
+            .is_some_and(|t| t.entries.iter().any(|e| e.name == "BROKEN"));
+        assert!(!broken, "{styles} styles kept");
+    }
+
+    #[test]
+    fn a_text_style_oblique_angle_is_converted_to_degrees() {
+        let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+        let mut style = TextStyle::new("SLANT");
+        style.oblique_angle = std::f64::consts::FRAC_PI_6;
+        doc.text_styles.add_or_replace(style);
+        let (tables, _) = mapper_report(&doc);
+        let oblique = tables
+            .styles
+            .as_ref()
+            .and_then(|t| t.entries.iter().find(|e| e.name == "SLANT"))
+            .map(|e| e.data.oblique);
+        assert!(
+            oblique.is_some_and(|v| (v - 30.0).abs() < 1e-9),
+            "{oblique:?}"
+        );
+    }
+
+    #[test]
+    fn block_flags_and_unresolved_members_are_reported() {
+        let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+        let mut record = BlockRecord::new("ANON");
+        record.flags.anonymous = true;
+        record.flags.is_xref = true;
+        record.entity_handles.push(Handle::new(0xDEAD));
+        doc.block_records.add_or_replace(record);
+        let limits = Limits::CONSTRAINED;
+        let cancel = Cancel::new();
+        let mut mapper = Mapper::new(&limits, &cancel, None, 0);
+        let drawing = match mapper.drawing(&doc, Version::R2018) {
+            Ok(drawing) => drawing,
+            Err(err) => panic!("the drawing is mapped: {}", err.code()),
+        };
+        let block = drawing
+            .blocks
+            .iter()
+            .find(|b| matches!(&b.begin.kind, EntityKind::Block(begin) if begin.name == "ANON"));
+        let flags = block.and_then(|b| match &b.begin.kind {
+            EntityKind::Block(begin) => Some(begin.flags),
+            _ => None,
+        });
+        assert_eq!(flags, Some(1 | 4));
+        let report = mapper.finish(LossHeader {
+            format: "dwg".to_owned(),
+            version: "R2018".to_owned(),
+            direction: arc_io_dxf::loss::Direction::Import,
+            file_name: None,
+            file_hash: None,
+            application: None,
+            application_version: None,
+            time: None,
+            limits: None,
+        });
+        let unresolved = report
+            .items
+            .iter()
+            .find(|i| i.reason == "io.dwg.handle_unresolved")
+            .and_then(|i| i.arguments.get("count").cloned());
+        assert_eq!(unresolved, Some(Argument::Int(1)));
+    }
+
+    #[test]
+    fn a_block_base_point_that_is_not_finite_becomes_the_origin() {
+        let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+        let mut record = BlockRecord::new("DOOR");
+        record.base_point = acadrust::types::Vector3::new(f64::NAN, 1.0, 1.0);
+        doc.block_records.add_or_replace(record);
+        let limits = Limits::CONSTRAINED;
+        let cancel = Cancel::new();
+        let mut mapper = Mapper::new(&limits, &cancel, None, 0);
+        let drawing = match mapper.drawing(&doc, Version::R2018) {
+            Ok(drawing) => drawing,
+            Err(err) => panic!("the drawing is mapped: {}", err.code()),
+        };
+        let base = drawing.blocks.iter().find_map(|b| match &b.begin.kind {
+            EntityKind::Block(begin) if begin.name == "DOOR" => Some(begin.base),
+            _ => None,
+        });
+        assert_eq!(base, Some([0.0, 0.0, 0.0]));
+        let report = mapper.finish(LossHeader {
+            format: "dwg".to_owned(),
+            version: "R2018".to_owned(),
+            direction: arc_io_dxf::loss::Direction::Import,
+            file_name: None,
+            file_hash: None,
+            application: None,
+            application_version: None,
+            time: None,
+            limits: None,
+        });
+        assert!(
+            report
+                .items
+                .iter()
+                .any(|i| i.reason == "io.dwg.value_skipped"
+                    && i.arguments.get("name") == Some(&Argument::Text("DOOR".to_owned())))
+        );
+    }
+
+    #[test]
+    fn a_model_space_without_a_layout_handle_holds_the_top_level_entities() {
+        // The library rebuilds layout links when it reads a file, so this case is made from a
+        // constructed document: a model space record with no layout handle, as the oldest versions
+        // can have, and one line in it.
+        let mut doc = CadDocument::with_version(DxfVersion::AC1012);
+        let line = acadrust::entities::Line::from_points(
+            acadrust::types::Vector3::new(0.0, 0.0, 0.0),
+            acadrust::types::Vector3::new(1.0, 0.0, 0.0),
+        );
+        // `add_entity` routes the line into the model space record.
+        if let Err(err) = doc.add_entity(EntityType::Line(line)) {
+            panic!("the line is added: {err:?}");
+        }
+        if let Some(record) = doc.block_records.get_mut("*Model_Space") {
+            record.layout = Handle::NULL;
+        }
+        let limits = Limits::CONSTRAINED;
+        let cancel = Cancel::new();
+        let mut mapper = Mapper::new(&limits, &cancel, None, 0);
+        let drawing = match mapper.drawing(&doc, Version::R13) {
+            Ok(drawing) => drawing,
+            Err(err) => panic!("the drawing is mapped: {}", err.code()),
+        };
+        let top: Vec<&str> = drawing
+            .entities
+            .iter()
+            .map(|e| e.kind.type_name())
+            .collect();
+        assert_eq!(top, vec!["LINE"]);
+        assert!(drawing.blocks.is_empty());
+    }
 }

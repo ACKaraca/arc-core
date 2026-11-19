@@ -4,7 +4,9 @@
 
 mod common;
 
-use acadrust::types::DxfVersion;
+use acadrust::entities::{EntityType, Line as DwgLine};
+use acadrust::types::{DxfVersion, Vector3};
+use arc_base::error::Value;
 use arc_base::{Cancel, Error, Limits};
 use arc_io_dwg::read;
 use arc_io_dxf::ReadOptions;
@@ -92,6 +94,8 @@ fn record_count_limit_is_enforced() {
 
 #[test]
 fn array_length_limit_is_enforced_on_vertices() {
+    // The first record with more than two elements is the lightweight polyline of the sample,
+    // whose three vertices are the value the limit reports.
     let bytes = sample();
     let limits = Limits {
         array_length: 2,
@@ -99,7 +103,31 @@ fn array_length_limit_is_enforced_on_vertices() {
     };
     let err = error_of(&bytes, &mut ReadOptions::with_limits(limits));
     assert_eq!(err.code(), "io.limit_exceeded");
-    assert!(format!("{:?}", err.arguments()).contains("array_length"));
+    assert_eq!(
+        err.arguments().get("limit"),
+        Some(&Value::Text("array_length".to_owned()))
+    );
+    assert_eq!(err.details().get("value"), Some(&Value::Int(3)));
+}
+
+#[test]
+fn layer_names_of_entities_are_checked_against_the_string_limit() {
+    let mut line = DwgLine::from_points(Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0));
+    line.common.layer = "AN_ENTITY_LAYER_NAME_LONGER_THAN_THE_LIMIT".to_owned();
+    let bytes = common::dwg_bytes(&common::document_with(
+        DxfVersion::AC1032,
+        EntityType::Line(line),
+    ));
+    let limits = Limits {
+        string_bytes: 16,
+        ..Limits::CONSTRAINED
+    };
+    let err = error_of(&bytes, &mut ReadOptions::with_limits(limits));
+    assert_eq!(err.code(), "io.limit_exceeded");
+    assert_eq!(
+        err.arguments().get("limit"),
+        Some(&Value::Text("string_bytes".to_owned()))
+    );
 }
 
 #[test]

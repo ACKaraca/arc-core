@@ -14,3 +14,4 @@ io-dwg-loss-object-dropped = { $count } grafik olmayan nesne aktarılmadı.
 io-dwg-loss-entity-dropped = Çizimin tutmadığı türde veya bir blok dışındaki { $count } öğe aktarılmadı.
 io-dwg-loss-entity-partial = { $count } öğe, çizimin taşımadığı bazı veriler içeriyordu.
 io-dwg-loss-value-skipped = Bir değer sonlu bir sayı olmadığı için { $count } kayıt atlandı.
+io-dwg-loss-handle-unresolved = Bir blok tanımının dosyada bulunmayan öğelere verdiği { $count } başvuru aktarılmadı.

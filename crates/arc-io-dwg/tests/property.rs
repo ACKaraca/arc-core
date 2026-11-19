@@ -39,7 +39,7 @@ fn valid_sample() -> Vec<u8> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(128))]
+    #![proptest_config(ProptestConfig::default())]
 
     #[test]
     fn arbitrary_bytes_never_unwind(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
@@ -58,8 +58,9 @@ proptest! {
 
     #[test]
     fn mutations_of_a_valid_file_never_unwind(
-        edits in proptest::collection::vec((any::<proptest::sample::Index>(), any::<u8>()), 1..16),
+        edits in proptest::collection::vec((any::<proptest::sample::Index>(), any::<u8>()), 1..=128),
     ) {
+        // Positions are drawn over the whole file, not only its head.
         let mut bytes = valid_sample();
         for (position, value) in edits {
             let at = position.index(bytes.len());

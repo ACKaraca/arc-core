@@ -1,16 +1,19 @@
 //! Mapping of library entities to the neutral entity kinds of `arc-io-dxf`.
 //!
 //! Each entity yields an [`Outcome`]: a mapped entity with the names of the data the model does
-//! not carry, an unsupported type, or an entity whose numbers the model does not accept.
+//! not carry, an unsupported type, or an entity whose numbers the model does not accept. The
+//! elevation of a two-dimensional polyline is the z of its origin point and the elevation of a
+//! hatch is the z of its elevation point, as the DXF reader stores them; the common properties
+//! carry the elevation of the other kinds.
+
+use std::f64::consts::TAU;
 
 use acadrust::entities::{self as dwg, EntityType};
-use arc_base::{Limits, Result};
-use arc_io_dxf::model::{self as m, Entity, EntityKind, EntityProps};
-
 use acadrust::types::{Vector2 as DwgVector2, Vector3 as DwgVector3};
+use arc_base::{Limits, Result};
+use arc_io_dxf::model::{self as m, Entity, EntityKind, EntityProps, P2};
 
-use crate::convert::{self, all_finite, finite2, finite3, p2, p3, xy};
-use crate::error::limit;
+use crate::convert::{self, RecordBudget, all_finite, array, finite2, finite3, p2, p3, text, xy};
 
 /// The result of mapping one library entity.
 pub(crate) enum Outcome {
@@ -79,22 +82,6 @@ pub(crate) fn type_name(entity: &EntityType) -> &'static str {
     }
 }
 
-fn array(len: usize, limits: &Limits) -> Result<()> {
-    let len = u64::try_from(len).unwrap_or(u64::MAX);
-    if len > limits.array_length {
-        return Err(limit("array_length", len));
-    }
-    Ok(())
-}
-
-pub(crate) fn text(value: &str, limits: &Limits) -> Result<String> {
-    let len = u64::try_from(value.len()).unwrap_or(u64::MAX);
-    if len > limits.string_bytes {
-        return Err(limit("string_bytes", len));
-    }
-    Ok(value.to_owned())
-}
-
 /// Sets the thickness, elevation and extrusion of an entity lying in a plane. Returns false when a
 /// number is not finite.
 fn plane(props: &mut EntityProps, thickness: f64, elevation: f64, normal: DwgVector3) -> bool {
@@ -107,10 +94,23 @@ fn plane(props: &mut EntityProps, thickness: f64, elevation: f64, normal: DwgVec
     true
 }
 
-/// Maps one entity of the library. Blocks and end markers are never passed here.
-pub(crate) fn map(entity: &EntityType, paper_space: bool, limits: &Limits) -> Result<Outcome> {
+/// Records the name of data the model does not carry, once for the entity.
+fn note(partial: &mut Vec<&'static str>, name: &'static str) {
+    if !partial.contains(&name) {
+        partial.push(name);
+    }
+}
+
+/// Maps one entity of the library. Blocks and end markers are never passed here. The records the
+/// entity holds (vertices, attributes) are counted against `records`.
+pub(crate) fn map(
+    entity: &EntityType,
+    paper_space: bool,
+    limits: &Limits,
+    records: &mut RecordBudget<'_>,
+) -> Result<Outcome> {
     let common = entity.common();
-    let (mut props, mut partial) = convert::props(common, paper_space);
+    let (mut props, mut partial) = convert::props(common, paper_space, limits)?;
     if !props.linetype_scale.is_none_or(f64::is_finite) {
         return Ok(Outcome::Invalid);
     }
@@ -123,12 +123,12 @@ pub(crate) fn map(entity: &EntityType, paper_space: bool, limits: &Limits) -> Re
         EntityType::Ray(e) => ray(e.base_point, e.direction).map(EntityKind::Ray),
         EntityType::XLine(e) => ray(e.base_point, e.direction).map(EntityKind::ConstructionLine),
         EntityType::LwPolyline(e) => lwpolyline(e, limits, &mut props)?,
-        EntityType::Polyline2D(e) => polyline2d(e, limits, &mut props, &mut partial)?,
+        EntityType::Polyline2D(e) => polyline2d(e, limits, records, &mut props, &mut partial)?,
         EntityType::Spline(e) => spline(e, limits, &mut props, &mut partial)?,
         EntityType::Text(e) => text_entity(e, limits, &mut props)?,
         EntityType::MText(e) => mtext(e, limits, &mut props, &mut partial)?,
-        EntityType::Insert(e) => insert(e, limits, &mut props, &mut partial)?,
-        EntityType::Dimension(e) => dimension(e, &mut props, &mut partial),
+        EntityType::Insert(e) => insert(e, limits, records, &mut props, &mut partial)?,
+        EntityType::Dimension(e) => dimension(e, limits, &mut props, &mut partial)?,
         EntityType::Hatch(e) => hatch(e, limits, &mut props, &mut partial)?,
         _ => return Ok(Outcome::Unsupported),
     };
@@ -254,22 +254,36 @@ fn lwpolyline(
     })))
 }
 
+/// The flag bits a two-dimensional polyline keeps: closed (1), curve fit (2), spline fit (4) and
+/// linetype generation (128). The other bits describe meshes and are not carried by this entity.
+const POLYLINE2D_FLAGS: u16 = 1 | 2 | 4 | 128;
+
 fn polyline2d(
     e: &dwg::Polyline2D,
     limits: &Limits,
+    records: &mut RecordBudget<'_>,
     props: &mut EntityProps,
     partial: &mut Vec<&'static str>,
 ) -> Result<Option<EntityKind>> {
     array(e.vertices.len(), limits)?;
-    if !plane(props, e.thickness, e.elevation, e.normal)
+    records.spend(e.vertices.len())?;
+    if !plane(props, e.thickness, 0.0, e.normal)
+        || !e.elevation.is_finite()
         || !e.start_width.is_finite()
         || !e.end_width.is_finite()
     {
         return Ok(None);
     }
-    if !matches!(e.smooth_surface, dwg::SmoothSurfaceType::None) {
-        partial.push("smooth_surface");
+    if e.flags.bits() & !POLYLINE2D_FLAGS != 0 {
+        note(partial, "polyline_flags");
     }
+    let flags = i16::try_from(e.flags.bits() & POLYLINE2D_FLAGS).unwrap_or_default();
+    let smooth_type = match e.smooth_surface {
+        dwg::SmoothSurfaceType::None => None,
+        dwg::SmoothSurfaceType::QuadraticBSpline => Some(5),
+        dwg::SmoothSurfaceType::CubicBSpline => Some(6),
+        dwg::SmoothSurfaceType::Bezier => Some(8),
+    };
     let mut vertices = Vec::with_capacity(e.vertices.len());
     for v in &e.vertices {
         if !finite3(v.location)
@@ -293,10 +307,12 @@ fn polyline2d(
             index4: None,
             id: (v.id != 0).then_some(v.id),
         };
+        // A vertex takes the layer and paper-space flag of its polyline.
         vertices.push(Entity {
             head: m::Head::default(),
             props: EntityProps {
-                layer: "0".to_owned(),
+                paper_space: props.paper_space,
+                layer: props.layer.clone(),
                 ..EntityProps::default()
             },
             kind: EntityKind::Vertex(vertex),
@@ -304,16 +320,17 @@ fn polyline2d(
             xdata: Vec::new(),
         });
     }
+    // The elevation is the z of the origin point, which is where the DXF reader keeps it.
     Ok(Some(EntityKind::Polyline(m::Polyline {
-        origin: None,
-        flags: i16::from(e.flags.is_closed()),
+        origin: Some([0.0, 0.0, e.elevation]),
+        flags,
         start_width: (e.start_width != 0.0).then_some(e.start_width),
         end_width: (e.end_width != 0.0).then_some(e.end_width),
         mesh_m: None,
         mesh_n: None,
         smooth_m: None,
         smooth_n: None,
-        smooth_type: None,
+        smooth_type,
         vertices,
         seqend: None,
     })))
@@ -345,7 +362,7 @@ fn spline(
         return Ok(None);
     };
     if e.knot_parameterization != 0 {
-        partial.push("knot_parameterization");
+        note(partial, "knot_parameterization");
     }
     let f = &e.flags;
     let flags = i16::from(f.closed)
@@ -452,13 +469,13 @@ fn mtext(
         return Ok(None);
     }
     if e.column_data.column_count != 0 || e.column_data.column_type != 0 {
-        partial.push("mtext_columns");
+        note(partial, "mtext_columns");
     }
     if e.background_fill_flags != 0 {
-        partial.push("mtext_background");
+        note(partial, "mtext_background");
     }
     if e.is_annotative {
-        partial.push("annotative");
+        note(partial, "annotative");
     }
     let x_axis = match e.dwg_x_direction {
         Some(v) if !finite3(v) => return Ok(None),
@@ -479,24 +496,30 @@ fn mtext(
             .transpose()?,
         x_axis,
         rotation: (e.rotation != 0.0).then_some(e.rotation.to_degrees()),
-        spacing_style: None,
+        spacing_style: Some(match e.line_spacing_style {
+            dwg::LineSpacingStyle::AtLeast => 1,
+            dwg::LineSpacingStyle::Exactly => 2,
+        }),
         spacing_factor: Some(e.line_spacing_factor),
         text: text(&e.value, limits)?,
     })))
 }
 
-/// An attribute of an insert: its entity and the names of the data it does not carry.
+/// An attribute of an insert: its entity and the names of the data it does not carry. The
+/// paper-space flag is the one of the insert that owns the attribute.
 fn attribute(
     e: &dwg::AttributeEntity,
     limits: &Limits,
+    paper_space: bool,
 ) -> Result<Option<(Entity, Vec<&'static str>)>> {
     let common = &e.common;
-    let (props, mut partial) = convert::props(common, false);
+    let (mut props, mut partial) = convert::props(common, paper_space, limits)?;
     let values = [e.height, e.rotation, e.width_factor, e.oblique_angle];
     if !finite3(e.insertion_point)
         || !finite3(e.alignment_point)
         || !all_finite(&values)
         || !props.linetype_scale.is_none_or(f64::is_finite)
+        || !plane(&mut props, 0.0, 0.0, e.normal)
     {
         return Ok(None);
     }
@@ -504,7 +527,7 @@ fn attribute(
         return Ok(None);
     };
     if e.is_multiline || e.embedded_mtext.is_some() {
-        partial.push("attribute_mtext");
+        note(&mut partial, "attribute_mtext");
     }
     Ok(Some((
         Entity {
@@ -550,10 +573,12 @@ fn attribute(
 fn insert(
     e: &dwg::Insert,
     limits: &Limits,
+    records: &mut RecordBudget<'_>,
     props: &mut EntityProps,
     partial: &mut Vec<&'static str>,
 ) -> Result<Option<EntityKind>> {
     array(e.attributes.len(), limits)?;
+    records.spend(e.attributes.len())?;
     let (Ok(columns), Ok(rows)) = (i16::try_from(e.column_count), i16::try_from(e.row_count))
     else {
         return Ok(None);
@@ -571,10 +596,12 @@ fn insert(
     }
     let mut attribs = Vec::with_capacity(e.attributes.len());
     for attribute_entity in &e.attributes {
-        match attribute(attribute_entity, limits)? {
+        match attribute(attribute_entity, limits, props.paper_space)? {
             Some((entity, names)) => {
                 attribs.push(entity);
-                partial.extend(names);
+                for name in names {
+                    note(partial, name);
+                }
             }
             None => return Ok(None),
         }
@@ -598,12 +625,13 @@ fn insert(
 
 fn dimension(
     e: &dwg::Dimension,
+    limits: &Limits,
     props: &mut EntityProps,
     partial: &mut Vec<&'static str>,
-) -> Option<EntityKind> {
+) -> Result<Option<EntityKind>> {
     let base = e.base();
     if !plane(props, 0.0, 0.0, base.normal) {
-        return None;
+        return Ok(None);
     }
     let kind = match e {
         dwg::Dimension::Linear(_) => 0,
@@ -615,11 +643,11 @@ fn dimension(
         dwg::Dimension::Ordinate(_) => 6,
         dwg::Dimension::Arc(_) => 8,
         dwg::Dimension::LargeRadial(_) => {
-            partial.push("large_radial");
+            note(partial, "large_radial");
             4
         }
     };
-    partial.push("dimension_detail");
+    note(partial, "dimension_detail");
     let points = [
         base.definition_point,
         base.text_middle_point,
@@ -629,12 +657,21 @@ fn dimension(
         || !base.text_rotation.is_finite()
         || !base.actual_measurement.is_finite()
     {
-        return None;
+        return Ok(None);
     }
-    let text_value = base.user_text.clone().unwrap_or_else(|| base.text.clone());
-    Some(EntityKind::Dimension(m::Dimension {
-        block: (!base.block_name.is_empty()).then(|| base.block_name.clone()),
-        style: (!base.style_name.is_empty()).then(|| base.style_name.clone()),
+    let block = (!base.block_name.is_empty())
+        .then(|| text(&base.block_name, limits))
+        .transpose()?;
+    let style = (!base.style_name.is_empty())
+        .then(|| text(&base.style_name, limits))
+        .transpose()?;
+    let user_or_text = base.user_text.clone().unwrap_or_else(|| base.text.clone());
+    let value = (!user_or_text.is_empty())
+        .then(|| text(&user_or_text, limits))
+        .transpose()?;
+    Ok(Some(EntityKind::Dimension(m::Dimension {
+        block,
+        style,
         def_point: p3(base.definition_point),
         text_mid: p3(base.text_middle_point),
         insert: Some(p3(base.insertion_point)),
@@ -643,7 +680,7 @@ fn dimension(
         spacing_style: None,
         spacing_factor: None,
         measurement: Some(base.actual_measurement),
-        text: (!text_value.is_empty()).then_some(text_value),
+        text: value,
         text_rotation: (base.text_rotation != 0.0).then_some(base.text_rotation.to_degrees()),
         horizontal: None,
         point13: None,
@@ -653,7 +690,84 @@ fn dimension(
         angle: None,
         oblique: None,
         leader_length: None,
-    }))
+    })))
+}
+
+/// The circular angle, in degrees, of an elliptic hatch edge point given by its ellipse parameter.
+///
+/// The model keeps the angle the DXF hatch edge stores (groups 50 and 51): the direction from the
+/// center, in degrees. The `arc-io-dxf` model documents its angles as degrees (module documentation,
+/// "angles are in degrees and parameters in radians, as the format stores them"), and the DXF reader
+/// stores the values of the file without conversion. The library stores the
+/// ellipse parameter `t` in radians, the point `(a cos t, b sin t)` where `b / a` is the ratio. The
+/// direction of that point from the center is `atan2(ratio sin t, cos t)`, and the result stays on
+/// the turn of `t`. For a ratio of 1 the two are equal.
+fn circular_degrees(ratio: f64, parameter: f64) -> f64 {
+    let direction = (ratio * parameter.sin()).atan2(parameter.cos());
+    let turns = ((parameter - direction) / TAU).round();
+    (direction + turns * TAU).to_degrees()
+}
+
+/// The arc of a polyline segment with a bulge, as (center, radius, start angle, end angle) in
+/// radians. The bulge is the tangent of a quarter of the included angle, positive for a
+/// counterclockwise arc; the start and end angles are those of the two ends on the circle.
+/// Absent for a straight segment.
+fn bulge_arc((a, b): (P2, P2), bulge: f64) -> Option<(P2, f64, f64, f64)> {
+    if bulge == 0.0 || !bulge.is_finite() {
+        return None;
+    }
+    let [ax, ay] = a;
+    let [bx, by] = b;
+    let (dx, dy) = (bx - ax, by - ay);
+    let chord = dx.hypot(dy);
+    if chord == 0.0 {
+        return None;
+    }
+    let half = chord / 2.0;
+    let (mx, my) = ((ax + bx) / 2.0, (ay + by) / 2.0);
+    // The left normal of the chord; the center lies on it, at the signed distance below.
+    let (nx, ny) = (-dy / chord, dx / chord);
+    let offset = half * (1.0 - bulge * bulge) / (2.0 * bulge);
+    let (cx, cy) = (mx + nx * offset, my + ny * offset);
+    let radius = half * (1.0 + bulge * bulge) / (2.0 * bulge.abs());
+    let start_angle = (ay - cy).atan2(ax - cx);
+    let end_angle = (by - cy).atan2(bx - cx);
+    Some(([cx, cy], radius, start_angle, end_angle))
+}
+
+/// The edge of one segment of a polyline boundary: an arc when the bulge of its start vertex is
+/// not zero, a line otherwise.
+fn segment_edge(start: DwgVector3, end: DwgVector3) -> m::HatchEdge {
+    let bulge = start.z;
+    let (a, b) = (xy(start), xy(end));
+    match bulge_arc((a, b), bulge) {
+        Some((center, radius, start_angle, end_angle)) => m::HatchEdge::Arc {
+            center,
+            radius,
+            start_angle: start_angle.to_degrees(),
+            end_angle: end_angle.to_degrees(),
+            counterclockwise: bulge > 0.0,
+        },
+        None => m::HatchEdge::Line { start: a, end: b },
+    }
+}
+
+/// The segments of a polyline boundary: each vertex starts the segment to the next one, and the
+/// last vertex starts the closing segment when the polyline is closed.
+fn polyline_segments(vertices: &[DwgVector3], closed: bool) -> Vec<(DwgVector3, DwgVector3)> {
+    let mut segments = Vec::with_capacity(vertices.len());
+    for (index, start) in vertices.iter().enumerate() {
+        let end = match vertices.get(index + 1) {
+            Some(end) => *end,
+            None if closed => match vertices.first() {
+                Some(first) => *first,
+                None => break,
+            },
+            None => break,
+        };
+        segments.push((*start, end));
+    }
+    segments
 }
 
 /// Appends the model form of one boundary edge; false when a number is not finite.
@@ -695,14 +809,15 @@ fn hatch_edge(
                 center: p2(a.center),
                 major_axis: p2(a.major_axis_endpoint),
                 ratio: a.minor_axis_ratio,
-                start_angle: a.start_angle.to_degrees(),
-                end_angle: a.end_angle.to_degrees(),
+                start_angle: circular_degrees(a.minor_axis_ratio, a.start_angle),
+                end_angle: circular_degrees(a.minor_axis_ratio, a.end_angle),
                 counterclockwise: a.counter_clockwise,
             });
         }
         dwg::hatch::BoundaryEdge::Spline(s) => {
             array(s.control_points.len(), limits)?;
             array(s.fit_points.len(), limits)?;
+            array(s.knots.len(), limits)?;
             let tangents_ok = finite2(s.start_tangent) && finite2(s.end_tangent);
             if !all_finite(&s.knots)
                 || !tangents_ok
@@ -712,65 +827,63 @@ fn hatch_edge(
                 return Ok(false);
             }
             let tangent = |v: DwgVector2| (v != DwgVector2::default()).then(|| p2(v));
+            // A rational control point carries its weight in z.
+            let weights = if s.rational {
+                s.control_points.iter().map(|v| v.z).collect()
+            } else {
+                Vec::new()
+            };
             edges.push(m::HatchEdge::Spline(m::HatchSpline {
                 degree: s.degree,
                 rational: s.rational,
                 periodic: s.periodic,
                 knots: s.knots.clone(),
                 control_points: s.control_points.iter().map(|v| xy(*v)).collect(),
-                weights: Vec::new(),
+                weights,
                 fit_points: s.fit_points.iter().map(|v| p2(*v)).collect(),
                 start_tangent: tangent(s.start_tangent),
                 end_tangent: tangent(s.end_tangent),
             }));
         }
         dwg::hatch::BoundaryEdge::Polyline(poly) => {
-            // A polyline inside a path of several edges has no edge form in the model; its
-            // segments are kept as line edges and the change is reported.
+            // A polyline inside a path of several edges has no polyline form in that path; its
+            // segments are kept as edges, with an arc for each bulged segment, and the change is
+            // reported.
             array(poly.vertices.len(), limits)?;
             if !poly.vertices.iter().all(|v| finite3(*v)) {
                 return Ok(false);
             }
-            partial.push("hatch_polyline_edges");
-            for pair in poly.vertices.windows(2) {
-                edges.push(m::HatchEdge::Line {
-                    start: xy(pair[0]),
-                    end: xy(pair[1]),
-                });
-            }
-            if let (true, Some(first), Some(last)) =
-                (poly.is_closed, poly.vertices.first(), poly.vertices.last())
-            {
-                edges.push(m::HatchEdge::Line {
-                    start: xy(*last),
-                    end: xy(*first),
-                });
+            note(partial, "hatch_polyline_edges");
+            for (start, end) in polyline_segments(&poly.vertices, poly.is_closed) {
+                edges.push(segment_edge(start, end));
             }
         }
     }
     Ok(true)
 }
 
-/// Maps a hatch boundary path that holds one polyline edge to the polyline form of the model.
+/// Maps a hatch boundary path to the model. A path that holds one polyline keeps the polyline
+/// form, with the bulge of each vertex; other paths are lists of edges.
 fn boundary(
     path: &dwg::hatch::BoundaryPath,
     limits: &Limits,
     partial: &mut Vec<&'static str>,
 ) -> Result<Option<m::HatchBoundary>> {
+    array(path.edges.len(), limits)?;
     if let [dwg::hatch::BoundaryEdge::Polyline(poly)] = path.edges.as_slice() {
         array(poly.vertices.len(), limits)?;
         if !poly.vertices.iter().all(|v| finite3(*v)) {
             return Ok(None);
         }
         return Ok(Some(m::HatchBoundary::Polyline {
-            has_bulge: false,
+            has_bulge: poly.vertices.iter().any(|v| v.z != 0.0),
             closed: poly.is_closed,
             vertices: poly
                 .vertices
                 .iter()
                 .map(|v| m::HatchVertex {
                     location: xy(*v),
-                    bulge: 0.0,
+                    bulge: v.z,
                 })
                 .collect(),
         }));
@@ -780,6 +893,7 @@ fn boundary(
         if !hatch_edge(edge, limits, partial, &mut edges)? {
             return Ok(None);
         }
+        array(edges.len(), limits)?;
     }
     Ok(Some(m::HatchBoundary::Edges(edges)))
 }
@@ -793,7 +907,8 @@ fn hatch(
     array(e.paths.len(), limits)?;
     array(e.pattern.lines.len(), limits)?;
     array(e.seed_points.len(), limits)?;
-    if !plane(props, 0.0, e.elevation, e.normal)
+    if !plane(props, 0.0, 0.0, e.normal)
+        || !e.elevation.is_finite()
         || !e.pattern_angle.is_finite()
         || !e.pattern_scale.is_finite()
         || !e.pixel_size.is_finite()
@@ -801,7 +916,10 @@ fn hatch(
         return Ok(None);
     }
     if e.is_mpolygon {
-        partial.push("hatch_mpolygon");
+        note(partial, "hatch_mpolygon");
+    }
+    if e.gradient_color.enabled {
+        note(partial, "hatch_gradient");
     }
     let mut loops = Vec::with_capacity(e.paths.len());
     for path in &e.paths {
@@ -811,6 +929,7 @@ fn hatch(
         let Ok(flags) = i32::try_from(path.flags.bits()) else {
             return Ok(None);
         };
+        array(path.boundary_handles.len(), limits)?;
         loops.push(m::HatchLoop {
             flags,
             boundary,
@@ -854,6 +973,7 @@ fn hatch(
         dwg::hatch::HatchPatternType::Predefined => 1,
         dwg::hatch::HatchPatternType::Custom => 2,
     };
+    // The elevation is the z of the elevation point, which is where the DXF reader keeps it.
     Ok(Some(EntityKind::Hatch(m::Hatch {
         elevation_point: [0.0, 0.0, e.elevation],
         pattern_name: text(&e.pattern.name, limits)?,
@@ -881,12 +1001,41 @@ mod tests {
         Limits::CONSTRAINED
     }
 
+    /// Maps one entity with a fresh record budget, as the mapping of a drawing does for one record.
+    fn map_entity(entity: &EntityType, paper_space: bool, limits: &Limits) -> Result<Outcome> {
+        let mut used = 0;
+        let mut budget = RecordBudget::new(&mut used, limits.record_count);
+        map(entity, paper_space, limits, &mut budget)
+    }
+
+    fn mapped(entity: &EntityType) -> (Entity, Vec<&'static str>) {
+        match map_entity(entity, false, &limits()) {
+            Ok(Outcome::Mapped { entity, partial }) => (*entity, partial),
+            _ => panic!("the entity is mapped"),
+        }
+    }
+
+    /// Maps one entity lying on paper space.
+    fn mapped_paper(entity: &EntityType) -> (Entity, Vec<&'static str>) {
+        match map_entity(entity, true, &limits()) {
+            Ok(Outcome::Mapped { entity, partial }) => (*entity, partial),
+            _ => panic!("the entity is mapped"),
+        }
+    }
+
+    fn hatch_with(path: dwg::hatch::BoundaryPath) -> dwg::Hatch {
+        let mut hatch = dwg::Hatch::new();
+        hatch.add_path(path);
+        hatch
+    }
+
     #[test]
     fn finite_line_is_mapped_on_its_layer() {
         let line = dwg::Line::from_points(V3::new(0.0, 1.0, 0.0), V3::new(2.0, 3.0, 0.0));
-        let Outcome::Mapped { entity, partial } = map(&EntityType::Line(line), false, &limits())
-            .ok()
-            .unwrap_or(Outcome::Invalid)
+        let Outcome::Mapped { entity, partial } =
+            map_entity(&EntityType::Line(line), false, &limits())
+                .ok()
+                .unwrap_or(Outcome::Invalid)
         else {
             panic!("a finite line is mapped");
         };
@@ -905,12 +1054,12 @@ mod tests {
     fn non_finite_coordinates_are_invalid_not_passed_through() {
         let line = dwg::Line::from_points(V3::new(f64::NAN, 0.0, 0.0), V3::new(1.0, 0.0, 0.0));
         assert!(matches!(
-            map(&EntityType::Line(line), false, &limits()),
+            map_entity(&EntityType::Line(line), false, &limits()),
             Ok(Outcome::Invalid)
         ));
         let circle = dwg::Circle::from_center_radius(V3::new(0.0, 0.0, 0.0), f64::INFINITY);
         assert!(matches!(
-            map(&EntityType::Circle(circle), false, &limits()),
+            map_entity(&EntityType::Circle(circle), false, &limits()),
             Ok(Outcome::Invalid)
         ));
     }
@@ -924,7 +1073,7 @@ mod tests {
             V3::new(0.0, 1.0, 0.0),
         );
         assert!(matches!(
-            map(&EntityType::Solid(solid), false, &limits()),
+            map_entity(&EntityType::Solid(solid), false, &limits()),
             Ok(Outcome::Unsupported)
         ));
         assert_eq!(
@@ -946,7 +1095,8 @@ mod tests {
             std::f64::consts::PI,
             std::f64::consts::FRAC_PI_2,
         );
-        let Ok(Outcome::Mapped { entity, .. }) = map(&EntityType::Arc(arc), false, &limits())
+        let Ok(Outcome::Mapped { entity, .. }) =
+            map_entity(&EntityType::Arc(arc), false, &limits())
         else {
             panic!("a finite arc is mapped");
         };
@@ -965,5 +1115,333 @@ mod tests {
         };
         assert!(text("four", &limits).is_err());
         assert_eq!(text("abc", &limits).ok().as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn elliptic_hatch_edges_keep_the_circular_angle_of_the_file() {
+        // With ratio 0.5 the parameter pi/4 is the direction atan(0.5), not 45 degrees.
+        let mut path = dwg::hatch::BoundaryPath::new();
+        path.add_edge(dwg::hatch::BoundaryEdge::EllipticArc(
+            dwg::hatch::EllipticArcEdge {
+                center: DwgVector2::new(0.0, 0.0),
+                major_axis_endpoint: DwgVector2::new(2.0, 0.0),
+                minor_axis_ratio: 0.5,
+                start_angle: std::f64::consts::FRAC_PI_4,
+                end_angle: std::f64::consts::FRAC_PI_2,
+                counter_clockwise: true,
+            },
+        ));
+        let (entity, _) = mapped(&EntityType::Hatch(Box::new(hatch_with(path))));
+        let EntityKind::Hatch(hatch) = entity.kind else {
+            panic!("a hatch is mapped to a hatch");
+        };
+        let m::HatchBoundary::Edges(edges) = &hatch.loops[0].boundary else {
+            panic!("an elliptic edge keeps the edge form");
+        };
+        let [
+            m::HatchEdge::Ellipse {
+                ratio,
+                start_angle,
+                end_angle,
+                ..
+            },
+        ] = edges.as_slice()
+        else {
+            panic!("one elliptic edge is mapped");
+        };
+        assert_eq!(*ratio, 0.5);
+        assert!(
+            (start_angle - 0.5_f64.atan().to_degrees()).abs() < 1e-9,
+            "{start_angle}"
+        );
+        assert!((end_angle - 90.0).abs() < 1e-9, "{end_angle}");
+    }
+
+    #[test]
+    fn circular_degrees_match_the_angle_at_ratio_one() {
+        for t in [0.3_f64, 1.2, -0.7, 4.0] {
+            assert!((circular_degrees(1.0, t) - t.to_degrees()).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn bulged_hatch_polyline_keeps_its_bulges() {
+        let mut poly = dwg::hatch::PolylineEdge::new(
+            vec![DwgVector2::new(0.0, 0.0), DwgVector2::new(2.0, 0.0)],
+            true,
+        );
+        poly.vertices[0].z = 1.0;
+        let mut path = dwg::hatch::BoundaryPath::new();
+        path.add_edge(dwg::hatch::BoundaryEdge::Polyline(poly));
+        let (entity, _) = mapped(&EntityType::Hatch(Box::new(hatch_with(path))));
+        let EntityKind::Hatch(hatch) = entity.kind else {
+            panic!("a hatch is mapped to a hatch");
+        };
+        let m::HatchBoundary::Polyline {
+            has_bulge,
+            closed,
+            vertices,
+        } = &hatch.loops[0].boundary
+        else {
+            panic!("a single polyline keeps the polyline form");
+        };
+        assert!(*has_bulge && *closed);
+        assert_eq!(vertices[0].bulge, 1.0);
+        assert_eq!(vertices[1].bulge, 0.0);
+    }
+
+    #[test]
+    fn bulged_segments_in_a_multi_edge_path_become_arcs() {
+        // A half circle of radius 1 centered at the origin, from (1, 0) counterclockwise to (-1, 0).
+        let poly = dwg::hatch::PolylineEdge {
+            vertices: vec![
+                DwgVector3::new(1.0, 0.0, 1.0),
+                DwgVector3::new(-1.0, 0.0, 0.0),
+            ],
+            is_closed: false,
+        };
+        let mut path = dwg::hatch::BoundaryPath::new();
+        path.add_edge(dwg::hatch::BoundaryEdge::Polyline(poly));
+        path.add_edge(dwg::hatch::BoundaryEdge::Line(dwg::hatch::LineEdge {
+            start: DwgVector2::new(-1.0, 0.0),
+            end: DwgVector2::new(1.0, 0.0),
+        }));
+        let (entity, partial) = mapped(&EntityType::Hatch(Box::new(hatch_with(path))));
+        assert!(partial.contains(&"hatch_polyline_edges"));
+        let EntityKind::Hatch(hatch) = entity.kind else {
+            panic!("a hatch is mapped to a hatch");
+        };
+        let m::HatchBoundary::Edges(edges) = &hatch.loops[0].boundary else {
+            panic!("a multi-edge path keeps the edge form");
+        };
+        let [
+            m::HatchEdge::Arc {
+                center,
+                radius,
+                start_angle,
+                end_angle,
+                counterclockwise,
+            },
+            ..,
+        ] = edges.as_slice()
+        else {
+            panic!("the bulged segment is an arc");
+        };
+        assert!(center[0].abs() < 1e-9 && center[1].abs() < 1e-9);
+        assert!((radius - 1.0).abs() < 1e-9);
+        assert!((start_angle - 0.0).abs() < 1e-9);
+        assert!((end_angle - 180.0).abs() < 1e-9);
+        assert!(*counterclockwise);
+    }
+
+    #[test]
+    fn two_dimensional_polyline_flags_and_smoothing_are_kept() {
+        let mut poly = dwg::Polyline2D::new();
+        poly.flags = dwg::PolylineFlags::from_bits(2 | 4 | 128 | 16);
+        poly.smooth_surface = dwg::SmoothSurfaceType::CubicBSpline;
+        poly.elevation = 2.5;
+        let (entity, partial) = mapped(&EntityType::Polyline2D(poly));
+        assert!(!partial.contains(&"smooth_surface"));
+        assert_eq!(partial, vec!["polyline_flags"]);
+        assert_eq!(
+            entity.props.elevation, None,
+            "the elevation is in the origin"
+        );
+        let EntityKind::Polyline(poly) = entity.kind else {
+            panic!("a polyline is mapped to a polyline");
+        };
+        assert_eq!(poly.flags, 2 | 4 | 128);
+        assert_eq!(poly.smooth_type, Some(6));
+        assert_eq!(poly.origin, Some([0.0, 0.0, 2.5]));
+    }
+
+    #[test]
+    fn polyline_vertices_take_the_layer_of_their_polyline() {
+        let mut poly = dwg::Polyline2D::new();
+        poly.common.layer = "WALLS".to_owned();
+        poly.vertices
+            .push(dwg::Vertex2D::new(DwgVector3::new(0.0, 0.0, 0.0)));
+        let (entity, _) = mapped(&EntityType::Polyline2D(poly));
+        let EntityKind::Polyline(poly) = entity.kind else {
+            panic!("a polyline is mapped to a polyline");
+        };
+        assert_eq!(poly.vertices[0].props.layer, "WALLS");
+    }
+
+    #[test]
+    fn hatch_elevation_is_the_elevation_point_only() {
+        let mut hatch = dwg::Hatch::new();
+        hatch.elevation = 4.0;
+        let (entity, _) = mapped(&EntityType::Hatch(Box::new(hatch)));
+        assert_eq!(entity.props.elevation, None);
+        let EntityKind::Hatch(hatch) = entity.kind else {
+            panic!("a hatch is mapped to a hatch");
+        };
+        assert_eq!(hatch.elevation_point, [0.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn spline_edge_weights_come_from_the_rational_control_points() {
+        let edge = dwg::hatch::SplineEdge {
+            degree: 1,
+            rational: true,
+            periodic: false,
+            knots: vec![0.0, 0.0, 1.0, 1.0],
+            control_points: vec![
+                DwgVector3::new(0.0, 0.0, 2.0),
+                DwgVector3::new(1.0, 0.0, 0.5),
+            ],
+            fit_points: Vec::new(),
+            start_tangent: DwgVector2::default(),
+            end_tangent: DwgVector2::default(),
+        };
+        let mut path = dwg::hatch::BoundaryPath::new();
+        path.add_edge(dwg::hatch::BoundaryEdge::Spline(edge));
+        let (entity, _) = mapped(&EntityType::Hatch(Box::new(hatch_with(path))));
+        let EntityKind::Hatch(hatch) = entity.kind else {
+            panic!("a hatch is mapped to a hatch");
+        };
+        let m::HatchBoundary::Edges(edges) = &hatch.loops[0].boundary else {
+            panic!("a spline keeps the edge form");
+        };
+        let [m::HatchEdge::Spline(spline)] = edges.as_slice() else {
+            panic!("one spline edge is mapped");
+        };
+        assert_eq!(spline.weights, vec![2.0, 0.5]);
+    }
+
+    #[test]
+    fn boundary_handles_and_edges_are_counted_against_the_array_limit() {
+        let limits = Limits {
+            array_length: 2,
+            ..Limits::CONSTRAINED
+        };
+        let mut path = dwg::hatch::BoundaryPath::new();
+        for _ in 0..3 {
+            path.add_boundary_handle(acadrust::types::Handle::new(0x10));
+        }
+        let hatch = EntityType::Hatch(Box::new(hatch_with(path)));
+        let err = map_entity(&hatch, false, &limits).err();
+        assert_eq!(err.as_ref().map(|e| e.code()), Some("io.limit_exceeded"));
+        assert_eq!(
+            err.and_then(|e| e.arguments().get("limit").cloned()),
+            Some(arc_base::error::Value::Text("array_length".to_owned()))
+        );
+    }
+
+    #[test]
+    fn non_finite_elevations_and_normals_are_invalid() {
+        let mut poly = dwg::Polyline2D::new();
+        poly.elevation = f64::NAN;
+        assert!(matches!(
+            map_entity(&EntityType::Polyline2D(poly), false, &limits()),
+            Ok(Outcome::Invalid)
+        ));
+        let mut hatch = dwg::Hatch::new();
+        hatch.normal = DwgVector3::new(f64::INFINITY, 0.0, 1.0);
+        assert!(matches!(
+            map_entity(&EntityType::Hatch(Box::new(hatch)), false, &limits()),
+            Ok(Outcome::Invalid)
+        ));
+    }
+
+    #[test]
+    fn text_entity_oblique_is_in_degrees() {
+        // Text entities keep their own oblique angle in degrees, as the model stores it.
+        let mut text = dwg::Text::with_value("A", DwgVector3::new(0.0, 0.0, 0.0));
+        text.oblique_angle = std::f64::consts::FRAC_PI_6;
+        let (entity, _) = mapped(&EntityType::Text(text));
+        let EntityKind::Text(text) = entity.kind else {
+            panic!("a text is mapped to a text");
+        };
+        assert!((text.oblique.unwrap_or(f64::NAN) - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn dimension_names_are_checked_against_the_string_limit() {
+        let limits = Limits {
+            string_bytes: 3,
+            ..Limits::CONSTRAINED
+        };
+        let mut dim = dwg::DimensionLinear::new(
+            DwgVector3::new(0.0, 0.0, 0.0),
+            DwgVector3::new(1.0, 0.0, 0.0),
+        );
+        dim.base.style_name = "A_LONG_DIMENSION_STYLE".to_owned();
+        let err = map_entity(
+            &EntityType::Dimension(Box::new(dwg::Dimension::Linear(dim))),
+            false,
+            &limits,
+        )
+        .err();
+        assert_eq!(err.map(|e| e.code()), Some("io.limit_exceeded"));
+    }
+
+    #[test]
+    fn attributes_take_the_paper_space_flag_and_normal_of_their_insert() {
+        let mut insert = dwg::Insert::new("DOOR", DwgVector3::new(0.0, 0.0, 0.0));
+        let mut attribute = dwg::AttributeEntity::new("NUMBER".to_owned(), "101".to_owned());
+        attribute.normal = DwgVector3::new(0.0, 0.0, -1.0);
+        insert.attributes.push(attribute);
+        let (entity, _) = mapped_paper(&EntityType::Insert(insert));
+        let EntityKind::Insert(insert) = entity.kind else {
+            panic!("an insert is mapped to an insert");
+        };
+        let attrib = &insert.attribs[0];
+        assert!(attrib.props.paper_space);
+        assert_eq!(attrib.props.extrusion, Some([0.0, 0.0, -1.0]));
+    }
+
+    #[test]
+    fn an_attribute_with_a_normal_that_is_not_finite_makes_the_insert_invalid() {
+        let mut insert = dwg::Insert::new("DOOR", DwgVector3::new(0.0, 0.0, 0.0));
+        let mut attribute = dwg::AttributeEntity::new("NUMBER".to_owned(), "101".to_owned());
+        attribute.normal = DwgVector3::new(f64::NAN, 0.0, 1.0);
+        insert.attributes.push(attribute);
+        assert!(matches!(
+            map_entity(&EntityType::Insert(insert), false, &limits()),
+            Ok(Outcome::Invalid)
+        ));
+    }
+
+    #[test]
+    fn mtext_line_spacing_style_is_kept() {
+        let mut text = dwg::MText::with_value("NOTE", DwgVector3::new(0.0, 0.0, 0.0));
+        text.line_spacing_style = dwg::LineSpacingStyle::Exactly;
+        let (entity, partial) = mapped(&EntityType::MText(Box::new(text)));
+        assert!(partial.is_empty());
+        let EntityKind::MText(text) = entity.kind else {
+            panic!("an mtext is mapped to an mtext");
+        };
+        assert_eq!(text.spacing_style, Some(2));
+    }
+
+    #[test]
+    fn hatch_gradients_are_partial() {
+        let mut hatch = dwg::Hatch::new();
+        hatch.gradient_color.enabled = true;
+        let (_, partial) = mapped(&EntityType::Hatch(Box::new(hatch)));
+        assert_eq!(partial, vec!["hatch_gradient"]);
+    }
+
+    #[test]
+    fn partial_names_of_a_multi_edge_hatch_are_listed_once() {
+        let poly = dwg::hatch::PolylineEdge {
+            vertices: vec![
+                DwgVector3::new(0.0, 0.0, 0.0),
+                DwgVector3::new(1.0, 0.0, 0.0),
+                DwgVector3::new(1.0, 1.0, 0.0),
+            ],
+            is_closed: false,
+        };
+        let mut path = dwg::hatch::BoundaryPath::new();
+        path.add_edge(dwg::hatch::BoundaryEdge::Polyline(poly.clone()));
+        path.add_edge(dwg::hatch::BoundaryEdge::Polyline(poly));
+        path.add_edge(dwg::hatch::BoundaryEdge::Line(dwg::hatch::LineEdge {
+            start: DwgVector2::new(1.0, 1.0),
+            end: DwgVector2::new(0.0, 0.0),
+        }));
+        let (_, partial) = mapped(&EntityType::Hatch(Box::new(hatch_with(path))));
+        assert_eq!(partial, vec!["hatch_polyline_edges"]);
     }
 }

@@ -121,6 +121,14 @@ pub mod reasons {
         severity: Severity::Warning,
         message_id: "io-dwg-loss-value-skipped",
     };
+    /// A block definition names entities by handle, and some handles name no entity of the file;
+    /// those references were not carried.
+    pub const HANDLE_UNRESOLVED: Reason = Reason {
+        code: "io.dwg.handle_unresolved",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-dwg-loss-handle-unresolved",
+    };
 
     /// Every reason of this crate, for the registry check.
     pub const ALL: &[Reason] = &[
@@ -131,6 +139,7 @@ pub mod reasons {
         ENTITY_DROPPED,
         ENTITY_PARTIAL,
         VALUE_SKIPPED,
+        HANDLE_UNRESOLVED,
     ];
 }
 

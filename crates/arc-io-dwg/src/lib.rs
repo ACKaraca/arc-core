@@ -11,8 +11,11 @@
 //! does not carry is counted in the loss report; nothing is dropped silently.
 //!
 //! The crate reads byte buffers, never paths, and makes no operating-system calls of its own. The
-//! library's own buffers are bounded by the decompression limit of the profile; the call into the
-//! library cannot be cancelled.
+//! read and the mapping of the library's document run inside one isolation boundary, so a panic of
+//! the library becomes an error and only the neutral output leaves it. The library's own buffers are
+//! bounded by the decompression limit of the profile, and the library reserves no mesh memory. The
+//! call into the library cannot be cancelled, and the library can make large reservations from small
+//! records; untrusted files are read in the worker process (see the specification).
 
 mod check;
 mod convert;
@@ -37,8 +40,8 @@ use arc_io_dxf::{ReadOptions, ReadOutput};
 ///
 /// `io.limit_exceeded` naming the limit, `io.dwg.signature_invalid` for input without a DWG
 /// signature, `io.dwg.version_unsupported` for a version outside R13 to R2018, `io.dwg.truncated`,
-/// `io.dwg.structure_invalid`, `io.dwg.checksum_mismatch`, `io.dwg.library_failed` when the
-/// wrapped library panics, and `base.cancelled`.
+/// `io.dwg.structure_invalid`, `io.dwg.checksum_mismatch`, `io.dwg.library_failed` when the read
+/// or the mapping of the wrapped library panics, and `base.cancelled`.
 pub fn read(bytes: &[u8], options: &mut ReadOptions<'_>) -> Result<ReadOutput> {
     let limits = options.limits;
     let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
@@ -47,28 +50,28 @@ pub fn read(bytes: &[u8], options: &mut ReadOptions<'_>) -> Result<ReadOutput> {
     }
     let (version, signature) = check::signature(bytes)?;
     options.cancel.check()?;
-    let document = library::read(bytes, signature, &limits)?;
-    options.cancel.check()?;
-    let total = u64::try_from(document.entity_count()).unwrap_or(u64::MAX);
-    let mut mapper = map::Mapper::new(
-        &limits,
-        &options.cancel,
-        options.progress.as_deref_mut(),
-        total,
-    );
-    let drawing = mapper.drawing(&document, version)?;
-    let report = mapper.finish(LossHeader {
-        format: "dwg".to_owned(),
-        version: version.name().to_owned(),
-        direction: Direction::Import,
-        file_name: None,
-        file_hash: None,
-        application: None,
-        application_version: None,
-        time: None,
-        limits: Some(limits),
-    });
-    Ok(ReadOutput { drawing, report })
+    let cancel = &options.cancel;
+    let progress = options.progress.as_deref_mut();
+    // The whole mapping runs inside the library boundary, so a panic in any accessor of the
+    // library is reported as `io.dwg.library_failed`; only the neutral output leaves it.
+    library::read(bytes, signature, &limits, |document| {
+        cancel.check()?;
+        let total = u64::try_from(document.entity_count()).unwrap_or(u64::MAX);
+        let mut mapper = map::Mapper::new(&limits, cancel, progress, total);
+        let drawing = mapper.drawing(document, version)?;
+        let report = mapper.finish(LossHeader {
+            format: "dwg".to_owned(),
+            version: version.name().to_owned(),
+            direction: Direction::Import,
+            file_name: None,
+            file_hash: None,
+            application: None,
+            application_version: None,
+            time: None,
+            limits: Some(limits),
+        });
+        Ok(ReadOutput { drawing, report })
+    })
 }
 
 #[cfg(test)]

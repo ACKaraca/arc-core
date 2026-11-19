@@ -1,4 +1,11 @@
 //! Builds the input of the tests: DWG bytes written by the wrapped library from a small document.
+//! Every step that the library can refuse fails the test with its error; nothing is defaulted.
+
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test helper: a failed step fails the test"
+)]
 
 use acadrust::entities::AttributeEntity;
 use acadrust::entities::hatch::{BoundaryEdge, BoundaryPath, PolylineEdge};
@@ -48,7 +55,9 @@ pub fn sample_document(version: DxfVersion) -> CadDocument {
         Vector3::new(0.0, 0.0, 0.0),
         1.0,
     ));
-    let handle = doc.add_entity(circle).unwrap_or_default();
+    let handle = doc
+        .add_entity(circle)
+        .expect("the circle is added to the document");
     if let Some(record) = doc.block_records.get_mut("DOOR") {
         record.entity_handles.push(handle);
     }
@@ -82,14 +91,30 @@ pub fn sample_document(version: DxfVersion) -> CadDocument {
     doc
 }
 
+/// A document of the given version whose model space holds the one entity.
+#[allow(
+    dead_code,
+    reason = "each test crate uses its own subset of the helpers"
+)]
+pub fn document_with(version: DxfVersion, entity: EntityType) -> CadDocument {
+    let mut doc = CadDocument::with_version(version);
+    add_model(&mut doc, entity);
+    doc
+}
+
 fn add_model(doc: &mut CadDocument, entity: EntityType) {
-    let handle = doc.add_entity(entity).unwrap_or_default();
+    let handle = doc
+        .add_entity(entity)
+        .expect("the entity is added to the document");
     if let Some(record) = doc.block_records.get_mut("*Model_Space") {
         record.entity_handles.push(handle);
     }
 }
 
-/// The DWG bytes of a document.
+/// The DWG bytes of a document. A refusal of the library's writer fails the test.
 pub fn dwg_bytes(doc: &CadDocument) -> Vec<u8> {
-    DwgWriter::write_to_vec(doc).unwrap_or_default()
+    match DwgWriter::write_to_vec(doc) {
+        Ok(bytes) => bytes,
+        Err(error) => panic!("the library's DWG writer refused the document: {error:?}"),
+    }
 }
