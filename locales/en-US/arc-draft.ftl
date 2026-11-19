@@ -216,3 +216,4 @@ draft-command-external-ref-set-clip-description = Sets or removes the clip bound
 draft-command-external-ref-bind = Bind external reference
 draft-command-external-ref-bind-description = Copies a linked drawing into a block definition and replaces the reference with a block reference.
 draft-external-ref-budget-exceeded = The linked drawings of the display list exceed the work budget of the display build.
+draft-snap-limit-exceeded = The snap query would examine more than { $limit } items.

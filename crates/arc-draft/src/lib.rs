@@ -70,6 +70,7 @@ pub mod plot_style;
 pub mod purge;
 #[cfg(feature = "raster")]
 pub mod raster;
+pub mod snap;
 pub mod spline;
 pub mod stroke_font;
 pub mod style;

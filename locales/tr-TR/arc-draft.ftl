@@ -216,3 +216,4 @@ draft-command-external-ref-set-clip-description = Dış başvuruların kırpma s
 draft-command-external-ref-bind = Dış başvuruyu bağla
 draft-command-external-ref-bind-description = Bağlı bir çizimi bir blok tanımına kopyalar ve başvuruyu blok başvurusuyla değiştirir.
 draft-external-ref-budget-exceeded = Görüntü listesinin bağlı çizimleri görüntü oluşturmanın iş bütçesini aşıyor.
+draft-snap-limit-exceeded = Nesne yakalama sorgusu { $limit } öğeden fazlasını inceleyecekti.

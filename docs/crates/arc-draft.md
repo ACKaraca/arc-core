@@ -1376,9 +1376,9 @@ drafting types refer to it and do not register it.
   `plot::layout_stream_with_work_budget` take a `WorkBudget` and return the `WorkUse`.
 - **Read-only.** No command writes a linked drawing: the loaded snapshot is immutable, and the
   commands of this crate change only the objects of the host document.
-- **Snapping and picking.** This crate has no snap or pick query; the display list is the query
-  the other crates use. Snapping to linked geometry uses the same primitives, identified by the
-  `source` and `path` above.
+- **Snapping and picking.** The display list is the input of the snap engine
+  ([Object snaps](#object-snaps-as-implemented)). Snapping to linked geometry uses the same
+  primitives, identified by the `source` and `path` above; the engine does not snap to them yet.
 
 ### Commands
 
@@ -1533,6 +1533,122 @@ Where the specification was silent:
    dropping the record, which shortens the list, shifts its later members, and hides the change from
    the readers that test for absence (a hatch boundary, a dimension point path).
 
+## Object snaps as implemented
+
+The module `snap` is headless: pure functions over a document snapshot, `arc-geom` and `arc-base`
+values. It holds no state and has no UI types; a host calls it per pick or per cursor move and
+passes the results of one call into the next. The host supplies, per frame: the snapshot, the
+space, a `SnapQuery` (cursor, aperture in drawing units, enabled `SnapModes`, the previous point
+`from` of the running command if any, the UCS x axis, the tolerance, `Limits`, the nesting bound),
+and for constraints a `Frame` (the UCS or the last segment direction), the optional `PolarSettings`,
+`SnapStep` and acquired tracking points.
+
+### Entry points
+
+| Function | Result |
+|---|---|
+| `snap_candidates(snapshot, space, &SnapQuery)` | Ranked `SnapCandidate`s: kind, point, distance, `extended` flag, and one or two `SnapSource`s (drawing entity and inserting block references) |
+| `constrain(cursor, &ConstraintContext)` | The constrained point and its `ConstraintSource` (precedence below) |
+| `ortho`, `polar`, `snap_step`, `grid_points` | One constraint each, or grid nodes in a window |
+| `track(cursor, acquired, &Frame, polar, aperture, &Tolerance)` | The intersection of two alignment paths, or the projection on one, through acquired points |
+| `mid_between`, `from_offset` | Helper points: midpoint of two points, and a base plus an offset |
+
+`SnapKind` has thirteen kinds, named as the snap markers of the UI kit where those exist:
+`Endpoint`, `Midpoint`, `Center`, `GeometricCenter`, `Node`, `Insertion`, `Quadrant`,
+`Intersection`, `Extension`, `Parallel`, `Perpendicular`, `Tangent` and `Nearest`. The declaration
+order is the kind priority of the ranking.
+
+### Candidates
+
+- **Source entities.** Drawing entities are read through `display::entity_list`, so block
+  references are followed through their transforms. A candidate's `SnapSource::entity` is the
+  drawing entity, and `block_path` lists the inserting references, outermost first. Only the
+  entity types with curve or point geometry take part: lines, rays, construction lines, circles,
+  arcs, ellipses, elliptical arcs, polylines, splines, points, block references and reference
+  arrays. Wipeouts, dimensions, leaders, hatches, tables, linked drawings and text (except its
+  insertion point) do not snap. Snaps use the whole curve, not its dashes.
+- **Layers.** A primitive is left out when any layer of its chain is off or frozen; a locked
+  layer snaps. A top-level entity that is hidden by its own flag, or whose layer is off or frozen,
+  gives no insertion point.
+- **Per kind.** Endpoints of open curves (none for closed curves; a ray has its origin; a line has
+  none). Midpoints are the parameter midpoints of segments, arcs and elliptical arcs; a spline
+  has none. Centers of circles, arcs, ellipses, elliptical arcs and polyline arc segments. The
+  geometric center is the centroid of a closed polyline or closed spline. Quadrant points of a
+  circle or arc in the UCS; an ellipse has them only when its axes are parallel or perpendicular to
+  the UCS x axis within `tolerance.angular`. Perpendicular feet and tangent points need `from`:
+  tangent points are the roots of the cross product of the derivative with the line to `from`,
+  found by sampling and bisection, with no root for a touch without a sign change. Nearest is the
+  closest point of each curve. Extension is the projection of the cursor on the tangential path
+  leaving a segment, arc or elliptical arc end the cursor is within the aperture of. Parallel is the
+  projection of the cursor on the path through `from` in the direction of a straight curve.
+- **Intersections.** Actual intersections of pairs of curves from different sources, through
+  `arc-geom`; overlaps and splines yield none. Extended intersections are intersections of the
+  natural extensions (segments as lines, arcs and elliptical arcs as their full circle or
+  ellipse), reported when the point is not on both actual curves.
+- **Window.** Only curves whose boxes meet the aperture around the cursor are offered, plus rays
+  and lines, which have no box. Extended intersections use the extensions that pass within the
+  aperture.
+- **Ranking and output.** Candidates are sorted by kind, then actual before extended, then by
+  distance to the cursor, then by the identifiers of their entities, then by coordinates. Equal
+  candidates are reported once. A candidate is offered when its distance to the cursor does not
+  exceed the aperture.
+
+### Precedence
+
+`constrain` applies, in order: an object snap point (the host passes the first candidate), a
+tracking point, ortho (when on and a previous point exists), polar tracking (only when ortho is off
+and a previous point exists), the snap step, and the raw cursor. The object snap overrides the step
+as the rows require; ortho and polar exclude each other. The rows do not order tracking against
+ortho, so tracking comes first. The host resolves an inverting key for ortho before the call.
+
+### Tracking and constraints
+
+- **Ortho.** The axis of the frame nearer to the cursor direction from the base point; the x axis
+  wins a tie.
+- **Polar.** Alignment angles are the multiples of `increment` on either side of the cursor
+  direction, plus the additional angles, all relative to the frame. The nearest alignment angle
+  locks the cursor when its distance is within the angular tolerance; a tie goes to the smaller
+  angle, and the angle wraps at a full turn. A cursor at the base point locks to nothing.
+- **Snap step.** Rectangular: the grid rotated by the frame, rounded per axis. Polar: rounded
+  distance and angle increments about the base. Both take positive spacings only.
+- **Grid points.** Grid nodes inside a window, at most `max_points`; the count is checked before
+  the nodes are generated.
+- **Tracking.** Horizontal and vertical paths through each acquired point, and the polar angles
+  nearest to the direction from the point to the cursor. Paths pass the aperture test when the
+  cursor is within the aperture of their lines. An intersection of two paths of different points
+  wins over a projection on one path; ties go to the earlier path. At most `MAX_ACQUIRED` (16)
+  points are tracked.
+
+### Bounds and errors
+
+- `Limits::record_count` bounds the top-level entities examined.
+- The curve pairs of the actual and of the extended intersections are bounded by
+  `MAX_INTERSECTION_PAIRS` (65536); the count is taken among the curves near the cursor.
+- `Limits::array_length` bounds the results of one intersection (through `arc-geom`).
+- `SnapQuery::max_depth` bounds the nesting of block references (`DisplayOptions::max_nesting`).
+- A non-finite cursor, aperture, previous point or UCS axis fails with `geom.input.not_finite`; a
+  zero UCS axis or a non-positive polar or grid parameter with `draft.geometry.invalid`; an invalid
+  tolerance with `geom.tolerance.invalid`. A zero or negative aperture yields no candidate.
+- Degenerate results (a curve whose computation fails, an intersection that fails in `arc-geom`) are
+  skipped, not reported as errors.
+
+### Unsupported combinations
+
+- Apparent intersections of objects that cross only in the current view, and 3D snaps: the model
+  has no view projection and no solids.
+- Splines: midpoints, intersections, tangent and perpendicular feet are supported only where
+  `arc-geom` supports the query; spline extensions and extended intersections are not computed.
+- Multilines, regions as separate objects, and the edges of hatch boundaries as snap sources.
+- Insertion points of block references and text inside block definitions (nested insertions);
+  only top-level references and text give insertion points.
+- Hover state. Parallel paths are offered for every straight curve in the space, and the
+  cursor selects among them by distance; the engine keeps no record of the line the cursor
+  hovered before.
+- Quadrant points of an ellipse whose axes are not aligned with the UCS.
+- Isometric snap style and the polar snap distance option; isometric planes.
+- Linked drawings (external references) as snap sources.
+- Tangent points where the function touches zero without changing sign.
+
 ## Error codes
 
 The codes of every part of the crate:
@@ -1565,6 +1681,7 @@ The codes of every part of the crate:
 | `draft.style.parent_invalid` | `invalid_input` | A dimension style's parent rule is broken |
 | `draft.purge.in_use` | `conflict` | An object selected for purging is in use |
 | `draft.display.too_large` | `limit_exceeded` | A display list would hold more primitives than the bound |
+| `draft.snap.limit_exceeded` | `limit_exceeded` | A snap query would examine more top-level entities, curve pairs or grid points than its bound |
 | `draft.font.syntax` | `invalid_input` | A line of a stroke-font file is malformed |
 | `draft.font.version_unsupported` | `unsupported` | A stroke-font file has a version this reader does not read |
 | `draft.font.header_invalid` | `invalid_input` | A stroke-font header value is missing, repeated or out of range |

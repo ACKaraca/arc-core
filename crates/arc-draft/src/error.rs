@@ -166,6 +166,12 @@ pub mod codes {
         category: Category::LimitExceeded,
         message_id: "draft-display-too-large",
     };
+    /// A snap query would examine more entities, candidate pairs or grid points than its bound.
+    pub const SNAP_LIMIT_EXCEEDED: ErrorCode = ErrorCode {
+        code: "draft.snap.limit_exceeded",
+        category: Category::LimitExceeded,
+        message_id: "draft-snap-limit-exceeded",
+    };
     /// A line of a stroke-font file is malformed; the argument `line` names it.
     pub const FONT_SYNTAX: ErrorCode = ErrorCode {
         code: "draft.font.syntax",
