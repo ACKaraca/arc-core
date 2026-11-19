@@ -762,7 +762,7 @@ mod tests {
     fn the_switch_is_off_by_default() {
         let store = fresh();
         assert_eq!(store.get(ENABLED).unwrap().value, SettingValue::Bool(false));
-        let d = dir("automation-default");
+        let d = dir("au-df");
         let mut automation = Automation::new();
         automation
             .sync(&store, &d.join("run"), &product(), None)
@@ -777,7 +777,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixStream;
 
-        let d = dir("automation-switch");
+        let d = dir("au-sw");
         let run = d.join("run");
         let mut store = fresh();
         let mut automation = Automation::new();
@@ -823,7 +823,7 @@ mod tests {
 
     #[test]
     fn the_switch_cannot_be_turned_on_when_the_system_locks_it_off() {
-        let d = dir("automation-locked");
+        let d = dir("au-lo");
         let file = d.join("managed-settings.toml");
         std::fs::write(
             &file,
@@ -843,7 +843,7 @@ mod tests {
 
     #[test]
     fn grants_are_remembered_in_the_user_settings_and_revocable() {
-        let d = dir("automation-grants");
+        let d = dir("au-gr");
         let file = d.join("settings.toml");
         let mut store = fresh();
         let read_edit: BTreeSet<Permission> = [Permission::Read, Permission::Edit].into();
@@ -927,7 +927,7 @@ mod tests {
 
     #[test]
     fn a_system_lock_on_the_grants_refuses_grant_and_revoke() {
-        let d = dir("automation-grants-locked");
+        let d = dir("au-gl");
         let file = d.join("managed-settings.toml");
         std::fs::write(&file, "[managed]\nlocked = [\"automation.grants\"]\n").unwrap();
         let mut store = fresh();
@@ -953,7 +953,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixStream;
 
-        let d = dir("automation-model");
+        let d = dir("au-mo");
         let run = d.join("run");
         let mut store = fresh();
         let mut automation = Automation::new();
@@ -1061,7 +1061,7 @@ mod tests {
         let edit = r#"{"jsonrpc":"2.0","id":3,"method":"command.run","params":{"document":"main","command":"shell.layer.create","params":{"name":"walls"}}}"#;
         let ping = r#"{"jsonrpc":"2.0","id":4,"method":"arc.ping","params":{}}"#;
 
-        let d = dir("automation-revoke");
+        let d = dir("au-rv");
         let mut store = fresh();
         let mut automation = Automation::new();
         automation
@@ -1154,7 +1154,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixStream;
 
-        let d = dir("automation-replace");
+        let d = dir("au-rp");
         let mut store = fresh();
         let mut automation = Automation::new();
         automation
@@ -1232,7 +1232,7 @@ mod tests {
     fn a_socket_that_cannot_bind_reports_the_failure_and_can_start_again() {
         use std::os::unix::fs::PermissionsExt;
 
-        let d = dir("automation-bind");
+        let d = dir("au-bi");
         let run = d.join("run");
         std::fs::create_dir_all(&run).unwrap();
         std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1259,7 +1259,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_serving_error_clears_the_running_state_and_the_files() {
-        let d = dir("automation-serve-error");
+        let d = dir("au-se");
         let run = d.join("run");
         let mut automation = Automation::new();
         automation
@@ -1302,7 +1302,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_lock_on_the_grants_ignores_the_user_grants_when_the_socket_starts() {
-        let d = dir("automation-lock-start");
+        let d = dir("au-ls");
         let mut store = fresh();
         store
             .set_layer(
@@ -1327,7 +1327,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_lock_on_the_grants_removes_the_running_clients_on_sync() {
-        let d = dir("automation-lock-running");
+        let d = dir("au-lr");
         let mut store = fresh();
         let file = d.join("settings.toml");
         let mut automation = Automation::new();
@@ -1355,7 +1355,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_lock_on_the_grants_leaves_exactly_the_system_grants() {
-        let d = dir("automation-lock-system");
+        let d = dir("au-lk");
         let mut store = fresh();
         store
             .set_layer(
@@ -1392,7 +1392,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_client_the_socket_refuses_is_not_listed() {
-        let d = dir("automation-add-refused");
+        let d = dir("au-ar");
         let run = d.join("run");
         let mut store = fresh();
         let mut automation = Automation::new();
