@@ -618,8 +618,8 @@ impl Handler {
     /// Opens the files other starts forwarded, through the application's open flow. Paths are
     /// not logged.
     fn receive_forwarded(&mut self) {
-        let paths = match &self.instance {
-            Some(instance) => instance.poll(),
+        let paths = match &mut self.instance {
+            Some(instance) => instance.poll(Instant::now()),
             None => return,
         };
         if paths.is_empty() {

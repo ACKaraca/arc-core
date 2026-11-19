@@ -96,9 +96,8 @@ fn data_dir() -> PathBuf {
 /// the environment would let a user choose a file that locks nothing.
 fn managed_settings_path() -> PathBuf {
     if cfg!(target_os = "windows") {
-        PathBuf::from(env(&["PROGRAMDATA"], "C:\\ProgramData"))
-            .join("arc-shell")
-            .join("managed-settings.toml")
+        // shortcut: fixed system drive path, switch to the known-folder API when a Windows FFI crate is allowed
+        PathBuf::from("C:\\ProgramData\\arc-shell\\managed-settings.toml")
     } else if cfg!(target_os = "macos") {
         PathBuf::from("/Library/Application Support/arc-shell/managed-settings.toml")
     } else {
@@ -163,7 +162,12 @@ fn start() -> Result<(), String> {
         recent,
     };
     let mut app = Application::new(product, config);
-    if let Err(e) = managed::apply(app.settings_mut(), &managed_settings_path()) {
+    // Fail closed: an administrator file that exists but cannot be used stops the start, so the
+    // user cannot run without the locks it sets (CORE-APP-013).
+    if let Err(e) = managed::apply_system(app.settings_mut(), &managed_settings_path()) {
+        if managed::is_fatal(&e) {
+            return Err(arc_shell::describe(&e, Some(&localizer)));
+        }
         let _ = writeln!(
             std::io::stderr(),
             "{}",

@@ -324,20 +324,28 @@ impl SettingsStore {
         }
     }
 
-    /// Locks the registered keys in `keys` (managed settings, CORE-APP-013): their value comes
-    /// from the system scope only, and writes below that scope are refused. Keys the registry
-    /// does not know are not locked; they are returned, in order, so the caller can log them.
-    pub fn lock<'k>(&mut self, keys: impl IntoIterator<Item = &'k str>) -> Vec<String> {
+    /// Installs the system scope and its lock list together (managed settings, CORE-APP-013).
+    /// The keys in `keys` that the registry knows become the whole lock set, replacing the
+    /// previous one: a key removed from the file is unlocked. Keys the registry does not know are
+    /// not locked; they are returned, in order, so the caller can log them. The lock set changes
+    /// only after the system table was accepted, so a refused table leaves the previous state.
+    ///
+    /// # Errors
+    /// As [`set_layer`](Self::set_layer) for [`Scope::System`]; nothing is changed then.
+    pub fn set_system(&mut self, table: Table, keys: &[&str]) -> Result<Vec<String>> {
+        let mut locked = BTreeSet::new();
         let mut unknown = Vec::new();
         for key in keys {
             match self.registry.get(key) {
                 Some(setting) => {
-                    self.locked.insert(setting.key);
+                    locked.insert(setting.key);
                 }
-                None => unknown.push(key.to_owned()),
+                None => unknown.push((*key).to_owned()),
             }
         }
-        unknown
+        self.set_layer(Scope::System, table)?;
+        self.locked = locked;
+        Ok(unknown)
     }
 
     /// Whether `key` is locked by the system scope.

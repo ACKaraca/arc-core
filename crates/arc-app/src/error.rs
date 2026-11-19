@@ -92,6 +92,13 @@ pub mod codes {
         category: Category::CorruptData,
         message_id: "app-managed-invalid",
     };
+    /// The system (managed) settings file or its folder is owned by another user or writable by
+    /// group or other users, so the file is not read.
+    pub const MANAGED_UNTRUSTED: ErrorCode = ErrorCode {
+        code: "app.managed.untrusted",
+        category: Category::PermissionDenied,
+        message_id: "app-managed-untrusted",
+    };
     /// A malformed settings file could not be renamed aside.
     pub const FILE_SET_ASIDE_FAILED: ErrorCode = ErrorCode {
         code: "app.settings_file.set_aside_failed",

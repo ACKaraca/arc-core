@@ -7,8 +7,9 @@
 //! the default. Entries that are not registered keys are ignored and logged.
 //!
 //! The file is read, never written or renamed: it lives in a directory the user does not own. A
-//! missing file applies nothing; a file that cannot be used is reported as an error and nothing
-//! from it is applied.
+//! missing file applies nothing. A file that exists but cannot be used stops the application from
+//! starting ([`is_fatal`]): nothing from it is applied and the application does not fall back to
+//! running without the administrator's locks.
 
 use std::fs;
 use std::path::Path;
@@ -17,11 +18,15 @@ use arc_base::{Error, Result};
 use toml::{Table, Value};
 
 use crate::codes;
-use crate::settings::{MANAGED_TABLE, Scope, SettingsStore};
+use crate::settings::{MANAGED_TABLE, SettingsStore};
 use crate::settings_file::MAX_FILE_BYTES;
 
 /// The key of the lock list inside [`MANAGED_TABLE`].
 pub const LOCKED: &str = "locked";
+
+/// The owner the administrator file and its folder must have on Unix: the superuser.
+#[cfg(unix)]
+const ADMINISTRATOR_UID: u32 = 0;
 
 /// What [`apply`] took from the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,8 +63,8 @@ pub fn read(path: &Path) -> Result<Table> {
 }
 
 /// Reads the file at `path`, sets its values as the system scope of `store`, and locks the
-/// listed keys. Unknown lock-list entries are logged with `tracing` and returned in
-/// [`Managed::ignored`].
+/// listed keys, replacing the lock set of an earlier apply. Unknown lock-list entries are logged
+/// with `tracing` and returned in [`Managed::ignored`].
 ///
 /// # Errors
 /// As [`read`]; nothing is changed when reading fails.
@@ -83,7 +88,8 @@ pub fn apply(store: &mut SettingsStore, path: &Path) -> Result<Managed> {
         }
         Some(_) => ignored.push(format!("{MANAGED_TABLE}.{LOCKED}")),
     }
-    let unknown = store.lock(requested.iter().map(String::as_str));
+    let keys: Vec<&str> = requested.iter().map(String::as_str).collect();
+    let unknown = store.set_system(table, &keys)?;
     let locked: Vec<String> = requested
         .into_iter()
         .filter(|key| !unknown.contains(key))
@@ -92,14 +98,67 @@ pub fn apply(store: &mut SettingsStore, path: &Path) -> Result<Managed> {
     for key in &ignored {
         tracing::warn!(key = %key, "managed settings: lock entry ignored");
     }
-    store.set_layer(Scope::System, table)?;
     Ok(Managed { locked, ignored })
+}
+
+/// Reads and applies the administrator file at `path` as [`apply`] does, after checking where it
+/// lives. On Unix the file and its folder must be owned by the superuser and not writable by
+/// group or other users; otherwise the file is refused with `app.managed.untrusted` and nothing is
+/// read.
+///
+/// # Errors
+/// As [`apply`], and `app.managed.untrusted`. Every one of them is fatal ([`is_fatal`]).
+pub fn apply_system(store: &mut SettingsStore, path: &Path) -> Result<Managed> {
+    #[cfg(unix)]
+    require_owner(path, ADMINISTRATOR_UID)?;
+    apply(store, path)
+}
+
+/// Whether `error` from [`apply_system`] must stop the application from starting. Every error of
+/// this module is fatal: a file that exists but cannot be used is never skipped (fail closed).
+#[must_use]
+pub fn is_fatal(error: &Error) -> bool {
+    [
+        codes::MANAGED_READ_FAILED.code,
+        codes::MANAGED_INVALID.code,
+        codes::MANAGED_UNTRUSTED.code,
+    ]
+    .contains(&error.code())
+}
+
+/// Refuses a file that `owner` does not own, that is not a regular file (a symbolic link is
+/// refused), or that group or other users can write, and a folder with the same faults. A missing
+/// file passes: nothing is managed.
+#[cfg(unix)]
+fn require_owner(path: &Path, owner: u32) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let read_failed = |e: std::io::Error| {
+        Error::new(codes::MANAGED_READ_FAILED)
+            .with_arg("path", path.display().to_string())
+            .with_source(e)
+    };
+    let file = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(read_failed(e)),
+    };
+    let folder = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let folder = fs::metadata(folder).map_err(read_failed)?;
+    // Group and other write bits (0o022) must be clear.
+    let trusted = |meta: &fs::Metadata| meta.uid() == owner && meta.mode() & 0o022 == 0;
+    if file.is_file() && trusted(&file) && trusted(&folder) {
+        return Ok(());
+    }
+    Err(Error::new(codes::MANAGED_UNTRUSTED).with_arg("path", path.display().to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{Setting, SettingType, SettingValue, SettingsRegistry};
+    use crate::settings::{Scope, Setting, SettingType, SettingValue, SettingsRegistry};
     use crate::testutil::dir;
 
     fn store_with_user(user: &str) -> SettingsStore {
@@ -243,13 +302,121 @@ mod tests {
         let file = d.join("managed-settings.toml");
         write(&file, "[managed\nlocked = [");
         let mut store = store_with_user(USER);
-        assert_eq!(
-            apply(&mut store, &file).unwrap_err().code(),
-            "app.managed.invalid"
-        );
+        let err = apply(&mut store, &file).unwrap_err();
+        assert_eq!(err.code(), "app.managed.invalid");
+        assert!(is_fatal(&err), "the caller must refuse to start");
         assert!(store.layer(Scope::System).is_none());
         assert!(!store.is_locked("log.level"));
         assert!(file.exists(), "the admin file is never renamed");
+    }
+
+    #[test]
+    fn reapplying_an_edited_file_unlocks_keys_removed_from_it() {
+        let d = dir("managed-relock");
+        let file = d.join("managed-settings.toml");
+        write(&file, "[managed]\nlocked = [\"log.level\"]\n");
+        let mut store = store_with_user(USER);
+        apply(&mut store, &file).unwrap();
+        assert!(store.is_locked("log.level"));
+        write(&file, "[managed]\nlocked = [\"recent.max_entries\"]\n");
+        apply(&mut store, &file).unwrap();
+        assert!(!store.is_locked("log.level"));
+        assert!(store.is_locked("recent.max_entries"));
+    }
+
+    #[test]
+    fn an_unusable_reapplied_file_keeps_the_previous_locks_and_values() {
+        let d = dir("managed-keep");
+        let file = d.join("managed-settings.toml");
+        write(
+            &file,
+            "[managed]\nlocked = [\"log.level\"]\n[log]\nlevel = \"warn\"\n",
+        );
+        let mut store = store_with_user(USER);
+        apply(&mut store, &file).unwrap();
+        write(&file, "[managed\nlocked = [");
+        assert!(apply(&mut store, &file).is_err());
+        assert!(store.is_locked("log.level"));
+        assert_eq!(
+            store.get("log.level").unwrap().value,
+            SettingValue::Text("warn".into())
+        );
+    }
+
+    #[test]
+    fn a_missing_file_is_not_fatal_and_applies_nothing() {
+        let d = dir("managed-fatal-none");
+        let mut store = store_with_user(USER);
+        let applied = apply_system(&mut store, &d.join("absent.toml")).unwrap();
+        assert!(applied.locked.is_empty());
+    }
+
+    #[cfg(unix)]
+    mod trust {
+        use super::*;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::path::PathBuf;
+
+        /// A settings file in a folder, both owned by the test user; returns the file and the uid.
+        fn owned(name: &str) -> (PathBuf, u32) {
+            let d = dir(name);
+            let file = d.join("managed-settings.toml");
+            write(&file, "[managed]\nlocked = []\n");
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+            fs::set_permissions(&d, fs::Permissions::from_mode(0o755)).unwrap();
+            let uid = fs::metadata(&file).unwrap().uid();
+            (file, uid)
+        }
+
+        #[test]
+        fn a_file_of_the_given_owner_in_a_private_folder_is_accepted() {
+            let (file, uid) = owned("managed-trust-ok");
+            require_owner(&file, uid).unwrap();
+        }
+
+        #[test]
+        fn a_group_writable_file_is_refused() {
+            let (file, uid) = owned("managed-trust-group");
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o664)).unwrap();
+            assert_eq!(
+                require_owner(&file, uid).unwrap_err().code(),
+                "app.managed.untrusted"
+            );
+        }
+
+        #[test]
+        fn a_world_writable_folder_is_refused() {
+            let (file, uid) = owned("managed-trust-folder");
+            let folder = file.parent().unwrap();
+            fs::set_permissions(folder, fs::Permissions::from_mode(0o757)).unwrap();
+            assert_eq!(
+                require_owner(&file, uid).unwrap_err().code(),
+                "app.managed.untrusted"
+            );
+        }
+
+        #[test]
+        fn a_file_of_another_owner_is_refused() {
+            let (file, uid) = owned("managed-trust-owner");
+            assert_eq!(
+                require_owner(&file, uid.wrapping_add(1))
+                    .unwrap_err()
+                    .code(),
+                "app.managed.untrusted"
+            );
+        }
+
+        #[test]
+        fn a_symbolic_link_is_refused_and_a_missing_file_passes() {
+            let (file, uid) = owned("managed-trust-link");
+            let link = file.with_file_name("link.toml");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert_eq!(
+                require_owner(&link, uid).unwrap_err().code(),
+                "app.managed.untrusted"
+            );
+            require_owner(&file.with_file_name("none.toml"), uid).unwrap();
+        }
     }
 
     #[test]

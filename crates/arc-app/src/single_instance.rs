@@ -10,11 +10,14 @@
 //! Unix uses a Unix domain socket `instance.sock` in a directory that must be private to the
 //! user: created with mode 0700 when missing, and refused when it is a symbolic link, has any
 //! group or other permission, or has another owner than the socket this process creates in it.
+//! Starts decide and bind under an exclusive lock on `instance.lock` in the same directory, so
+//! two starts cannot both replace a stale socket. `poll` never blocks: it reads what has arrived
+//! and keeps the rest for the next call.
 //! Windows named pipes are not provided yet: there, [`SingleInstance::acquire`] reports that no
 //! running instance exists, so the application starts normally.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_base::{Error, Result};
 
@@ -32,9 +35,21 @@ pub const MAX_PATHS: usize = 64;
 /// The time a forwarding start or a connection of the running instance has to finish its message.
 pub const DEADLINE: Duration = Duration::from_millis(500);
 
+/// The most paths one [`SingleInstance::poll`] returns. Paths beyond it are dropped and logged
+/// without their content.
+pub const MAX_PATHS_PER_POLL: usize = 64;
+
+/// The most paths returned in any one second of the clock passed to [`SingleInstance::poll`].
+/// The second starts at the first poll that returns a path after the previous second ended.
+pub const MAX_PATHS_PER_SECOND: usize = 256;
+
 /// The most connections one [`SingleInstance::poll`] accepts; the rest wait for the next poll.
 #[cfg(unix)]
 const MAX_ACCEPTS_PER_POLL: usize = 8;
+
+/// The most accepted connections that wait for their message. Beyond it the oldest is dropped.
+#[cfg(unix)]
+const MAX_PENDING: usize = 16;
 
 /// What [`SingleInstance::acquire`] decided.
 #[derive(Debug)]
@@ -52,6 +67,23 @@ pub struct SingleInstance {
     listener: std::os::unix::net::UnixListener,
     #[cfg(unix)]
     path: PathBuf,
+    /// Accepted connections whose message is not complete yet, oldest first.
+    #[cfg(unix)]
+    pending: std::collections::VecDeque<Pending>,
+    /// The start of the current one-second window and the paths returned within it.
+    #[cfg(unix)]
+    window: Option<(Instant, usize)>,
+}
+
+/// An accepted connection whose line is not complete yet.
+#[cfg(unix)]
+#[derive(Debug)]
+struct Pending {
+    stream: std::os::unix::net::UnixStream,
+    /// The bytes read so far, without the newline once it arrived.
+    received: Vec<u8>,
+    /// The clock value at which the connection was accepted.
+    accepted: Instant,
 }
 
 /// The message for `paths`, one line without the newline.
@@ -91,20 +123,26 @@ fn decode(line: &[u8]) -> Option<Vec<PathBuf>> {
 
 #[cfg(unix)]
 mod unix {
-    use std::fs::{self, DirBuilder};
-    use std::io::{self, BufRead, BufReader, Read, Write};
-    use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
+    use std::collections::VecDeque;
+    use std::fs::{self, DirBuilder, OpenOptions};
+    use std::io::{self, Read, Write};
+    use std::os::unix::fs::{
+        DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt,
+    };
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use arc_base::{Error, Result};
 
     use super::{
-        Acquisition, DEADLINE, MAX_ACCEPTS_PER_POLL, MAX_MESSAGE_BYTES, SOCKET_NAME,
-        SingleInstance, decode, encode,
+        Acquisition, DEADLINE, MAX_ACCEPTS_PER_POLL, MAX_MESSAGE_BYTES, MAX_PATHS_PER_POLL,
+        MAX_PATHS_PER_SECOND, MAX_PENDING, Pending, SOCKET_NAME, SingleInstance, decode, encode,
     };
     use crate::codes;
+
+    /// The lock file that serializes the decisions of [`SingleInstance::acquire`].
+    const LOCK_NAME: &str = "instance.lock";
 
     /// Makes sure `dir` exists and only the user can enter it.
     fn private_directory(dir: &Path) -> Result<()> {
@@ -125,43 +163,19 @@ mod unix {
         }
     }
 
-    /// Reads from a connection; each read waits no longer than the time left before `deadline`,
-    /// so one line shares one bound.
-    struct Until<'a> {
-        stream: &'a UnixStream,
-        deadline: Instant,
-    }
-
-    impl Read for Until<'_> {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let left = self.deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(io::Error::from(io::ErrorKind::TimedOut));
-            }
-            self.stream.set_read_timeout(Some(left))?;
-            let mut stream = self.stream;
-            stream.read(buf)
-        }
-    }
-
-    /// One line of at most [`MAX_MESSAGE_BYTES`] before the deadline, without its newline; `None`
-    /// when the line is longer, incomplete or late.
-    fn read_line(stream: &UnixStream) -> Option<Vec<u8>> {
-        let until = Until {
-            stream,
-            deadline: Instant::now() + DEADLINE,
-        };
-        let mut reader = BufReader::new(until);
-        let mut line = Vec::new();
-        // One byte past the limit is read at most, so an oversize line is recognized.
-        (&mut reader)
-            .take(MAX_MESSAGE_BYTES as u64 + 1)
-            .read_until(b'\n', &mut line)
-            .ok()?;
-        (line.last() == Some(&b'\n')).then(|| {
-            line.pop();
-            line
-        })
+    /// Takes the exclusive lock of the instance directory. The lock is released when the returned
+    /// file is dropped.
+    fn lock_directory(dir: &Path) -> Result<fs::File> {
+        let io = |e: io::Error| Error::new(codes::INSTANCE_IO).with_source(e);
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(dir.join(LOCK_NAME))
+            .map_err(io)?;
+        file.lock().map_err(io)?;
+        Ok(file)
     }
 
     /// Sends `line` to the instance listening at `path`. `Ok(true)` when it was accepted,
@@ -196,9 +210,46 @@ mod unix {
         }
     }
 
+    /// What one read of a pending connection found.
+    enum Step {
+        /// No complete line yet.
+        Waiting,
+        /// A complete line; its bytes are in `received`.
+        Line,
+        /// The connection ends without a usable line.
+        Drop,
+    }
+
+    /// Reads what the connection has now, without waiting, and reports whether its line is
+    /// complete. A line longer than [`MAX_MESSAGE_BYTES`] without its newline is dropped.
+    fn fill(pending: &mut Pending) -> Step {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match pending.stream.read(&mut chunk) {
+                Ok(0) => return Step::Drop,
+                Ok(n) => {
+                    pending.received.extend_from_slice(&chunk[..n]);
+                    if let Some(at) = pending.received.iter().position(|&b| b == b'\n') {
+                        pending.received.truncate(at);
+                        return Step::Line;
+                    }
+                    if pending.received.len() > MAX_MESSAGE_BYTES {
+                        return Step::Drop;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Step::Waiting,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return Step::Drop,
+            }
+        }
+    }
+
     impl SingleInstance {
         /// Forwards `args` to a running instance of the application whose channel lives in `dir`,
         /// or becomes that instance. Each argument is made absolute before it is sent.
+        ///
+        /// The decision and the bind happen under the exclusive lock `instance.lock` in `dir`, so
+        /// two starts that find the same stale socket cannot both replace it.
         ///
         /// # Errors
         /// `app.instance.directory` (not a private directory), `app.instance.io`,
@@ -215,6 +266,7 @@ mod unix {
                 .collect::<Result<_>>()?;
             let line = encode(&absolute)?;
             private_directory(dir)?;
+            let _lock = lock_directory(dir)?;
             let path = dir.join(SOCKET_NAME);
             if forward(&path, &line)? {
                 return Ok(Acquisition::Forwarded);
@@ -231,7 +283,7 @@ mod unix {
             }
             let listener = match UnixListener::bind(&path) {
                 Ok(listener) => listener,
-                // Another start bound the socket between the check and the bind.
+                // Another process that does not take the lock bound the socket in the meantime.
                 Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
                     return Err(Error::new(codes::INSTANCE_BUSY));
                 }
@@ -253,33 +305,97 @@ mod unix {
                     let _ = fs::remove_file(&path);
                     Error::new(codes::INSTANCE_IO).with_source(e)
                 })?;
-            Ok(Acquisition::Primary(Self { listener, path }))
+            Ok(Acquisition::Primary(Self {
+                listener,
+                path,
+                pending: VecDeque::new(),
+                window: None,
+            }))
         }
 
-        /// Accepts the messages waiting now (at most a few per call) and returns the absolute paths
-        /// they name, in arrival order. Messages that are oversize, late, malformed or not JSON are
-        /// dropped and logged without their content; the next message is unaffected.
+        /// Returns the absolute paths of the messages that are complete at `now`, in arrival order.
+        /// It never blocks: connections are accepted and read as far as the data has arrived, and
+        /// a connection whose line is still incomplete is kept for the next call.
+        ///
+        /// Limits: at most eight connections are accepted per call and sixteen wait at a time (the
+        /// oldest is dropped beyond that); a connection is dropped when [`DEADLINE`] has passed
+        /// since it was accepted on the clock passed here, when its line exceeds 64 KiB, when it
+        /// is closed before a newline or when its line is not a valid message. A call returns at
+        /// most [`MAX_PATHS_PER_POLL`] paths and the clock's one-second windows return at most
+        /// [`MAX_PATHS_PER_SECOND`] in total; paths beyond a bound are dropped and logged.
         #[must_use]
-        pub fn poll(&self) -> Vec<PathBuf> {
+        pub fn poll(&mut self, now: Instant) -> Vec<PathBuf> {
+            self.accept(now);
             let mut paths = Vec::new();
+            let mut waiting = VecDeque::with_capacity(self.pending.len());
+            while let Some(mut pending) = self.pending.pop_front() {
+                if now.saturating_duration_since(pending.accepted) >= DEADLINE {
+                    tracing::warn!("single instance: message dropped after its deadline");
+                    continue;
+                }
+                match fill(&mut pending) {
+                    Step::Waiting => waiting.push_back(pending),
+                    Step::Drop => tracing::warn!("single instance: message dropped"),
+                    Step::Line => match decode(&pending.received) {
+                        Some(received) => self.deliver(now, received, &mut paths),
+                        None => tracing::warn!("single instance: message dropped"),
+                    },
+                }
+            }
+            self.pending = waiting;
+            paths
+        }
+
+        /// Accepts the connections waiting now, at most [`MAX_ACCEPTS_PER_POLL`], and queues them
+        /// with the clock value `now`.
+        fn accept(&mut self, now: Instant) {
             for _ in 0..MAX_ACCEPTS_PER_POLL {
-                let stream = match self.listener.accept() {
-                    Ok((stream, _)) => stream,
+                match self.listener.accept() {
+                    Ok((stream, _)) => {
+                        if stream.set_nonblocking(true).is_err() {
+                            continue;
+                        }
+                        self.pending.push_back(Pending {
+                            stream,
+                            received: Vec::new(),
+                            accepted: now,
+                        });
+                        if self.pending.len() > MAX_PENDING {
+                            self.pending.pop_front();
+                            tracing::warn!("single instance: oldest waiting connection dropped");
+                        }
+                    }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                     Err(e) => {
                         tracing::warn!(error = %e, "single instance: accept failed");
                         break;
                     }
-                };
-                if stream.set_nonblocking(false).is_err() {
-                    continue;
-                }
-                match read_line(&stream).as_deref().and_then(decode) {
-                    Some(received) => paths.extend(received),
-                    None => tracing::warn!("single instance: message dropped"),
                 }
             }
-            paths
+        }
+
+        /// Appends the paths of one message to `out` within the per-poll and per-second bounds.
+        fn deliver(&mut self, now: Instant, received: Vec<PathBuf>, out: &mut Vec<PathBuf>) {
+            let (start, used) = match self.window {
+                Some((start, used))
+                    if now.saturating_duration_since(start) < Duration::from_secs(1) =>
+                {
+                    (start, used)
+                }
+                _ => (now, 0),
+            };
+            let room = MAX_PATHS_PER_SECOND
+                .saturating_sub(used)
+                .min(MAX_PATHS_PER_POLL.saturating_sub(out.len()));
+            let take = room.min(received.len());
+            if take < received.len() {
+                tracing::warn!(
+                    dropped = received.len() - take,
+                    "single instance: paths over the bound dropped"
+                );
+            }
+            out.extend(received.into_iter().take(take));
+            self.window = Some((start, used + take));
         }
     }
 
@@ -305,7 +421,7 @@ impl SingleInstance {
 
     /// Nothing is ever received on this platform.
     #[must_use]
-    pub fn poll(&self) -> Vec<PathBuf> {
+    pub fn poll(&mut self, _now: Instant) -> Vec<PathBuf> {
         Vec::new()
     }
 }
@@ -315,9 +431,11 @@ mod tests {
     #[cfg(unix)]
     mod unix_tests {
         use std::fs::{self, DirBuilder};
-        use std::io::Write;
+        use std::io::{Read, Write};
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         use std::os::unix::net::{UnixListener, UnixStream};
+        use std::sync::{Arc, Barrier};
+        use std::thread;
 
         use super::super::*;
         use crate::testutil::dir;
@@ -333,6 +451,19 @@ mod tests {
             run
         }
 
+        /// Polls until something arrives: delivery of a sent message is not instant on every
+        /// platform, so a test that expects paths asks again instead of assuming one poll.
+        fn settle(instance: &mut SingleInstance, now: Instant) -> Vec<PathBuf> {
+            for _ in 0..200_000 {
+                let paths = instance.poll(now);
+                if !paths.is_empty() {
+                    return paths;
+                }
+                std::thread::yield_now();
+            }
+            Vec::new()
+        }
+
         fn first(run: &std::path::Path) -> SingleInstance {
             match SingleInstance::acquire(run, &[]).unwrap() {
                 Acquisition::Primary(instance) => instance,
@@ -340,22 +471,28 @@ mod tests {
             }
         }
 
+        /// One complete message naming `paths`, newline included.
+        fn message(paths: &[&str]) -> String {
+            format!("{}\n", serde_json::json!({ "paths": paths }))
+        }
+
         #[test]
         fn a_second_start_forwards_and_the_first_receives_the_paths() {
             let run = private("inst-forward");
-            let running = first(&run);
+            let mut running = first(&run);
+            let base = Instant::now();
             let forwarded = SingleInstance::acquire(&run, &[abs("a.arc"), abs("b.arc")]).unwrap();
             assert!(matches!(forwarded, Acquisition::Forwarded));
-            assert_eq!(running.poll(), [abs("a.arc"), abs("b.arc")]);
-            assert!(running.poll().is_empty());
+            assert_eq!(settle(&mut running, base), [abs("a.arc"), abs("b.arc")]);
+            assert!(running.poll(base).is_empty());
         }
 
         #[test]
         fn relative_arguments_are_sent_as_absolute_paths() {
             let run = private("inst-absolute");
-            let running = first(&run);
+            let mut running = first(&run);
             let _ = SingleInstance::acquire(&run, &[PathBuf::from("rel.arc")]).unwrap();
-            let received = running.poll();
+            let received = settle(&mut running, Instant::now());
             assert_eq!(received.len(), 1);
             assert!(received[0].is_absolute() && received[0].ends_with("rel.arc"));
         }
@@ -368,15 +505,47 @@ mod tests {
                 run.join(SOCKET_NAME).exists(),
                 "the socket file was left behind"
             );
-            let instance = first(&run);
+            let mut instance = first(&run);
             let _ = SingleInstance::acquire(&run, &[abs("next.arc")]).unwrap();
-            assert_eq!(instance.poll(), [abs("next.arc")]);
+            assert_eq!(settle(&mut instance, Instant::now()), [abs("next.arc")]);
+        }
+
+        #[test]
+        fn two_starts_racing_over_a_stale_socket_yield_one_primary_and_one_forwarded() {
+            let run = private("inst-race");
+            drop(UnixListener::bind(run.join(SOCKET_NAME)).unwrap());
+            let barrier = Arc::new(Barrier::new(2));
+            let starts: Vec<_> = (0..2)
+                .map(|n| {
+                    let run = run.clone();
+                    let barrier = Arc::clone(&barrier);
+                    thread::spawn(move || {
+                        barrier.wait();
+                        SingleInstance::acquire(&run, &[abs(&format!("start{n}.arc"))])
+                    })
+                })
+                .collect();
+            let outcomes: Vec<Acquisition> = starts
+                .into_iter()
+                .map(|start| start.join().unwrap().unwrap())
+                .collect();
+            let mut primaries = Vec::new();
+            let mut forwarded = 0;
+            for outcome in outcomes {
+                match outcome {
+                    Acquisition::Primary(instance) => primaries.push(instance),
+                    Acquisition::Forwarded => forwarded += 1,
+                }
+            }
+            assert_eq!(primaries.len(), 1, "exactly one start is the instance");
+            assert_eq!(forwarded, 1, "exactly one start forwards");
+            assert_eq!(settle(&mut primaries[0], Instant::now()).len(), 1);
         }
 
         #[test]
         fn oversize_and_malformed_messages_are_dropped_without_affecting_the_next() {
             let run = private("inst-hostile");
-            let running = first(&run);
+            let mut running = first(&run);
             let socket = run.join(SOCKET_NAME);
             let mut oversize = UnixStream::connect(&socket).unwrap();
             oversize
@@ -387,7 +556,98 @@ mod tests {
             malformed.write_all(b"{not json\n").unwrap();
             drop(malformed);
             let _ = SingleInstance::acquire(&run, &[abs("ok.arc")]).unwrap();
-            assert_eq!(running.poll(), [abs("ok.arc")]);
+            assert_eq!(settle(&mut running, Instant::now()), [abs("ok.arc")]);
+        }
+
+        #[test]
+        fn poll_returns_immediately_while_a_connection_stays_idle() {
+            let run = private("inst-idle");
+            let mut running = first(&run);
+            let _idle = UnixStream::connect(run.join(SOCKET_NAME)).unwrap();
+            let base = Instant::now();
+            assert!(running.poll(base).is_empty());
+            assert!(running.poll(base).is_empty());
+        }
+
+        #[test]
+        fn a_message_split_across_two_writes_is_delivered_after_the_second() {
+            let run = private("inst-split");
+            let mut running = first(&run);
+            let base = Instant::now();
+            let mut client = UnixStream::connect(run.join(SOCKET_NAME)).unwrap();
+            client.write_all(b"{\"paths\":[\"/d/split").unwrap();
+            assert!(running.poll(base).is_empty(), "no newline yet");
+            client.write_all(b".arc\"]}\n").unwrap();
+            assert_eq!(settle(&mut running, base), [abs("split.arc")]);
+        }
+
+        #[test]
+        fn an_idle_connection_is_dropped_at_the_deadline_and_a_later_client_is_served() {
+            let run = private("inst-deadline");
+            let mut running = first(&run);
+            let socket = run.join(SOCKET_NAME);
+            let base = Instant::now();
+            let mut idle = UnixStream::connect(&socket).unwrap();
+            assert!(running.poll(base).is_empty());
+            let mut client = UnixStream::connect(&socket).unwrap();
+            client
+                .write_all(message(&["/d/late.arc"]).as_bytes())
+                .unwrap();
+            let later = base + DEADLINE + Duration::from_millis(1);
+            assert_eq!(settle(&mut running, later), [abs("late.arc")]);
+            idle.set_nonblocking(true).unwrap();
+            let mut byte = [0u8; 1];
+            assert_eq!(
+                idle.read(&mut byte).unwrap(),
+                0,
+                "the server closed the idle connection"
+            );
+        }
+
+        #[test]
+        fn more_connections_than_the_bound_are_handled_without_blocking() {
+            let run = private("inst-flood");
+            let mut running = first(&run);
+            let socket = run.join(SOCKET_NAME);
+            let idle: Vec<UnixStream> = (0..MAX_PENDING + 4)
+                .map(|_| UnixStream::connect(&socket).unwrap())
+                .collect();
+            let mut valid = UnixStream::connect(&socket).unwrap();
+            valid
+                .write_all(message(&["/d/valid.arc"]).as_bytes())
+                .unwrap();
+            let base = Instant::now();
+            let mut received = Vec::new();
+            for _ in 0..4 {
+                received.extend(running.poll(base));
+            }
+            assert_eq!(received, [abs("valid.arc")]);
+            assert_eq!(idle.len(), MAX_PENDING + 4);
+        }
+
+        #[test]
+        fn returned_paths_are_bounded_per_call_and_per_second() {
+            let run = private("inst-budget");
+            let mut running = first(&run);
+            let socket = run.join(SOCKET_NAME);
+            let names: Vec<String> = (0..MAX_PATHS_PER_POLL)
+                .map(|i| format!("/d/f{i}.arc"))
+                .collect();
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            let base = Instant::now();
+            let mut counts = Vec::new();
+            for step in 0..5u64 {
+                let mut client = UnixStream::connect(&socket).unwrap();
+                client.write_all(message(&refs).as_bytes()).unwrap();
+                let at = base + Duration::from_millis(step);
+                counts.push(running.poll(at).len());
+            }
+            // Four full calls fill the second; the fifth message is dropped within it.
+            assert_eq!(counts, [64, 64, 64, 64, 0]);
+            let mut client = UnixStream::connect(&socket).unwrap();
+            client.write_all(message(&refs).as_bytes()).unwrap();
+            let next_second = base + Duration::from_secs(1);
+            assert_eq!(running.poll(next_second).len(), MAX_PATHS_PER_POLL);
         }
 
         #[test]

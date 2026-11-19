@@ -156,21 +156,35 @@ reports, Hub) are added in later parts behind settings that default to off.
   as bytes, written in 16 lowercase hexadecimal digits. The file never holds the path and is never
   in the settings file.
 - The caller supplies the PNG bytes when a document is saved or closed; the crate does not render.
-  The bytes are checked for the PNG signature and an `IHDR` header: at most 64 KiB and 256 pixels
-  on each side, both at least one pixel.
-- `get` returns `None` for a missing file, one over the byte limit, or one without a valid header;
-  an absent thumbnail is not an error. `put` writes through a temporary file and a rename.
+  The bytes are checked without decoding pixels: at most 64 KiB; the 8-byte signature; an `IHDR`
+  chunk whose declared length is 13, with width and height at least one pixel and at most 256; and
+  an `IEND` chunk as the last 12 bytes (length 0, type, fixed CRC). A 24-byte stub is refused.
+- `get` returns `None` for a missing file, a file that is not a regular file (a device, a named
+  pipe, a symbolic link to one), one over the byte limit, or one without a valid header; an absent
+  thumbnail is not an error. The type is checked before the file is opened, because opening a
+  named pipe waits for a writer; the opened file is checked again and read through a limit of one
+  byte past the bound.
+- On Unix the thumbnail directory is created with mode 0700 and each file with mode 0600. `put`
+  writes through a temporary file and a rename.
 - `remove` deletes one thumbnail. `sweep` deletes every thumbnail file whose hash no entry of the
-  list produces, so evicted, removed and pruned entries lose their files; the caller runs it after
-  saving the list. Files whose names are not thumbnail names are left alone.
+  list produces, and every temporary file `put` writes (`.<name>.png.tmp`), so evicted, removed and
+  pruned entries lose their files; the caller runs it after saving the list. A thumbnail name is
+  exactly 16 lowercase hexadecimal digits and `.png`; other files are left alone. A temporary file
+  of a `put` running in another process may be removed by a concurrent `sweep`; the `put` then
+  fails with `app.thumbnail.io` and the previous thumbnail stays.
 - The list itself is not changed by thumbnails: an entry has no thumbnail field.
 
 ### Managed settings (CORE-APP-013)
 
 - The administrator file is `managed-settings.toml` in a fixed system location: `/etc/arc-shell/`
-  on Linux, `/Library/Application Support/arc-shell/` on macOS and `%PROGRAMDATA%\arc-shell\` on
+  on Linux, `/Library/Application Support/arc-shell/` on macOS and `C:\ProgramData\arc-shell\` on
   Windows. The reference shell reads it at start; no environment variable or argument changes the
-  path, because a user-chosen file could lock nothing.
+  path, because a user-chosen file could lock nothing. The Windows path is fixed to the system
+  drive; it will move to the known-folder API when a Windows FFI crate is allowed.
+- On Unix, before the file is read, `apply_system` requires the file to be a regular file (a
+  symbolic link is refused) owned by uid 0, in a folder owned by uid 0, and neither writable by
+  group or other users. Otherwise the file is refused with `app.managed.untrusted` and nothing is
+  read. A missing file passes.
 - Its top-level values are the system scope. The table `managed` holds the lock list,
   `managed.locked`, an array of setting keys. The table is reserved: no setting key starts with
   `managed`.
@@ -180,16 +194,21 @@ reports, Hub) are added in later parts behind settings that default to off.
 - `set` and `reset` in a scope other than the system scope fail with `app.settings.locked`, which
   names the key. The settings editor row carries `locked`, and the windowed editor disables the
   row's edit controls.
+- Each apply replaces the whole lock set and the system scope together: a key removed from the
+  file is unlocked. The new state is computed first and installed only when the system table is
+  accepted, so a refused file leaves the previous locks and values in force.
 - Lock-list entries that are not registered keys, that are not text, or a `locked` value that is
   not an array are ignored and logged with `tracing` at warning level. Only the key is logged.
-- The file is read, never written or renamed. A missing file applies nothing. A file that is too
-  large, not UTF-8 or not TOML is an error and none of it is applied.
-- Decisions: a malformed file applies nothing, and the shell reports the error and starts; the
-  rejected alternative was refusing to start, which would block users on a damaged file. A
-  reset in the user scope of a locked key is refused too; the rejected alternative allowed it,
-  since it only removes a value that is ignored anyway, but the rule is one check for all writes.
-  A malformed file is not set aside, unlike user files; renaming inside a system directory needs
-  rights the application does not have.
+- The file is read, never written or renamed. A missing file applies nothing. A file that exists
+  but cannot be read, is too large, not UTF-8, not TOML or refused by the ownership check stops the
+  reference shell from starting: it prints the localized error and exits with a non-zero code.
+  Every such error is fatal (`managed::is_fatal`).
+- Decisions: fail closed. A damaged or untrusted administrator file stops the start, so a user
+  cannot run without the locks it sets; the rejected alternative applied nothing and started, which
+  lets anyone who can damage the file remove the locks. A reset in the user scope of a locked key
+  is refused too; the rejected alternative allowed it, since it only removes a value that is
+  ignored anyway, but the rule is one check for all writes. A malformed file is not set aside,
+  unlike user files; renaming inside a system directory needs rights the application does not have.
 - Known gap: the reference shell logs the ignored entries before the log subscriber exists, so
   those records are not written. Logging is installed when the event loop starts.
 
@@ -209,10 +228,22 @@ reports, Hub) are added in later parts behind settings that default to off.
   kind of file is left alone and the start fails with `app.instance.io`. A running instance that
   accepts the connection but does not take the write within the 500 ms deadline gives
   `app.instance.busy`.
-- `SingleInstance::poll` accepts at most eight connections per call. Each connection has one
-  deadline of 500 ms for its line. A line longer than 64 KiB without a newline, a line that is not
-  JSON, a `paths` value that is not an array, or more than 64 paths drops that message only; the
-  next one is read normally. Relative entries inside an accepted message are skipped.
+- `acquire` decides and binds under an exclusive lock on `instance.lock` in the same directory
+  (created with mode 0600, released when `acquire` returns). Two starts that find the same stale
+  socket therefore yield one instance and one forwarding start.
+- `SingleInstance::poll(now)` never blocks. It takes the clock value `now` from the caller and
+  returns the paths of messages complete at that time. Accepted connections are non-blocking and
+  keep their bytes between calls; a message completes when its newline arrives, so a line split
+  across writes is delivered after the last one. Limits, all documented in the code:
+  - at most 8 connections are accepted per call, and at most 16 wait for their line at a time; the
+    oldest waiting connection is dropped beyond that;
+  - a connection is dropped when 500 ms have passed on the clock since it was accepted, when its
+    line exceeds 64 KiB without a newline, when it is closed before a newline, or when the line is
+    not a valid message (not JSON, `paths` not an array, more than 64 paths);
+  - a call returns at most 64 paths, and the paths returned in any one second of the clock (a
+    window that starts at the first call that returns a path after the previous window) are at
+    most 256; paths beyond a bound are dropped and logged without their content.
+  Relative entries inside an accepted message are skipped.
 - The receiving side opens each path with `Application::open`, so the application's own checks
   apply. The reference shell polls every 250 ms while its listener exists; a forwarded file
   therefore opens within a quarter of a second.
@@ -226,6 +257,9 @@ reports, Hub) are added in later parts behind settings that default to off.
   listener thread, which needs a cross-thread queue into the single-threaded event loop.
 - Shortcut: `std` offers no connect timeout for Unix sockets, so connecting to a listener whose
   backlog is full can wait. Upgrade when a non-blocking connect is available.
+- Shortcut: the lock is a blocking `File::lock`; a holder that stalls delays other starts. The
+  holder's work is bounded by the 500 ms forwarding deadline. Upgrade with a try-lock and a retry
+  limit if that ever shows.
 
 ### Automation switch (CORE-APP-020)
 
@@ -317,10 +351,11 @@ The codes `arc-app` owns; messages are in `locales/en-US/arc-app.ftl`.
 | `app.settings.scope_not_allowed` | `invalid_input` | A value is in a scope above the setting's highest scope, or in the default scope (also reported as an issue) |
 | `app.settings.path_conflict` | `conflict` | A parent key of a setting holds a non-table value, or the key holds a table |
 | `app.settings.locked` | `permission_denied` | A write or reset outside the system scope names a key that the system scope locks |
-| `app.managed.read_failed` | `io` | The system settings file exists but cannot be read |
+| `app.managed.read_failed` | `io` | The system settings file exists but cannot be read; the application does not start |
+| `app.managed.untrusted` | `permission_denied` | On Unix, the system settings file or its folder is not owned by uid 0, is not a regular file, or is writable by group or other users; the application does not start |
 | `app.automation.failed` | `failed_operation` | The automation socket's serving thread cannot be started |
 | `app.automation.client_invalid` | `invalid_input` | A client label is empty, longer than 64 bytes or contains control characters |
-| `app.managed.invalid` | `corrupt_data` | The system settings file is larger than 1 MiB, not UTF-8 or not valid TOML; nothing from it is applied |
+| `app.managed.invalid` | `corrupt_data` | The system settings file is larger than 1 MiB, not UTF-8 or not valid TOML; the application does not start |
 | `app.settings_file.read_failed` | `io` | An existing settings file cannot be read |
 | `app.settings_file.write_failed` | `io` | A settings file cannot be written |
 | `app.settings_file.malformed` | `corrupt_data` | A settings file is not UTF-8 TOML; it was set aside |
@@ -336,7 +371,7 @@ The codes `arc-app` owns; messages are in `locales/en-US/arc-app.ftl`.
 | `app.recent.not_found` | `not_found` | A path is not in the recent-files list |
 | `app.recent.too_many_pinned` | `limit_exceeded` | A fifty-first entry is pinned |
 | `app.thumbnail.too_large` | `limit_exceeded` | A thumbnail exceeds 64 KiB or 256 pixels on a side |
-| `app.thumbnail.invalid` | `invalid_input` | A thumbnail is not a PNG image header |
+| `app.thumbnail.invalid` | `invalid_input` | A thumbnail is not a PNG image: no signature, no 13-byte IHDR chunk or no IEND chunk at the end |
 | `app.thumbnail.io` | `io` | A thumbnail file cannot be written, read as a directory or removed |
 | `app.instance.directory` | `permission_denied` | The instance directory is a symbolic link, not a directory, open to other users, or owned by another user than the socket |
 | `app.instance.io` | `io` | The single-instance socket cannot be created, connected, configured or read |

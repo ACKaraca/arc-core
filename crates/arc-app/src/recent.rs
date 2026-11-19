@@ -6,6 +6,7 @@
 //! way. Entries are never removed because a file is missing unless [`RecentFiles::prune_missing`]
 //! is called.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use arc_base::{Error, Result};
@@ -223,6 +224,12 @@ const MAX_SWEEP_FILES: usize = 10_000;
 
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 
+/// The IEND chunk: an empty data field, the type and the CRC that every PNG file ends with.
+const IEND_CHUNK: [u8; 12] = [0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82];
+
+/// The length of the smallest PNG: the signature, an IHDR chunk and the IEND chunk.
+const MIN_PNG_BYTES: usize = 8 + 25 + IEND_CHUNK.len();
+
 /// Thumbnails of recent files: one PNG file per path in a directory the caller chooses, named by
 /// a hash of the path. The directory is never inside the settings file, so a thumbnail is never
 /// parsed as settings. The crate does not render thumbnails; the caller supplies the PNG bytes.
@@ -246,7 +253,51 @@ fn file_name(path: &Path) -> String {
     format!("{:016x}.png", path_hash(path))
 }
 
-/// Checks the PNG signature and the size of the image header, and the byte bound.
+/// Whether `name` is a thumbnail file name: 16 lowercase hexadecimal digits and `.png`.
+fn is_thumbnail_name(name: &str) -> bool {
+    name.strip_suffix(".png").is_some_and(|hash| {
+        hash.len() == 16
+            && hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+/// Whether `name` is a temporary file [`Thumbnails::put`] writes: a thumbnail name with a leading
+/// dot and the suffix `.tmp`.
+fn is_temporary_name(name: &str) -> bool {
+    name.strip_prefix('.')
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+        .is_some_and(is_thumbnail_name)
+}
+
+/// Creates `dir` and any missing parent; on Unix the directories are private to the user.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
+/// Writes `bytes` to `path`; on Unix a created file is readable and writable by the user only.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(bytes)
+}
+
+/// Checks the byte bound, the PNG signature, an IHDR chunk of length 13 with non-zero sides within
+/// the pixel bound, and that the file ends with an IEND chunk. Pixels are not decoded.
 fn check_png(bytes: &[u8]) -> Result<()> {
     let at = |code| Error::new(code);
     if bytes.len() > MAX_THUMBNAIL_BYTES {
@@ -255,10 +306,16 @@ fn check_png(bytes: &[u8]) -> Result<()> {
             i64::try_from(MAX_THUMBNAIL_BYTES).unwrap_or(i64::MAX),
         ));
     }
+    if bytes.len() < MIN_PNG_BYTES || !bytes.ends_with(&IEND_CHUNK) {
+        return Err(at(codes::THUMBNAIL_INVALID));
+    }
     let header = bytes
         .get(..24)
         .ok_or_else(|| at(codes::THUMBNAIL_INVALID))?;
-    if header[..8] != PNG_SIGNATURE || &header[12..16] != b"IHDR" {
+    if header[..8] != PNG_SIGNATURE
+        || header[8..12] != 13u32.to_be_bytes()
+        || &header[12..16] != b"IHDR"
+    {
         return Err(at(codes::THUMBNAIL_INVALID));
     }
     let side = |range: std::ops::Range<usize>| {
@@ -295,11 +352,11 @@ impl Thumbnails {
     pub fn put(&self, path: &Path, png: &[u8]) -> Result<()> {
         check_png(png)?;
         let io = |e: std::io::Error| Error::new(codes::THUMBNAIL_IO).with_source(e);
-        std::fs::create_dir_all(&self.dir).map_err(io)?;
+        create_private_dir(&self.dir).map_err(io)?;
         let name = file_name(path);
         let tmp = self.dir.join(format!(".{name}.tmp"));
         let target = self.dir.join(&name);
-        let written = std::fs::write(&tmp, png).and_then(|()| std::fs::rename(&tmp, &target));
+        let written = write_private(&tmp, png).and_then(|()| std::fs::rename(&tmp, &target));
         written.map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
             io(e)
@@ -311,11 +368,22 @@ impl Thumbnails {
     #[must_use]
     pub fn get(&self, path: &Path) -> Option<Vec<u8>> {
         let target = self.dir.join(file_name(path));
-        let meta = std::fs::metadata(&target).ok()?;
-        if meta.len() > u64::try_from(MAX_THUMBNAIL_BYTES).ok()? {
+        // The type is checked before opening as well: opening a named pipe waits for a writer.
+        if !std::fs::metadata(&target).ok()?.is_file() {
             return None;
         }
-        let bytes = std::fs::read(target).ok()?;
+        let file = std::fs::File::open(&target).ok()?;
+        let limit = u64::try_from(MAX_THUMBNAIL_BYTES).ok()?;
+        let meta = file.metadata().ok()?;
+        if !meta.is_file() || meta.len() > limit {
+            return None;
+        }
+        // One byte past the limit is read at most, so a file that grew is refused too.
+        let mut bytes = Vec::new();
+        file.take(limit + 1).read_to_end(&mut bytes).ok()?;
+        if bytes.len() > MAX_THUMBNAIL_BYTES {
+            return None;
+        }
         check_png(&bytes).ok().map(|()| bytes)
     }
 
@@ -331,9 +399,10 @@ impl Thumbnails {
         }
     }
 
-    /// Removes every thumbnail file whose path is not an entry of `list`. Call it after the list
-    /// was saved: evicted, removed and pruned entries then lose their thumbnails too. Files that
-    /// are not thumbnails are left alone.
+    /// Removes every thumbnail file whose path is not an entry of `list`, and every temporary file
+    /// [`put`](Self::put) left behind. Call it after the list was saved: evicted, removed and
+    /// pruned entries then lose their thumbnails too. Other files are left alone; a thumbnail name
+    /// is exactly 16 lowercase hexadecimal digits and `.png`.
     ///
     /// # Errors
     /// `app.thumbnail.io` when the directory cannot be read or a stale file cannot be removed.
@@ -349,9 +418,15 @@ impl Thumbnails {
         for entry in entries.take(MAX_SWEEP_FILES) {
             let entry = entry.map_err(io)?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            let is_thumbnail = name.len() == 20 && name.ends_with(".png");
-            if is_thumbnail && !keep.contains(&name) {
-                std::fs::remove_file(entry.path()).map_err(io)?;
+            let stale =
+                is_temporary_name(&name) || (is_thumbnail_name(&name) && !keep.contains(&name));
+            if stale {
+                match std::fs::remove_file(entry.path()) {
+                    Ok(()) => {}
+                    // Removed by another process in the meantime.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(io(e)),
+                }
             }
         }
         Ok(())
@@ -363,15 +438,94 @@ mod thumbnail_tests {
     use super::*;
     use crate::testutil::dir;
 
-    /// A PNG signature and IHDR of the given size, padded to `len` bytes.
+    /// A PNG signature, IHDR and IEND chunks of the given size, padded to `len` bytes.
     fn png(width: u32, height: u32, len: usize) -> Vec<u8> {
         let mut bytes = PNG_SIGNATURE.to_vec();
         bytes.extend_from_slice(&13u32.to_be_bytes());
         bytes.extend_from_slice(b"IHDR");
         bytes.extend_from_slice(&width.to_be_bytes());
         bytes.extend_from_slice(&height.to_be_bytes());
-        bytes.resize(len.max(bytes.len()), 0);
+        // Bit depth, colour type, compression, filter and interlace, then a CRC that is not checked.
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        bytes.resize(
+            len.max(bytes.len() + IEND_CHUNK.len()) - IEND_CHUNK.len(),
+            0,
+        );
+        bytes.extend_from_slice(&IEND_CHUNK);
         bytes
+    }
+
+    #[test]
+    fn a_header_without_an_iend_chunk_or_with_another_length_is_not_a_png() {
+        let d = dir("thumb-format");
+        let t = Thumbnails::new(d.join("thumbs"));
+        let p = Path::new("/d/a.arc");
+        let mut stub = png(8, 8, 0);
+        stub.truncate(24);
+        assert_eq!(t.put(p, &stub).unwrap_err().code(), "app.thumbnail.invalid");
+        let mut no_end = png(8, 8, 64);
+        no_end.truncate(63);
+        assert_eq!(
+            t.put(p, &no_end).unwrap_err().code(),
+            "app.thumbnail.invalid"
+        );
+        let mut wrong_length = png(8, 8, 64);
+        wrong_length[11] = 12;
+        assert_eq!(
+            t.put(p, &wrong_length).unwrap_err().code(),
+            "app.thumbnail.invalid"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn thumbnails_are_private_to_the_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir("thumb-private");
+        let t = Thumbnails::new(d.join("thumbs"));
+        let p = Path::new("/d/a.arc");
+        t.put(p, &png(8, 8, 64)).unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&d.join("thumbs")), 0o700);
+        assert_eq!(mode(&d.join("thumbs").join(file_name(p))), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_thumbnail_that_is_a_device_is_refused_without_being_read() {
+        let d = dir("thumb-device");
+        let t = Thumbnails::new(d.join("thumbs"));
+        let p = Path::new("/d/a.arc");
+        std::fs::create_dir_all(d.join("thumbs")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", d.join("thumbs").join(file_name(p))).unwrap();
+        assert_eq!(t.get(p), None);
+    }
+
+    #[test]
+    fn sweep_matches_only_thumbnail_names_and_its_temporary_files() {
+        let d = dir("thumb-names");
+        let t = Thumbnails::new(d.join("thumbs"));
+        let folder = d.join("thumbs");
+        std::fs::create_dir_all(&folder).unwrap();
+        for name in [
+            "0123456789abcdef.png",
+            "0123456789ABCDEF.png",
+            "short.png",
+            "0123456789abcdef.png.bak",
+            ".0123456789abcdef.png.tmp",
+        ] {
+            std::fs::write(folder.join(name), b"x").unwrap();
+        }
+        t.sweep(&RecentFiles::new(5)).unwrap();
+        assert!(!folder.join("0123456789abcdef.png").exists());
+        assert!(!folder.join(".0123456789abcdef.png.tmp").exists());
+        for kept in [
+            "0123456789ABCDEF.png",
+            "short.png",
+            "0123456789abcdef.png.bak",
+        ] {
+            assert!(folder.join(kept).exists(), "{kept} is not a thumbnail");
+        }
     }
 
     #[test]
