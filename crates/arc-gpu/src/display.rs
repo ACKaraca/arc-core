@@ -34,7 +34,8 @@
 //! clipped. Instances flagged [`FLAG_SOLID`] are closed solids: while the section has a cap
 //! color, their back faces that remain visible after clipping are drawn unlit in that color,
 //! which fills the cut. The cap is the nearest back face behind the cut, not a polygon on the
-//! cutting plane, so its depth is that of the back face; hatch caps are a later step.
+//! cutting plane, so its depth is that of the back face. A [`CapHatch`] draws parallel lines in
+//! a second color over the cap; the lines are in screen space, so their spacing is in pixels.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -324,7 +325,7 @@ impl Resolved {
             } else {
                 self.visible(object)
             };
-            if !ok {
+            if !ok || !item.visible {
                 continue;
             }
             let key = self.style_of(object).map(|style| {
@@ -368,6 +369,25 @@ pub struct SectionBox {
     pub max: Point3,
 }
 
+/// Parallel lines drawn over the caps of a section (CORE-GPU-024). The lines are in screen
+/// space: their spacing and width are in pixels, so their density follows the view. Without
+/// caps the hatch has no effect.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CapHatch {
+    /// The color of the lines. Its alpha is ignored: lines are drawn opaque over the cap.
+    pub color: Color,
+    /// The direction of the lines in degrees, counterclockwise as seen on the screen, from the
+    /// horizontal. Must be finite.
+    pub angle_deg: f64,
+    /// The distance between neighboring lines in pixels, above 0 and at most 4096.
+    pub spacing_px: f32,
+    /// The width of a line in pixels, above 0 and below the spacing.
+    pub width_px: f32,
+}
+
+/// The largest hatch spacing in pixels.
+pub const MAX_HATCH_SPACING_PX: f32 = 4096.0;
+
 /// The section of a view; see the module documentation.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Section {
@@ -377,17 +397,23 @@ pub struct Section {
     pub volume: Option<SectionBox>,
     /// The unlit color of caps on cut solids; `None` draws no caps.
     pub cap_color: Option<Color>,
+    /// The hatch over the caps; `None` draws the caps in one color.
+    pub hatch: Option<CapHatch>,
 }
 
 /// The section as the view uniform holds it, relative to the translation origin.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SectionUniform {
-    /// Plane count, box active, caps active, zero.
+    /// Plane count, box active, caps active, hatch active (caps only).
     pub(crate) counts: [f32; 4],
     pub(crate) cap_color: [f32; 4],
     pub(crate) planes: [[f32; 4]; MAX_SECTION_PLANES],
     pub(crate) box_min: [f32; 4],
     pub(crate) box_max: [f32; 4],
+    /// The normal of the hatch lines in pixels (x, y), the spacing and the width in pixels.
+    pub(crate) hatch: [f32; 4],
+    /// The hatch color, alpha 1.
+    pub(crate) hatch_color: [f32; 4],
 }
 
 impl SectionUniform {
@@ -397,6 +423,8 @@ impl SectionUniform {
         planes: [[0.0; 4]; MAX_SECTION_PLANES],
         box_min: [0.0; 4],
         box_max: [0.0; 4],
+        hatch: [0.0; 4],
+        hatch_color: [0.0; 4],
     };
 }
 
@@ -457,6 +485,33 @@ impl Section {
             }
             out.cap_color = [c.r, c.g, c.b, 1.0];
             out.counts[2] = 1.0;
+        }
+        if let Some(h) = self.hatch {
+            let c = h.color;
+            if !([c.r, c.g, c.b].iter().all(|v| v.is_finite()) && h.angle_deg.is_finite()) {
+                return Err(Error::new(codes::VALUE_NOT_FINITE));
+            }
+            if !(h.spacing_px.is_finite() && h.width_px.is_finite()) {
+                return Err(Error::new(codes::VALUE_NOT_FINITE));
+            }
+            if !(h.spacing_px > 0.0
+                && h.spacing_px <= MAX_HATCH_SPACING_PX
+                && h.width_px > 0.0
+                && h.width_px < h.spacing_px)
+            {
+                return Err(Error::new(codes::SETTINGS_INVALID));
+            }
+            // The lines are the level sets of the screen position along the normal of their
+            // direction, which is counterclockwise on the screen (y points down the image).
+            let angle = h.angle_deg.to_radians();
+            out.hatch = [
+                narrow(angle.sin()),
+                narrow(angle.cos()),
+                h.spacing_px,
+                h.width_px,
+            ];
+            out.hatch_color = [c.r, c.g, c.b, 1.0];
+            out.counts[3] = f32::from(u8::from(out.counts[2] > 0.0));
         }
         Ok(out)
     }
@@ -532,5 +587,46 @@ mod tests {
             .unwrap();
         assert_eq!(u.planes[0], [0.0, 0.0, 1.0, 0.5]);
         assert_eq!(u.counts[0], 1.0);
+    }
+
+    #[test]
+    fn hatch_settings_are_validated_when_the_section_resolves() {
+        let hatch = |spacing_px: f32, width_px: f32, angle_deg: f64| CapHatch {
+            color: Color::WHITE,
+            angle_deg,
+            spacing_px,
+            width_px,
+        };
+        let with = |h: CapHatch| Section {
+            cap_color: Some(Color::WHITE),
+            planes: vec![SectionPlane {
+                point: Point3::origin(),
+                normal: Vector3::z(),
+            }],
+            hatch: Some(h),
+            ..Section::default()
+        };
+        let code = |h: CapHatch| with(h).resolve(&Point3::origin()).unwrap_err().code();
+        assert_eq!(code(hatch(0.0, 1.0, 0.0)), codes::SETTINGS_INVALID.code);
+        assert_eq!(code(hatch(4.0, 4.0, 0.0)), codes::SETTINGS_INVALID.code);
+        assert_eq!(code(hatch(4.0, 0.0, 0.0)), codes::SETTINGS_INVALID.code);
+        assert_eq!(code(hatch(5000.0, 1.0, 0.0)), codes::SETTINGS_INVALID.code);
+        assert_eq!(
+            code(hatch(4.0, 1.0, f64::NAN)),
+            codes::VALUE_NOT_FINITE.code
+        );
+        let uniform = with(hatch(6.0, 2.0, 90.0))
+            .resolve(&Point3::origin())
+            .unwrap();
+        // At 90 degrees the lines are vertical: the normal is the image's horizontal axis.
+        assert!((uniform.hatch[0] - 1.0).abs() < 1e-6 && uniform.hatch[1].abs() < 1e-6);
+        assert_eq!(uniform.hatch[2..], [6.0, 2.0]);
+        assert_eq!(uniform.counts[3], 1.0);
+        // Without caps the hatch is inactive.
+        let no_caps = Section {
+            cap_color: None,
+            ..with(hatch(6.0, 2.0, 0.0))
+        };
+        assert_eq!(no_caps.resolve(&Point3::origin()).unwrap().counts[3], 0.0);
     }
 }

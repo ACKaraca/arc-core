@@ -51,6 +51,7 @@ pub mod manipulator;
 pub mod navigation;
 pub mod overlay;
 pub mod pool;
+pub mod quality;
 pub mod render;
 pub mod scene;
 pub mod tile;
@@ -59,8 +60,8 @@ pub mod viewport;
 pub use adapter::{AdapterKind, AdapterReport, BackendKind, Gpu, GpuSettings, ReducedFeature};
 pub use curve::{CurveItem, CurvePath, CurveShape, DashPattern, MAX_DASH_INTERVALS};
 pub use display::{
-    DisplayOverrides, Isolation, Others, OverrideStyle, Section, SectionBox, SectionPlane,
-    category_flags,
+    CapHatch, DisplayOverrides, Isolation, Others, OverrideStyle, Section, SectionBox,
+    SectionPlane, category_flags,
 };
 pub use extract::{
     ApplyReport, Extraction, ExtractionDriver, ExtractionResult, Extractor, ExtractorRegistry,
@@ -69,12 +70,14 @@ pub use extract::{
 pub use manipulator::{Axis, Manipulator, ManipulatorKind};
 pub use overlay::{Anchor, Grid, MarkerShape, Overlay, OverlayPrimitive};
 pub use pool::PoolUsage;
+pub use quality::AdaptiveQuality;
 pub use render::{
     FrameExtras, Image, Pass, PickHit, PickRegion, RenderSettings, Renderer, ShadingMode,
 };
 pub use scene::{
-    FEATURE_EDGE_ANGLE, GeometryId, ItemKey, LineCap, LineItem, LineJoin, LinePath, LineStyle,
-    LineWidth, MemoryReport, MeshInstance, MeshItem, RenderItem, Scene, SceneLimits, WriteCounters,
+    CullStats, FEATURE_EDGE_ANGLE, GeometryId, ItemKey, LineCap, LineItem, LineJoin, LinePath,
+    LineStyle, LineWidth, MemoryReport, MeshInstance, MeshItem, RenderItem, Scene, SceneLimits,
+    WriteCounters,
 };
 pub use tile::{LineTile, MeshTile, TILE_SIZE, TiledGeometry, split_lines, split_mesh};
 pub use viewport::{DirtyReasons, Frame, Viewport, ViewportConfig};

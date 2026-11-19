@@ -21,7 +21,8 @@ struct View {
     // x: 1 when lineweights are displayed; y: pixels per item unit at clip w = 1; z: 1 for a
     // perspective view.
     draft: vec4<f32>,
-    // Section: x plane count, y 1 when the box clips, z 1 when caps are drawn.
+    // Section: x plane count, y 1 when the box clips, z 1 when caps are drawn, w 1 when the caps
+    // are hatched.
     section: vec4<f32>,
     section_color: vec4<f32>,
     // Planes (unit normal, distance) relative to the translation origin: a fragment is removed
@@ -29,6 +30,11 @@ struct View {
     planes: array<vec4<f32>, 6>,
     box_min: vec4<f32>,
     box_max: vec4<f32>,
+    // The hatch of caps: x, y the normal of the lines in pixels, z the spacing and w the width
+    // of a line, both in pixels.
+    section_hatch: vec4<f32>,
+    // The hatch color; alpha is 1.
+    section_hatch_color: vec4<f32>,
     // x: 1 when faces with an override opacity below 1 are drawn in a second pass; y: 1 in the
     // identifier pass; z: 1 when the draw's object style replaces the category styles.
     over: vec4<f32>,
@@ -231,6 +237,14 @@ fn face_color(in: VertexOut, front: bool, faded: bool) -> vec4<f32> {
     var result: vec4<f32>;
     if (view.section.z > 0.5 && !front && (in.misc.y & SOLID) != 0u) {
         result = vec4<f32>(view.section_color.rgb, 1.0);
+        // Lines where the screen position, measured across the lines, is within the width of a
+        // multiple of the spacing. Screen positions are the same on every backend.
+        if (view.section.w > 0.5) {
+            let across = dot(in.clip.xy, view.section_hatch.xy) / view.section_hatch.z;
+            if (fract(across) < view.section_hatch.w / view.section_hatch.z) {
+                result = view.section_hatch_color;
+            }
+        }
     } else {
         // Meshes without normals use the face normal from screen-space derivatives.
         let smooth_length = length(in.normal);

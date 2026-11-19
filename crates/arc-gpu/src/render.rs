@@ -21,7 +21,7 @@ use arc_base::{Color, Error, ObjectId, Result};
 use arc_geom::view::{Projection, ViewFrame};
 
 use crate::adapter::Gpu;
-use crate::camera::{camera_data, depth_origin, region_window, sphere_depth};
+use crate::camera::{camera_data, clip_matrix, depth_origin, region_window, sphere_depth};
 use crate::display::{
     DisplayOverrides, GpuStyle, Resolved as ResolvedOverrides, Section, SectionUniform,
 };
@@ -30,8 +30,8 @@ use crate::manipulator::Manipulator;
 use crate::overlay::{FILL_VERTEX_STRIDE, Overlay, Resolved};
 use crate::scene::SILHOUETTE_STRIDE;
 use crate::scene::{
-    ItemEntry, ItemGpu, ItemKey, MESH_INSTANCE_STRIDE, SEGMENT_STRIDE, Scene, TRANSLATION_STRIDE,
-    VERTEX_STRIDE,
+    CullView, ItemEntry, ItemGpu, ItemKey, MESH_INSTANCE_STRIDE, SEGMENT_STRIDE, Scene,
+    TRANSLATION_STRIDE, VERTEX_STRIDE,
 };
 
 /// The color target format: 8-bit sRGB with alpha; blending happens in linear space.
@@ -169,6 +169,10 @@ pub struct RenderSettings {
     /// The largest projected error in pixels a level of detail may have; 0 always draws the
     /// finest level.
     pub lod_budget_px: f32,
+    /// Whether items wholly outside the view are skipped before drawing and picking
+    /// (CORE-GPU-018, CPU path). The image is the same either way; switching it off serves
+    /// comparisons and tests.
+    pub cull_items: bool,
 }
 
 /// The smallest chord tolerance of curve flattening, in pixels.
@@ -197,6 +201,7 @@ impl RenderSettings {
         curve_tolerance_px: 0.5,
         silhouette_edges: false,
         lod_budget_px: 1.0,
+        cull_items: true,
     };
 
     pub(crate) fn validate(&self) -> Result<()> {
@@ -389,7 +394,7 @@ fn color4(c: Color) -> [f32; 4] {
     [c.r, c.g, c.b, c.a]
 }
 
-/// The view uniform shared by all scene shaders (928 bytes).
+/// The view uniform shared by all scene shaders (960 bytes).
 #[derive(Debug, Clone, Copy)]
 struct ViewUniform {
     view_proj: [f32; 16],
@@ -413,7 +418,7 @@ struct ViewUniform {
 
 impl ViewUniform {
     fn bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(928);
+        let mut out = Vec::with_capacity(960);
         for v in self
             .view_proj
             .iter()
@@ -439,6 +444,8 @@ impl ViewUniform {
             .chain(section.planes.iter().flatten())
             .chain(&section.box_min)
             .chain(&section.box_max)
+            .chain(&section.hatch)
+            .chain(&section.hatch_color)
             .chain(&self.over)
             .chain(self.object_style.iter().flatten())
             .chain(self.styles.iter().flatten().flatten())
@@ -585,7 +592,7 @@ impl Renderer {
         settings: &RenderSettings,
         window: &Matrix4,
         viewport: (u32, u32),
-    ) -> Result<(arc_base::math::Point3, ViewUniform, f64)> {
+    ) -> Result<(arc_base::math::Point3, ViewUniform, f64, CullView)> {
         let aspect = f64::from(width) / f64::from(height);
         let bounds = scene
             .items()
@@ -593,6 +600,12 @@ impl Renderer {
             .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
         let (eye, depth) = depth_origin(frame, bounds);
         let camera = camera_data(frame, aspect, depth, window)?;
+        let cull = CullView {
+            clip: clip_matrix(frame, aspect, depth),
+            eye,
+            pixel: [2.0 / f64::from(width), 2.0 / f64::from(height)],
+            extra_px: 0.0,
+        };
         let unit_px = camera.y_scale * f64::from(height) * 0.5;
         let paper = narrow(settings.plot_scale * unit_px);
         let smoothing = if settings.line_smoothing { 1.0 } else { 0.0 };
@@ -644,7 +657,7 @@ impl Renderer {
             object_style: [[0.0; 4]; 2],
             styles: [[[0.0; 4]; 2]; crate::display::CATEGORIES],
         };
-        Ok((eye, uniform, unit_px))
+        Ok((eye, uniform, unit_px, cull))
     }
 
     /// Renders `scene` seen through `frame` into an image of `width × height` pixels in the
@@ -711,7 +724,7 @@ impl Renderer {
         readback: bool,
     ) -> Result<(wgpu::Texture, Option<Vec<u8>>)> {
         let samples = self.check(scene, width, height, settings)?;
-        let (eye, base, unit_px) = Self::view_uniform(
+        let (eye, base, unit_px, cull) = Self::view_uniform(
             scene,
             frame,
             width,
@@ -768,6 +781,7 @@ impl Renderer {
         gpu.scoped(|| {
             refresh_curves(scene, frame, unit_px, settings)?;
             refresh_levels(scene, frame, unit_px, settings);
+            scene.cull(settings.cull_items.then_some(&cull));
             scene.prepare_frame(&eye)?;
             let faces = settings.mode.faces();
             let mut kinds = vec![Kind::Line];
@@ -1143,7 +1157,7 @@ impl Renderer {
             (width, height),
             (region.x, region.y, region.width, region.height),
         );
-        let (eye, mut uniform, unit_px) = Self::view_uniform(
+        let (eye, mut uniform, unit_px, mut cull) = Self::view_uniform(
             scene,
             frame,
             width,
@@ -1153,6 +1167,8 @@ impl Renderer {
             (region.width, region.height),
         )?;
         uniform.shading[3] = tolerance;
+        // A pick widens the lines it tests by the tolerance, so the culling margin includes it.
+        cull.extra_px = f64::from(tolerance);
         let resolved = ResolvedOverrides::new(extras.overrides, scene.limits().max_objects)?;
         let uniform = uniform.with_view_state(&eye, &resolved, extras.section, true)?;
         let capping = extras
@@ -1167,6 +1183,7 @@ impl Renderer {
         let values = gpu.scoped(|| {
             refresh_curves(scene, frame, unit_px, settings)?;
             refresh_levels(scene, frame, unit_px, settings);
+            scene.cull(settings.cull_items.then_some(&cull));
             scene.prepare_frame(&eye)?;
             self.ensure(
                 samples,

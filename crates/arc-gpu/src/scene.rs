@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use arc_base::math::{Point3, Vector3};
+use arc_base::math::{Matrix4, Point3, Vector3};
 use arc_base::{Color, Error, ObjectId, Result};
 use arc_mesh::TriMesh;
 use arc_mesh::lod::{LodChain, ViewParams};
@@ -310,6 +310,8 @@ struct GeometryEntry {
     /// The silhouette records in the vertex pool and the edge count, when derived.
     silhouettes: Option<(AllocId, u32)>,
     radius: f64,
+    /// The box of the uploaded positions, relative to the geometry origin: `[min, max]`.
+    bounds: [[f64; 3]; 2],
     users: u32,
 }
 
@@ -477,6 +479,14 @@ pub(crate) struct ItemEntry {
     pub(crate) gpu: ItemGpu,
     pub(crate) origin: Point3,
     pub(crate) radius: f64,
+    /// The box of everything the item draws, relative to its origin: `[min, max]`. For a mesh
+    /// item it covers the instances of every level of its geometry.
+    pub(crate) bounds: [[f64; 3]; 2],
+    /// How far, in pixels, the item draws past its bounds, or `None` when that extent depends
+    /// on the view (paper or item-unit widths): such an item is never culled.
+    pub(crate) margin_px: Option<f64>,
+    /// Whether the item is inside the view of the last frame or pick (see [`Scene::cull`]).
+    pub(crate) visible: bool,
     /// The largest scale factor of the item's instance transforms (1 for lines).
     scale: f64,
     /// The level of detail drawn this frame, when the item's geometry has levels.
@@ -521,6 +531,119 @@ pub struct Scene {
     curve_tolerance_px: f32,
     /// The applied extraction stamp and owned geometries of each extracted object.
     pub(crate) extracted: crate::extract::Applied,
+    /// The counts of the last [`Scene::cull`].
+    cull_stats: CullStats,
+}
+
+/// The items of a scene and how many the view of the last frame or pick kept.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CullStats {
+    /// Items in the scene.
+    pub items: usize,
+    /// Items that are not wholly outside the view and are drawn.
+    pub visible: usize,
+}
+
+/// The view that items are culled against (CORE-GPU-018, CPU path): the clip matrix of the
+/// frame in `f64` without the image window, the translation origin, and the size of a pixel in
+/// clip units of the image.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CullView {
+    /// Projection times view rotation, applied to offsets from the translation origin.
+    pub(crate) clip: Matrix4,
+    /// The translation origin of the frame.
+    pub(crate) eye: Point3,
+    /// Clip units (normalized device units) per image pixel, horizontal and vertical.
+    pub(crate) pixel: [f64; 2],
+    /// Pixels added to every item's margin (the pick tolerance of a pick).
+    pub(crate) extra_px: f64,
+}
+
+impl CullView {
+    /// Whether `item` is wholly outside the view.
+    ///
+    /// The clip-space half-spaces are affine in the position, so an item is outside when one of
+    /// them is negative at all eight corners of its box. The side planes are widened by the
+    /// item's margin: a drawn pixel of the item lies within the margin of a point of the item,
+    /// so a point outside the widened planes draws nothing. The near and far planes are exact.
+    /// A non-finite value keeps the item.
+    fn excludes(&self, item: &ItemEntry) -> bool {
+        let Some(margin) = item.margin_px else {
+            return false;
+        };
+        let margin = margin + self.extra_px;
+        let (dx, dy) = (margin * self.pixel[0], margin * self.pixel[1]);
+        let m = &self.clip;
+        let [low, high] = item.bounds;
+        let offset = item.origin - self.eye;
+        // One flag per half-space: true while every corner so far is negative in it.
+        let mut all_negative = [true; 6];
+        for corner in 0..8 {
+            let pick = |k: usize| {
+                if corner & (1 << k) == 0 {
+                    low[k]
+                } else {
+                    high[k]
+                }
+            };
+            let p = [offset.x + pick(0), offset.y + pick(1), offset.z + pick(2)];
+            let clip =
+                |r: usize| m[(r, 0)] * p[0] + m[(r, 1)] * p[1] + m[(r, 2)] * p[2] + m[(r, 3)];
+            let (x, y, z, w) = (clip(0), clip(1), clip(2), clip(3));
+            let values = [
+                x + w * (1.0 + dx),
+                w * (1.0 + dx) - x,
+                y + w * (1.0 + dy),
+                w * (1.0 + dy) - y,
+                z,
+                w - z,
+            ];
+            if !values.iter().all(|v| v.is_finite()) {
+                return false;
+            }
+            for (flag, value) in all_negative.iter_mut().zip(values) {
+                *flag &= value < 0.0;
+            }
+        }
+        all_negative.iter().any(|flag| *flag)
+    }
+}
+
+/// Grows the box `into` to contain `other` (`[min, max]` corners).
+pub(crate) fn include_box(into: &mut Option<[[f64; 3]; 2]>, other: [[f64; 3]; 2]) {
+    *into = Some(match *into {
+        None => other,
+        Some([lo, hi]) => {
+            let [olo, ohi] = other;
+            [
+                [0, 1, 2].map(|k| lo[k].min(olo[k])),
+                [0, 1, 2].map(|k| hi[k].max(ohi[k])),
+            ]
+        }
+    });
+}
+
+/// The box of `box_` under the affine map `rows` (a 3×4 matrix: three rows, the translation in
+/// the fourth column), as the box of its eight transformed corners.
+pub(crate) fn transformed_box(rows: &[[f32; 4]; 3], box_: [[f64; 3]; 2]) -> [[f64; 3]; 2] {
+    let mut out = None;
+    for corner in 0..8 {
+        let p = [0, 1, 2].map(|k| {
+            if corner & (1 << k) == 0 {
+                box_[0][k]
+            } else {
+                box_[1][k]
+            }
+        });
+        let q = rows.map(|r| {
+            f64::from(r[0]) * p[0]
+                + f64::from(r[1]) * p[1]
+                + f64::from(r[2]) * p[2]
+                + f64::from(r[3])
+        });
+        include_box(&mut out, [q, q]);
+    }
+    out.unwrap_or(box_)
 }
 
 fn put_f32(out: &mut Vec<u8>, values: &[f32]) {
@@ -626,6 +749,19 @@ pub(crate) struct Encoded {
     pub(crate) radius: f64,
     /// The cumulative segment count at the end of each path.
     pub(crate) path_ends: Vec<u32>,
+    /// The box of the path vertices, relative to the item origin.
+    pub(crate) bounds: Option<[[f64; 3]; 2]>,
+    /// The largest pixel extent past the vertices, over the paths with screen widths.
+    pub(crate) margin_px: f64,
+    /// Whether a path has a width that depends on the view, so no margin bounds it.
+    pub(crate) unbounded: bool,
+}
+
+impl Encoded {
+    /// The pixel margin for culling, or `None` when a width depends on the view.
+    pub(crate) fn cull_margin(&self) -> Option<f64> {
+        (!self.unbounded).then_some(self.margin_px)
+    }
 }
 
 /// The bytes of one segment instance (see the layout in the specification).
@@ -669,14 +805,27 @@ impl Encoded {
         let width = match style.width {
             LineWidth::Screen(w) | LineWidth::Paper(w) => w,
         };
+        // Half the width, times the longest miter (a multiple of half the width), plus one pixel
+        // of coverage at the edge.
+        match style.width {
+            LineWidth::Screen(_) => {
+                let half = f64::from(width.max(1.0)) * 0.5 * f64::from(style.miter_limit.max(1.0));
+                self.margin_px = self.margin_px.max(half + 1.0);
+            }
+            LineWidth::Paper(_) => self.unbounded = true,
+        }
         let mut points: Vec<PathVertex> = Vec::new();
         for v in vertices {
             finite(&v.point)?;
             if let Some(w) = v.out.widths {
                 finite(&w)?;
+                // Item-unit widths scale with the view, so no pixel margin bounds them.
+                self.unbounded = true;
             }
             finite(&v.out.phase)?;
             self.radius = self.radius.max(length3(v.point));
+            let p = v.point.map(f64::from);
+            include_box(&mut self.bounds, [p, p]);
             match points.last_mut() {
                 Some(last) if last.point == v.point => last.out = v.out,
                 _ => points.push(v),
@@ -868,6 +1017,7 @@ impl Scene {
                 zoom_hint: None,
                 curve_tolerance_px: crate::render::RenderSettings::DEFAULT.curve_tolerance_px,
                 extracted: crate::extract::Applied::default(),
+                cull_stats: CullStats::default(),
             })
         })
     }
@@ -913,11 +1063,16 @@ impl Scene {
         let normals = mesh.normals();
         let mut vertex_bytes = Vec::with_capacity(positions.len() * 24);
         let mut radius: f64 = 0.0;
+        let mut bounds = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
         for (i, p) in positions.iter().enumerate() {
             put_f32(&mut vertex_bytes, &p.to_array());
             let n = normals.and_then(|n| n.get(i)).copied().unwrap_or([0.0; 3]);
             put_f32(&mut vertex_bytes, &n);
             radius = radius.max(length3(p.to_array()));
+            for (k, v) in p.to_array().into_iter().enumerate() {
+                bounds[0][k] = bounds[0][k].min(f64::from(v));
+                bounds[1][k] = bounds[1][k].max(f64::from(v));
+            }
         }
         let mut index_bytes = Vec::with_capacity(mesh.triangle_count() * 12);
         for t in mesh.triangles() {
@@ -1004,6 +1159,7 @@ impl Scene {
                 edges,
                 silhouettes,
                 radius,
+                bounds,
                 users: 0,
             },
         );
@@ -1262,6 +1418,7 @@ impl Scene {
         self.free_slots.push(entry.slot);
     }
 
+    #[allow(clippy::too_many_lines)] // One arm per item kind, each uploading its own data.
     fn insert_object(&mut self, object: ObjectId, items: &[RenderItem]) -> Result<()> {
         let slot = self.free_slots.pop().unwrap_or_else(|| {
             self.next_slot += 1;
@@ -1283,6 +1440,22 @@ impl Scene {
                         .geometries
                         .get(&mesh.geometry)
                         .map_or(0.0, |g| g.radius);
+                    // The boxes of every level, so the bounds hold whichever level is drawn.
+                    let boxes: Vec<[[f64; 3]; 2]> = match self.lods.get(&mesh.geometry) {
+                        Some(group) => group
+                            .levels
+                            .iter()
+                            .filter_map(|id| self.geometries.get(id))
+                            .map(|g| g.bounds)
+                            .collect(),
+                        None => self
+                            .geometries
+                            .get(&mesh.geometry)
+                            .map(|g| g.bounds)
+                            .into_iter()
+                            .collect(),
+                    };
+                    let mut bounds = None;
                     let mut bytes = Vec::with_capacity(mesh.instances.len() * 80);
                     let mut radius: f64 = 0.0;
                     let mut largest_scale: f64 = 0.0;
@@ -1300,6 +1473,9 @@ impl Scene {
                         let scale = column(0).max(column(1)).max(column(2));
                         largest_scale = largest_scale.max(scale);
                         radius = radius.max(column(3) + scale * geometry_radius);
+                        for b in &boxes {
+                            include_box(&mut bounds, transformed_box(&i.transform, *b));
+                        }
                     }
                     let count = u32::try_from(mesh.instances.len())
                         .map_err(|_| limit("max_instances_per_item"))?;
@@ -1319,6 +1495,10 @@ impl Scene {
                         },
                         origin: mesh.origin,
                         radius,
+                        bounds: bounds.unwrap_or([[0.0; 3]; 2]),
+                        // Edges are one-pixel lines on the surface; two pixels cover them.
+                        margin_px: Some(2.0),
+                        visible: true,
                         scale: largest_scale,
                         shown: None,
                         translation_dirty: true,
@@ -1370,6 +1550,9 @@ impl Scene {
             },
             origin,
             radius: encoded.radius,
+            bounds: encoded.bounds.unwrap_or([[0.0; 3]; 2]),
+            margin_px: encoded.cull_margin(),
+            visible: true,
             scale: 1.0,
             shown: None,
             translation_dirty: true,
@@ -1424,6 +1607,8 @@ impl Scene {
                     count: encoded.count,
                 };
                 item.radius = item.radius.max(encoded.radius);
+                item.bounds = encoded.bounds.unwrap_or([[0.0; 3]; 2]);
+                item.margin_px = encoded.cull_margin();
                 item.path_ends = encoded.path_ends;
                 item.translation_dirty = true;
             }
@@ -1494,6 +1679,36 @@ impl Scene {
             self.all_translations_dirty = true;
             Ok(())
         })
+    }
+
+    /// Marks the items wholly outside `view` as not visible (CORE-GPU-018, CPU path); with
+    /// `None` every item is visible. Items partly inside are always visible.
+    pub(crate) fn cull(&mut self, view: Option<&CullView>) {
+        let mut stats = CullStats::default();
+        for entry in self.objects.values_mut() {
+            for item in &mut entry.items {
+                item.visible = view.is_none_or(|v| !v.excludes(item));
+                stats.items += 1;
+                stats.visible += usize::from(item.visible);
+            }
+        }
+        self.cull_stats = stats;
+    }
+
+    /// The item counts of the last frame or pick: how many items the view kept (see
+    /// [`CullStats`]).
+    #[must_use]
+    pub fn cull_stats(&self) -> CullStats {
+        self.cull_stats
+    }
+
+    /// Whether an item is inside the view of the last frame or pick. `None` for an unknown key.
+    /// Without culling every item is visible.
+    #[must_use]
+    pub fn item_visible(&self, key: ItemKey) -> Option<bool> {
+        self.object_items(&key.object)
+            .get(key.sub as usize)
+            .map(|item| item.visible)
     }
 
     /// The keys of all items, sorted.

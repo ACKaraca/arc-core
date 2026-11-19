@@ -34,6 +34,7 @@ use crate::error::codes;
 use crate::extract::ExtractionResult;
 use crate::manipulator::Manipulator;
 use crate::overlay::Overlay;
+use crate::quality::{AdaptiveQuality, SETTLE_TIME};
 use crate::render::{FrameExtras, Image, RenderSettings, Renderer};
 use crate::scene::{Scene, SceneLimits};
 
@@ -97,6 +98,9 @@ pub struct DirtyReasons {
     pub manipulator: bool,
     /// A progressive frame was requested.
     pub progressive: bool,
+    /// Full quality returned because the camera has been still for the settle time
+    /// (CORE-GPU-021). Set by the render thread, not by a call.
+    pub quality: bool,
 }
 
 impl DirtyReasons {
@@ -113,6 +117,7 @@ impl DirtyReasons {
             || self.section
             || self.manipulator
             || self.progressive
+            || self.quality
     }
 }
 
@@ -612,22 +617,40 @@ impl Drop for ExitGuard {
 
 #[allow(clippy::too_many_lines)] // The loop: wait, take the inputs, apply, draw, publish.
 fn render_loop(shared: &Shared, mut scene: Scene, mut renderer: Renderer, readback: bool) {
+    // The clock of the quality rules: the time since the thread started.
+    let clock = Instant::now();
+    let mut quality = AdaptiveQuality::new(SETTLE_TIME);
+    // Whether the last frame was drawn at navigation quality.
+    let mut navigating = false;
     loop {
-        let (inputs, mut reasons, results, jobs, generation) = {
+        let (inputs, mut reasons, results, jobs, generation, moved) = {
             let mut state = lock(shared);
             loop {
                 if state.shutdown {
                     return;
                 }
-                if state.dirty.any() || !state.scene.is_empty() || !state.jobs.is_empty() {
+                let now = clock.elapsed();
+                // Navigation has settled since the last frame: draw at full quality.
+                let settled = navigating && !quality.is_navigating(now);
+                if state.dirty.any() || !state.scene.is_empty() || !state.jobs.is_empty() || settled
+                {
                     break;
                 }
                 state.processed = state.requested;
                 shared.done.notify_all();
-                state = shared
-                    .wake
-                    .wait(state)
-                    .unwrap_or_else(PoisonError::into_inner);
+                state = match quality.settled_at().filter(|_| navigating) {
+                    Some(at) => {
+                        shared
+                            .wake
+                            .wait_timeout(state, at.saturating_sub(now))
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .0
+                    }
+                    None => shared
+                        .wake
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner),
+                };
             }
             let i = &state.inputs;
             let inputs = Inputs {
@@ -644,8 +667,19 @@ fn render_loop(shared: &Shared, mut scene: Scene, mut renderer: Renderer, readba
             let reasons = std::mem::take(&mut state.dirty);
             let results: Vec<_> = std::mem::take(&mut state.scene).into_values().collect();
             let jobs = std::mem::take(&mut state.jobs);
-            (inputs, reasons, results, jobs, state.requested)
+            // A camera change after the first frame is navigation.
+            let moved = reasons.camera && state.frames > 0;
+            (inputs, reasons, results, jobs, state.requested, moved)
         };
+        let now = clock.elapsed();
+        if moved {
+            quality.camera_moved(now);
+        }
+        let now_navigating = quality.is_navigating(now);
+        // Full quality returns with a frame of its own once the camera has settled.
+        reasons.quality |= navigating && !now_navigating;
+        navigating = now_navigating;
+        let settings = quality.apply(&inputs.settings, now);
         let mut error = None;
         if !results.is_empty() {
             let report = scene.apply_extractions(results);
@@ -676,7 +710,7 @@ fn render_loop(shared: &Shared, mut scene: Scene, mut renderer: Renderer, readba
                 &mut scene,
                 &inputs.frame,
                 inputs.size,
-                &inputs.settings,
+                &settings,
                 &extras,
                 readback,
             ) {
@@ -853,6 +887,17 @@ mod tests {
             viewport.sync(WAIT).unwrap();
             if !reasons.progressive {
                 assert_eq!(viewport.frames(), before + 1, "{reasons:?} repeated");
+            }
+            // A camera change ends with one frame at full quality once the camera is still.
+            if reasons.camera {
+                let settled = viewport.wait_frame(viewport.frames(), WAIT).unwrap();
+                assert_eq!(
+                    settled.reasons,
+                    DirtyReasons {
+                        quality: true,
+                        ..DirtyReasons::default()
+                    }
+                );
             }
         };
         expect(
@@ -1038,5 +1083,23 @@ mod tests {
             .unwrap()
             .0;
         assert!(state.exited);
+    }
+
+    #[test]
+    fn a_settled_camera_draws_one_frame_at_full_quality() {
+        let viewport = viewport(false);
+        let before = viewport.frames();
+        viewport.set_camera(view(12.0)).unwrap();
+        let moved = viewport.wait_frame(before, WAIT).unwrap();
+        assert!(moved.reasons.camera);
+        assert!(
+            !moved.reasons.quality,
+            "navigation draws at the camera's own reason"
+        );
+        // Without further input the thread draws again once the camera has been still.
+        let settled = viewport.wait_frame(moved.number, WAIT).unwrap();
+        assert!(settled.reasons.quality);
+        assert!(!settled.reasons.camera);
+        assert!(!viewport.dirty().any());
     }
 }

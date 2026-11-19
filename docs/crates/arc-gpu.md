@@ -323,6 +323,8 @@ depth target.
   wins over the face it lies on. Faces are picked in every shading mode; back faces are skipped
   when `cull_back_faces` is set.
 - A pick counts as a frame for write accounting (it writes translations when the eye moved).
+- A pick culls items against the view before it draws (see [Culling](#culling-core-gpu-018)),
+  and widens the culling margin of lines by the pick tolerance.
 - On the pinned software adapter a pixel pick in a small scene takes about 1.5 ms and a 96 × 96
   rectangle about 2.5 ms; the tests bound only gross regressions.
 
@@ -420,10 +422,14 @@ the thread, which draws the first frame.
   selections and pending objects are checked against the limits at the call.
 - **On-demand redraw.** The thread draws only for a `DirtyReasons` flag: camera, size,
   settings, highlight or overlay set to a different value, extraction results that changed the
-  scene, or a requested progressive frame. A frame takes every change pending when it starts.
+  scene, a requested progressive frame, or full quality returning after navigation. A frame
+  takes every change pending when it starts.
   Otherwise the thread waits on a condition variable and submits no GPU work.
   `Viewport::frames` counts frames, `Viewport::dirty` reports pending reasons and each `Frame`
   carries the reasons it was drawn for.
+- **Adaptive quality.** While the camera moves, a viewport draws at navigation quality; when the
+  camera has been still for the settle time, it draws one frame at full quality with the reason
+  `quality` (see [Adaptive quality](#adaptive-quality-core-gpu-021)).
 - **Frames.** Each frame renders into its own `Rgba8UnormSrgb` texture usable as a texture
   binding and copy source; the `Frame` holds the texture and a view for a compositor on the same
   device and, when `ViewportConfig::readback` is set, the read-back `Image`. Without readback the
@@ -463,7 +469,7 @@ The codes `arc-gpu` owns. A code is never reused for a different meaning; messag
 | Code | Category | Raised when |
 |---|---|---|
 | `gpu.adapter.not_found` | `not_found` | No adapter matches the settings, or none is available |
-| `gpu.settings.invalid` | `invalid_input` | A settings value is out of range: a sample count other than 1 or 4, a negative or non-finite ambient term or plot scale, an X-ray opacity or tint outside [0, 1], an outline wider than 8 pixels, a curve tolerance outside [0.01, 16] pixels, a negative or non-finite level-of-detail budget, a non-finite color, or a limit of zero; display overrides with an opacity outside [0, 1] or a category above 15; a section with more than six planes, a zero plane normal or an inverted box; a manipulator with a zero axis, a size outside (0, 4096] pixels or a width that is not positive; a tile bound that is not positive |
+| `gpu.settings.invalid` | `invalid_input` | A settings value is out of range: a sample count other than 1 or 4, a negative or non-finite ambient term or plot scale, an X-ray opacity or tint outside [0, 1], an outline wider than 8 pixels, a curve tolerance outside [0.01, 16] pixels, a negative or non-finite level-of-detail budget, a non-finite color, or a limit of zero; display overrides with an opacity outside [0, 1] or a category above 15; a section with more than six planes, a zero plane normal, an inverted box or a cap hatch with a spacing outside (0, 4096] pixels or a width that is not positive and below the spacing; a manipulator with a zero axis, a size outside (0, 4096] pixels or a width that is not positive; a tile bound that is not positive |
 | `gpu.device.request_failed` | `failed_operation` | The adapter refused to create a device with the required features and limits |
 | `gpu.device.lost` | `failed_operation` | The device was lost or destroyed; the scene and renderer must be recreated on a new device |
 | `gpu.out_of_memory` | `limit_exceeded` | The device ran out of memory while creating a resource or executing work |
@@ -471,7 +477,7 @@ The codes `arc-gpu` owns. A code is never reused for a different meaning; messag
 | `gpu.timeout` | `failed_operation` | A wait for the device exceeded its bound |
 | `gpu.readback.failed` | `failed_operation` | Reading a rendered image back from the device failed |
 | `gpu.limit.exceeded` | `limit_exceeded` | A count or size exceeds the scene limits or the device limits |
-| `gpu.value.not_finite` | `invalid_input` | A coordinate, origin, transform, color or width is NaN or infinite |
+| `gpu.value.not_finite` | `invalid_input` | A coordinate, origin, transform, color, width or hatch angle is NaN or infinite |
 | `gpu.item.invalid` | `invalid_input` | A render item is empty (no instances, no points) or a line width or miter limit is out of range, or a curve item has an unbounded curve, an invalid dash pattern or an empty clip rectangle |
 | `gpu.geometry.invalid` | `invalid_input` | A mesh has no triangles |
 | `gpu.geometry.not_found` | `not_found` | An item or call refers to a geometry handle the scene does not hold |
@@ -484,12 +490,13 @@ The codes `arc-gpu` owns. A code is never reused for a different meaning; messag
 
 ## Overrides, sections, levels of detail, tiles and manipulators
 
-The sixth part implements CORE-GPU-005, 016, 017, 019, 024 and 026. Overrides, sections and
-manipulators are per-frame inputs (`FrameExtras::overrides`, `section` and `manipulator`, and
-`Viewport::set_overrides`, `set_section` and `set_manipulator`, each a dirty reason of the
-viewport); they are uploaded in the view uniform (928 bytes) and per-frame bind groups and write
-no scene buffer. `Renderer::pick_with` takes the same extras, so picks follow what is drawn.
-CORE-GPU-018, 020 and 021 are not part of this step.
+The sixth part implements CORE-GPU-005, 016, 017, 019, 024 and 026, and the seventh part
+CORE-GPU-018 (CPU path only) and 021. Overrides, sections and manipulators are per-frame inputs
+(`FrameExtras::overrides`, `section` and `manipulator`, and `Viewport::set_overrides`,
+`set_section` and `set_manipulator`, each a dirty reason of the viewport); they are uploaded in
+the view uniform (960 bytes) and per-frame bind groups and write no scene buffer.
+`Renderer::pick_with` takes the same extras, so picks follow what is drawn. CORE-GPU-020 is not
+part of these steps.
 
 ### Tiled large items (CORE-GPU-005)
 
@@ -569,6 +576,57 @@ CORE-GPU-018, 020 and 021 are not part of this step.
 - Selection is monotonic: `LodChain::select` never returns a finer level for a smaller
   projected size, and the projected size only decreases with distance.
 
+### Culling (CORE-GPU-018)
+
+Only the CPU path is implemented. Culling on the GPU with hierarchical depth and multi-draw
+indirect is not implemented; every frame and pick uses the CPU path below.
+
+- **Bounds.** Each item has a box relative to its origin, computed when the item is added or
+  extracted. A mesh item covers the transformed box of each of its instances over every level of
+  detail of its geometry, so the bound holds whichever level is drawn. A line or curve item covers
+  its path vertices. The boxes are computed from the `f32` values the GPU holds.
+- **Test.** Before each frame and each pick, after the curves and levels of detail are refreshed,
+  an item is culled when one clip-space half-space of the view is negative at all eight corners of
+  its box. The half-spaces are those of the reversed projection times the view rotation, computed
+  in `f64` relative to the translation origin. A linear function that is negative at the corners
+  of a box is negative on the whole box, so the test never removes an item with a point inside the
+  view; an item partly inside is always drawn.
+- **Margins.** The side planes are widened by the pixels an item draws past its vertices: 2 pixels
+  for a mesh (its feature and silhouette edges are one pixel wide), and for a line item half its
+  width (at least one pixel) times the larger of 1 and its miter limit, plus one pixel of coverage. A pick adds
+  its tolerance to the margin. The near and far planes are exact. An item with a paper width or an
+  item-unit width has a width that depends on the view, so no pixel margin bounds it and it is
+  never culled. A non-finite value keeps the item.
+- **What is still drawn for every item.** The outline mask of the highlights (CORE-GPU-023) and
+  the tint of selected and hovered objects use all items of those objects, because an item outside
+  the view can outline a pixel inside it and a tinted item outside the view draws nothing. The
+  camera-relative translations of culled items are still written, so a later frame that shows them
+  needs no rewrite.
+- **Counts.** `Scene::cull_stats` gives the item count and the visible count of the last frame or
+  pick, and `Scene::item_visible` the flag of one item. `RenderSettings::cull_items` (on by
+  default) switches the culling off; with it off every item is visible. A frame with culling is
+  pixel-identical to the same frame without it.
+
+### Adaptive quality (CORE-GPU-021)
+
+- `arc_gpu::quality::AdaptiveQuality` decides the quality of a frame from the camera's motion. Its
+  methods take the time `now` as a `Duration` from an origin the caller chooses; the type never
+  reads the system clock. `camera_moved(now)` records a camera change, `is_navigating(now)` tells
+  whether the camera is moving (its last change is less than `SETTLE_TIME`, 250 ms, before `now`),
+  `settled_at()` gives the time full quality returns, and `apply(settings, now)` gives the
+  settings a frame is drawn with.
+- **Lowered effects.** While the camera moves, `apply` sets `sample_count` to 1, turns
+  `silhouette_edges` off and multiplies `lod_budget_px` by `NAVIGATION_LOD_FACTOR` (4), so coarser
+  levels of detail are chosen; a budget of 0 stays 0 and keeps the finest level. Every other
+  setting is unchanged, so overrides, sections and highlights look the same.
+- **Viewport.** A camera change after a viewport's first frame is navigation. The render thread
+  draws each change at navigation quality. Once the camera has been still for the settle time it
+  draws one more frame at full quality, with the reason `DirtyReasons::quality`; the thread waits
+  for that time with a timeout, not by polling. The clock of the thread is the time since it
+  started. The settle time is not a setting.
+- **Rest.** A frame drawn at rest is the same before and after a navigation episode (test in
+  `tests/adaptive_quality.rs`).
+
 ### Section planes and box (CORE-GPU-024)
 
 - A `Section` has up to six `SectionPlane`s (a point and a normal; the side the normal points to
@@ -585,7 +643,15 @@ CORE-GPU-018, 020 and 021 are not part of this step.
   back face behind the cut, not of the cutting plane, so objects inside a cut solid show
   through it, and a mirrored instance transform inverts front and back faces. A stencil cap on
   the cutting plane needs a stencil format outside the default features and was not built.
-  Hatch caps are a later step; a cap is one flat color.
+- **Hatch.** A `Section` may carry a `CapHatch` (`hatch`): parallel lines in a second color drawn
+  over the caps. The lines are in screen space, so their spacing and width are in pixels and their
+  density follows the view. `angle_deg` is the direction of the lines, counterclockwise as seen on
+  the screen; `spacing_px` is in (0, 4096] and `width_px` is above 0 and below the spacing. The
+  alpha of the hatch color is ignored. The fragment shader of the cap takes the position of the
+  fragment in pixels, projects it on the normal of the lines and draws a line where the fractional
+  part of that quotient by the spacing is below the width over the spacing; no derivatives are
+  used. A hatch without caps has no effect and is still validated. The hatch is part of the view
+  uniform (two `vec4` after the section box), so the uniform is 960 bytes.
 
 ### Manipulators (CORE-GPU-026)
 

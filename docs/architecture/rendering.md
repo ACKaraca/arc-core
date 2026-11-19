@@ -79,8 +79,9 @@ on the GPU through per-instance flags, not by re-extraction.
 
 ### Section planes
 
-Up to six arbitrary clip planes and one section box per view. Clipped solids are capped: a stencil
-pass finds the interior and draws a cap face with the material's section color or hatch. Section
+Up to six arbitrary clip planes and one section box per view. Clipped solids are capped: fragments
+on the cut side are discarded and the back faces left visible through the cut are drawn in the
+section color, with an optional hatch of screen-space lines. Section
 state is part of the view and saved with it.
 
 ### Selection and identifier picking

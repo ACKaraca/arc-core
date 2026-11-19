@@ -16,7 +16,7 @@ use arc_base::Color;
 use arc_base::math::{Point3, Vector3};
 use arc_gpu::display::FLAG_SOLID;
 use arc_gpu::{
-    Anchor, FrameExtras, MarkerShape, MeshInstance, MeshItem, Overlay, OverlayPrimitive,
+    Anchor, CapHatch, FrameExtras, MarkerShape, MeshInstance, MeshItem, Overlay, OverlayPrimitive,
     PickRegion, RenderItem, RenderSettings, Renderer, Scene, Section, SectionBox, SectionPlane,
     WriteCounters,
 };
@@ -25,6 +25,7 @@ use support::{cube, ids, setup, top_view};
 const SIZE: u32 = 96;
 const RED: Color = Color::new(1.0, 0.0, 0.0, 1.0);
 const GREEN: Color = Color::new(0.0, 1.0, 0.0, 1.0);
+const BLUE: Color = Color::new(0.0, 0.0, 1.0, 1.0);
 
 /// A unit cube at `origin`, flagged as a closed solid, seen from above at 32 pixels per unit.
 fn solid_at(scene: &mut Scene, origin: Point3, flags: u32) -> arc_base::ObjectId {
@@ -278,4 +279,66 @@ fn picking_respects_the_section() {
         pick(36, &mut renderer, &mut scene).is_empty(),
         "the clipped part is not picked"
     );
+}
+
+#[test]
+fn a_hatch_draws_lines_over_the_cap_and_nothing_outside_it() {
+    let (_, mut scene, mut renderer) = setup();
+    solid_at(&mut scene, Point3::origin(), FLAG_SOLID);
+    let section = |hatch: Option<CapHatch>| Section {
+        planes: vec![plane([0.0; 3], [0.0, 0.0, 1.0])],
+        cap_color: Some(GREEN),
+        hatch,
+        ..Section::default()
+    };
+    let hatch = CapHatch {
+        color: BLUE,
+        angle_deg: 45.0,
+        spacing_px: 6.0,
+        width_px: 2.0,
+    };
+    // The cap covers pixels 32 to 63 on both axes; one pixel of margin on each side.
+    let inside = |x: u32, y: u32| (34..62).contains(&x) && (34..62).contains(&y);
+    let outside = |x: u32, y: u32| !(31..=64).contains(&x) || !(31..=64).contains(&y);
+
+    let plain = render(
+        &mut renderer,
+        &mut scene,
+        Point3::origin(),
+        Some(&section(None)),
+        None,
+    );
+    let hatched = render(
+        &mut renderer,
+        &mut scene,
+        Point3::origin(),
+        Some(&section(Some(hatch))),
+        None,
+    );
+    let (mut caps, mut lines) = (0, 0);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let cap = is(&hatched, x, y, [0, 255, 0]);
+            let line = is(&hatched, x, y, [0, 0, 255]);
+            if inside(x, y) {
+                caps += u32::from(cap);
+                lines += u32::from(line);
+            }
+            if outside(x, y) {
+                assert!(
+                    !cap && !line,
+                    "pixel ({x}, {y}) outside the cap is {:?}",
+                    hatched.pixel(x, y)
+                );
+            }
+        }
+    }
+    assert!(caps > 100, "the cap shows its color ({caps} pixels)");
+    assert!(lines > 100, "the cut shows hatch lines ({lines} pixels)");
+    // The hatch changes only the cap: without it the same cut has no line color at all.
+    let plain_lines = (0..SIZE)
+        .flat_map(|y| (0..SIZE).map(move |x| (x, y)))
+        .filter(|(x, y)| is(&plain, *x, *y, [0, 0, 255]))
+        .count();
+    assert_eq!(plain_lines, 0);
 }

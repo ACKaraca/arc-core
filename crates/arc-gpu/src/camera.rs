@@ -155,6 +155,14 @@ pub fn region_window(image: (u32, u32), rect: (u32, u32, u32, u32)) -> Matrix4 {
     m
 }
 
+/// The clip matrix of `frame` in `f64` without an image window: the reversed projection for the
+/// depth range `depth` times the view rotation. Culling tests items against it (see
+/// [`crate::scene::CullStats`]).
+#[must_use]
+pub(crate) fn clip_matrix(frame: &ViewFrame, aspect: f64, depth: (f64, f64)) -> Matrix4 {
+    reversed_projection(frame, aspect, depth.0, depth.1) * view_rotation(frame)
+}
+
 /// The camera data of `frame`; `window` remaps clip space (the identity for a whole image,
 /// [`region_window`] for a region).
 pub(crate) fn camera_data(
