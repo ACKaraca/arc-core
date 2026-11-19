@@ -18,7 +18,9 @@ use crate::context::Session;
 use crate::error::codes;
 use crate::invoke::{Invocation, Invoker, Outcome};
 use crate::line::{self, Completion};
-use crate::prompt::{Accept, Feedback, Prompt, PromptInput, PromptSession};
+use crate::prompt::{
+    Accept, Feedback, PlaneTransform, Point, PointEntry, Prompt, PromptInput, PromptSession,
+};
 use crate::registry::Registry;
 use crate::spec::UndoBehavior;
 
@@ -98,11 +100,17 @@ pub const TRANSPARENT_PREFIX: char = '\'';
 /// Runs a completed invocation for [`CommandLine::drive`].
 pub type Runner<'r> = &'r mut dyn FnMut(Invocation) -> Result<Outcome>;
 
-/// The state of one command line: the active prompt session and the last completed command.
+/// The state of one command line: the active prompt session, the last completed command and the
+/// point state of the line.
+///
+/// The point state (a [`PointEntry`]) is the last point of the previous prompt session, its
+/// settings and the host's pointer direction. Each prompt session starts with it and hands its
+/// state back when it ends. A transparent command does not change it.
 #[derive(Debug, Default)]
 pub struct CommandLine {
     active: Option<PromptSession>,
     last: Option<LastCommand>,
+    entry: PointEntry,
 }
 
 impl CommandLine {
@@ -122,6 +130,84 @@ impl CommandLine {
     #[must_use]
     pub fn last(&self) -> Option<&LastCommand> {
         self.last.as_ref()
+    }
+
+    /// Ends the active prompt session, if any, and keeps its point state: the last point it
+    /// accepted (or, when it accepted none, the line's last point) and its settings. A cancelled
+    /// command keeps the points it accepted.
+    fn retire(&mut self) {
+        if let Some(session) = self.active.take() {
+            self.entry = session.carry();
+        }
+    }
+
+    /// The point state of the active prompt session, or of the line when none is active.
+    #[must_use]
+    pub fn point_entry(&self) -> &PointEntry {
+        self.active
+            .as_ref()
+            .map_or(&self.entry, PromptSession::point_entry)
+    }
+
+    /// The base point a rubber band measures from: the active session's last point, else the
+    /// line's.
+    #[must_use]
+    pub fn base_point(&self) -> Option<Point> {
+        self.active
+            .as_ref()
+            .map_or_else(|| self.entry.last_point(), PromptSession::last_point)
+    }
+
+    /// The direction a direct distance uses: a locked direction, else the pointer direction.
+    #[must_use]
+    pub fn direction(&self) -> Option<[f64; 2]> {
+        self.point_entry().effective_direction()
+    }
+
+    /// Sets the pointer direction (a unit vector in the plane; normalized) for the active session
+    /// and the line.
+    ///
+    /// # Errors
+    ///
+    /// `cmd.prompt.range` (reason `direction`) when the vector is not finite or has no length;
+    /// nothing changes then.
+    pub fn set_pointer_direction(&mut self, direction: Option<[f64; 2]>) -> Result<()> {
+        self.entry.set_direction(direction)?;
+        if let Some(active) = self.active.as_mut() {
+            active.point_entry_mut().set_direction(direction)?;
+        }
+        Ok(())
+    }
+
+    /// Sets the last point the next point answer measures from, for the active session and the
+    /// line. An active session that has accepted a point keeps its own last point.
+    ///
+    /// # Errors
+    ///
+    /// `cmd.prompt.range` (reason `not_finite`) when a coordinate is not finite; nothing changes.
+    pub fn set_last_point(&mut self, point: Option<Point>) -> Result<()> {
+        self.entry.set_last_point(point)?;
+        if let Some(active) = self.active.as_mut() {
+            active.point_entry_mut().set_last_point(point)?;
+        }
+        Ok(())
+    }
+
+    /// Sets whether a typed coordinate without a prefix is relative, for the active session and
+    /// the line.
+    pub fn set_relative_default(&mut self, relative: bool) {
+        self.entry.set_relative_default(relative);
+        if let Some(active) = self.active.as_mut() {
+            active.point_entry_mut().set_relative_default(relative);
+        }
+    }
+
+    /// Sets the user coordinate system transform, for the active session and the line.
+    pub fn set_transform(&mut self, transform: PlaneTransform) {
+        self.entry.set_transform(transform);
+        if let Some(active) = self.active.as_mut() {
+            active.point_entry_mut().set_transform(transform);
+        }
     }
 
     /// Records a command completed elsewhere (a menu entry or a tool) as the last command;
@@ -162,15 +248,15 @@ impl CommandLine {
             Feedback::Ask(prompt) => Ok(Submitted::Prompt(prompt)),
             Feedback::Rejected { error, prompt } => Ok(Submitted::Rejected { error, prompt }),
             Feedback::Cancelled => {
-                self.active = None;
+                self.retire();
                 Ok(Submitted::Cancelled)
             }
             Feedback::Failed(error) => {
-                self.active = None;
+                self.retire();
                 Err(error)
             }
             Feedback::Done(invocation) => {
-                self.active = None;
+                self.retire();
                 self.run(target, &invocation.command, invocation.params, runner)
             }
         }
@@ -192,11 +278,16 @@ impl CommandLine {
     ) -> Result<Submitted> {
         match step {
             LineStep::Start { command, preset } => {
-                self.active = None;
+                self.retire();
                 let spec = Arc::clone(&target.registry.resolve(command, target.localized)?.spec);
                 let snapshot = target.document.snapshot();
-                let (session, feedback) =
-                    PromptSession::start(spec, preset, target.session, &snapshot);
+                let (session, feedback) = PromptSession::start_with_entry(
+                    spec,
+                    preset,
+                    target.session,
+                    &snapshot,
+                    self.entry.clone(),
+                );
                 self.active = Some(session);
                 self.follow(target, feedback, runner)
             }
@@ -379,12 +470,15 @@ impl CommandLine {
         self.invoke(target, LineStep::Back)
     }
 
-    /// Cancels the active command; [`Submitted::Idle`] when there is none.
+    /// Cancels the active command, keeping the points it accepted as the line's last point
+    /// (a cancel before any point keeps the line's previous one); [`Submitted::Idle`] when there
+    /// is none.
     pub fn cancel(&mut self) -> Submitted {
-        match self.active.take() {
-            Some(_) => Submitted::Cancelled,
-            None => Submitted::Idle,
+        if self.active.is_none() {
+            return Submitted::Idle;
         }
+        self.retire();
+        Submitted::Cancelled
     }
 
     /// Runs the last completed command again with the same parameters through

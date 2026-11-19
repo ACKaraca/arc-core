@@ -29,6 +29,10 @@ use crate::invoke::Invocation;
 use crate::line::{self, Kind};
 use crate::spec::CommandSpec;
 
+mod coordinates;
+
+pub use coordinates::{MAX_POINT_BYTES, PlaneTransform, PointEntry};
+
 /// The most answers one prompt session collects.
 pub const MAX_ANSWERS: usize = 1024;
 
@@ -322,6 +326,12 @@ pub struct PromptState<'a> {
     pub answers: &'a [Answer],
     /// The current document state; machines never change it.
     pub snapshot: &'a Snapshot,
+    /// The last point: the latest accepted point answer, else the point the host set. Typed
+    /// relative and direct forms measure from it; a host draws a rubber band from it.
+    pub base: Option<Point>,
+    /// The direction direct distances use, a unit vector in the plane: a direction locked by
+    /// `<angle`, else the host's pointer direction.
+    pub direction: Option<[f64; 2]>,
 }
 
 impl PromptState<'_> {
@@ -880,6 +890,7 @@ pub struct PromptSession {
     answers: Vec<Answer>,
     current: Option<Prompt>,
     session: Session,
+    entry: PointEntry,
 }
 
 impl fmt::Debug for PromptSession {
@@ -913,6 +924,20 @@ impl PromptSession {
         session: &Session,
         snapshot: &Snapshot,
     ) -> (Self, Feedback) {
+        Self::start_with_entry(spec, preset, session, snapshot, PointEntry::new())
+    }
+
+    /// Like [`PromptSession::start`], with the point state `entry` (the last point, the host's
+    /// direction and the typed-input settings, usually [`PromptSession::carry`] of the previous
+    /// session). A locked direction does not carry over and is released.
+    pub fn start_with_entry(
+        spec: Arc<CommandSpec>,
+        preset: Map<String, Value>,
+        session: &Session,
+        snapshot: &Snapshot,
+        mut entry: PointEntry,
+    ) -> (Self, Feedback) {
+        entry.unlock();
         let machine = spec.prompt().cloned().unwrap_or_else(|| {
             Arc::new(PromptSequence::from_schema(spec.params_schema())) as Arc<dyn PromptMachine>
         });
@@ -923,6 +948,7 @@ impl PromptSession {
             answers: Vec::new(),
             current: None,
             session: session.clone(),
+            entry,
         };
         let feedback = this.advance(snapshot, None);
         (this, feedback)
@@ -952,11 +978,49 @@ impl PromptSession {
         &self.preset
     }
 
+    /// The point state: the host's settings, direction and lock.
+    #[must_use]
+    pub fn point_entry(&self) -> &PointEntry {
+        &self.entry
+    }
+
+    /// The point state, for the host to set the direction, the defaults or the transform before
+    /// answering. The last point the host sets here is used until a point is answered.
+    pub fn point_entry_mut(&mut self) -> &mut PointEntry {
+        &mut self.entry
+    }
+
+    /// The last point: the latest accepted point answer of this session, else the point the host
+    /// set on the entry.
+    #[must_use]
+    pub fn last_point(&self) -> Option<Point> {
+        self.answers
+            .iter()
+            .rev()
+            .find_map(|a| match &a.input {
+                PromptInput::Point(p) => Some(*p),
+                _ => None,
+            })
+            .or_else(|| self.entry.last_point())
+    }
+
+    /// The point state a following session starts with (see
+    /// [`PromptSession::start_with_entry`]): this session's settings and direction, its last
+    /// point, and no locked direction.
+    #[must_use]
+    pub fn carry(&self) -> PointEntry {
+        let mut entry = self.entry.clone().with_last_point(self.last_point());
+        entry.unlock();
+        entry
+    }
+
     fn state<'s>(&'s self, snapshot: &'s Snapshot) -> PromptState<'s> {
         PromptState {
             preset: &self.preset,
             answers: &self.answers,
             snapshot,
+            base: self.last_point(),
+            direction: self.entry.effective_direction(),
         }
     }
 
@@ -1055,6 +1119,10 @@ impl PromptSession {
         if let Err(error) = guarded(|| machine.check(&state, &prompt, &input)) {
             return self.rejected(error);
         }
+        if matches!(input, PromptInput::Point(_)) {
+            // An accepted point ends a direction lock: the next distance measures from it.
+            self.entry.unlock();
+        }
         self.answers.push(Answer {
             key: prompt.key,
             input,
@@ -1092,8 +1160,26 @@ impl PromptSession {
             return self.answer(PromptInput::Keyword(option), snapshot);
         }
         let mut first_error = None;
+        let last = self.last_point();
         for accept in &prompt.accepts {
-            match read(accept, text, &self.session) {
+            let read_result = match accept {
+                Accept::Point { .. } => {
+                    match coordinates::read(text, &self.session, &self.entry, last) {
+                        // `<angle` locks a direction and keeps the prompt.
+                        Some(Ok(coordinates::Read::Lock(direction))) => {
+                            self.entry.lock(direction);
+                            return Feedback::Ask(prompt);
+                        }
+                        Some(Ok(coordinates::Read::Point(point))) => {
+                            Some(Ok(PromptInput::Point(point)))
+                        }
+                        Some(Err(error)) => Some(Err(error)),
+                        None => None,
+                    }
+                }
+                _ => read(accept, text, &self.session),
+            };
+            match read_result {
                 Some(Ok(input)) => match admit(accept, &input, snapshot, &self.session) {
                     Some(Ok(())) => return self.answer(input, snapshot),
                     Some(Err(error)) => {
@@ -1176,29 +1262,10 @@ fn quantity(text: &str, session: &Session, dimension: Dimension) -> Result<Quant
 /// Reads typed text as one accepted kind: `None` when the text does not have that kind's form.
 fn read(accept: &Accept, text: &str, session: &Session) -> Option<Result<PromptInput>> {
     Some(match accept {
-        Accept::Point { .. } => {
-            let parts = line::split_top_level(text, ',');
-            if !(2..=3).contains(&parts.len()) {
-                return None;
-            }
-            let coordinates: Result<Vec<f64>> = parts
-                .iter()
-                .map(|part| quantity(part, session, Dimension::LENGTH).map(Quantity::value))
-                .collect();
-            coordinates.map(|c| {
-                PromptInput::Point(Point {
-                    x: c.first().copied().unwrap_or_default(),
-                    y: c.get(1).copied().unwrap_or_default(),
-                    z: c.get(2).copied(),
-                })
-            })
-        }
-        Accept::Distance { .. } => {
-            quantity(text, session, Dimension::LENGTH).map(|q| PromptInput::Distance(q.value()))
-        }
-        Accept::Angle { .. } => {
-            quantity(text, session, Dimension::ANGLE).map(|q| PromptInput::Angle(q.value()))
-        }
+        // Points are read by `coordinates::read`, which needs the session's point entry.
+        Accept::Point { .. } => return None,
+        Accept::Distance { .. } => coordinates::length(text, session).map(PromptInput::Distance),
+        Accept::Angle { .. } => coordinates::angle(text, session).map(PromptInput::Angle),
         Accept::Number { dimension, .. } => {
             quantity(text, session, *dimension).map(PromptInput::Number)
         }

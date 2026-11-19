@@ -255,9 +255,57 @@ The modules are `prompt` (CORE-CMD-011), `line` (CORE-CMD-013) and `command_line
   separator and the session's context unit of the dimension for bare numbers (so
   `1200 mm + 3 in` is a distance, and an angle prompt needs an angle context unit for bare
   numbers); an expression is kept as text; a pick is an identifier text; a selection is
-  identifier texts separated by commas or whitespace; a text is the text. The architecture
-  defines no relative or polar coordinate entry, so only absolute `x,y[,z]` is read. Text no kind
-  reads is `cmd.prompt.unreadable`; text a kind reads but rejects reports that kind's error.
+  identifier texts separated by commas or whitespace; a text is the text. Text no kind reads is
+  `cmd.prompt.unreadable`; text a kind reads but rejects reports that kind's error.
+- **Typed points** (point prompts only). Points are read in this order after keyword options:
+
+  ```ebnf
+  point      = last | coordinate | lock | direct ;
+  last       = [ "*" ] , "@" ;                      (* the last point *)
+  coordinate = [ "*" ] , [ "#" | "@" ] , ( cartesian | polar ) ;
+  cartesian  = length , "," , length , [ "," , length ] ;
+  polar      = length , "<" , angle ;               (* distance and angle from the origin or last point *)
+  lock       = "<" , angle ;                        (* no prefix: locks a direction *)
+  direct     = length ;                             (* no prefix, comma or "<": a distance *)
+  ```
+
+  Whitespace is allowed around the whole text, after a prefix and around `,` and `<`. The text is
+  at most 256 bytes (`cmd.prompt.limit_exceeded`, detail `limit` `point_bytes`).
+  - `*` reads the coordinate in world coordinates; without it, a coordinate is in the user
+    coordinate system (the session's plane transform, identity by default). A relative or polar
+    offset is mapped by the transform's linear part only.
+  - `#` forces absolute, `@` forces relative to the last point. Without a prefix the entry's
+    relative default applies (absolute by default). `@` alone is the last point.
+  - A polar `distance<angle` is measured from the origin of the coordinate system when absolute,
+    and from the last point when relative.
+  - Angles are counterclockwise from the positive X axis of the coordinate system, in radians
+    internally. The architecture defines no session angle base, so no other base exists. A
+    surveyor bearing counts counterclockwise from east.
+  - A direct distance places the point at the distance along the effective direction from the
+    last point: the direction locked by `<angle` if any, else the host's pointer direction. It
+    takes the length context unit for a bare number.
+  - `<angle` locks the direction for the next point answer and keeps the prompt. An accepted
+    point, typed or from the pointer, releases the lock.
+  - Relative, polar and direct forms need a last point, else `cmd.prompt.no_base`; a direct
+    distance needs a direction, else `cmd.prompt.no_direction`. A result that is not finite is
+    `cmd.prompt.range` with the reason `not_finite`.
+  - Lengths are read by the solver of `arc-solve`, then by the architectural notation of
+    `arc_base::DisplayFormat` (feet and inches, fractions); angles by the solver, then by
+    degrees-minutes-seconds and surveyor bearings of the same type. A bare number needs the
+    session's context unit of its dimension, as in other prompts. Grads and radians are read by
+    the solver's unit names.
+  - A distance or angle prompt reads the same lengths and angles (notations included) and no
+    point form; a point form on those prompts is `cmd.prompt.unreadable` or the reader's error.
+
+- **Point state** (`PointEntry`, held by the prompt session): the last point the host sets
+  (`set_last_point`), the host's pointer direction (`set_direction`, normalized to a unit vector
+  in the plane), the locked direction, the relative default (`set_relative_default`, absolute by
+  default), and the plane transform (`set_transform`, identity by default). The session's last
+  point is its latest accepted point, else the entry's. `PromptSession::carry()` gives the entry a
+  following session starts with (`start_with_entry`): the last point of this session and its
+  settings, without a lock. `PromptState::base` and `PromptState::direction` expose the last point
+  and the effective direction to a machine, so a host can draw the rubber band in `preview`.
+  A host supplies the pointer direction before answering; the defaults above apply until it does.
 
 ### Command-line grammar
 
@@ -345,6 +393,25 @@ group      = "(" , { group | char - ( "(" | ")" ) } , ")" ;
   while another prompt is active), and `group_open`, when the command is undoable and the
   document has an open undo group, or controls undo. A `not_undoable` transparent command
   runs inside a group.
+- **Point state.** `CommandLine` keeps one `PointEntry` for its lifetime (the grammar is in
+  [Typed points](#prompt-sessions)). Each prompt session starts with it (`start_with_entry`) and
+  hands its state back when it ends (`carry`), whether it completes, is cancelled, fails, or is
+  replaced by `start`. So a first typed point of a new command measures from the last point of
+  the previous command, and the settings (relative default, transform, pointer direction) persist
+  across commands.
+  - A cancelled command keeps the points it accepted; a cancel before any point keeps the line's
+    previous last point.
+  - A transparent command runs without a prompt session, so it cannot accept a point; it leaves
+    the point state of the interrupted prompt untouched and hands nothing back.
+  - A direction lock lasts until the next accepted point and is not carried to the next command.
+  - Host setters (`set_pointer_direction`, `set_last_point`, `set_relative_default`,
+    `set_transform`) apply to the line and to the active session, so the active prompt sees
+    them at once. An active session that already accepted a point keeps its own last point, as
+    the session's last point is its latest accepted point. Invalid values are refused with no
+    change.
+  - Getters: `point_entry`, `base_point` and `direction` for a rubber band; a surface draws from
+    these or from `PromptState` in `preview`.
+  - A command typed in full on the line (no prompt session) does not set the line's last point.
 - **Drive.** `drive(target, step, runner)` takes one `LineStep` (start, submit, answer, back,
   repeat, transparent) like the method of the same name, except that each completed invocation goes to the
   caller's `runner` instead of `Invoker::invoke`; the runner's outcome or error is the run's.
@@ -456,6 +523,10 @@ of the recorded one.
   the recorded identifiers. A step without a revision (a batch list line) mixes in an
   order-independent digest of the identifiers of the objects present when playback starts,
   because a package opened again starts at revision 0 and would otherwise repeat identifiers.
+- **Typed points are stored resolved.** A recorded step holds the invocation's canonical line,
+  whose parameters are the values the command ran with: a point typed as `@1,0` is recorded as
+  its absolute coordinates. Playback parses those lines and does not use the point state, so it
+  reproduces the points whatever the line's last point is at playback.
 - **No undo steps.** A macro cannot undo or redo. Playback is one undo group, and the document
   refuses an undo inside an open group. A step that ends the group would make playback split into
   several undo steps and break its promise that a failure leaves the content as before playback,
@@ -826,6 +897,8 @@ gives `validate <file>` the package check, so parameter validation is the separa
 | `cmd.prompt.range` | `invalid_input` | The answer is outside the prompt's constraints; the detail `reason` says which |
 | `cmd.prompt.object` | `invalid_input` | A picked or selected object does not exist or has a type the prompt does not accept |
 | `cmd.prompt.unreadable` | `invalid_input` | Typed text cannot be read as any input the prompt accepts |
+| `cmd.prompt.no_base` | `invalid_input` | A relative, polar or direct typed point has no last point to measure from |
+| `cmd.prompt.no_direction` | `invalid_input` | A direct distance has neither a host direction nor a locked one |
 | `cmd.prompt.no_default` | `invalid_input` | Enter was given to a prompt without a default |
 | `cmd.prompt.invalid` | `internal` | A prompt machine produced a prompt that accepts nothing or has malformed keyword options |
 | `cmd.prompt.limit_exceeded` | `limit_exceeded` | An answer or the number of answers exceeds a limit |

@@ -135,6 +135,18 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "cmd-prompt-unreadable",
     };
+    /// A relative or direct typed point, or `@` alone, has no last point to measure from.
+    pub const PROMPT_NO_BASE: ErrorCode = ErrorCode {
+        code: "cmd.prompt.no_base",
+        category: Category::InvalidInput,
+        message_id: "cmd-prompt-no-base",
+    };
+    /// A direct distance has no direction: the host set none and `<angle` locked none.
+    pub const PROMPT_NO_DIRECTION: ErrorCode = ErrorCode {
+        code: "cmd.prompt.no_direction",
+        category: Category::InvalidInput,
+        message_id: "cmd-prompt-no-direction",
+    };
     /// Enter was given to a prompt without a default.
     pub const PROMPT_NO_DEFAULT: ErrorCode = ErrorCode {
         code: "cmd.prompt.no_default",
@@ -483,6 +495,8 @@ pub mod codes {
         PROMPT_RANGE,
         PROMPT_OBJECT,
         PROMPT_UNREADABLE,
+        PROMPT_NO_BASE,
+        PROMPT_NO_DIRECTION,
         PROMPT_NO_DEFAULT,
         PROMPT_INVALID,
         PROMPT_LIMIT_EXCEEDED,

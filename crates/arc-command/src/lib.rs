@@ -88,8 +88,9 @@ pub use macros::{
     Macro, MacroHeader, MacroInput, MacroStep, Recorder, parse_macro, play, play_with,
 };
 pub use prompt::{
-    Accept, Answer, Feedback, KeywordOption, Message, Point, PointDims, Prompt, PromptInput,
-    PromptMachine, PromptSequence, PromptSession, PromptState, PromptStep, Step,
+    Accept, Answer, Feedback, KeywordOption, Message, PlaneTransform, Point, PointDims, PointEntry,
+    Prompt, PromptInput, PromptMachine, PromptSequence, PromptSession, PromptState, PromptStep,
+    Step,
 };
 pub use protocol::{Log, LogLevel, NoLog, Server, ServerConfig, ViewRenderer, ViewRequest};
 pub use registry::{CATALOG_FORMAT, CATALOG_VERSION, Registry, Resolved, Via};
