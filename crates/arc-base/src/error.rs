@@ -123,6 +123,31 @@ pub mod codes {
         category: Category::Cancelled,
         message_id: "base-cancelled",
     };
+    /// The quantity does not have the dimension the notation writes.
+    pub const DISPLAY_NOTATION_MISMATCH: ErrorCode = ErrorCode {
+        code: "base.display.notation_mismatch",
+        category: Category::InvalidInput,
+        message_id: "base-display-notation-mismatch",
+    };
+    /// A notation parameter is not supported: an inch denominator that is not a power of two from
+    /// 1 to 256, or a seconds precision above 9.
+    pub const DISPLAY_INVALID_NOTATION: ErrorCode = ErrorCode {
+        code: "base.display.invalid_notation",
+        category: Category::InvalidInput,
+        message_id: "base-display-invalid-notation",
+    };
+    /// A value is not finite or too large to write in the notation.
+    pub const DISPLAY_VALUE_OUT_OF_RANGE: ErrorCode = ErrorCode {
+        code: "base.display.value_out_of_range",
+        category: Category::InvalidInput,
+        message_id: "base-display-value-out-of-range",
+    };
+    /// A text is not a value in the notation it is parsed as.
+    pub const DISPLAY_PARSE_INVALID: ErrorCode = ErrorCode {
+        code: "base.display.parse_invalid",
+        category: Category::InvalidInput,
+        message_id: "base-display-parse-invalid",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -131,6 +156,10 @@ pub mod codes {
         UNIT_UNKNOWN,
         DISPLAY_INVALID_INCREMENT,
         CANCELLED,
+        DISPLAY_NOTATION_MISMATCH,
+        DISPLAY_INVALID_NOTATION,
+        DISPLAY_VALUE_OUT_OF_RANGE,
+        DISPLAY_PARSE_INVALID,
     ];
 }
 

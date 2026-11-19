@@ -35,7 +35,8 @@ namespace), and any default display-unit choice for a product's documents.
 | `DisplayUnits` | Per-dimension display unit, precision, rounding increment and format style |
 | `Tolerance` | Linear, angular, parametric and tessellation tolerances with defaults |
 | `Error` | Category, stable code, message identifier, arguments, source chain |
-| `Color` | Linear RGBA `f32`; source kind (explicit, indexed, from layer, from block, from material) |
+| `Color` | Linear RGBA `f32`; `ColorSource` records where a color comes from (explicit, indexed, named, by layer, by block, material) |
+| `Notation` | How a `DisplayFormat` writes a quantity: decimal, architectural feet and inches, degrees-minutes-seconds or surveyor bearing |
 | `CrsRecord` | Local origin, survey point, rotation to grid north, CRS identifier string, vertical datum |
 | `Limits` | A named profile of hostile-input limits |
 | `Cancel` | Shared cancellation token with a checked `is_cancelled` |
@@ -105,6 +106,10 @@ The codes `arc-base` owns. A code is never reused for a different meaning; messa
 | `base.unit.dimension_mismatch` | `invalid_input` | Quantities or units of different dimensions are added, subtracted, compared or converted |
 | `base.unit.unknown` | `not_found` | A unit name or symbol is not in the built-in registry |
 | `base.display.invalid_increment` | `invalid_input` | A display rounding increment is not a positive finite number |
+| `base.display.notation_mismatch` | `invalid_input` | A quantity of another dimension is written as feet and inches (length) or as an angle notation (angle) |
+| `base.display.invalid_notation` | `invalid_input` | An inch denominator is not a power of two from 1 to 256, or a seconds precision is above 9 |
+| `base.display.value_out_of_range` | `invalid_input` | A value to write is not finite or is too large for the notation |
+| `base.display.parse_invalid` | `invalid_input` | Text is not a value in the notation it is parsed as, or is longer than 256 characters |
 | `base.cancelled` | `cancelled` | An operation observed a cancelled token |
 
 ### Color and math
@@ -122,3 +127,76 @@ The codes `arc-base` owns. A code is never reused for a different meaning; messa
 |---|---|---|---|---|
 | CORE-BASE-023 | Coordinate reference record | Stores a local origin, survey point, rotation to grid north, CRS identifier and vertical datum as data every document carries; transformations between local and project coordinates are exact affine operations. | T1 | 0 |
 | CORE-BASE-024 | Shared geodetic reference | Two documents with the same CRS record and survey point place each other's objects at identical project coordinates when linked. | T2 | 2 |
+
+## Notation and color details
+
+### Architectural and angle notations (CORE-BASE-009, CORE-BASE-010)
+
+`DisplayFormat::format_with` and `DisplayFormat::parse_with` take a `Notation`. `DisplayFormat::format`
+is the decimal notation and is unchanged.
+
+| Notation | Dimension | Example | Parameter |
+|---|---|---|---|
+| `Decimal` | any | `1.25 m` | the format's unit, precision, rounding increment and symbol |
+| `Architectural { denominator }` | length | `5'-3 1/2"` | a power of two from 1 to 256 |
+| `DegreesMinutesSeconds` | angle | `45°30'15"` | the format's precision, the decimals of the seconds (0 to 9) |
+| `SurveyorBearing` | angle | `N 45°30'15" E` | the format's precision, as above |
+
+The feet-and-inch and angle notations write their own units, so they ignore the format's unit, its
+rounding increment and `show_symbol`; the decimal separator applies to the seconds. Their marks are
+`'` and `"` for feet and inches, and `°`, `'` and `"` for angles.
+
+Rules shared by the notations:
+
+- Rounding happens once. Architectural values round to the nearest multiple of `1 / denominator` inch,
+  and angles round to the nearest unit of `10^-precision` seconds, with ties away from zero. Carries
+  then propagate through integer arithmetic: 11 31/32" written at denominator 32 is `11 31/32"`, and
+  11.99" at denominator 32 is `1'-0"`.
+- Architectural text writes the fraction in lowest terms. Feet appear only when they are not zero, but
+  when they appear the inches are always written (`1'-0"`). Zero is `0"`. A negative value has one
+  leading `-`; a value that rounds to zero has no sign.
+- Degrees are not padded; minutes and seconds have two digits. Trailing zeros of the seconds are removed
+  unless `trailing_zeros` is set, and the decimal point is removed with an empty fraction.
+- Surveyor bearings reduce the angle modulo 360 degrees before rounding, reduce the rounded count modulo
+  360 degrees again (so a count that rounds to 360 becomes 0), and select the quadrant from that count, so `89.9999999` at precision 0 is `N 90°00'00" E`. The quadrant
+  intervals are [0, 90], (90, 180], (180, 270] and (270, 360). The written angle lies in [0, 90].
+- Parsing reads the exact value of the text; it does not round. Architectural fractions may have any
+  denominator from 1 to 256 and need not be reduced. Feet-and-inch text accepts `5'-3 1/2"`,
+  `5' 3 1/2"`, `3 1/2"`, `1/2"` and `5'`. Angle text accepts `45°30'15.5"`, with minutes and seconds
+  optional, and `N 45°30'15" E`. Minutes and seconds of 60 or more are rejected. A bearing angle
+  outside [0, 90] is rejected. `N 0°00'00" W` reads as 0 degrees.
+- `Notation` is a parameter of the two methods, not a field of `DisplayFormat`. The struct keeps its
+  layout, so existing literal constructions compile unchanged. Storing a notation in a document needs a
+  separate change to the stored display record.
+
+### Indexed palette (CORE-BASE-020)
+
+`INDEXED_PALETTE` holds the 256 entries of the indexed color table as sRGB bytes; `indexed_rgb` reads
+an entry. Index 0 is black, which the DXF format uses as its by-block marker; the by-layer marker (256)
+is not a palette entry.
+
+`nearest_index` returns the entry nearest to an sRGB color by Euclidean distance in OKLab. Every entry
+is a candidate, including index 0, so black maps to 0. When entries are equally near, the lowest index
+wins. Consequently an entry maps to itself or to an earlier entry with identical bytes. A format that
+cannot write index 0 must handle black before it calls `nearest_index`.
+
+### Color sources (CORE-BASE-021)
+
+`ColorSource` records where a color comes from without resolving it:
+
+| Variant | Meaning | `direct_color` |
+|---|---|---|
+| `Explicit(Color)` | A color given directly | the color |
+| `Indexed(u8)` | An indexed palette entry | the palette color |
+| `Named(String)` | A name from a document color table | none |
+| `ByLayer` | The color of the object's layer | none |
+| `ByBlock` | The color of the inserting block reference | none |
+| `Material(ObjectId)` | The color of a material object | none |
+
+Serialized variants use snake_case tags, for example `"by_layer"` and `{"indexed":3}`.
+
+The stored document value in `arc-doc` has only `Indexed` and `Named`, and its encoding is part of the
+stored payload. `arc-base` cannot depend on `arc-doc`, so the two types are not converted in this crate.
+Adopting `ColorSource` in documents needs a payload version change, with fixtures and an ADR, because
+it adds variants to a stored encoding. `arc-draft` resolves layer and block colors through its own
+appearance settings; it keeps those settings in place until the document encoding changes.

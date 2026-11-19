@@ -19,3 +19,7 @@ base-unit-dimension-mismatch = Nicelikler farklı şeyleri ölçüyor ve birleş
 base-unit-unknown = { $name } birimi bilinmiyor.
 base-display-invalid-increment = Yuvarlama adımı pozitif bir sayı olmalıdır.
 base-cancelled = İşlem iptal edildi.
+base-display-notation-mismatch = Bu gösterim niceliğin boyutu için kullanılamaz.
+base-display-invalid-notation = Payda veya ondalık basamak sayısı desteklenmiyor.
+base-display-value-out-of-range = Değer sonlu değil ya da bu gösterim için çok büyük.
+base-display-parse-invalid = Metin bu gösterimde bir değer değil.

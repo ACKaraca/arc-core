@@ -21,7 +21,7 @@ pub mod tolerance;
 pub mod unit;
 
 pub use cancel::Cancel;
-pub use color::Color;
+pub use color::{Color, ColorSource};
 pub use crs::CrsRecord;
 pub use display::{DisplayFormat, DisplayUnits};
 pub use error::{Category, Error, ErrorCode, Result};
