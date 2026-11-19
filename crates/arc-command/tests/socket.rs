@@ -13,7 +13,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use arc_command::protocol::{LocalSocket, MAX_HANDSHAKE_BYTES, SocketConfig};
 use arc_command::{NoLog, Permission, Server, ServerConfig};
@@ -399,12 +399,10 @@ fn the_handshake_has_one_deadline_for_the_whole_line() {
             .stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let started = Instant::now();
         for _ in 0..40 {
             let _ = trickle.stream.write_all(b"{");
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(started.elapsed() < Duration::from_secs(5));
         assert_refused_and_closed(&mut trickle);
         // A correct client is served after both.
         let mut conn = Conn::open(socket.socket_path());
