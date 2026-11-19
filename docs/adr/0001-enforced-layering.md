@@ -110,3 +110,24 @@ Placing the readers in `arc-base` was rejected: it would move two third-party pa
 foundation that every crate depends on, although only the format family needs them. Placing them in
 `arc-io-exchange` was rejected for the same reason as a format-to-format edge. Every format crate
 that needs the readers keeps the same behavior and the same error codes by using one crate.
+
+## Amendment: DWG reader over a wrapped library
+
+`arc-io-dwg` is classed `layer(4)` and has one same-layer edge, `arc-io-dwg` to `arc-io-dxf`, in
+addition to its lower-layer dependencies (`arc-base`). It is in the WebAssembly set.
+
+The edge is needed because both crates produce one neutral drawing model: the specification requires
+DWG reading to return the model of the DXF reader, with its header, table, block, entity and loss
+report types, and to accept the DXF reader's options. The mapping from the wrapped library to that
+model belongs to the DWG crate, since the model and the reading options are the DXF crate's
+definitions. The invariant that format crates expose neutral models and never take product mapping
+is kept: the DWG crate maps to the neutral model and does not depend on any product crate.
+
+The wrapped library `acadrust` (MPL-2.0, unmodified) is a third-party dependency of this crate only.
+No other workspace crate depends on it, and its types appear in no public signature of the crate.
+
+The rejected alternatives are: placing the DWG reader in `arc-io-dxf`, which would make the DXF
+crate, and every crate above it, depend on a wrapped third-party library and would widen the
+WebAssembly set's third-party surface for a format that is only read in phase one; and a separate
+neutral model crate below both readers, which adds a crate and a layer for one shared type set that
+the DXF crate already defines.

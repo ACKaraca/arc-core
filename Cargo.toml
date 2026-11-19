@@ -32,6 +32,11 @@ arc-io-pdf = { path = "crates/arc-io-pdf" }
 arc-io-mesh = { path = "crates/arc-io-mesh" }
 arc-io-common = { path = "crates/arc-io-common" }
 arc-io-ifc = { path = "crates/arc-io-ifc" }
+arc-io-dwg = { path = "crates/arc-io-dwg" }
+
+# DWG reading in `arc-io-dwg`, wrapped behind a byte-level API; the default `parallel` feature
+# (rayon) stays off, the optional `import`, `serde` and `parallel` features stay off.
+acadrust = { version = "0.6.8", default-features = false }
 
 # Lock-free publication of document snapshots in `arc-doc`; the optional `serde` feature stays off.
 arc-swap = { version = "1.9.5", default-features = false }

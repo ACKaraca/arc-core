@@ -68,6 +68,15 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `miniz_oxide` | Raw deflate inflation of ZIP entries in `arc-io-common`, through the streaming API that caps the output; `with-alloc` only (no default features) | MIT OR Zlib OR Apache-2.0 |
 | `zip` | Bounded ZIP reading and writing | MIT |
 | `lyon` | Fill tessellation | MIT or Apache-2.0 |
+| `acadrust` | DWG reading behind `arc-io-dwg` (`default-features = false`); no other crate of the suite depends on it | MPL-2.0 |
+| `anyhow` | Error context inside `acadrust`, through `arc-io-dwg` | MIT OR Apache-2.0 |
+| `encoding_rs` | Legacy code-page decoding inside `acadrust` | (Apache-2.0 OR MIT) AND BSD-3-Clause |
+| `minimal-lexical` | Number parsing inside `acadrust` (through `nom`) | MIT/Apache-2.0 |
+| `multiversion_no_op` | Feature-detection shim pulled by `acadrust` | Apache-2.0 OR MIT |
+| `nom` | Parser combinators inside `acadrust` | MIT |
+| `oem_cp` | OEM code-page tables inside `acadrust` | MIT |
+| `phf`, `phf_shared` | Static lookup tables inside `acadrust` | MIT |
+| `ryu` | Number formatting inside `acadrust` | Apache-2.0 OR BSL-1.0 |
 | `resvg` | Icon and SVG rasterization | Apache-2.0 or MIT |
 | `egui` | The widget toolkit of `arc-ui` with its AccessKit tree, re-exported by `arc-ui` (no default features: no bundled fonts); `resvg` is used in `arc-ui` without default features (no text, system fonts, compressed SVG or raster images) | MIT or Apache-2.0 |
 | `winit` | Windows and the event loop of the windowed shell in `arc-app` (feature `window`; features `rwh_06`, `x11`, `wayland`, `wayland-dlopen` and `wayland-csd-adwaita-notitle`, no default features) | Apache-2.0 |

@@ -43,7 +43,7 @@ product could not map).
 | Crate | Arc | Third-party |
 |---|---|---|
 | `arc-io-dxf` | `arc-base`, `arc-geom` | none |
-| `arc-io-dwg` | `arc-base`, `arc-geom`, `arc-command` (worker jobs) | `acadrust` |
+| `arc-io-dwg` | `arc-base`, `arc-io-dxf` (neutral drawing model, reading options and loss report) | `acadrust` (MPL-2.0, wrapped behind the byte-level reader; see below) |
 | `arc-io-ifc` | `arc-base`, `arc-io-common` | `serde` (loss report only); the STEP physical file reader and the typed views are implemented in the crate from ISO 10303-21 and the published IFC schemas, so no third-party parser is used; the ZIP archive reader is `arc-io-common` |
 | `arc-io-step` | `arc-base`, `arc-brep`, `arc-command` (worker jobs) | none beyond the kernel tier |
 | `arc-io-mesh` | `arc-base`, `arc-mesh` | `serde` (loss report only); OBJ with MTL, STL and PLY are implemented in the crate; `gltf`, `threemf`, `image` and `exr` are for the formats that follow |
@@ -315,6 +315,134 @@ counts typed records. The crate leaves file name, hash, application and time emp
 
 The `io.*` codes without a format segment are registered here because this is the first crate of
 the family; they move to a shared registry when a second format crate needs them.
+
+## DWG reading as implemented
+
+`arc-io-dwg` is the first DWG part (CORE-IO-011). It reads DWG files of versions R13 to R2018 from
+bytes and returns the neutral drawing model of `arc-io-dxf` with a loss report. The file is read by
+the library `acadrust` 0.6.8 (MPL-2.0, used unmodified), which is wrapped so that no type of the
+library appears in a signature, a result or an error. The layer amendment and the reasons for the
+same-layer edge to `arc-io-dxf` are in [ADR-0001](../adr/0001-enforced-layering.md#amendment-dwg-reader-over-a-wrapped-library).
+The crate is in the WebAssembly set; its build for `wasm32-unknown-unknown` succeeds with the
+library's default features off.
+
+### Reading
+
+- `read(bytes, options)` takes the options of the DXF reader (`ReadOptions`: limits profile,
+  cancellation token and progress callback) and returns `ReadOutput`. The DWG file is never read by
+  path.
+- Before the library is called, two checks run in this order. The input size is compared with
+  `input_bytes`. The first six bytes must be `AC` followed by four digits, and the version they name
+  must be one of the signatures below.
+
+| Signature | Release |
+|---|---|
+| `AC1012` | R13 |
+| `AC1014` | R14 |
+| `AC1015` | R2000 |
+| `AC1018` | R2004 |
+| `AC1021` | R2007 |
+| `AC1024` | R2010 |
+| `AC1027` | R2013 |
+| `AC1032` | R2018 |
+
+  Four-digit signatures outside the table, such as R12 (`AC1009`), are refused with
+  `io.dwg.version_unsupported`. Input that does not begin with `AC` and four digits, including the
+  `AD` prefix, is refused with `io.dwg.signature_invalid`. The release names follow the version
+  families the library documents.
+- The library reads the bytes through a cursor. Its decompression budget is the profile's
+  `decompressed_bytes`. The failsafe mode of the library is off: a damaged file is an error, not a
+  repaired drawing. A budget refusal of the library is reported as `io.limit_exceeded` with the
+  argument `limit` set to `decompressed_bytes`; the refusal is recognized by the library's message
+  text, and a test of this crate fails if that text changes.
+- The call into the library is wrapped in `std::panic::catch_unwind`. A panic becomes
+  `io.dwg.library_failed`. This does not protect against aborts, stack overflows or unbounded memory
+  use inside the library. Running the call in `arc-worker` is the intended hardening; it is not part
+  of this unit (CORE-IO-013).
+- After the library returns, the model is checked against the profile: `record_count` counts every
+  entity, block entity and table entry; `array_length` bounds the vertices, control and fit points,
+  knots, boundary paths, pattern lines and dashes, linetype elements and preview bytes of each record; `string_bytes` bounds every text value and
+  name. A failure is `io.limit_exceeded` naming the field. These limits bound the mapped model; the
+  library has already allocated the file when they apply.
+- Cancellation is checked before the library call, after it, and before every record of the mapping.
+  The library call cannot be cancelled once it has started. Progress is reported while the drawing is
+  mapped, every 1024 records and at the end; the total is the number of entities.
+- A number that is not finite is not passed through. The record that holds it is skipped and counted
+  in `io.dwg.value_skipped`.
+
+### Mapping
+
+| Library data | Neutral model |
+|---|---|
+| Header variables `$INSUNITS`, `$LTSCALE`, `$MEASUREMENT`, `$CLAYER` | Header variables with their group codes; all other header variables are counted as one item of `io.dwg.header_dropped` |
+| Layers | LAYER entries: color number (negative when the layer is off), true color, linetype name, plot flag, lineweight; flags frozen (1), frozen in new viewports (2) and locked (4) |
+| Linetypes | LTYPE entries: description, alignment, pattern length and element lengths; complex elements are partial |
+| Text styles | STYLE entries: height, width factor, oblique angle, last height, font names, generation flags |
+| Application names, dimension style names | APPID and DIMSTYLE entries by name; dimension variables are partial |
+| Block records | BLOCK_RECORD entries: layout handle, explodable and scalable flags, preview bytes |
+| Block definitions | One block for each block record that is not a layout; its entities are the members of the definition |
+| Model space and paper space | Top-level entities; paper space entities carry the paper-space flag |
+| LINE, RAY, XLINE, CIRCLE, ARC, ELLIPSE, POINT | The same kinds; angles of arcs and points are converted from radians to degrees; ellipse parameters stay in radians, as the DXF model stores them |
+| LWPOLYLINE | Vertices with bulges, widths and ids; closed and plinegen flags |
+| POLYLINE (two-dimensional) | Polyline with its vertices; closed flag; smoothing is partial |
+| SPLINE | Knots, weights, control points, fit points, tangents, degree and flags |
+| TEXT, MTEXT | Text with height, rotation, width factor, oblique angle, style, alignments and attachment; MTEXT columns and background are partial |
+| INSERT | Block reference with scales, rotation, array counts and spacings, and its ATTRIB entities |
+| HATCH | Pattern name, solid and associative flags, pattern angle, scale and type, boundary paths, pattern lines and seed points. A path made of one polyline keeps the polyline form; other paths keep line, arc, ellipse and spline edges; polylines inside a multi-edge path become line edges and are partial |
+| DIMENSION | Definition, text and insertion points, type, text, style and block names; the geometry beyond these is partial |
+
+Entity types the model does not carry, and entities outside any block or layout, are counted in
+`io.dwg.entity_dropped` by type name. Objects, classes and notifications are counted in
+`io.dwg.object_dropped`. The view port, view, user coordinate system and VX tables are counted in
+`io.dwg.table_dropped`.
+
+Data of a mapped record that the model does not carry is named in the argument `properties` of the
+partial item for the record kind: `color`, `transparency`, `graphic_data`, `extended_data`,
+`references`, `knot_parameterization`, `smooth_surface`, `dimension_detail`, `mtext_columns`,
+`mtext_background`, `annotative`, `attribute_mtext`, `hatch_mpolygon`, `hatch_polyline_edges`,
+`plot_style`, `xref`, `true_type_font`, `shape_file`, `vertical`, `complex_elements`, `units`,
+`xref_path`, `description`, `insert_handles`, `dimension_variables`, `large_radial` and `alignment`. Only the first record of the
+group supplies the names; the count covers the whole group.
+
+### Loss reports
+
+Every successful read returns a `LossReport` in the form of `schemas/loss-report.schema.json`. The
+header has format `dwg`, the release name as version and the direction `import`. `summary.mapped`
+counts the entities of the model, the top-level and block members, that were carried.
+
+| Reason | Outcome |
+|---|---|
+| `io.dwg.header_dropped` | `dropped` |
+| `io.dwg.table_dropped` | `dropped` |
+| `io.dwg.table_entry_partial` | `approximated` |
+| `io.dwg.object_dropped` | `dropped` |
+| `io.dwg.entity_dropped` | `dropped` |
+| `io.dwg.entity_partial` | `approximated` |
+| `io.dwg.value_skipped` | `dropped` |
+
+### Error codes
+
+| Code | Category | Meaning |
+|---|---|---|
+| `io.dwg.signature_invalid` | `corrupt_data` | The input does not start with `AC` and four digits |
+| `io.dwg.version_unsupported` | `unsupported` | The signature names a version outside R13 to R2018; the argument `version` is the signature |
+| `io.dwg.truncated` | `corrupt_data` | The library reached the end of the input inside a structure it needs |
+| `io.dwg.structure_invalid` | `corrupt_data` | The library reports malformed structures, unknown handles or unsupported content |
+| `io.dwg.checksum_mismatch` | `corrupt_data` | A checksum stored in the file does not match its data |
+| `io.dwg.library_failed` | `internal` | The wrapped library panicked; the file was not read |
+
+The shared codes `io.limit_exceeded` (`limit_exceeded`) and `base.cancelled` (`cancelled`) apply as
+in the DXF reader. The limit code names the field of the profile in the argument `limit`.
+
+### Tests
+
+The tests are in `crates/arc-io-dwg/tests` and in the modules of the crate. A sample drawing is built
+in the test with the library's own writer, for each version from R13 to R2018, with layers, lines,
+an arc, text, a polyline, an mtext, a hatch, an unmapped solid and a block with an insert and an
+attribute. Its mapped values, the dropped and partial items, the limit errors, the signature and
+version checks, the truncation and the cancellation are asserted. Property tests read arbitrary
+bytes, bytes that start with a supported signature, and mutations of a valid file, and assert that
+no read unwinds or reports a library panic. No sample file is part of the repository.
 
 ## SVG and PDF output as implemented
 

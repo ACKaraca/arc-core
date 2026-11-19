@@ -10,7 +10,7 @@ Arc product depends on one tagged release of it; it contains no product function
 
 ## Status and where to start reading
 
-Foundation phase: the workspace, `xtask`, `arc-base` and the first parts of `arc-geom`, `arc-mesh`, `arc-solve`, `arc-doc`, `arc-command`, `arc-draft`, `arc-gpu`, `arc-ui`, `arc-app`, `arc-io-dxf`, `arc-io-pdf`, `arc-io-mesh`, `arc-draft-dxf`, `arc-io-common` and `arc-io-ifc`
+Foundation phase: the workspace, `xtask`, `arc-base` and the first parts of `arc-geom`, `arc-mesh`, `arc-solve`, `arc-doc`, `arc-command`, `arc-draft`, `arc-gpu`, `arc-ui`, `arc-app`, `arc-io-dxf`, `arc-io-pdf`, `arc-io-mesh`, `arc-draft-dxf`, `arc-io-common`, `arc-io-ifc` and `arc-io-dwg`
 exist, and the reference windowed shell `apps/arc-shell`, the reference headless CLI `apps/arc-shell-cli` and their sample set `arc-shell-sample` exist; every other crate is still a specification. Read, in order: [README.md](README.md),
 [docs/architecture/overview.md](docs/architecture/overview.md), the architecture document for your
 area, and the crate specification you are changing under [docs/crates](docs/crates/README.md).

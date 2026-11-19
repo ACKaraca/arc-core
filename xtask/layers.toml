@@ -32,6 +32,7 @@ wasm_deny = [
 # Third-party crates a workspace crate may depend on directly. Mirrors the crates of
 # docs/architecture/technology-baseline.md that are in use.
 third_party = [
+  "acadrust",
   "arc-swap",
   "blake3",
   "egui",
@@ -72,7 +73,7 @@ third_party = [
 ]
 
 # Crates built for wasm32-unknown-unknown by `cargo xtask wasm`.
-wasm = ["arc-base", "arc-geom", "arc-doc", "arc-mesh", "arc-solve", "arc-command", "arc-draft", "arc-ui", "arc-io-dxf", "arc-io-pdf", "arc-draft-dxf", "arc-io-mesh", "arc-io-common", "arc-io-ifc"]
+wasm = ["arc-base", "arc-geom", "arc-doc", "arc-mesh", "arc-solve", "arc-command", "arc-draft", "arc-ui", "arc-io-dxf", "arc-io-pdf", "arc-draft-dxf", "arc-io-mesh", "arc-io-common", "arc-io-ifc", "arc-io-dwg"]
 
 # Class of every workspace crate: layer(n), ffi(n), app, testkit or tool.
 [crates]
@@ -93,6 +94,9 @@ arc-io-dxf = "layer(4)"
 arc-io-mesh = "layer(4)"
 # The IFC reader (CORE-IO-014); its same-layer edge to arc-io-common is recorded in the ADR-0001 amendment.
 arc-io-ifc = "layer(4)"
+# The DWG reader over the wrapped library (CORE-IO-011); its same-layer edge to arc-io-dxf is recorded in the
+# ADR-0001 amendment "DWG reader over a wrapped library".
+arc-io-dwg = "layer(4)"
 # The shared bounded ZIP and XML readers (ADR-0001, amendment "Shared bounded ZIP and XML readers").
 arc-io-common = "layer(4)"
 arc-io-pdf = "layer(4)"
@@ -152,3 +156,7 @@ to = "arc-io-dxf"
 [[same_layer]]
 from = "arc-io-ifc"
 to = "arc-io-common"
+
+[[same_layer]]
+from = "arc-io-dwg"
+to = "arc-io-dxf"
