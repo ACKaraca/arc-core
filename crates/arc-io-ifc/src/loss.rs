@@ -187,16 +187,19 @@ pub(crate) const OVERFLOW_KIND: &str = "(overflow)";
 /// One aggregated item: reason, count, first source and arguments.
 type Entry = (Reason, u64, Option<String>, Vec<(String, Argument)>);
 
-/// Collects items while reading.
+/// Collects items while reading. Items are keyed by reason and then by record kind, so a lookup of
+/// an existing item borrows the kind and allocates nothing.
 #[derive(Debug, Default)]
 pub(crate) struct LossLog {
-    items: BTreeMap<(&'static str, String), Entry>,
+    items: BTreeMap<&'static str, BTreeMap<String, Entry>>,
+    distinct: usize,
     mapped: u64,
 }
 
 impl LossLog {
-    /// Adds `count` occurrences of `reason` for the record kind `kind`.
-    pub(crate) fn add(&mut self, reason: Reason, kind: &str, source: Option<&str>, count: u64) {
+    /// Adds `count` occurrences of `reason` for the record kind `kind`; `source` is the instance
+    /// name of the first occurrence.
+    pub(crate) fn add(&mut self, reason: Reason, kind: &str, source: Option<u64>, count: u64) {
         if reason.outcome == Outcome::Mapped {
             self.mapped = self.mapped.saturating_add(count);
             return;
@@ -204,26 +207,34 @@ impl LossLog {
         if count == 0 {
             return;
         }
-        // Past the cap, a new kind joins the overflow item of its reason.
-        let known = self.items.contains_key(&(reason.code, kind.to_owned()));
-        let kind = if known || self.items.len() < MAX_LOSS_ITEMS {
+        let distinct = self.distinct;
+        let by_kind = self.items.entry(reason.code).or_default();
+        // Past the cap, a new kind joins the overflow item of its reason, so the counts stay exact.
+        let key = if by_kind.contains_key(kind) || distinct < MAX_LOSS_ITEMS {
             kind
         } else {
             OVERFLOW_KIND
         };
-        let entry = self.items.entry((reason.code, kind.to_owned())).or_insert((
-            reason,
-            0,
-            None,
-            Vec::new(),
-        ));
-        entry.1 = entry.1.saturating_add(count);
-        if entry.2.is_none() {
-            entry.2 = source.map(str::to_owned);
+        if let Some(entry) = by_kind.get_mut(key) {
+            entry.1 = entry.1.saturating_add(count);
+            if entry.2.is_none() {
+                entry.2 = source.map(|name| name.to_string());
+            }
+            return;
         }
+        by_kind.insert(
+            key.to_owned(),
+            (
+                reason,
+                count,
+                source.map(|name| name.to_string()),
+                Vec::new(),
+            ),
+        );
+        self.distinct = self.distinct.saturating_add(1);
     }
 
-    /// Finishes the report: summary counts and items, ordered by reason and record kind.
+    /// Finishes the report: summary counts and items, ordered by reason code and record kind.
     pub(crate) fn finish(self, header: LossHeader) -> LossReport {
         let mut summary = LossSummary {
             mapped: self.mapped,
@@ -231,8 +242,9 @@ impl LossLog {
         };
         let items = self
             .items
-            .into_iter()
-            .map(|((_, kind), (reason, count, source, arguments))| {
+            .into_values()
+            .flat_map(BTreeMap::into_iter)
+            .map(|(kind, (reason, count, source, arguments))| {
                 let slot = match reason.outcome {
                     Outcome::Mapped => &mut summary.mapped,
                     Outcome::Approximated => &mut summary.approximated,

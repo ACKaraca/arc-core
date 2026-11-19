@@ -101,12 +101,18 @@ pub struct IfcFile {
     instances: Vec<Instance>,
     by_name: BTreeMap<u64, usize>,
     by_type: BTreeMap<String, Vec<usize>>,
+    parsed_bytes: u64,
 }
 
 impl IfcFile {
     /// Builds the file and its indexes. `instances` must have distinct names; the parser checks
     /// that before it calls this.
-    pub(crate) fn new(schema: Schema, header: Vec<Record>, instances: Vec<Instance>) -> Self {
+    pub(crate) fn new(
+        schema: Schema,
+        header: Vec<Record>,
+        instances: Vec<Instance>,
+        parsed_bytes: u64,
+    ) -> Self {
         let mut by_name = BTreeMap::new();
         let mut by_type: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (position, instance) in instances.iter().enumerate() {
@@ -124,7 +130,15 @@ impl IfcFile {
             instances,
             by_name,
             by_type,
+            parsed_bytes,
         }
+    }
+
+    /// The estimate of the memory the parser allocated for this file, the amount charged against
+    /// `memory_bytes` while reading. The typed views share the rest of `memory_bytes`.
+    #[must_use]
+    pub fn parsed_bytes(&self) -> u64 {
+        self.parsed_bytes
     }
 
     /// The instances of the data section, in file order.

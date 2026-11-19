@@ -208,7 +208,7 @@ fn cycle_without_a_root_is_reported_and_nothing_hangs() {
 
 #[test]
 fn nesting_beyond_the_hard_cap_is_refused_whatever_the_profile() {
-    // The profile allows any depth; the parser still stops at its own cap of 256 levels.
+    // The profile allows any depth; the parser still stops at its own cap of 64 levels.
     let limits = Limits {
         nesting_depth: u32::MAX,
         ..Limits::CONSTRAINED
@@ -220,7 +220,7 @@ fn nesting_beyond_the_hard_cap_is_refused_whatever_the_profile() {
     )
     .unwrap_err();
     assert_eq!(error.code(), "io.limit_exceeded");
-    let within = format!("#1=IFCX({}1{});", "(".repeat(200), ")".repeat(200));
+    let within = format!("#1=IFCX({}1{});", "(".repeat(60), ")".repeat(60));
     assert!(
         read(
             file(&within).as_bytes(),

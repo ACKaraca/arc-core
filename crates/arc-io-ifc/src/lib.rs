@@ -41,7 +41,9 @@ pub mod views;
 pub use error::{codes, reasons};
 pub use loss::{LossItem, LossReport, Outcome, Severity};
 pub use model::{IfcFile, Instance, Parameter, Record, Schema};
-pub use options::{Progress, ReadOptions, ReadOutput};
+#[cfg(not(target_arch = "wasm32"))]
+pub use options::SystemClock;
+pub use options::{Clock, Progress, ReadOptions, ReadOutput};
 pub use read::read;
 pub use views::{
     Nominal, Number, Property, PropertySet, PropertyValue, Quantity, QuantityKind, QuantitySet,

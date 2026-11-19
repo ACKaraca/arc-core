@@ -13,15 +13,50 @@ use arc_io_common::crc32::checksum;
 
 /// The minimal project in the given schema identifier: a project, a site, a building, two
 /// storeys, a space, two walls with a type, a property set with one property of each kind, and an
-/// element quantity set with one quantity of each kind. The body uses attribute positions that
-/// IFC2X3, IFC4 and IFC4X3 share for every attribute the typed views read.
+/// element quantity set with one quantity of each kind. IFC2X3 has no `Formula` attribute on the
+/// quantities and no `SetPointValue` on the bounded value, so its body is the IFC4 body with those
+/// lines in the IFC2X3 layout. The views read the same logical tree from both layouts.
 pub fn project(schema: &str) -> String {
+    let body = if schema.starts_with("IFC2X3") {
+        BODY.to_owned()
+            .replace(BOUNDED_4, BOUNDED_2X3)
+            .replace(QUANTITY_4[0], QUANTITY_2X3[0])
+            .replace(QUANTITY_4[1], QUANTITY_2X3[1])
+            .replace(QUANTITY_4[2], QUANTITY_2X3[2])
+            .replace(QUANTITY_4[3], QUANTITY_2X3[3])
+            .replace(QUANTITY_4[4], QUANTITY_2X3[4])
+            .replace(QUANTITY_4[5], QUANTITY_2X3[5])
+    } else {
+        BODY.to_owned()
+    };
     format!(
         "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('ViewDefinition []'),'2;1');\n\
 FILE_NAME('project.ifc','2026-01-01T00:00:00',(''),(''),'','','');\n\
-FILE_SCHEMA(('{schema}'));\nENDSEC;\nDATA;\n{BODY}ENDSEC;\nEND-ISO-10303-21;\n"
+FILE_SCHEMA(('{schema}'));\nENDSEC;\nDATA;\n{body}ENDSEC;\nEND-ISO-10303-21;\n"
     )
 }
+
+/// The IFC4 and IFC4X3 layouts of the bounded value and the quantities, and their IFC2X3 forms.
+const BOUNDED_4: &str =
+    "#24=IFCPROPERTYBOUNDEDVALUE('Thickness',$,IFCREAL(300.),IFCREAL(100.),#30,IFCREAL(200.));\n";
+const BOUNDED_2X3: &str =
+    "#24=IFCPROPERTYBOUNDEDVALUE('Thickness',$,IFCREAL(300.),IFCREAL(100.),#30);\n";
+const QUANTITY_4: [&str; 6] = [
+    "#40=IFCQUANTITYLENGTH('Length',$,#30,IFCLENGTHMEASURE(2500.),$);\n",
+    "#41=IFCQUANTITYAREA('GrossArea',$,$,IFCAREAMEASURE(12.5),$);\n",
+    "#42=IFCQUANTITYVOLUME('Volume',$,$,IFCVOLUMEMEASURE(1.25),$);\n",
+    "#43=IFCQUANTITYCOUNT('Count',$,$,IFCCOUNTMEASURE(4),$);\n",
+    "#44=IFCQUANTITYWEIGHT('Weight',$,$,IFCMASSMEASURE(250.),$);\n",
+    "#45=IFCQUANTITYTIME('Time',$,$,IFCTIMEMEASURE(3600.),$);\n",
+];
+const QUANTITY_2X3: [&str; 6] = [
+    "#40=IFCQUANTITYLENGTH('Length',$,#30,IFCLENGTHMEASURE(2500.));\n",
+    "#41=IFCQUANTITYAREA('GrossArea',$,$,IFCAREAMEASURE(12.5));\n",
+    "#42=IFCQUANTITYVOLUME('Volume',$,$,IFCVOLUMEMEASURE(1.25));\n",
+    "#43=IFCQUANTITYCOUNT('Count',$,$,IFCCOUNTMEASURE(4));\n",
+    "#44=IFCQUANTITYWEIGHT('Weight',$,$,IFCMASSMEASURE(250.));\n",
+    "#45=IFCQUANTITYTIME('Time',$,$,IFCTIMEMEASURE(3600.));\n",
+];
 
 const BODY: &str = "\
 #1=IFCPROJECT('0YvctVUKr0kugbFTf53O9L',$,'Demo Project','Project description',$,$,$,$,$);
@@ -66,47 +101,56 @@ fn le32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-/// A ZIP archive of stored entries: `(name, data)`. A name that ends in `/` with empty data is a
-/// directory entry. The archive is valid: CRCs and sizes are correct.
-pub fn zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+/// One archive entry: its name, its compression method (0 stored, 8 deflated), the payload as
+/// stored in the archive, and the original data the CRC and the size describe.
+pub struct Entry<'a> {
+    pub name: &'a str,
+    pub method: u16,
+    pub payload: &'a [u8],
+    pub original: &'a [u8],
+}
+
+/// A ZIP archive of entries, valid: CRCs and sizes describe the original data.
+pub fn zip_entries(entries: &[Entry<'_>]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut central = Vec::new();
-    for (name, data) in entries {
+    for entry in entries {
         let offset = out.len() as u32;
-        let crc = checksum(data);
-        let size = data.len() as u32;
+        let crc = checksum(entry.original);
+        let size = entry.original.len() as u32;
+        let packed = entry.payload.len() as u32;
         le32(&mut out, 0x0403_4B50);
         le16(&mut out, 20);
         le16(&mut out, 0);
-        le16(&mut out, 0);
+        le16(&mut out, entry.method);
         le16(&mut out, 0);
         le16(&mut out, 0);
         le32(&mut out, crc);
+        le32(&mut out, packed);
         le32(&mut out, size);
-        le32(&mut out, size);
-        le16(&mut out, name.len() as u16);
+        le16(&mut out, entry.name.len() as u16);
         le16(&mut out, 0);
-        out.extend_from_slice(name.as_bytes());
-        out.extend_from_slice(data);
+        out.extend_from_slice(entry.name.as_bytes());
+        out.extend_from_slice(entry.payload);
 
         le32(&mut central, 0x0201_4B50);
         le16(&mut central, 20);
         le16(&mut central, 20);
         le16(&mut central, 0);
-        le16(&mut central, 0);
+        le16(&mut central, entry.method);
         le16(&mut central, 0);
         le16(&mut central, 0);
         le32(&mut central, crc);
+        le32(&mut central, packed);
         le32(&mut central, size);
-        le32(&mut central, size);
-        le16(&mut central, name.len() as u16);
+        le16(&mut central, entry.name.len() as u16);
         le16(&mut central, 0);
         le16(&mut central, 0);
         le16(&mut central, 0);
         le16(&mut central, 0);
         le32(&mut central, 0);
         le32(&mut central, offset);
-        central.extend_from_slice(name.as_bytes());
+        central.extend_from_slice(entry.name.as_bytes());
     }
     let central_offset = out.len() as u32;
     let central_size = central.len() as u32;
@@ -120,4 +164,66 @@ pub fn zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
     le32(&mut out, central_offset);
     le16(&mut out, 0);
     out
+}
+
+/// A ZIP archive of stored entries: `(name, data)`. A name that ends in `/` with empty data is a
+/// directory entry. The archive is valid: CRCs and sizes are correct.
+pub fn zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let stored: Vec<Entry<'_>> = entries
+        .iter()
+        .map(|(name, data)| Entry {
+            name,
+            method: 0,
+            payload: data,
+            original: data,
+        })
+        .collect();
+    zip_entries(&stored)
+}
+
+/// A raw DEFLATE stream of fixed Huffman codes: one literal `a` and `matches` back-references of
+/// length 258 at distance 1. It inflates to `1 + 258 * matches` bytes from about two bytes per
+/// match, so an archive entry of it is small when packed and large when unpacked. Returns the
+/// stream and the bytes it inflates to.
+pub fn deflated_run(matches: usize) -> (Vec<u8>, Vec<u8>) {
+    struct Bits {
+        out: Vec<u8>,
+        used: u32,
+    }
+    impl Bits {
+        // Extra bits and block fields go in least significant bit first.
+        fn put(&mut self, value: u32, count: u32) {
+            for bit in 0..count {
+                if self.used.is_multiple_of(8) {
+                    self.out.push(0);
+                }
+                let last = self.out.len() - 1;
+                self.out[last] |= (((value >> bit) & 1) as u8) << (self.used % 8);
+                self.used += 1;
+            }
+        }
+        // Huffman codes go most significant bit first.
+        fn code(&mut self, code: u32, length: u32) {
+            for bit in (0..length).rev() {
+                self.put((code >> bit) & 1, 1);
+            }
+        }
+    }
+    let mut bits = Bits {
+        out: Vec::new(),
+        used: 0,
+    };
+    bits.put(1, 1); // final block
+    bits.put(1, 2); // fixed Huffman codes
+    bits.code(0x91, 8); // literal 'a' (97): 0x30 + 97
+    for _ in 0..matches {
+        bits.code(0xC5, 8); // length 258 (symbol 285)
+        bits.code(0, 5); // distance 1 (distance code 0)
+    }
+    bits.code(0, 7); // end of block (symbol 256)
+    let mut original = vec![b'a'];
+    for _ in 0..matches {
+        original.extend(std::iter::repeat_n(b'a', 258));
+    }
+    (bits.out, original)
 }

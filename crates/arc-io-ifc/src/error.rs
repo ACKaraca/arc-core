@@ -135,6 +135,73 @@ pub mod reasons {
         severity: Severity::Warning,
         message_id: "io-ifc-loss-cycle-cut",
     };
+    /// An element is placed a second time: a second parent, or a repeated pair in a relationship.
+    pub const DUPLICATE_PLACEMENT: Reason = Reason {
+        code: "io.ifc.duplicate_placement",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-duplicate-placement",
+    };
+    /// A relationship, property or quantity member names an instance that is missing or of a kind
+    /// the views cannot use; that member is not read.
+    pub const TARGET_MISSING: Reason = Reason {
+        code: "io.ifc.target_missing",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-target-missing",
+    };
+    /// An entity the views understand but cannot map (a property of another kind, a complex
+    /// property, an aggregation outside the spatial structure) is kept as generic instances.
+    pub const NOT_MAPPED: Reason = Reason {
+        code: "io.ifc.not_mapped",
+        outcome: Outcome::Preserved,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-not-mapped",
+    };
+    /// A section other than `DATA` (`ANCHOR`, `REFERENCE` or `SIGNATURE`) is skipped as a whole.
+    pub const SECTION_SKIPPED: Reason = Reason {
+        code: "io.ifc.section_skipped",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-section-skipped",
+    };
+    /// An archive entry that holds resource-fork or metadata data (`__MACOSX/` or a `._` file) is
+    /// not the model and is skipped.
+    pub const ARCHIVE_ENTRY_SKIPPED: Reason = Reason {
+        code: "io.ifc.archive_entry_skipped",
+        outcome: Outcome::Dropped,
+        severity: Severity::Info,
+        message_id: "io-ifc-loss-archive-entry-skipped",
+    };
+    /// A string holds bytes that are not UTF-8; each is read as ISO 8859-1.
+    pub const TEXT_LATIN1: Reason = Reason {
+        code: "io.ifc.text_latin1",
+        outcome: Outcome::Approximated,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-text-latin1",
+    };
+    /// A string holds a raw tab, carriage return or line feed, which is kept as it is.
+    pub const TEXT_CONTROL_KEPT: Reason = Reason {
+        code: "io.ifc.text_control_kept",
+        outcome: Outcome::Preserved,
+        severity: Severity::Info,
+        message_id: "io-ifc-loss-text-control-kept",
+    };
+    /// Bytes outside the sections are ignored: a UTF-8 byte order mark before the first keyword,
+    /// and white space, NUL and 0x1A padding after `END-ISO-10303-21;`.
+    pub const BYTES_IGNORED: Reason = Reason {
+        code: "io.ifc.bytes_ignored",
+        outcome: Outcome::Dropped,
+        severity: Severity::Info,
+        message_id: "io-ifc-loss-bytes-ignored",
+    };
+    /// Bytes after `END-ISO-10303-21;` that are not padding are reported and ignored.
+    pub const TRAILING_BYTES: Reason = Reason {
+        code: "io.ifc.trailing_bytes",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-trailing-bytes",
+    };
 
     /// Every reason of this crate, for the registry check.
     pub const ALL: &[Reason] = &[
@@ -143,6 +210,15 @@ pub mod reasons {
         SCHEMA_UNRECOGNIZED,
         VALUE_UNEXPECTED,
         CYCLE_CUT,
+        DUPLICATE_PLACEMENT,
+        TARGET_MISSING,
+        NOT_MAPPED,
+        SECTION_SKIPPED,
+        ARCHIVE_ENTRY_SKIPPED,
+        TEXT_LATIN1,
+        TEXT_CONTROL_KEPT,
+        BYTES_IGNORED,
+        TRAILING_BYTES,
     ];
 }
 

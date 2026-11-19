@@ -873,39 +873,64 @@ instances.
 ### Reading
 
 - `read(bytes, options)` takes the bytes of a physical file or of an archive. Bytes that begin with the
-  ZIP local header signature are an archive: it is opened with `arc-io-common` under the same limits,
-  and the one entry whose name ends in `.ifc` (compared in lower case; directory entries are ignored)
-  is read. An archive with no such entry fails with `io.ifc.archive_entry_missing`, and one with
-  several fails with `io.ifc.archive_entry_ambiguous`. Any other bytes are read as a physical file.
-- The physical file is `ISO-10303-21;`, the `HEADER;` section, `DATA;`, the instances, `ENDSEC;` and
-  `END-ISO-10303-21;`. The section keywords are case-sensitive; any content after the last `;` other
-  than white space and comments is refused. Comments `/* ... */` and white space (space, tab, carriage
-  return, line feed) are accepted between any two tokens and not inside a string.
+  ZIP local header signature are an archive. It is opened with `arc-io-common` under the same limits,
+  except that `decompressed_bytes` is lowered to the smaller of `decompressed_bytes` and `input_bytes`,
+  so no entry inflates beyond the input bound. Directory entries are ignored. Entries that hold
+  resource-fork or metadata data (a path with a `__MACOSX` component, or a base name that starts with
+  `._`) are skipped and counted as `io.ifc.archive_entry_skipped`. The one remaining entry whose name
+  ends in `.ifc` (compared in lower case) is read. An archive with no such entry fails with
+  `io.ifc.archive_entry_missing`, and one with several fails with `io.ifc.archive_entry_ambiguous`.
+  Any other bytes are read as a physical file.
+- The physical file is `ISO-10303-21;`, the `HEADER;` section, one or more `DATA;` sections, and
+  `END-ISO-10303-21;`. Between the header and the end, `ANCHOR`, `REFERENCE` and `SIGNATURE` sections
+  may appear in any order; each is parsed, dropped as a whole and counted as `io.ifc.section_skipped`.
+  A data section may carry a parenthesized parameter list (`DATA('x');`), which is parsed and not
+  used. The instances of all data sections form one list with one name space, so a name repeated in
+  two sections is refused. Section keywords are case-sensitive.
+- A UTF-8 byte order mark before `ISO-10303-21;` is skipped and counted as `io.ifc.bytes_ignored`.
+  After `END-ISO-10303-21;`, white space is ignored without a report, NUL and 0x1A bytes are ignored
+  and counted as `io.ifc.bytes_ignored`, and any other byte (a comment included) is ignored and counted
+  as `io.ifc.trailing_bytes`.
+- White space (space, tab, carriage return, line feed) and comments `/* ... */` are accepted between
+  any two tokens and not inside a string. An unterminated comment is truncation.
+- Words (entity type names, identifiers and parameter type names) are a letter, then letters, digits or
+  `_`. A word is at most 255 bytes; a longer one is `io.ifc.syntax`, and a word longer than
+  `string_bytes` is a `string_bytes` limit error. `-` is not part of a word, except in the section names
+  `ISO-10303-21` and `END-ISO-10303-21`. A user-defined word starts with `!`; the `!` is kept in the
+  type name. Entity type names are stored in upper case.
 - Header records are kept in file order (`FILE_DESCRIPTION`, `FILE_NAME`, `FILE_SCHEMA` and others);
   only the first identifier of `FILE_SCHEMA` is read, as the schema. An identifier with a suffix such as
   `_ADD2` or `_TC1` names the schema without it. Any other identifier is `Schema::Other`, with its
   identifier in upper case, and is read without a schema-specific reading.
 - Instances are `#n=TYPE(parameters);` for a simple instance and `#n=(TYPE(parameters)TYPE(parameters));`
-  for a complex instance, which keeps one record per part. Entity type names are stored in upper case.
-  Instance names are unique; a second instance with the same name is refused. Instances may refer to
-  instances declared later; references are resolved after the data section is read.
+  for a complex instance, which keeps one record per part. A complex instance with no record, `#n=();`,
+  is a syntax error. The instance name is a decimal number up to `u64::MAX`. Instance names are unique;
+  a second instance with the same name is refused. Instances may refer to instances declared later;
+  references are resolved after the data section is read.
 - Parameters: an integer (a sign and digits; the value must fit `i64`); a real (a point is required, the
   sign and the digits before the point are optional, and an exponent `E` with a sign is allowed; the
-  value must be finite; an exponent without a point is refused); a string (below); an enumeration such as
-  `.T.` (kept as written, without the dots); a binary literal (`"`, a digit from 0 to 3, hexadecimal
-  digits, `"`; kept as written); a reference `#n`; `$` (omitted); `*` (derived); a typed parameter
-  `TYPE(value)`, whose type name is stored in upper case; and a list `(...)`, which may be empty.
+  value must be finite; an exponent without a point is refused; a lowercase `e` is a syntax error); a
+  string (below); an enumeration such as `.T.` (kept as written, without the dots); a binary literal
+  (`"`, a digit from 0 to 3, hexadecimal digits, `"`; kept as written); a reference `#n`; `$` (omitted);
+  `*` (derived); a typed parameter `TYPE(value)`, whose type name is stored in upper case; and a list
+  `(...)`, which may be empty.
 - Strings: `''` stands for one apostrophe; `\\` for one backslash; `\S\c` for the character `c` with its
-  upper half set, and `\X\hh` for the byte `hh`, both in ISO 8859-1; `\P?\` selects the ISO 8859 page
-  whose letter is given, and only page `A` (ISO 8859-1) is decoded, so a string that selects another
-  page is refused; `\X2\...\X0\` holds UTF-16 code units in four hexadecimal digits each, and a surrogate
-  pair is combined; `\X4\...\X0\` holds code points in eight hexadecimal digits each. Bytes of the string
-  that are not part of an encoded form are taken as UTF-8. A control character (below 0x20) inside a
-  string, an encoded form that is malformed, and a decoded text that is not UTF-8 are refused with
-  `io.ifc.text_invalid`.
+  upper half set, in ISO 8859-1, and only while page `A` is selected; `\X\hh` for the character U+00hh,
+  whatever page is selected; `\X2\...\X0\` holds UTF-16 code units in four hexadecimal digits each, and a
+  surrogate pair is combined; `\X4\...\X0\` holds code points in eight hexadecimal digits each. Both
+  `\X2\` and `\X4\` denote Unicode characters whatever page is selected. `\P?\` selects the ISO 8859
+  page whose letter is given (`A` to `I`); pages other than `A` have no table, so `\S\` after one of them
+  is refused. A decoded U+0000, from any form, is refused as a raw NUL is. Raw bytes are UTF-8, except
+  that a byte that starts no well-formed UTF-8 sequence is read as ISO 8859-1 and counted
+  (`io.ifc.text_latin1`). A raw tab, carriage return or line feed is kept and counted
+  (`io.ifc.text_control_kept`). Any other raw control byte below 0x20 is refused.
 - What is not read: the content of the header beyond `FILE_SCHEMA` is not interpreted; the parameter
   count and the parameter types of an entity are not checked against the schema, and no WHERE rule is
   evaluated. An entity keeps the values its file gives, whatever the schema says of them.
+- Memory estimate: the parser charges an estimate of the memory it allocates against `memory_bytes`:
+  48 bytes per parameter, 64 bytes per record plus its type name, 96 bytes per instance, and the raw
+  length of each string, binary literal, enumeration and type name. The constants are in
+  `crates/arc-io-ifc/src/step.rs`. The estimate is kept on the file as `IfcFile::parsed_bytes`.
 
 ### The neutral model
 
@@ -913,52 +938,79 @@ instances.
 an instance by name with a binary search over an index built once when the file is read, and
 `instances_of(type)` iterates over the instances of a type through a second index, without a scan of
 all instances per query. `Instance` holds its name and its records; `Record` holds its type name and its
-parameters; `Parameter` is the enumeration of the parameter kinds above.
+parameters; `Parameter` is the enumeration of the parameter kinds above. `parsed_bytes()` is the memory
+estimate of the parser.
 
 ### Typed views
 
 `IfcFile::typed_views(limits, cancel)` returns `TypedViews`: the spatial structure, the type
 assignments, the property sets, the quantity sets and a loss report of the views.
 
+- Sharing: each distinct instance is materialized once per `TypedViews`. Entities, properties and
+  quantities are held in `Arc` values, and the spatial nodes, assignments and sets refer to them. A
+  name listed many times costs one value and a loss count for the repeats.
+- Lists: every list of related instance names is deduplicated while it is read; a repeated name in a
+  list, or a repeated pair in a relationship, is dropped and counted once per relationship and reason as
+  `io.ifc.duplicate_placement`.
+- Budget: the views charge the bytes they allocate (copied strings, values, the fixed size of each
+  struct and each shared reference) against `memory_bytes` minus `IfcFile::parsed_bytes()`, before the
+  allocation. They count the entries they emit against `record_count`. A failure is `io.limit_exceeded`
+  naming `memory_bytes` or `record_count`.
 - Rooted attributes are read from the positions `GlobalId` (0), `Name` (2) and `Description` (3) of any
   entity that has them. A wrongly typed value is read as absent and counted as dropped.
-- Spatial structure: `IfcProject`, `IfcSite`, `IfcBuilding`, `IfcBuildingStorey` and `IfcSpace`. The
-  aggregation relationships `IfcRelAggregates` (`RelatingObject` 4, `RelatedObjects` 5) link spatial
-  elements; the roots are the spatial elements that no spatial element aggregates, in file order, and
-  the children are in the order of the relationships. The elements contained in a spatial structure come
-  from `IfcRelContainedInSpatialStructure` (`RelatedElements` 4, `RelatingStructure` 5), in file order.
-  A spatial element reached a second time, through a cycle or through a second parent, is cut from the
-  tree and reported as `io.ifc.cycle_cut`; a cycle that no root reaches is reported the same way. The
-  depth of the tree is bounded by `nesting_depth` of the profile and by 256 whatever the profile says,
+- Spatial structure: `IfcProject`, `IfcSite`, `IfcBuilding`, `IfcBuildingStorey`, `IfcSpace`,
+  `IfcSpatialZone`, `IfcFacility`, `IfcFacilityPart`, `IfcRoad`, `IfcBridge`, `IfcRailway` and
+  `IfcMarineFacility`. The aggregation relationships `IfcRelAggregates` (`RelatingObject` 4,
+  `RelatedObjects` 5) link spatial elements. A child whose parent or whose own type is not spatial is
+  kept as a generic instance and counted as `io.ifc.not_mapped`; a name that is not in the file is
+  counted as `io.ifc.target_missing`. The roots are the spatial elements that no spatial element
+  aggregates, in file order, and the children are in the order of the relationships. The elements
+  contained in a spatial structure come from `IfcRelContainedInSpatialStructure` (`RelatedElements` 4,
+  `RelatingStructure` 5), in file order; a structure that is not spatial is `io.ifc.not_mapped`.
+- A child placed a second time, under a second parent or through a repeated pair, is not placed again
+  and is counted as `io.ifc.duplicate_placement`. A child on the path from its own root is a cycle, cut
+  and counted as `io.ifc.cycle_cut`; a spatial element that no root reaches is cut the same way. The
+  depth of the tree is bounded by `nesting_depth` of the profile and by 64 whatever the profile says,
   and a deeper tree fails with `io.limit_exceeded` naming `nesting_depth`.
 - Element types: `IfcRelDefinesByType` (`RelatedObjects` 4, `RelatingType` 5) gives a type assignment for
   each element.
 - Property sets: `IfcRelDefinesByProperties` (`RelatedObjects` 4, `RelatingPropertyDefinition` 5) assigns
-  an `IfcPropertySet` (`HasProperties` 4) to objects. The properties read are `IfcPropertySingleValue`
-  (`NominalValue` 2, `Unit` 3), `IfcPropertyEnumeratedValue` (`EnumerationValues` 2, `EnumerationReference`
-  3), `IfcPropertyListValue` (`ListValues` 2, `Unit` 3) and `IfcPropertyBoundedValue` (`UpperBoundValue` 2,
-  `LowerBoundValue` 3, `Unit` 4, `SetPointValue` 5), with `Name` 0 and `Description` 1 on each. A nominal
-  value is kept with its wrapping type when the file wraps it (`IFCLABEL('x')`) and is a text, a real, an
-  integer or an enumeration; `IFCBOOLEAN(.T.)` is the enumeration `T`. A unit is kept as the instance name
-  of its unit. Any other value kind is dropped and counted.
+  an `IfcPropertySet` (`HasProperties` 4) to objects. The definition may be one reference or the IFC4 form
+  `IFCPROPERTYSETDEFINITIONSET((#a,#b))`, whose members are read as the definitions. A definition that is
+  missing, or that is neither a property set nor an element quantity, is `io.ifc.target_missing`. The
+  properties read are `IfcPropertySingleValue` (`NominalValue` 2, `Unit` 3), `IfcPropertyEnumeratedValue`
+  (`EnumerationValues` 2, `EnumerationReference` 3), `IfcPropertyListValue` (`ListValues` 2, `Unit` 3) and
+  `IfcPropertyBoundedValue` (`UpperBoundValue` 2, `LowerBoundValue` 3, `Unit` 4, `SetPointValue` 5), with
+  `Name` 0 and `Description` 1 on each. `SetPointValue` exists in IFC4 and IFC4X3 only, so IFC2X3 gives no
+  set point. A property of another type, and a complex property, are `io.ifc.not_mapped`; another kind
+  of member is `io.ifc.target_missing`. A nominal value is kept with its wrapping type when the file wraps
+  it (`IFCLABEL('x')`) and is a text, a real, an integer or an enumeration; `IFCBOOLEAN(.T.)` is the
+  enumeration `T`. A unit is kept as the instance name of its unit. Any other value kind is dropped and
+  counted.
 - Quantity sets: `IfcElementQuantity` (`Quantities` 5) with `IfcQuantityLength`, `IfcQuantityArea`,
   `IfcQuantityVolume`, `IfcQuantityCount`, `IfcQuantityWeight` and `IfcQuantityTime`. Each quantity reads
-  `Name` 0, `Description` 1, `Unit` 2, its value at 3 and `Formula` 4. A count is an integer, the others
-  are reals; a measure wrapper such as `IFCAREAMEASURE(12.5)` is read through.
-- Schemas: the positions above agree in IFC2X3, IFC4 and IFC4X3 for every attribute the views read, so
-  the views do not consult the schema. The minimal project in each of the three schema identifiers is
-  tested; the schema of a file is available as `IfcFile::schema`.
+  `Name` 0, `Description` 1, `Unit` 2, its value at 3 and `Formula` 4. `Formula` exists in IFC4 and
+  IFC4X3 only, so IFC2X3 gives no formula. A count is an integer, the others are reals; a measure wrapper
+  such as `IFCAREAMEASURE(12.5)` is read through. Another quantity type is `io.ifc.not_mapped`.
+- Schemas: the reader reads attributes by position and does not consult the schema. The positions of the
+  rooted attributes, the relationships, the property values and the quantity values agree in IFC2X3, IFC4
+  and IFC4X3. The two exceptions are the layouts named above (`Formula` and `SetPointValue`), which are
+  absent in IFC2X3. The minimal project is tested in each schema identifier, with an IFC2X3 layout of its
+  quantities and bounded value; the schema of a file is available as `IfcFile::schema`.
+- A relationship member of the wrong kind drops that member only; the other members of the list are kept.
 - Entity types the views do not read stay generic instances and are not part of the views.
 
 ### Loss reports
 
 `read` returns a loss report of the read; `typed_views` returns a loss report of the views. Both are
-`LossReport` values in the form of `schemas/loss-report.schema.json`. The read reports every record of an
-entity type that the views do not read (`io.ifc.entity_preserved`, preserved), every reference to an
-instance that is not in the file (`io.ifc.reference_unresolved`, preserved; the reference is kept as it
-is), and a schema the reader does not know (`io.ifc.schema_unrecognized`, preserved). The views report
-values of the wrong kind (`io.ifc.value_unexpected`, dropped) and cut relationships (`io.ifc.cycle_cut`,
-dropped). This unit reports no mapped records, so the `mapped` count is zero.
+`LossReport` values in the form of `schemas/loss-report.schema.json`. Items are aggregated per reason and
+record kind, and the number of distinct items is capped (the overflow is one item per reason, with exact
+counts). The read reports every record of an entity type that the views do not read
+(`io.ifc.entity_preserved`), every reference to an instance that is not in the file
+(`io.ifc.reference_unresolved`), a schema the reader does not know (`io.ifc.schema_unrecognized`), and the
+leniency and skipping rules of the reading section. The views report values of the wrong kind
+(`io.ifc.value_unexpected`), placements and members they do not use, and cut relationships. This unit
+reports no mapped records, so the `mapped` count is zero.
 
 | Reason | Outcome |
 |---|---|
@@ -967,6 +1019,15 @@ dropped). This unit reports no mapped records, so the `mapped` count is zero.
 | `io.ifc.schema_unrecognized` | `preserved` |
 | `io.ifc.value_unexpected` | `dropped` |
 | `io.ifc.cycle_cut` | `dropped` |
+| `io.ifc.duplicate_placement` | `dropped` |
+| `io.ifc.target_missing` | `dropped` |
+| `io.ifc.not_mapped` | `preserved` |
+| `io.ifc.section_skipped` | `dropped` |
+| `io.ifc.archive_entry_skipped` | `dropped` |
+| `io.ifc.text_latin1` | `approximated` |
+| `io.ifc.text_control_kept` | `preserved` |
+| `io.ifc.bytes_ignored` | `dropped` |
+| `io.ifc.trailing_bytes` | `dropped` |
 
 ### Limits
 
@@ -975,15 +1036,25 @@ limit in the argument `limit` of `io.limit_exceeded`.
 
 | Limit | Enforced on |
 |---|---|
-| `input_bytes` | The input, before any parsing; each buffer of an archive entry is the same input |
+| `input_bytes` | The input, before any parsing; each buffer of an archive entry is the same input, and no archive entry inflates beyond it |
 | `decompressed_bytes`, `decompression_ratio` | The archive entry, through `arc-io-common` |
-| `record_count` | Instances of the data section |
+| `record_count` | Instances of the data section; the entries the views emit |
 | `array_length` | Parameters of a record, elements of a list, records of a complex instance, header records |
-| `nesting_depth` | Open parentheses (lists and typed parameters), and the depth of the spatial tree; at most 256 whatever the profile |
-| `string_bytes` | The raw content of a string, a binary literal and an enumeration |
+| `nesting_depth` | Open parentheses (lists and typed parameters), and the depth of the spatial tree; at most 64 whatever the profile |
+| `string_bytes` | The raw content of a string, a binary literal, an enumeration and a word |
+| `memory_bytes` | The parser's estimate of its allocations, then the bytes the views copy, from the share the parser left; `None` leaves the budget to the caller and nothing is checked |
+| `wall_clock_seconds` | The time between the start of the read and a check every 1024 parser steps, through the injected clock; `None` is unlimited |
 
-Cancellation is checked before each instance and each list element of the parser, and before each
-instance and each node of the views; a cancelled read returns `base.cancelled`.
+### Cancellation and time
+
+Cancellation is checked before each instance and each list element of the parser, after parsing and
+before the file is built, before each instance of the loss report, before each instance and each node of
+the views; a cancelled read returns `base.cancelled`.
+
+`ReadOptions::clock` supplies the monotonic time for the wall-clock limit (`Clock`, milliseconds from an
+origin of the source's choosing). The default is `SystemClock`, whose origin is its creation. On
+`wasm32-unknown-unknown` there is no default clock, because the system clock is not available there, so
+the wall-clock limit is not enforced unless the caller supplies a clock. The views do not check time.
 
 ### Error codes
 
@@ -991,12 +1062,12 @@ instance and each node of the views; a cancelled read returns `base.cancelled`.
 |---|---|---|
 | `io.limit_exceeded` | `limit_exceeded` | A limit of the profile was exceeded; the argument `limit` names it |
 | `io.ifc.truncated` | `corrupt_data` | The input ends inside a comment, a string, a list, a record or a section |
-| `io.ifc.syntax` | `corrupt_data` | A token does not fit the grammar at its position |
-| `io.ifc.structure_invalid` | `corrupt_data` | A section is missing or out of order, or `FILE_SCHEMA` is missing or malformed |
-| `io.ifc.text_invalid` | `corrupt_data` | A string holds a control character, a malformed encoded form, an unsupported page or text that is not UTF-8 |
+| `io.ifc.syntax` | `corrupt_data` | A token does not fit the grammar at its position; a word longer than 255 bytes; an empty complex instance; a lowercase exponent |
+| `io.ifc.structure_invalid` | `corrupt_data` | A section is missing or out of order, no data section is present, or `FILE_SCHEMA` is missing or malformed |
+| `io.ifc.text_invalid` | `corrupt_data` | A string holds a control character other than tab, carriage return or line feed, a NUL (raw or decoded), a malformed encoded form, or an unsupported page for `\S\` |
 | `io.ifc.value_invalid` | `corrupt_data` | A number is out of range or not finite, an exponent has no point, or a binary or enumeration literal is malformed |
-| `io.ifc.instance_duplicate` | `corrupt_data` | Two instances have the same name |
-| `io.ifc.archive_entry_missing` | `not_found` | The archive has no entry whose name ends in `.ifc` |
-| `io.ifc.archive_entry_ambiguous` | `unsupported` | The archive has more than one entry whose name ends in `.ifc` |
+| `io.ifc.instance_duplicate` | `corrupt_data` | Two instances have the same name, in one or several data sections |
+| `io.ifc.archive_entry_missing` | `not_found` | The archive has no entry whose name ends in `.ifc` after the metadata entries are skipped |
+| `io.ifc.archive_entry_ambiguous` | `unsupported` | The archive has more than one entry whose name ends in `.ifc` after the metadata entries are skipped |
 
 The `io.zip.*` codes of the archive reader are returned as the `arc-io-common` section defines them.

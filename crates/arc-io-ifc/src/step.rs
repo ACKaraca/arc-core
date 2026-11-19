@@ -3,9 +3,10 @@
 //! The grammar is read by a cursor that never indexes the buffer directly. Nesting is recursive
 //! but bounded by a hard cap ([`MAX_NESTING`]) in addition to the caller's `nesting_depth`, so the
 //! stack cannot grow with the input. Every count is checked against its limit before the element
-//! is stored.
+//! is stored, and the parser keeps an estimate of the memory it allocates, checked against
+//! `memory_bytes`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use arc_base::{ErrorCode, Limits, Result};
 
@@ -16,12 +17,43 @@ use crate::text;
 
 /// The deepest nesting of lists and typed parameters the parser follows, whatever the profile
 /// allows. It bounds the recursion of the parser's stack.
-pub(crate) const MAX_NESTING: u32 = 256;
+pub(crate) const MAX_NESTING: u32 = 64;
+
+/// The longest word the parser accepts: a keyword, a section name or an entity type name.
+pub(crate) const MAX_WORD_BYTES: usize = 255;
+
+/// Estimated bytes of one parameter: its enumeration slot and its share of the list holding it.
+pub(crate) const PARAMETER_BYTES: u64 = 48;
+
+/// Estimated bytes of one record, besides its type name.
+pub(crate) const RECORD_BYTES: u64 = 64;
+
+/// Estimated bytes of one instance: its name, its index entry and its record list.
+pub(crate) const INSTANCE_BYTES: u64 = 96;
+
+/// What the reader saw that is not an error but is reported in the loss report.
+#[derive(Debug, Default)]
+pub(crate) struct Notes {
+    /// Bytes of strings that are not UTF-8 and were read as ISO 8859-1.
+    pub(crate) text_latin1: u64,
+    /// Raw tab, carriage return and line feed bytes kept inside strings.
+    pub(crate) text_controls: u64,
+    /// Byte order mark and padding bytes ignored outside the sections.
+    pub(crate) ignored_bytes: u64,
+    /// Other bytes after `END-ISO-10303-21;`, ignored.
+    pub(crate) trailing_bytes: u64,
+    /// Archive entries skipped as metadata; set by the archive reader.
+    pub(crate) skipped_entries: u64,
+    /// Sections other than `DATA` that were skipped, by section name.
+    pub(crate) sections: BTreeMap<&'static str, u64>,
+}
 
 /// The header records and the instances of a physical file.
 pub(crate) struct Parsed {
     pub(crate) header: Vec<Record>,
     pub(crate) instances: Vec<Instance>,
+    pub(crate) estimated_bytes: u64,
+    pub(crate) notes: Notes,
 }
 
 /// Parses a physical file held in `data` under `limits`.
@@ -36,20 +68,48 @@ pub(crate) fn parse(data: &[u8], limits: &Limits, control: &mut Control<'_>) -> 
         limits: *limits,
         depth_limit: limits.nesting_depth.min(MAX_NESTING),
         control,
+        used: 0,
+        names: BTreeSet::new(),
+        notes: Notes::default(),
     };
+    parser.byte_order_mark();
     parser.keyword("ISO-10303-21")?;
     parser.expect(b';')?;
     let header = parser.header()?;
-    parser.keyword("DATA")?;
-    parser.expect(b';')?;
-    let instances = parser.instances()?;
-    parser.keyword("END-ISO-10303-21")?;
-    parser.expect(b';')?;
-    parser.skip_space()?;
-    if parser.pos < data.len() {
-        return Err(parser.fail(codes::IFC_SYNTAX));
+    let mut instances = Vec::new();
+    let mut data_sections = 0u64;
+    loop {
+        parser.skip_space()?;
+        if parser.peek().is_none() {
+            return Err(parser.fail(codes::IFC_TRUNCATED));
+        }
+        let at = parser.pos;
+        let word = parser
+            .word(true, false)
+            .map_err(|_| at_offset(codes::IFC_STRUCTURE_INVALID, to_u64(at)))?;
+        match word {
+            "DATA" => {
+                parser.data_section(&mut instances)?;
+                data_sections = data_sections.saturating_add(1);
+            }
+            "ANCHOR" => parser.skipped_section("ANCHOR")?,
+            "REFERENCE" => parser.skipped_section("REFERENCE")?,
+            "SIGNATURE" => parser.skipped_section("SIGNATURE")?,
+            "END-ISO-10303-21" => break,
+            _ => return Err(at_offset(codes::IFC_STRUCTURE_INVALID, to_u64(at))),
+        }
     }
-    Ok(Parsed { header, instances })
+    if data_sections == 0 {
+        return Err(parser.fail(codes::IFC_STRUCTURE_INVALID));
+    }
+    parser.expect(b';')?;
+    parser.trailer();
+    Ok(Parsed {
+        header,
+        instances,
+        estimated_bytes: parser.used,
+        notes: parser.notes,
+    })
 }
 
 fn to_u64(value: usize) -> u64 {
@@ -62,6 +122,11 @@ struct Parser<'a, 'c, 'p> {
     limits: Limits,
     depth_limit: u32,
     control: &'c mut Control<'p>,
+    /// The estimate of the memory the parser has allocated so far.
+    used: u64,
+    /// The instance names read so far, across all data sections.
+    names: BTreeSet<u64>,
+    notes: Notes,
 }
 
 impl<'a> Parser<'a, '_, '_> {
@@ -84,6 +149,23 @@ impl<'a> Parser<'a, '_, '_> {
 
     fn peek_at(&self, offset: usize) -> Option<u8> {
         self.data.get(self.pos + offset).copied()
+    }
+
+    /// Adds `bytes` to the memory estimate and refuses when the estimate passes `memory_bytes`.
+    fn charge(&mut self, bytes: u64) -> Result<()> {
+        self.used = self.used.saturating_add(bytes);
+        match self.limits.memory_bytes {
+            Some(max) if self.used > max => Err(limit("memory_bytes", self.used)),
+            _ => Ok(()),
+        }
+    }
+
+    /// Skips a UTF-8 byte order mark before the first keyword.
+    fn byte_order_mark(&mut self) {
+        if self.data.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            self.pos = 3;
+            self.notes.ignored_bytes = self.notes.ignored_bytes.saturating_add(3);
+        }
     }
 
     /// Skips white space and comments (`/* ... */`). An unterminated comment is truncation.
@@ -115,24 +197,40 @@ impl<'a> Parser<'a, '_, '_> {
         }
     }
 
-    /// Reads an identifier: a letter, then letters, digits, `_` or `-`.
-    fn ident(&mut self) -> Result<&'a str> {
+    /// Reads a word: a letter, then letters, digits and `_`, and `-` when `dash` is set. When
+    /// `user_defined` is set the word may start with `!`, which is part of it. A word longer than
+    /// [`MAX_WORD_BYTES`] is a syntax error; one longer than `string_bytes` is a limit error.
+    fn word(&mut self, dash: bool, user_defined: bool) -> Result<&'a str> {
         self.skip_space()?;
         let data: &'a [u8] = self.data;
         let start = self.pos;
+        if user_defined && self.peek() == Some(b'!') {
+            self.pos += 1;
+        }
         match self.peek() {
             Some(b) if b.is_ascii_alphabetic() => {}
             _ => return Err(self.fail_here(codes::IFC_SYNTAX)),
         }
         while let Some(b) = self.peek() {
-            if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+            if b.is_ascii_alphanumeric() || b == b'_' || (dash && b == b'-') {
                 self.pos += 1;
             } else {
                 break;
             }
         }
+        let length = self.pos.saturating_sub(start);
+        if length > MAX_WORD_BYTES {
+            return Err(at_offset(codes::IFC_SYNTAX, to_u64(start)));
+        }
+        check_bytes(length, self.limits.string_bytes)?;
         let bytes = data.get(start..self.pos).unwrap_or_default();
         std::str::from_utf8(bytes).map_err(|_| self.fail(codes::IFC_SYNTAX))
+    }
+
+    /// An entity type name or an attribute-like identifier: [`Parser::word`] without `-`, with
+    /// the user-defined `!` form allowed.
+    fn ident(&mut self) -> Result<&'a str> {
+        self.word(false, true)
     }
 
     /// Reads the section keyword `expected`. A different word is a structure error; the end of
@@ -143,7 +241,7 @@ impl<'a> Parser<'a, '_, '_> {
             return Err(self.fail(codes::IFC_TRUNCATED));
         }
         let found = self
-            .ident()
+            .word(true, false)
             .map_err(|_| self.fail(codes::IFC_STRUCTURE_INVALID))?;
         if found == expected {
             Ok(())
@@ -175,21 +273,66 @@ impl<'a> Parser<'a, '_, '_> {
         }
     }
 
-    /// The data section: instances up to `ENDSEC;`.
-    fn instances(&mut self) -> Result<Vec<Instance>> {
-        let mut instances: Vec<Instance> = Vec::new();
-        let mut names = BTreeSet::new();
+    /// A data section after its keyword: optional parameters, `;`, instances up to `ENDSEC;`.
+    /// Instances of every data section go into one list and one set of names.
+    fn data_section(&mut self, out: &mut Vec<Instance>) -> Result<()> {
+        self.skip_space()?;
+        if self.peek() == Some(b'(') {
+            self.pos += 1;
+            self.items(1)?;
+        }
+        self.expect(b';')?;
+        self.instances(out)
+    }
+
+    /// A section that is not read (`ANCHOR`, `REFERENCE`, `SIGNATURE`): its statements are parsed,
+    /// so that its strings and nesting are checked, and then dropped.
+    fn skipped_section(&mut self, name: &'static str) -> Result<()> {
+        self.skip_space()?;
+        if self.peek() == Some(b'(') {
+            self.pos += 1;
+            self.items(1)?;
+        }
+        self.expect(b';')?;
+        loop {
+            self.skip_space()?;
+            match self.peek() {
+                None => return Err(self.fail(codes::IFC_TRUNCATED)),
+                Some(b'#') => {
+                    self.instance()?;
+                }
+                Some(_) => {
+                    let start = self.pos;
+                    if self.ident()? == "ENDSEC" {
+                        self.expect(b';')?;
+                        break;
+                    }
+                    self.pos = start;
+                    self.record()?;
+                    self.expect(b';')?;
+                }
+            }
+            self.control
+                .step(to_u64(self.pos), to_u64(self.data.len()))?;
+        }
+        let count = self.notes.sections.entry(name).or_default();
+        *count = count.saturating_add(1);
+        Ok(())
+    }
+
+    /// The instances of a data section, up to `ENDSEC;`.
+    fn instances(&mut self, out: &mut Vec<Instance>) -> Result<()> {
         loop {
             self.skip_space()?;
             match self.peek() {
                 None => return Err(self.fail(codes::IFC_TRUNCATED)),
                 Some(b'#') => {
                     let instance = self.instance()?;
-                    if !names.insert(instance.name) {
+                    if !self.names.insert(instance.name) {
                         return Err(self.fail(codes::IFC_INSTANCE_DUPLICATE));
                     }
-                    check_count(instances.len(), self.limits.record_count, "record_count")?;
-                    instances.push(instance);
+                    check_count(out.len(), self.limits.record_count, "record_count")?;
+                    out.push(instance);
                     self.control
                         .step(to_u64(self.pos), to_u64(self.data.len()))?;
                 }
@@ -198,7 +341,7 @@ impl<'a> Parser<'a, '_, '_> {
                     let word = self.ident()?;
                     if word == "ENDSEC" {
                         self.expect(b';')?;
-                        return Ok(instances);
+                        return Ok(());
                     }
                     self.pos = start;
                     return Err(self.fail(codes::IFC_STRUCTURE_INVALID));
@@ -207,11 +350,12 @@ impl<'a> Parser<'a, '_, '_> {
         }
     }
 
-    /// `#n = record;` or `#n = (record record ...);`
+    /// `#n = record;` or `#n = (record record ...);`. A complex instance has at least one record.
     fn instance(&mut self) -> Result<Instance> {
         self.pos += 1;
         let name = self.number_u64()?;
         self.expect(b'=')?;
+        self.charge(INSTANCE_BYTES)?;
         self.skip_space()?;
         let mut records = Vec::new();
         if self.peek() == Some(b'(') {
@@ -223,12 +367,15 @@ impl<'a> Parser<'a, '_, '_> {
                         self.pos += 1;
                         break;
                     }
-                    Some(b) if b.is_ascii_alphabetic() => {
+                    Some(b) if b.is_ascii_alphabetic() || b == b'!' => {
                         check_count(records.len(), self.limits.array_length, "array_length")?;
                         records.push(self.record()?);
                     }
                     _ => return Err(self.fail_here(codes::IFC_SYNTAX)),
                 }
+            }
+            if records.is_empty() {
+                return Err(self.fail(codes::IFC_SYNTAX));
             }
         } else {
             records.push(self.record()?);
@@ -239,7 +386,9 @@ impl<'a> Parser<'a, '_, '_> {
 
     /// `TYPE(parameters)`, the type name in upper case.
     fn record(&mut self) -> Result<Record> {
-        let type_name = self.ident()?.to_ascii_uppercase();
+        let raw = self.ident()?;
+        self.charge(RECORD_BYTES.saturating_add(to_u64(raw.len())))?;
+        let type_name = raw.to_ascii_uppercase();
         self.expect(b'(')?;
         let parameters = self.items(1)?;
         Ok(Record {
@@ -281,6 +430,7 @@ impl<'a> Parser<'a, '_, '_> {
         let Some(byte) = self.peek() else {
             return Err(self.fail(codes::IFC_TRUNCATED));
         };
+        self.charge(PARAMETER_BYTES)?;
         match byte {
             b'(' => {
                 let inner = self.enter(depth)?;
@@ -303,19 +453,26 @@ impl<'a> Parser<'a, '_, '_> {
             }
             b'.' if self.peek_at(1).is_some_and(|b| b.is_ascii_alphabetic()) => self.enumeration(),
             b'+' | b'-' | b'.' | b'0'..=b'9' => self.number(),
-            b if b.is_ascii_alphabetic() => {
-                let type_name = self.ident()?.to_ascii_uppercase();
-                self.expect(b'(')?;
-                let inner = self.enter(depth)?;
-                let value = self.parameter(inner)?;
-                self.expect(b')')?;
-                Ok(Parameter::Typed {
-                    type_name,
-                    value: Box::new(value),
-                })
-            }
+            b if b.is_ascii_alphabetic() || b == b'!' => self.typed(depth),
             _ => Err(self.fail(codes::IFC_SYNTAX)),
         }
+    }
+
+    /// A typed parameter `TYPE(value)`. It lives apart from [`Parser::parameter`] so that the
+    /// recursion through nested parameters keeps a small stack frame.
+    #[inline(never)]
+    fn typed(&mut self, depth: u32) -> Result<Parameter> {
+        let raw = self.ident()?;
+        self.charge(to_u64(raw.len()))?;
+        let type_name = raw.to_ascii_uppercase();
+        self.expect(b'(')?;
+        let inner = self.enter(depth)?;
+        let value = self.parameter(inner)?;
+        self.expect(b')')?;
+        Ok(Parameter::Typed {
+            type_name,
+            value: Box::new(value),
+        })
     }
 
     /// The nesting level of a parenthesis opened inside `depth`, refused past the limit.
@@ -344,7 +501,11 @@ impl<'a> Parser<'a, '_, '_> {
         let raw = data.get(start..self.pos).unwrap_or_default();
         self.pos += 1;
         check_bytes(raw.len(), self.limits.string_bytes)?;
-        Ok(Parameter::Text(text::decode(raw, to_u64(start))?))
+        self.charge(to_u64(raw.len()))?;
+        let decoded = text::decode(raw, to_u64(start))?;
+        self.notes.text_latin1 = self.notes.text_latin1.saturating_add(decoded.latin1);
+        self.notes.text_controls = self.notes.text_controls.saturating_add(decoded.controls);
+        Ok(Parameter::Text(decoded.text))
     }
 
     /// A binary literal: `"` then a digit from 0 to 3, then hexadecimal digits, then `"`.
@@ -364,6 +525,7 @@ impl<'a> Parser<'a, '_, '_> {
         let raw = data.get(start..self.pos).unwrap_or_default();
         self.pos += 1;
         check_bytes(raw.len(), self.limits.string_bytes)?;
+        self.charge(to_u64(raw.len()))?;
         let valid = raw.first().is_some_and(|b| (b'0'..=b'3').contains(b))
             && raw
                 .iter()
@@ -392,6 +554,7 @@ impl<'a> Parser<'a, '_, '_> {
         }
         self.pos += 1;
         check_bytes(name.len(), self.limits.string_bytes)?;
+        self.charge(to_u64(name.len()))?;
         Ok(Parameter::Enumeration(
             String::from_utf8_lossy(name).into_owned(),
         ))
@@ -472,6 +635,22 @@ impl<'a> Parser<'a, '_, '_> {
                 .ok_or_else(|| at_offset(codes::IFC_VALUE_INVALID, to_u64(start)))?;
         }
         Ok(value)
+    }
+
+    /// After `END-ISO-10303-21;`: white space is ignored silently, NUL and 0x1A padding are counted
+    /// as ignored bytes, and any other byte is counted as trailing data and ignored.
+    fn trailer(&mut self) {
+        let data: &'a [u8] = self.data;
+        let rest = data.get(self.pos..).unwrap_or_default();
+        for &byte in rest {
+            let counter = match byte {
+                b' ' | b'\t' | b'\r' | b'\n' => continue,
+                0 | 0x1A => &mut self.notes.ignored_bytes,
+                _ => &mut self.notes.trailing_bytes,
+            };
+            *counter = counter.saturating_add(1);
+        }
+        self.pos = self.data.len();
     }
 }
 

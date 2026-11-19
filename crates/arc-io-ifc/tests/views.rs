@@ -147,7 +147,12 @@ fn check_project(schema: &str, expected: Schema) {
         } => {
             assert_eq!(upper.as_ref().unwrap().value, Value::Real(300.0));
             assert_eq!(lower.as_ref().unwrap().value, Value::Real(100.0));
-            assert_eq!(set_point.as_ref().unwrap().value, Value::Real(200.0));
+            // IFC2X3 has no SetPointValue; the other schemas carry it.
+            if expected == Schema::Ifc2x3 {
+                assert!(set_point.is_none());
+            } else {
+                assert_eq!(set_point.as_ref().unwrap().value, Value::Real(200.0));
+            }
             assert_eq!(*unit, Some(30));
         }
         other => panic!("bounded value expected, got {other:?}"),
