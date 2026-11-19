@@ -24,11 +24,11 @@ use arc_geom::{Aabb2, Curve2, Loop2, Polyline2, PolylineVertex, Region};
 use crate::appearance::default_color;
 use crate::clip::{Piece, cut, piece};
 use crate::display::{
-    DisplayList, DisplayOptions, Lists, Primitive, Shape, space_list_with_links,
-    transform_polyline, transform_shape, viewport_list_with_links,
+    DisplayList, DisplayOptions, Lists, Primitive, Shape, assemble, scope_of, transform_polyline,
+    transform_shape, viewport_list_in,
 };
 use crate::error::codes;
-use crate::external::ReferenceProblem;
+use crate::external::{Memo, ReferenceProblem, Scope, WorkBudget, WorkUse};
 use crate::layout::{LAYOUT, VIEWPORT, settings, sheet_size, view};
 use crate::linetype::{DashOptions, Dashes, Pattern, dashes};
 use crate::plot_style::{
@@ -505,7 +505,7 @@ fn redash(
 fn collect_viewports(
     snapshot: &Snapshot,
     lists: Lists<'_>,
-    links: Option<&Links>,
+    scope: Option<Scope<'_>>,
     layout: ObjectId,
     display: &DisplayOptions,
     groups: &mut Vec<Group>,
@@ -513,9 +513,8 @@ fn collect_viewports(
     problems: &mut Vec<ReferenceProblem>,
 ) {
     for vp in owned(snapshot, layout, VIEWPORT) {
-        let listed = view(snapshot, vp).and_then(|v| {
-            viewport_list_with_links(snapshot, lists, links, vp, display).map(|l| (v, l))
-        });
+        let listed = view(snapshot, vp)
+            .and_then(|v| viewport_list_in(snapshot, lists, scope, vp, display).map(|l| (v, l)));
         match listed {
             Ok((
                 v,
@@ -806,7 +805,8 @@ pub struct LinkedPlot {
 
 /// The stream of the layout space `layout` as [`layout_stream`], with the loaded `links` of
 /// `snapshot`'s document: placed external references of its viewports and of the sheet draw
-/// their linked drawings through them.
+/// their linked drawings through them. The whole stream shares one work budget (see
+/// [`WorkBudget`]), so each linked space is built once for all the viewports that show it.
 ///
 /// # Errors
 ///
@@ -815,6 +815,53 @@ pub fn layout_stream_with_links(
     snapshot: &Snapshot,
     lists: Lists<'_>,
     links: Option<&Links>,
+    layout: ObjectId,
+    options: &PlotOptions,
+    display: &DisplayOptions,
+) -> Result<LinkedPlot> {
+    layout_stream_with_work_budget(
+        snapshot,
+        lists,
+        links,
+        layout,
+        options,
+        display,
+        WorkBudget::default(),
+    )
+    .map(|(plot, _)| plot)
+}
+
+/// The stream of the layout space `layout` as [`layout_stream_with_links`], within the bounds of
+/// `budget` (see [`WorkBudget`]), with what the stream used of them.
+///
+/// # Errors
+///
+/// As [`layout_stream`].
+pub fn layout_stream_with_work_budget(
+    snapshot: &Snapshot,
+    lists: Lists<'_>,
+    links: Option<&Links>,
+    layout: ObjectId,
+    options: &PlotOptions,
+    display: &DisplayOptions,
+    budget: WorkBudget,
+) -> Result<(LinkedPlot, WorkUse)> {
+    let memo = Memo::new(budget);
+    let plot = layout_stream_in(
+        snapshot,
+        lists,
+        scope_of(links, &memo),
+        layout,
+        options,
+        display,
+    )?;
+    Ok((plot, memo.usage()))
+}
+
+fn layout_stream_in(
+    snapshot: &Snapshot,
+    lists: Lists<'_>,
+    scope: Option<Scope<'_>>,
     layout: ObjectId,
     options: &PlotOptions,
     display: &DisplayOptions,
@@ -839,14 +886,14 @@ pub fn layout_stream_with_links(
     collect_viewports(
         snapshot,
         lists,
-        links,
+        scope,
         layout,
         display,
         &mut groups,
         &mut failed,
         &mut problems,
     );
-    let own = space_list_with_links(snapshot, lists, links, layout, display)?;
+    let own = assemble(snapshot, lists, scope, layout, display, 0)?.0;
     failed.extend(own.failed);
     problems.extend(own.problems);
     groups.push(Group {
@@ -911,7 +958,8 @@ pub fn model_stream_with_links(
     if !type_is(snapshot, space, SPACE) {
         return Err(Error::new(codes::PLOT_SOURCE_INVALID).with_detail("id", space.to_string()));
     }
-    let list = space_list_with_links(snapshot, lists, links, space, display)?;
+    let memo = Memo::new(WorkBudget::default());
+    let list = assemble(snapshot, lists, scope_of(links, &memo), space, display, 0)?.0;
     let groups = vec![Group {
         clip: None,
         pattern_scale: 1.0,

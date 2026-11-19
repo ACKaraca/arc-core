@@ -514,3 +514,25 @@ fn tiff_refuses_sizes_and_resolutions_it_cannot_write() {
     };
     assert_eq!(no_dpi.tiff().unwrap_err().code(), "draft.raster.invalid");
 }
+
+#[test]
+fn the_tiff_limit_is_the_most_pixels_a_classic_file_holds() {
+    // Three bytes per pixel, and the header, the resolutions and the directory around them:
+    // (2^32 - 1 - 193) / 3 pixels.
+    let limit: u64 = 1_431_655_700;
+    let raster = |width: u32, height: u32| Raster {
+        width,
+        height,
+        rgba: Vec::new(),
+        skipped: 0,
+        dpi: 300.0,
+    };
+    // At the limit the size is accepted; the empty pixels are then the only fault.
+    let at = raster(limit as u32, 1).tiff().unwrap_err();
+    assert_eq!(at.code(), "draft.raster.invalid");
+    // One pixel more is too large, and the limit reported is the real maximum.
+    let over = raster(limit as u32 + 1, 1).tiff().unwrap_err();
+    assert_eq!(over.code(), "draft.raster.too_large");
+    let reported = format!("{:?}", over.arguments().get("limit"));
+    assert!(reported.contains("1431655700"), "{reported}");
+}

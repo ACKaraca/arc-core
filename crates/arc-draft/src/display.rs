@@ -33,7 +33,9 @@ use crate::appearance::{
 use crate::clip::{Piece, cut, keeps, piece};
 use crate::dimension::{DIMENSION, Resolution};
 use crate::error::codes;
-use crate::external::{self, DEFAULT_MAX_EXPANSIONS, Memo, ReferenceProblem, Scope};
+use crate::external::{
+    self, DEFAULT_MAX_EXPANSIONS, Memo, ReferenceProblem, Scope, WorkBudget, WorkUse,
+};
 use crate::fonts::{Fonts, Substitutions, font_table_id};
 use crate::layout::{Overrides, view};
 use crate::leader::{LEADER, MULTILEADER};
@@ -423,6 +425,28 @@ pub(crate) fn with_snapshot<R>(
     })
 }
 
+/// Whether the entity `reader` reads may be visited: entities of a linked drawing cost one work
+/// unit each, and the host's cost nothing.
+fn visit_allowed(reader: &dyn Reader) -> bool {
+    reader
+        .scope()
+        .is_none_or(|scope| !scope.linked || scope.memo.charge_work(1))
+}
+
+/// The error of a linked drawing whose visits used up the work budget. Built out of line, so the
+/// frames of the recursive build stay small.
+#[cold]
+fn work_exhausted() -> Error {
+    Error::new(codes::EXTERNAL_BUDGET_EXCEEDED)
+}
+
+/// The error of a list with more primitives than `limit`, built out of line (see
+/// [`work_exhausted`]).
+#[cold]
+fn too_large(limit: usize) -> Error {
+    Error::new(codes::DISPLAY_TOO_LARGE).with_arg("limit", i64::try_from(limit).unwrap_or(i64::MAX))
+}
+
 fn nesting(limit: u32) -> Error {
     Error::new(codes::BLOCK_NESTING_TOO_DEEP).with_arg("limit", i64::from(limit))
 }
@@ -649,6 +673,10 @@ fn is_space(reader: &dyn Reader, container: Option<ObjectId>) -> bool {
 /// The list of one entity, as described in the crate specification.
 #[expect(clippy::too_many_lines, reason = "one match over every entity type")]
 fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<EntityList> {
+    // Every entity of a linked drawing that is visited, visible or not, costs one work unit.
+    if !visit_allowed(reader) {
+        return Err(work_exhausted());
+    }
     let key = reader
         .type_key(id)
         .ok_or_else(|| Error::new(arc_doc::error::codes::OBJECT_NOT_FOUND))?;
@@ -1272,13 +1300,18 @@ pub fn entity_list_with_links(
     entity: ObjectId,
     options: &DisplayOptions,
 ) -> Result<EntityList> {
-    let memo = Memo::new(DEFAULT_MAX_EXPANSIONS);
+    let memo = Memo::new(WorkBudget::default());
     entity_list_at(snapshot, scope_of(links, &memo), entity, options, 0)
 }
 
-/// The scope of a build with `links` and `memo`; none without links.
-fn scope_of<'a>(links: Option<&'a Links>, memo: &'a Memo) -> Option<Scope<'a>> {
-    links.map(|links| Scope { links, memo })
+/// The scope of a build with `links` and `memo`, over the entities of the host document; none
+/// without links.
+pub(crate) fn scope_of<'a>(links: Option<&'a Links>, memo: &'a Memo) -> Option<Scope<'a>> {
+    links.map(|links| Scope {
+        links,
+        memo,
+        linked: false,
+    })
 }
 
 fn entity_list_at(
@@ -1340,14 +1373,20 @@ fn gather(
     out: &mut DisplayList,
 ) -> Result<(Vec<Primitive>, u32)> {
     let mut entries = Vec::new();
+    let mut count = 0usize;
     for member in members(snapshot, space) {
         let external = snapshot
             .resolve(member)
             .ok()
             .and_then(|h| snapshot.type_key(h))
             .is_some_and(|k| k.as_str() == EXTERNAL_REF);
+        // The graph holds no linked drawings: a block reference that reaches a placed reference is
+        // built directly, as the placed reference is.
+        let direct = external
+            || (matches!(lists, Lists::Graph(_))
+                && scope.is_some_and(|s| reaches_reference(snapshot, member, s.memo)));
         let list: Option<DerivedValue> = match lists {
-            Lists::Graph(graph) if !external => graph
+            Lists::Graph(graph) if !direct => graph
                 .evaluate_now(&node(member)?)
                 .ok()
                 .filter(|v| v.state.kind() == StateKind::Clean)
@@ -1357,10 +1396,25 @@ fn gather(
                 .map(|l| Arc::new(l) as DerivedValue),
         };
         match list {
-            Some(value) if value.downcast_ref::<EntityList>().is_some() => {
+            Some(value) => {
+                let Some(primitives) = value
+                    .downcast_ref::<EntityList>()
+                    .map(|l| l.primitives.len())
+                else {
+                    out.failed.push(member);
+                    continue;
+                };
+                // The build stops as soon as the list it gathers would exceed the limit, or, in a
+                // linked build, the primitives left in the budget.
+                count = count.saturating_add(primitives);
+                let over_budget = count > options.max_primitives
+                    || scope.is_some_and(|s| s.linked && count > s.memo.primitives_left());
+                if over_budget {
+                    return Err(too_large(options.max_primitives));
+                }
                 entries.push((member, value));
             }
-            _ => out.failed.push(member),
+            None => out.failed.push(member),
         }
     }
     let mut ordered: Vec<(i64, ObjectId, &EntityList)> = entries
@@ -1390,6 +1444,51 @@ fn gather(
         }
     }
     Ok((primitives, deepest))
+}
+
+/// The block definition that the block reference `member` inserts, when `member` is one.
+fn block_of_reference(snapshot: &Snapshot, member: ObjectId) -> Option<ObjectId> {
+    let handle = snapshot.resolve(member).ok()?;
+    if snapshot.type_key(handle)?.as_str() != BLOCK_REF {
+        return None;
+    }
+    match snapshot.get(handle).ok()?.values.get(entity::KIND) {
+        Some(Some(Value::Reference(block))) => Some(*block),
+        _ => None,
+    }
+}
+
+/// Whether the block reference `member` inserts a definition that holds a placed reference, at
+/// any depth. Answered once per block definition and build (see [`Memo::holds_of`]).
+fn reaches_reference(snapshot: &Snapshot, member: ObjectId, memo: &Memo) -> bool {
+    let Some(block) = block_of_reference(snapshot, member) else {
+        return false;
+    };
+    if let Some(known) = memo.holds_of(block) {
+        return known;
+    }
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![block];
+    let mut holds = false;
+    while let Some(definition) = pending.pop() {
+        if !seen.insert(definition) {
+            continue;
+        }
+        for inner in members(snapshot, definition) {
+            let key = snapshot
+                .resolve(inner)
+                .ok()
+                .and_then(|h| snapshot.type_key(h))
+                .map(|k| k.as_str().to_owned());
+            match key.as_deref() {
+                Some(EXTERNAL_REF) => holds = true,
+                Some(BLOCK_REF) => pending.extend(block_of_reference(snapshot, inner)),
+                _ => {}
+            }
+        }
+    }
+    memo.remember_holds(block, holds);
+    holds
 }
 
 /// The bounding box of the outer loops of `region`.
@@ -1538,8 +1637,31 @@ pub fn space_list_with_budget(
     options: &DisplayOptions,
     max_expansions: usize,
 ) -> Result<DisplayList> {
-    let memo = Memo::new(max_expansions);
-    Ok(assemble(snapshot, lists, scope_of(links, &memo), space, options, 0)?.0)
+    let budget = WorkBudget {
+        expansions: max_expansions,
+        ..WorkBudget::default()
+    };
+    space_list_with_work_budget(snapshot, lists, links, space, options, budget)
+        .map(|(list, _)| list)
+}
+
+/// The display list of `space` as [`space_list_with_links`], within the bounds of `budget` (see
+/// [`WorkBudget`]), with what the build used of them.
+///
+/// # Errors
+///
+/// As [`space_list`].
+pub fn space_list_with_work_budget(
+    snapshot: &Snapshot,
+    lists: Lists<'_>,
+    links: Option<&Links>,
+    space: ObjectId,
+    options: &DisplayOptions,
+    budget: WorkBudget,
+) -> Result<(DisplayList, WorkUse)> {
+    let memo = Memo::new(budget);
+    let list = assemble(snapshot, lists, scope_of(links, &memo), space, options, 0)?.0;
+    Ok((list, memo.usage()))
 }
 
 /// The assembled list of `space` at `depth`: the visible primitives in draw order with the
@@ -1650,11 +1772,23 @@ pub fn viewport_list_with_links(
     viewport: ObjectId,
     options: &DisplayOptions,
 ) -> Result<DisplayList> {
+    let memo = Memo::new(WorkBudget::default());
+    viewport_list_in(snapshot, lists, scope_of(links, &memo), viewport, options)
+}
+
+/// The display list of `viewport` within the linked `scope` of its build (see
+/// [`viewport_list_with_links`]). The plot functions pass the scope of their whole build, so the
+/// viewports of one layout share one expansion of each linked space.
+pub(crate) fn viewport_list_in(
+    snapshot: &Snapshot,
+    lists: Lists<'_>,
+    scope: Option<Scope<'_>>,
+    viewport: ObjectId,
+    options: &DisplayOptions,
+) -> Result<DisplayList> {
     let view = view(snapshot, viewport)?;
     let tol = &options.tolerance;
     let mut out = DisplayList::default();
-    let memo = Memo::new(DEFAULT_MAX_EXPANSIONS);
-    let scope = scope_of(links, &memo);
     let (mut primitives, _) = gather(
         snapshot,
         lists,

@@ -10,12 +10,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use arc_base::id::Identifier;
 use arc_base::math::Vector3;
-use arc_base::{Error, Limits, ObjectId, Result};
+use arc_base::{Error, ObjectId, Result};
 use arc_command::{CommandSpec, Context, IdParam};
 use arc_doc::link::{LINK_TYPE, Links};
 use arc_doc::{FieldPath, GeometryBytes, Snapshot, Value};
+use arc_geom::Curve2;
 use arc_geom::encoding::GeomCodec;
-use arc_geom::{Curve2, Polyline2};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -77,8 +77,17 @@ pub struct Bind {
     pub reference: IdParam,
 }
 
-/// The encoded clip boundary of a JSON closed polyline; `None` for `null`.
+/// The encoded clip boundary of a JSON closed polyline; `None` for `null`. A boundary with more
+/// than [`external::CLIP_MAX_VERTICES`] vertices is refused.
 fn clip_value(json: Option<serde_json::Value>) -> Result<Option<Value>> {
+    clip_value_within(json, external::CLIP_MAX_VERTICES)
+}
+
+/// As [`clip_value`], with at most `max_vertices` vertices in the boundary.
+fn clip_value_within(
+    json: Option<serde_json::Value>,
+    max_vertices: usize,
+) -> Result<Option<Value>> {
     let Some(json) = json else {
         return Ok(None);
     };
@@ -86,6 +95,9 @@ fn clip_value(json: Option<serde_json::Value>) -> Result<Option<Value>> {
     let curve: Curve2 = serde_json::from_value(json).map_err(|_| invalid())?;
     match &curve {
         Curve2::Polyline(polyline) if polyline.is_closed() => {
+            if polyline.vertices().len() > max_vertices {
+                return Err(invalid().with_detail("reason", "vertex count"));
+            }
             Ok(Some(Value::Geometry(GeometryBytes(curve.encode()))))
         }
         _ => Err(invalid()),
@@ -98,6 +110,9 @@ pub(crate) fn create_reference(ctx: &mut Context<'_>, p: CreateExternal) -> Resu
     expect(&snapshot, p.owner.0, CONTAINERS)?;
     expect(&snapshot, p.link.0, &[LINK_TYPE])?;
     let [sx, sy, sz] = p.scale.unwrap_or([1.0; 3]);
+    if let Some(field) = external::non_finite_placement(p.position, [sx, sy, sz], p.rotation) {
+        return Err(field_invalid(field));
+    }
     let mut kind = vec![
         (external::LINK, Value::Reference(p.link.0)),
         (entity::REF_POSITION, point2(p.position)),
@@ -288,17 +303,19 @@ impl Styles<'_> {
     }
 }
 
-/// The entity type a curve becomes, and the values of its geometry.
+/// The entity type a curve becomes, and the values of its geometry. Every entity holds its
+/// geometry in the kind slot, as the commands that create entities do.
 fn curve_entity(curve: &Curve2) -> (&'static str, Vec<(usize, Value)>) {
+    let geometry = || vec![(entity::KIND, Value::Geometry(GeometryBytes(curve.encode())))];
     match curve {
-        Curve2::Segment(_) => (types::LINE, vec![]),
-        Curve2::Ray(_) => (types::RAY, vec![]),
-        Curve2::Line(_) => (types::CONSTRUCTION_LINE, vec![]),
-        Curve2::Circle(_) => (types::CIRCLE, vec![]),
-        Curve2::Arc(_) => (types::ARC, vec![]),
-        Curve2::Ellipse(_) => (types::ELLIPSE, vec![]),
-        Curve2::EllipticalArc(_) => (types::ELLIPTICAL_ARC, vec![]),
-        Curve2::Polyline(_) => (types::POLYLINE, vec![]),
+        Curve2::Segment(_) => (types::LINE, geometry()),
+        Curve2::Ray(_) => (types::RAY, geometry()),
+        Curve2::Line(_) => (types::CONSTRUCTION_LINE, geometry()),
+        Curve2::Circle(_) => (types::CIRCLE, geometry()),
+        Curve2::Arc(_) => (types::ARC, geometry()),
+        Curve2::Ellipse(_) => (types::ELLIPSE, geometry()),
+        Curve2::EllipticalArc(_) => (types::ELLIPTICAL_ARC, geometry()),
+        Curve2::Polyline(_) => (types::POLYLINE, geometry()),
         Curve2::Nurbs(nurbs) => (types::SPLINE, crate::spline::values(nurbs, &[])),
     }
 }
@@ -357,8 +374,7 @@ fn bind(ctx: &mut Context<'_>, links: &Links, p: Bind) -> Result<Created> {
     entities.sort_by_key(|(id, order, _)| (*order, *id));
     let clip = match placed.get(external::CLIP) {
         Some(Some(Value::Geometry(bytes))) => {
-            let polyline = Polyline2::decode(&bytes.0, &Limits::DEFAULT)
-                .map_err(|_| Error::new(codes::EXTERNAL_CLIP_INVALID))?;
+            let polyline = external::clip_polyline(&bytes.0)?;
             Some(
                 boundary_loop(&polyline, &tolerance)
                     .map_err(|_| Error::new(codes::EXTERNAL_CLIP_INVALID))?,
@@ -478,6 +494,7 @@ fn bind(ctx: &mut Context<'_>, links: &Links, p: Bind) -> Result<Created> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arc_geom::{Polyline2, PolylineVertex};
 
     #[test]
     fn stems_and_unique_names() {
@@ -488,6 +505,25 @@ mod tests {
         assert_eq!(unique_name(&mut taken, "site", "0"), "site-0");
         assert_eq!(unique_name(&mut taken, "site", "0"), "site-0-2");
         assert_eq!(unique_name(&mut taken, "site", "1"), "1");
+    }
+
+    #[test]
+    fn a_clip_over_the_vertex_cap_is_refused_by_create_and_set_clip() {
+        // Both commands encode their clip with the same function.
+        let vertices = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+            .map(|(x, y)| PolylineVertex::new(arc_base::math::Point2::new(x, y), 0.0))
+            .to_vec();
+        let square =
+            serde_json::to_value(Curve2::Polyline(Polyline2::new(vertices, true).unwrap()))
+                .unwrap();
+        assert!(
+            clip_value_within(Some(square.clone()), 4)
+                .unwrap()
+                .is_some()
+        );
+        let err = clip_value_within(Some(square), 3).unwrap_err();
+        assert_eq!(err.code(), codes::EXTERNAL_CLIP_INVALID.code);
+        assert!(err.details().contains_key("reason"), "{err:?}");
     }
 
     #[test]

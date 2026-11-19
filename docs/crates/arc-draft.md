@@ -937,7 +937,8 @@ otherwise; at most `max_pixels` pixels, `draft.raster.too_large`) `Raster::png` 
   8 bits per sample and one strip, with `XResolution` and `YResolution` in inches (`dpi` as
   thousandths over 1000) and `Raster::dpi`. Alpha is dropped: every rendered pixel is opaque.
   The file must fit 32-bit offsets, else `draft.raster.too_large` (argument `limit`: the most
-  pixels a file holds). Decision: RGB rather than RGBA with an alpha sample, because the alpha
+  pixels a file holds, 1,431,655,700, which is (2^32 - 1 - 193) / 3 with the 193 bytes around the
+  pixels). Decision: RGB rather than RGBA with an alpha sample, because the alpha
   is always 255 and RGB is one third smaller and read by every baseline TIFF reader; rejected:
   compressed strips, which need a codec and a dependency.
 
@@ -1233,19 +1234,35 @@ drafting types refer to it and do not register it.
   as a block reference does. The unit factor from the linked space's unit to the unit of the
   container applies. `space` selects the space of the linked drawing; absent, the first model space
   of that drawing in identifier order.
+- **Placement values.** `position`, `scale` and `rotation` must be finite. `create` refuses a value
+  that is not with `draft.field.invalid` (argument `field`), the validator reports it, and display
+  draws nothing for the reference.
 - **Clip.** `clip` is a closed polyline in the coordinates of the linked drawing, applied before the
-  insertion transform, so it moves with the reference. Its parts inside the boundary are kept
-  (`clip::cut` with `inside`), and the wipeouts of the linked space apply first.
+  insertion transform, so it moves with the reference. It has at most 10,000 vertices
+  (`external::CLIP_MAX_VERTICES`): creation, `set_clip`, the validator and display refuse more with
+  `draft.external_ref.clip_invalid` (detail `reason`: `vertex count`, or `vertex count or encoding`
+  for a stored boundary that does not decode). Its parts inside the boundary are kept
+  (`clip::cut` with `inside`), and the wipeouts of the linked space apply first. The cut is charged
+  to the work budget.
 - **Display.** `display::space_list_with_links`, `viewport_list_with_links` and
   `entity_list_with_links` take the loaded `arc_doc::link::Links` of the host document; `space_list`
   and `viewport_list` pass none. The linked drawing's lists are built directly from its snapshot,
   not through the graph, which holds one document only. Each primitive of a placed reference has
   `source` set to the placed reference and `path` set to `[link, linked entity, nested path...]`:
   the link object of the host, then the object of the linked drawing. The nested path is the one
-  of the linked drawing's own lists. Its layers are the linked drawing's layers and the layer of the
-  placed reference. Layers that are off or frozen in the linked drawing hide their primitives.
+  of the linked drawing's own lists. Its layers are the layer of the placed reference only. The
+  layers of the linked drawing act inside the expansion: layers that are off or frozen there hide
+  their primitives. A linked primitive whose color, linetype, lineweight or transparency came from a
+  linked layer reports that source as `Object`, so a viewport override of a host layer does not
+  restyle linked geometry. The two documents may share layer identifiers; the host never looks up a
+  linked identifier.
+- **Block definitions.** A block reference whose definition holds a placed reference, at any depth,
+  is built directly when links are supplied, as a placed reference is: the dependency graph holds no
+  linked drawings, so `Lists::Graph` would draw nothing for it. The check is answered once per block
+  definition and build.
 - **Problems.** A reference whose link is missing, unresolved, refused or not loaded, whose linked
-  space cannot be found, or whose display list is built without links draws nothing and adds
+  space cannot be found, whose placement is not finite, or whose display list is built without links
+  draws nothing and adds
   a `ReferenceProblem` (`reference`, `link`, the stable `code`) to `DisplayList::problems` or
   `EntityList::problems`. Entities of a linked drawing that fail to draw leave the reference
   partially drawn: `draft.external_ref.partial` (a warning) is reported for the reference. Nothing is
@@ -1255,18 +1272,31 @@ drafting types refer to it and do not register it.
   `draft.block.nesting_too_deep`; a drawing that references itself through links therefore
   terminates at that limit and is reported, not failed.
 - **Work.** One top-level display build (`space_list_with_links`, `viewport_list_with_links`,
-  `entity_list_with_links`, the plot functions) keeps a memo of the untransformed list of each
-  linked space, keyed by linked document, space and nesting depth. A placed reference reuses the
-  list of its key and applies its own transform and clip, so a drawing with `k` references back
-  to itself builds one list per document, space and depth, not `k` to the power of the depth.
-  Two bounds apply per build, both checked when charged, not configurable through
-  `DisplayOptions` (its literal construction in `arc-gpu` would change): at most
-  `DEFAULT_MAX_EXPANSIONS` (10,000) linked spaces built, counted when built, and at most 100,000
-  primitives charged, counted for each expansion kept and each copy made for a placement.
-  `space_list_with_budget` takes the expansion bound explicitly. A reference that needs an
-  expansion or a copy after a bound is used up draws nothing and reports
-  `draft.external_ref.budget_exceeded`; a reference whose linked list exceeds
-  `DisplayOptions::max_primitives` reports `draft.display.too_large`.
+  `entity_list_with_links`, the plot functions with links) keeps one memo, holding the untransformed
+  list of each linked space keyed by linked document, space and nesting depth. A placed reference
+  reuses the list of its key and applies its own transform and clip, so a drawing with `k`
+  references back to itself builds one list per document, space and depth, not `k` to the power of
+  the depth. The plot functions share one memo across the viewports and the sheet of a layout, so
+  each linked space is built once per plot.
+  The bounds are a `WorkBudget` (`expansions`, `primitives`, `work`); `WorkBudget::default()` holds
+  `DEFAULT_MAX_EXPANSIONS` (10,000), 200,000 and 1,000,000. The bounds are not part of
+  `DisplayOptions`, whose literal construction in `arc-gpu` would change. Each charge is checked when
+  it is made, and `WorkUse` reports what a build used:
+  - `expansions`: each linked space built, once per key.
+  - `primitives`: each materialized list, once. An expansion is charged when it is built, and a
+    placement is charged the copy it makes. A linked space of `n` primitives costs `2n` for its first
+    placement and `n` for each further placement, so one placement of a space of up to 100,000
+    primitives fits the default.
+  - `work`: one unit for each entity of a linked drawing that is visited, visible or not, including
+    the entities of block definitions that it places; and, for each clip cut, the primitives times
+    the clip's vertices. Host entities are not charged.
+  A list that would exceed the primitives left stops as soon as it does, before the rest of the
+  linked space is built. A visit or cut that does not fit in `work` marks the build overrun: the
+  expansion in progress is refused as a whole, and so is every expansion after it in the build. A placed reference that needs a bound that is used up
+  draws nothing and reports `draft.external_ref.budget_exceeded`; a linked list above
+  `DisplayOptions::max_primitives` reports `draft.display.too_large`. `space_list_with_budget` takes
+  the expansion bound alone; `space_list_with_work_budget` and
+  `plot::layout_stream_with_work_budget` take a `WorkBudget` and return the `WorkUse`.
 - **Read-only.** No command writes a linked drawing: the loaded snapshot is immutable, and the
   commands of this crate change only the objects of the host document.
 - **Snapping and picking.** This crate has no snap or pick query; the display list is the query
@@ -1277,8 +1307,8 @@ drafting types refer to it and do not register it.
 
 | Command | Effect |
 |---|---|
-| `core.draft.external_ref.create` | Creates a placed reference in `owner` with `link` (a `core.doc.link` object), `position`, optional `scale`, `rotation`, `space`, `clip` and `layer`. `clip` must be a closed polyline (`draft.external_ref.clip_invalid`). |
-| `core.draft.external_ref.set_clip` | Sets the `clip` of `objects` to a closed polyline, or removes it with `null`. |
+| `core.draft.external_ref.create` | Creates a placed reference in `owner` with `link` (a `core.doc.link` object), `position`, optional `scale`, `rotation`, `space`, `clip` and `layer`. `clip` must be a closed polyline of at most 10,000 vertices (`draft.external_ref.clip_invalid`); `position`, `scale` and `rotation` must be finite (`draft.field.invalid`). |
+| `core.draft.external_ref.set_clip` | Sets the `clip` of `objects` to a closed polyline of at most 10,000 vertices (same error), or removes it with `null`. |
 | `core.draft.external_ref.bind` | Not registered by `register_commands`: `external_commands::bind_command(links)` returns its specification with the loaded links, and the product registers it. |
 
 The bind command runs in one transaction, so one undo restores everything it changed:
@@ -1293,7 +1323,8 @@ The bind command runs in one transaction, so one undo restores everything it cha
    the names and the references to copied layers and linetypes.
 4. It copies each entity into the block with its values and draw order. A clip boundary is applied
    first: each curve is cut with `clip::cut` and each piece becomes an entity of the type of its
-   curve; points are kept when inside. Block references of this crate do not clip, so the clip
+   curve, holding its geometry in the kind slot as the creating commands do; points are kept when
+   inside. Block references of this crate do not clip, so the clip
    boundary itself is not kept.
 5. It creates a block reference with the placed reference's common fields, `position`, `scale` and
    `rotation`, and deletes the placed reference. The link object is deleted when no other placed
@@ -1319,8 +1350,9 @@ Where the specification was silent:
    identifiers.
 5. Problems are returned in the display result, not as errors and not in `failed`. An error would
    drop the whole list of the host space, and `failed` holds host identifiers only.
-6. Placed references are always built directly, not through the graph. Rejected: graph dependencies
-   on the linked documents, which the graph cannot hold.
+6. Placed references, and block references whose definitions hold them, are built directly, not
+   through the graph. Rejected: graph dependencies on the linked documents, which the graph cannot
+   hold.
 7. Cycles are cut at the nesting limit, as the specification requires. Rejected: detecting a cycle
    on the active path and reporting it at once, which is cheaper but reports before the limit.
 8. The default space is the first model space in identifier order. Rejected: an error for drawings
@@ -1339,6 +1371,19 @@ Where the specification was silent:
    delegate with no links. Rejected: a `problems` field on `PlotStream`, which would break its literal
    construction in `arc-io-pdf` tests. A placed reference with a problem is also listed in the
    stream's `failed`, the list the plot already uses for left-out entities.
+13. A linked primitive carries the placed reference's layer only. Rejected: the union of the linked
+   and host layer identifiers, which lets a host layer hide or restyle linked geometry when the two
+   documents share identifiers, as copies of one drawing do.
+14. Primitives are counted once per materialized list, in one counter, with a default of 200,000.
+   Rejected: separate counters for builds and copies, which bound the same memory twice, and a
+   counter for builds alone, which does not bound the copies.
+15. Work counts the visits of linked entities only. Rejected: counting host entities, which would let
+   the size of a host document use up the budget of its links.
+16. A clip boundary is limited to 10,000 vertices, and the decoder refuses more before it allocates
+   them. Rejected: unbounded boundaries, which make each cut cost the primitives times whatever a
+   boundary holds.
+17. A linked primitive's appearance sources are `Object` when they came from a linked layer. Rejected:
+   keeping `Layer` sources, which a viewport override of a host layer matches by identifier.
 
 ## Error codes
 
@@ -1402,9 +1447,9 @@ The codes of every part of the crate:
 | `draft.external_ref.link_invalid` | `invalid_input` | A placed external reference names no `core.doc.link` object |
 | `draft.external_ref.no_links` | `unsupported` | A placed external reference is listed without loaded links and draws nothing |
 | `draft.external_ref.space_invalid` | `not_found` | The linked drawing holds no space that the placed reference names, or no model space |
-| `draft.external_ref.clip_invalid` | `invalid_input` | A clip boundary of an external reference is not a closed polyline |
+| `draft.external_ref.clip_invalid` | `invalid_input` | A clip boundary of an external reference is not a closed polyline, or has more than 10,000 vertices |
 | `draft.external_ref.bind_unsupported` | `unsupported` | Binding meets an entity of a type it does not copy (argument `type`) |
-| `draft.external_ref.budget_exceeded` | `limit_exceeded` | The linked-space expansions of one display build are used up; the placed reference draws nothing |
+| `draft.external_ref.budget_exceeded` | `limit_exceeded` | The expansions, primitives or work units of one display build are used up; the placed reference draws nothing |
 | `draft.external_ref.partial` | `failed_operation` | Some entities of a linked drawing could not be drawn in a placed reference (a warning) |
 | `draft.hatch.boundary_invalid` | `invalid_input` | A stored hatch loop is not a closed circle, ellipse or polyline, a hatch has no loop, or a boundary object cannot bound a region |
 | `draft.hatch.parameter_invalid` | `invalid_input` | A hatch scale is not a finite positive number, or its angle or origin is not finite |

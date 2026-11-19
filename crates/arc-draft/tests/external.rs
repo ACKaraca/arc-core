@@ -16,7 +16,10 @@ use arc_base::math::Point2;
 use arc_base::{Limits, ObjectId, Result};
 use arc_doc::link::{self, LinkSpec, LinkState, Links, LoadMode, Opened};
 use arc_doc::{Snapshot, Txn};
-use arc_draft::display::{DisplayList, DisplayOptions, Lists, Shape, space_list_with_links};
+use arc_draft::display::{
+    DisplayList, DisplayOptions, Lists, Shape, space_list_with_links, space_list_with_work_budget,
+};
+use arc_draft::external::{WorkBudget, WorkUse};
 use arc_draft::external_commands::bind_command;
 use arc_geom::{Aabb2, Circle2, Curve2, Polyline2, PolylineVertex, Segment2};
 use serde_json::json;
@@ -552,4 +555,350 @@ fn an_exhausted_budget_stops_the_expansions_and_reports_one_problem_per_referenc
     assert_eq!(out.problems.len(), 1, "{:?}", out.problems);
     assert_eq!(out.problems[0].reference, placed);
     assert_eq!(out.problems[0].code, "draft.external_ref.budget_exceeded");
+}
+
+/// An open polyline through `points`, in the coordinates of the linked drawing.
+fn open_polyline(points: &[(f64, f64)]) -> serde_json::Value {
+    let vertices = points
+        .iter()
+        .map(|(x, y)| PolylineVertex::new(Point2::new(*x, *y), 0.0))
+        .collect();
+    curve_json(&Curve2::Polyline(Polyline2::new(vertices, false).unwrap()))
+}
+
+/// Places a reference to the linked drawing in `space`, with the fields of `extra` besides the
+/// owner and the link.
+fn place_with(f: &mut Fixture, space: ObjectId, mut extra: serde_json::Value) -> ObjectId {
+    let fields = extra.as_object_mut().unwrap();
+    fields.insert("owner".to_owned(), json!(space.to_string()));
+    fields.insert("link".to_owned(), json!(id(LINK).to_string()));
+    f.create("core.draft.external_ref.create", extra)
+}
+
+/// A linked drawing of `n` lines, the k-th from (0, k) to (10, k), in its model space.
+fn lines(n: usize) -> Snapshot {
+    let mut f = Fixture::drafting();
+    let space = f.space("Model");
+    for k in 0..n {
+        f.entity(
+            space,
+            curve_json(&segment((0.0, k as f64), (10.0, k as f64))),
+        );
+    }
+    f.document.snapshot()
+}
+
+/// The list of `space` within `budget`, and what the build used.
+fn list_within(
+    f: &Fixture,
+    space: ObjectId,
+    links: &Links,
+    budget: WorkBudget,
+) -> (DisplayList, WorkUse) {
+    space_list_with_work_budget(
+        &f.document.snapshot(),
+        Lists::Direct,
+        Some(links),
+        space,
+        &DisplayOptions::default(),
+        budget,
+    )
+    .unwrap()
+}
+
+/// The curves a list draws, flattened and sorted, so that two lists compare whatever the split
+/// of their primitives.
+fn drawn_curves(list: &DisplayList) -> Vec<String> {
+    let mut out: Vec<String> = list
+        .primitives
+        .iter()
+        .flat_map(|p| match &p.shape {
+            Shape::Stroke { curve, drawn: None } => vec![format!("{curve:?}")],
+            Shape::Stroke {
+                drawn: Some(pieces),
+                ..
+            } => pieces
+                .iter()
+                .filter_map(|piece| match piece {
+                    arc_draft::clip::Piece::Curve(c) => Some(format!("{c:?}")),
+                    arc_draft::clip::Piece::Point(_) => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn binding_a_clipped_reference_draws_what_the_reference_drew() {
+    // A line, a circle and an open polyline, each crossing the clip edge x = 6.
+    let mut d = Fixture::drafting();
+    let d_space = d.space("Model");
+    d.entity(d_space, curve_json(&segment((0.0, 0.0), (10.0, 0.0))));
+    d.entity(d_space, curve_json(&circle((5.0, 5.0), 2.0)));
+    d.entity(
+        d_space,
+        open_polyline(&[(1.0, 1.0), (9.0, 1.0), (9.0, 3.0)]),
+    );
+    let linked = d.document.snapshot();
+    let (mut f, space) = host(id(LINKED), "linked.arc");
+    let placed = place_with(
+        &mut f,
+        space,
+        json!({"position": [100.0, 20.0], "clip": rectangle((-1.0, -1.0), (6.0, 6.0))}),
+    );
+    let links = load(&f, &opening(id(LINKED), linked));
+    let before = list(&f, space, Some(&links));
+    assert!(before.problems.is_empty(), "{:?}", before.problems);
+    let drawn = drawn_curves(&before);
+    assert!(!drawn.is_empty());
+
+    f.commands.register(bind_command(links.clone())).unwrap();
+    f.create(
+        "core.draft.external_ref.bind",
+        json!({"reference": placed.to_string()}),
+    );
+    let after = list(&f, space, None);
+    assert_eq!(
+        drawn_curves(&after),
+        drawn,
+        "the block draws the clipped parts"
+    );
+}
+
+#[test]
+fn binding_a_rotated_and_scaled_reference_draws_what_the_reference_drew() {
+    let linked = linked_snapshot();
+    let (mut f, space) = host(id(LINKED), "linked.arc");
+    let placed = place_with(
+        &mut f,
+        space,
+        json!({"position": [100.0, 20.0], "scale": [2.0, 0.5, 1.0], "rotation": 0.3}),
+    );
+    let links = load(&f, &opening(id(LINKED), linked));
+    let before = list(&f, space, Some(&links));
+    let drawn = drawn_curves(&before);
+    assert_eq!(drawn.len(), 2, "{drawn:?}");
+
+    f.commands.register(bind_command(links.clone())).unwrap();
+    f.create(
+        "core.draft.external_ref.bind",
+        json!({"reference": placed.to_string()}),
+    );
+    let after = list(&f, space, None);
+    assert_eq!(drawn_curves(&after), drawn);
+    for (a, b) in before.primitives.iter().zip(&after.primitives) {
+        assert_eq!(a.shape, b.shape, "the same transform applies to the copies");
+    }
+}
+
+#[test]
+fn a_linked_space_larger_than_the_primitive_budget_is_refused_before_it_is_built() {
+    let (mut f, space) = host(id(LINKED), "linked.arc");
+    let placed = place(&mut f, space, [0.0, 0.0]);
+    let links = load(&f, &opening(id(LINKED), lines(10)));
+    let budget = WorkBudget {
+        primitives: 5,
+        ..WorkBudget::default()
+    };
+    let (out, used) = list_within(&f, space, &links, budget);
+    assert!(out.primitives.is_empty());
+    assert_eq!(out.problems.len(), 1, "{:?}", out.problems);
+    assert_eq!(out.problems[0].reference, placed);
+    assert_eq!(out.problems[0].code, "draft.external_ref.budget_exceeded");
+    assert!(used.primitives <= 5, "{used:?}");
+    assert!(
+        used.work < 10,
+        "the build stops before it visits all ten entities: {used:?}"
+    );
+}
+
+#[test]
+fn linked_entities_on_a_hidden_layer_use_up_the_work_budget() {
+    let mut d = Fixture::drafting();
+    let hidden = d.create("core.draft.layer.create", json!({"name": "Hidden"}));
+    d.set("core.draft.layer.modify", &[hidden], "on", json!(false));
+    let d_space = d.space("Model");
+    for k in 0..50 {
+        d.create(
+            "core.draft.entity.create",
+            json!({
+                "owner": d_space.to_string(),
+                "geometry": curve_json(&segment((0.0, k as f64), (10.0, k as f64))),
+                "layer": hidden.to_string(),
+            }),
+        );
+    }
+    let (mut f, space) = host(id(LINKED), "linked.arc");
+    place(&mut f, space, [0.0, 0.0]);
+    let links = load(&f, &opening(id(LINKED), d.document.snapshot()));
+
+    let (out, used) = list_within(&f, space, &links, WorkBudget::default());
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    assert!(out.primitives.is_empty(), "every entity is hidden");
+    assert_eq!(
+        used.work, 50,
+        "each entity visited is charged, hidden or not"
+    );
+
+    let budget = WorkBudget {
+        work: 20,
+        ..WorkBudget::default()
+    };
+    let (out, used) = list_within(&f, space, &links, budget);
+    assert_eq!(out.problems.len(), 1, "{:?}", out.problems);
+    assert_eq!(out.problems[0].code, "draft.external_ref.budget_exceeded");
+    assert!(used.work <= 20, "{used:?}");
+}
+
+#[test]
+fn a_linked_space_is_charged_once_when_built_and_each_placement_for_its_copy() {
+    let snapshot = lines(10);
+    let (mut f, space) = host(id(LINKED), "linked.arc");
+    place(&mut f, space, [0.0, 0.0]);
+    let links = load(&f, &opening(id(LINKED), snapshot));
+    // One placement: the build (10 primitives) and its copy (10) need 20.
+    let exact = WorkBudget {
+        primitives: 20,
+        ..WorkBudget::default()
+    };
+    let (out, used) = list_within(&f, space, &links, exact);
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    assert_eq!(out.primitives.len(), 10);
+    assert_eq!(used.primitives, 20);
+
+    // A second placement shares the build and copies ten more primitives.
+    place(&mut f, space, [100.0, 0.0]);
+    let (out, _) = list_within(&f, space, &links, exact);
+    assert_eq!(out.problems.len(), 1, "{:?}", out.problems);
+    assert_eq!(out.problems[0].code, "draft.external_ref.budget_exceeded");
+    assert_eq!(out.primitives.len(), 10);
+
+    let (out, used) = list_within(
+        &f,
+        space,
+        &links,
+        WorkBudget {
+            primitives: 30,
+            ..WorkBudget::default()
+        },
+    );
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    assert_eq!(out.primitives.len(), 20);
+    assert_eq!(used.primitives, 30);
+    assert_eq!(used.expansions, 1, "the build is memoized");
+}
+
+#[test]
+fn the_clip_cut_is_charged_per_primitive_and_clip_vertex() {
+    // 50 lines and a clip of four vertices: 50 entity visits and 50 x 4 cut units.
+    let (mut f, space) = host(id(LINKED), "linked.arc");
+    place_with(
+        &mut f,
+        space,
+        json!({"position": [0.0, 0.0], "clip": rectangle((-1.0, -1.0), (20.0, 60.0))}),
+    );
+    let links = load(&f, &opening(id(LINKED), lines(50)));
+    let short = WorkBudget {
+        work: 249,
+        ..WorkBudget::default()
+    };
+    let (out, _) = list_within(&f, space, &links, short);
+    assert_eq!(out.problems.len(), 1, "{:?}", out.problems);
+    assert_eq!(out.problems[0].code, "draft.external_ref.budget_exceeded");
+
+    let exact = WorkBudget {
+        work: 250,
+        ..WorkBudget::default()
+    };
+    let (out, used) = list_within(&f, space, &links, exact);
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    assert_eq!(out.primitives.len(), 50);
+    assert_eq!(used.work, 250);
+}
+
+#[test]
+fn a_host_layer_that_shares_an_identifier_with_a_linked_layer_does_not_hide_linked_geometry() {
+    // The linked drawing is a copy of the host's layer and entity: the same identifier names the
+    // layer in both documents.
+    let mut d = Fixture::drafting();
+    let linked_walls = d.create("core.draft.layer.create", json!({"name": "Walls"}));
+    let d_space = d.space("Model");
+    d.create(
+        "core.draft.entity.create",
+        json!({
+            "owner": d_space.to_string(),
+            "geometry": curve_json(&segment((0.0, 0.0), (10.0, 0.0))),
+            "layer": linked_walls.to_string(),
+        }),
+    );
+    let linked = d.document.snapshot();
+
+    let mut f = Fixture::drafting_with_links();
+    let host_walls = f.create("core.draft.layer.create", json!({"name": "Walls"}));
+    assert_eq!(host_walls, linked_walls, "the identifiers coincide");
+    let spec = LinkSpec {
+        document: id(LINKED),
+        path: "linked.arc",
+        hub_resource: None,
+        mode: LoadMode::Full,
+    };
+    let link = id(LINK);
+    f.document
+        .submit(move |txn: &mut Txn| link::create(txn, link, &spec))
+        .wait()
+        .unwrap();
+    let space = f.space("Host");
+    let reference_layer = f.create("core.draft.layer.create", json!({"name": "Reference"}));
+    let placed = place_with(
+        &mut f,
+        space,
+        json!({"position": [0.0, 0.0], "layer": reference_layer.to_string()}),
+    );
+    let links = load(&f, &opening(id(LINKED), linked));
+
+    let shown = list(&f, space, Some(&links));
+    assert_eq!(shown.primitives.len(), 1);
+    f.set("core.draft.layer.modify", &[host_walls], "on", json!(false));
+    let with_host_layer_off = list(&f, space, Some(&links));
+    assert_eq!(
+        with_host_layer_off.primitives.len(),
+        1,
+        "the host layer with the same identifier does not hide the linked line"
+    );
+    f.set(
+        "core.draft.layer.modify",
+        &[reference_layer],
+        "on",
+        json!(false),
+    );
+    let with_reference_layer_off = list(&f, space, Some(&links));
+    assert!(with_reference_layer_off.primitives.is_empty());
+    assert_eq!(shown.primitives[0].source, placed);
+}
+
+#[test]
+fn a_block_holding_a_placed_reference_draws_through_a_graph_list() {
+    let (mut f, space) = host(id(LINKED), "linked.arc");
+    let block = f.create("core.draft.block.define", json!({"name": "holder"}));
+    place_with(&mut f, block, json!({"position": [0.0, 0.0]}));
+    f.create(
+        "core.draft.block.insert",
+        json!({"owner": space.to_string(), "block": block.to_string(), "position": [100.0, 0.0]}),
+    );
+    let links = load(&f, &opening(id(LINKED), linked_snapshot()));
+    let out = space_list_with_links(
+        &f.document.snapshot(),
+        Lists::Graph(f.document.graph()),
+        Some(&links),
+        space,
+        &DisplayOptions::default(),
+    )
+    .unwrap();
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    assert_eq!(out.primitives.len(), 2, "the linked line and circle");
+    let bounds = boxes(&out.primitives[0].shape);
+    assert!((bounds[0].min().x - 100.0).abs() < 1e-9, "{:?}", bounds[0]);
 }

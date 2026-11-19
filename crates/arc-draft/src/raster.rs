@@ -136,6 +136,15 @@ mod tiff {
     const BITS: u64 = 6;
     /// The bytes of one rational.
     const RATIONAL: u64 = 8;
+    /// The bytes of a file besides its pixels: the header, the padding byte that aligns the
+    /// BitsPerSample values, those values, the two resolutions, the directory and its end.
+    const FIXED: u64 = HEADER + 1 + BITS + 2 * RATIONAL + 2 + ENTRIES * 12 + 4;
+
+    /// The most pixels a classic file holds: three bytes per pixel within the 32-bit offsets
+    /// that remain after the fixed bytes.
+    fn max_pixels() -> u64 {
+        (u64::from(u32::MAX) - FIXED) / 3
+    }
 
     /// Byte size of the file for `pixels`, with the offsets of its parts, or `None` when a
     /// size overflows `u64` or the file would not fit a classic TIFF.
@@ -179,28 +188,26 @@ mod tiff {
         Ok((n as u32, 1000))
     }
 
-    fn too_large(width: u32, height: u32) -> Error {
-        let limit = (u64::from(u32::MAX) / 4).min(u64::from(width) * u64::from(height));
+    fn too_large() -> Error {
         Error::new(codes::RASTER_TOO_LARGE)
-            .with_arg("limit", i64::try_from(limit).unwrap_or(i64::MAX))
+            .with_arg("limit", i64::try_from(max_pixels()).unwrap_or(i64::MAX))
     }
 
     pub(super) fn encode(raster: &Raster) -> Result<Vec<u8>> {
-        let pixels = u64::from(raster.width)
-            .checked_mul(u64::from(raster.height))
-            .ok_or_else(|| too_large(raster.width, raster.height))?;
-        let data = pixels
-            .checked_mul(3)
-            .ok_or_else(|| too_large(raster.width, raster.height))?;
-        let layout = layout(data).ok_or_else(|| too_large(raster.width, raster.height))?;
-        if u64::try_from(raster.rgba.len()).ok() != pixels.checked_mul(4) {
+        let pixels = u64::from(raster.width) * u64::from(raster.height);
+        if pixels > max_pixels() {
+            return Err(too_large());
+        }
+        let data = pixels * 3;
+        let layout = layout(data).ok_or_else(too_large)?;
+        if u64::try_from(raster.rgba.len()).ok() != Some(pixels * 4) {
             return Err(invalid("pixels"));
         }
         let (x_num, x_den) = rational(raster.dpi)?;
         let (y_num, y_den) = (x_num, x_den);
         let width = raster.width;
         let height = raster.height;
-        let data_bytes = u32::try_from(data).map_err(|_| too_large(width, height))?;
+        let data_bytes = u32::try_from(data).map_err(|_| too_large())?;
 
         let mut out = Vec::with_capacity(layout.end as usize);
         // Header: byte order, magic 42, offset of the image file directory.
