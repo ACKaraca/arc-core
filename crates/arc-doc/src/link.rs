@@ -9,7 +9,7 @@
 //! The crate reads no paths. Opening a path is the caller's job: a [`LinkResolver`] turns the
 //! path, seen from the document that holds it, into an [`Opened`] document: the loaded snapshot
 //! and the content hash the caller computed from the file's bytes. [`load`] walks the links of a
-//! document through the resolver. Each document of a load is opened once and walked once, however
+//! document through the resolver, breadth first. Each document of a load is walked once, however
 //! many links name it, so cycles of links (A links B, B links A) load and terminate. Chains of
 //! documents nested deeper than [`Limits::nesting_depth`] are refused.
 //!
@@ -22,7 +22,7 @@
 //! An unresolved link keeps its link object and every external reference in the document; they
 //! are reported by [`Links::problems`] and are not readable. Nothing is deleted or rewritten.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use arc_base::error::ErrorCode;
@@ -211,8 +211,8 @@ pub struct Opened {
 }
 
 /// Turns a path, seen from the document at location `from`, into an opened document. The
-/// crate calls it for each link to a document not yet loaded by the same load; a closure of the
-/// same signature implements the trait.
+/// crate calls it for each link of a loaded document; a closure of the same signature implements
+/// the trait.
 pub trait LinkResolver {
     /// Opens the document that `path` names from the document at `from`. A failure makes the
     /// link unresolved, with the failure's code as its reason.
@@ -228,12 +228,10 @@ where
     }
 }
 
-/// A document of one load: its location, identifier, the content hash of its file (absent for
-/// the root document until a link opens it), its snapshot and the states of its links.
+/// A document of one load: its location, its snapshot and the states of its links.
 #[derive(Debug)]
 struct Linked {
     location: String,
-    content: Option<[u8; 32]>,
     snapshot: Snapshot,
     states: BTreeMap<ObjectId, LinkState>,
 }
@@ -372,18 +370,27 @@ impl Links {
     }
 }
 
-/// The documents of one load, by identifier, and the nesting limit.
+/// The documents of one load, by identifier, the nesting limit and the documents to walk.
 struct Loader<'a> {
     resolver: &'a dyn LinkResolver,
     /// The number of linked levels a load opens below the root: `Limits::nesting_depth`.
     limit: usize,
     documents: BTreeMap<ObjectId, Linked>,
+    /// The documents opened and not walked yet, with their depth, in the order they were opened.
+    queue: VecDeque<(ObjectId, usize)>,
 }
 
 impl Loader<'_> {
-    /// Computes the link states of the document `document`, which the map holds, and stores
-    /// them. A link to a document the load has not opened yet opens and walks it, one level
-    /// deeper; a link to a document already in the map reuses that entry.
+    /// Walks the queued documents breadth first: every document of one depth is walked before any
+    /// document of the next, so each document is opened at the least depth a route reaches it.
+    fn run(&mut self) {
+        while let Some((document, depth)) = self.queue.pop_front() {
+            self.walk(document, depth);
+        }
+    }
+
+    /// Computes the link states of the document `document`, `depth` levels below the root, which
+    /// the map holds, and stores them.
     fn walk(&mut self, document: ObjectId, depth: usize) {
         let Some(entry) = self.documents.get(&document) else {
             return;
@@ -403,6 +410,10 @@ impl Loader<'_> {
         }
     }
 
+    /// The state of one link of a document at `depth`. Every link opens its own path, so a path
+    /// that no longer opens the document is caught even when another link loaded it. A link to a
+    /// document the load has not opened yet opens it one level deeper and queues it for a walk;
+    /// a link to a document already in the map reuses that snapshot and is not walked again.
     fn state(
         &mut self,
         snapshot: &Snapshot,
@@ -418,11 +429,8 @@ impl Loader<'_> {
             return LinkState::NotLoaded;
         }
         let target = record.document;
-        let known = self.documents.get(&target).map(|entry| entry.content);
-        if let Some(Some(content)) = known {
-            return Self::settled(&record, target, content);
-        }
-        if known.is_none() && depth >= self.limit {
+        let known = self.documents.contains_key(&target);
+        if !known && depth >= self.limit {
             return LinkState::Refused(Problem::new(codes::LINK_TOO_DEEP, "nesting_depth"));
         }
         let opened = match self.resolver.open(from, &record.path) {
@@ -434,27 +442,16 @@ impl Loader<'_> {
         if opened.document != target {
             return LinkState::Unresolved(Problem::new(codes::LINK_UNRESOLVED, "document"));
         }
-        let content = opened.content;
-        match known {
-            // The root document, reached by a link for the first time: its snapshot is the one
-            // the load started from, and this link records its content.
-            Some(None) => {
-                if let Some(entry) = self.documents.get_mut(&target) {
-                    entry.content = Some(content);
-                }
-            }
-            _ => {
-                let linked = Linked {
-                    location: opened.location,
-                    content: Some(content),
-                    snapshot: opened.snapshot,
-                    states: BTreeMap::new(),
-                };
-                self.documents.insert(target, linked);
-                self.walk(target, depth + 1);
-            }
+        if !known {
+            let linked = Linked {
+                location: opened.location,
+                snapshot: opened.snapshot,
+                states: BTreeMap::new(),
+            };
+            self.documents.insert(target, linked);
+            self.queue.push_back((target, depth + 1));
         }
-        Self::settled(&record, target, content)
+        Self::settled(&record, target, opened.content)
     }
 
     fn settled(record: &Record, target: ObjectId, content: [u8; 32]) -> LinkState {
@@ -470,12 +467,13 @@ impl Loader<'_> {
 /// name is `location`. Each link's path is opened through `resolver`, and the linked documents'
 /// own links are loaded likewise.
 ///
-/// Each document of the load is opened once and walked once: a link to a document already loaded,
-/// including the root and any document on the path to the link, reuses that document, and the
-/// resolver is not called for it. So a cycle of links loads and terminates; for A links B and B
-/// links A, the resolver is called once for B and once for A, and `root_document` is never opened
-/// through the resolver twice. A link whose document would be opened beyond `limits.nesting_depth`
-/// levels below the root is refused with `doc.link.too_deep`.
+/// The documents are walked breadth first, so each document is opened at the least depth any route
+/// to it reaches. A document is walked once, however many links name it: the first link that
+/// opens it adds it to the load, and every other link calls the resolver for its own path, which
+/// must open the same document identifier, and reuses the snapshot already loaded. So a cycle of
+/// links loads and terminates; for A links B and B links A, the resolver is called once for B and
+/// once for A, and `root_document` is never walked twice. A link whose document would be opened
+/// beyond `limits.nesting_depth` levels below the root is refused with `doc.link.too_deep`.
 #[must_use]
 pub fn load(
     root: &Snapshot,
@@ -489,17 +487,18 @@ pub fn load(
         resolver,
         limit,
         documents: BTreeMap::new(),
+        queue: VecDeque::new(),
     };
     loader.documents.insert(
         root_document,
         Linked {
             location: location.to_owned(),
-            content: None,
             snapshot: root.clone(),
             states: BTreeMap::new(),
         },
     );
-    loader.walk(root_document, 0);
+    loader.queue.push_back((root_document, 0));
+    loader.run();
     Links {
         document: root_document,
         documents: Arc::new(loader.documents),
@@ -512,9 +511,11 @@ pub fn load(
 /// so undo restores the previously recorded state.
 ///
 /// Fails with `doc.link.invalid` for a link object that is malformed or missing,
-/// `doc.link.not_loaded` for a link with the load mode `not_loaded`, `doc.link.unresolved` when
-/// the path does not open the linked document, and `doc.value.out_of_range` when the revision
-/// does not fit a 64-bit signed field. Nothing is recorded then.
+/// `doc.link.not_loaded` for a link with the load mode `not_loaded`, and `doc.link.unresolved`
+/// when the path does not open the linked document: with the failure's code as reason when the
+/// resolver fails, and with reason `document` when it opens another document, as [`load`]
+/// reports it. `doc.value.out_of_range` is returned when the revision does not fit a 64-bit
+/// signed field. Nothing is recorded then.
 pub fn reload(
     txn: &mut Txn,
     link: ObjectId,
@@ -532,15 +533,30 @@ pub fn reload(
         refusal(link, Problem::new(codes::LINK_UNRESOLVED, error.code())).with_source(error)
     })?;
     if opened.document != record.document {
-        return Err(refusal(link, Problem::new(codes::LINK_INVALID, "document")));
+        return Err(refusal(
+            link,
+            Problem::new(codes::LINK_UNRESOLVED, "document"),
+        ));
     }
     let revision = i64::try_from(opened.snapshot.revision())
         .map_err(|_| Error::new(codes::VALUE_OUT_OF_RANGE).with_arg("field", REVISION))?;
+    // Both fields are written or neither is: the savepoint takes back the first write when the
+    // second fails. The kind is set only once both writes have succeeded.
+    let savepoint = txn.savepoint()?;
+    let written = txn
+        .modify(link, FieldPath::new(REVISION), Some(Value::I64(revision)))
+        .and_then(|()| {
+            txn.modify(
+                link,
+                FieldPath::new(CONTENT),
+                Some(Value::Opaque(opened.content.to_vec())),
+            )
+        });
+    if let Err(error) = written {
+        txn.rollback_to(&savepoint)?;
+        return Err(error);
+    }
+    txn.release(&savepoint)?;
     txn.meta_mut().kind = TxnKind::LinkReload;
-    txn.modify(link, FieldPath::new(REVISION), Some(Value::I64(revision)))?;
-    txn.modify(
-        link,
-        FieldPath::new(CONTENT),
-        Some(Value::Opaque(opened.content.to_vec())),
-    )
+    Ok(())
 }

@@ -1586,6 +1586,13 @@ points the record at it.
   counts (saturating at zero).
 - `saved`: the `Saved` the rewrite returned.
 
+The file is replaced by the rewrite. A footprint that cannot be read after it does not fail the
+compaction: the after-values then read zero (`file_bytes_after`, `reclaimed_bytes` and the three
+removed counts), and a package file is never empty, so a zero size means not measured. A zero count
+cannot be told apart from none removed, so a caller that needs to know must check the file again.
+Failures before the rewrite still fail the call. A recovery notification that fails after the file
+was saved fails the call with `doc.recovery.unavailable`, as `Package::save_document` does.
+
 What is removed follows the rules of the compact strategy and the retention: an asset is kept
 while an object, a held row, a retained journal record or a foreign data row refers to it, and the
 journal keeps the records the `history_retention` metadata allows. Because the create record of an
@@ -1638,7 +1645,7 @@ value `(link, target)` names an object of the linked document through its link o
   document at location `from`, into an `Opened`: the caller's location name, the document identifier,
   the content hash of the file the caller read and the document's `Snapshot`. A closure of the same
   signature implements the trait. `link::load(root, root_document, location, resolver, limits)` opens
-  every link of the root and, recursively, the links of each linked document, and returns `Links`:
+  every link of the root and, breadth first, the links of each linked document, and returns `Links`:
   one `LinkState` per link object of the root, and `Links::linked` gives the view of each linked
   document.
 - **States.** `NotLoaded` for `not_loaded`; `Resolved` when the opened content equals the content
@@ -1650,12 +1657,18 @@ value `(link, target)` names an object of the linked document through its link o
   snapshot for `Resolved` and `Outdated` links, and fails with `doc.link.unresolved`,
   `doc.link.too_deep` or `doc.link.not_loaded` otherwise. A linked snapshot is
   immutable, and no function writes to it.
-- **Limits.** `Limits::nesting_depth` bounds the levels a load opens below the root: a link found at
-  that depth is refused with `doc.link.too_deep`. The walk recurses at most that deep.
-- **Cycles and shared documents.** Each document of a load is opened through the resolver once and
-  walked once. A link to a document the load already holds, including the root and any ancestor on
-  the path, reuses that entry and does not call the resolver. So a cycle of links (A links B, B
-  links A) loads and terminates: the resolver is called once for B and once for A.
+- **Limits.** `Limits::nesting_depth` bounds the levels a load opens below the root: a link to a
+  document that is not loaded yet, found in a document at that depth, is refused with
+  `doc.link.too_deep`. The walk is breadth first, so every document is opened at the least depth
+  any route reaches it, and the refusal does not depend on the order of the link identifiers. For
+  example, with a limit of 2 the root links A and B, A links B and B links C: C is two levels below
+  the root through B and resolves, whichever of the root's links is visited first.
+- **Cycles and shared documents.** Each document of a load is walked once. The first link that opens
+  a document adds it to the load. Every other link calls the resolver for its own path, as the first
+  one did, and must open the same document identifier; it then reuses the snapshot already loaded and
+  the document is not walked again. A path that no longer opens the document makes its own link
+  `Unresolved`, whatever the other links did. So a cycle of links (A links B, B links A) loads and
+  terminates: the resolver is called once for B and once for A, and the root is walked once.
 - **Unresolved links** keep the link object and every external reference in the document: `load`
   changes nothing, and `Links::problems` reports each unresolved link as a warning with
   `doc.link.unresolved` and the failure's code as its `reason`. `problems` covers the root document's
@@ -1664,7 +1677,10 @@ value `(link, target)` names an object of the linked document through its link o
   resolver)` opens the link's path and records the opened revision and content hash in the link
   object. The transaction has kind `TxnKind::LinkReload` and its changes are two field modifications,
   so undo restores the recorded content and the link is outdated again. A reload of a `not_loaded`
-  link, or one that names another document, fails and records nothing.
+  link fails with `doc.link.not_loaded`. A reload whose path does not open the linked document fails
+  with `doc.link.unresolved`, with the resolver's code as reason, or with reason `document` when it
+  opens another document, the same codes `load` reports. Both field writes are made or neither is,
+  and the transaction's kind is set after both succeed; a failed reload records nothing.
 - **Load mode.** `partition_list` loads the whole linked document until product partitions
   (CORE-DOC-007) exist; it is not a partial load in this version.
 

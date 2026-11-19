@@ -422,3 +422,106 @@ fn a_document_with_another_identifier_does_not_resolve_the_link() {
     ));
     assert_eq!(links.problems()[0].reason, "document");
 }
+
+#[test]
+fn a_document_is_opened_at_its_least_depth_whatever_the_order_of_the_links() {
+    // The root links A and B, A links B and B links C. With nesting_depth 2, B is one level below
+    // the root and C two levels below it, so C resolves whichever of the root's links is visited
+    // first: the identifiers of the root's links decide that order.
+    let (a_id, b_id, c_id) = (id(101), id(102), id(103));
+    let c = cell_document(3);
+    let b = document();
+    link_document(&b, id(30), id(31), c_id, "c.arc", LoadMode::Full);
+    let a = document();
+    link_document(&a, id(40), id(41), b_id, "b.arc", LoadMode::Full);
+    let (a_snapshot, b_snapshot, c_snapshot) = (a.snapshot(), b.snapshot(), c.snapshot());
+    let resolver = move |_: &str, path: &str| -> Result<Opened> {
+        match path {
+            "a.arc" => Ok(opened("a", a_id, 1, &a_snapshot)),
+            "b.arc" => Ok(opened("b", b_id, 2, &b_snapshot)),
+            "c.arc" => Ok(opened("c", c_id, 3, &c_snapshot)),
+            _ => Err(Error::new(codes::OBJECT_NOT_FOUND).with_arg("id", path)),
+        }
+    };
+    let limits = Limits {
+        nesting_depth: 2,
+        ..Limits::DEFAULT
+    };
+
+    // A's link is visited first in the first case, B's in the second.
+    for (to_a, to_b) in [(id(10), id(20)), (id(20), id(10))] {
+        let root = document();
+        link_document(&root, to_a, id(11), a_id, "a.arc", LoadMode::Full);
+        link_document(&root, to_b, id(21), b_id, "b.arc", LoadMode::Full);
+        let links = link::load(&root.snapshot(), id(500), "root", &resolver, &limits);
+
+        let state = links.linked(to_b).unwrap().state(id(30)).cloned();
+        assert!(
+            matches!(state, Some(LinkState::Outdated(document)) if document == c_id),
+            "C resolves through B with links {to_a} and {to_b}: {state:?}"
+        );
+    }
+}
+
+#[test]
+fn a_link_whose_own_path_no_longer_opens_the_document_is_unresolved() {
+    // Two links record the same document. The second link's path opens nothing, so it is
+    // unresolved even though the first link loaded the document.
+    let target = id(100);
+    let root = document();
+    link_document(&root, id(10), id(11), target, "present.arc", LoadMode::Full);
+    link_document(&root, id(12), id(13), target, "moved.arc", LoadMode::Full);
+    let linked = cell_document(5);
+    let snapshot = linked.snapshot();
+    let resolver = move |_: &str, path: &str| -> Result<Opened> {
+        match path {
+            "present.arc" => Ok(opened("linked", target, 1, &snapshot)),
+            _ => Err(Error::new(codes::OBJECT_NOT_FOUND).with_arg("id", path)),
+        }
+    };
+    let links = link::load(
+        &root.snapshot(),
+        id(500),
+        "root",
+        &resolver,
+        &Limits::DEFAULT,
+    );
+
+    assert!(matches!(links.state(id(10)), Some(LinkState::Outdated(_))));
+    let Some(LinkState::Unresolved(problem)) = links.state(id(12)) else {
+        panic!("the link whose path opens nothing is unresolved");
+    };
+    assert_eq!(problem.code.code, codes::LINK_UNRESOLVED.code);
+    assert_eq!(problem.reason, codes::OBJECT_NOT_FOUND.code);
+}
+
+#[test]
+fn a_reload_that_opens_another_document_fails_like_a_load_and_records_nothing() {
+    let root = document();
+    let link_id = id(10);
+    link_document(
+        &root,
+        link_id,
+        id(11),
+        id(100),
+        "linked.arc",
+        LoadMode::Full,
+    );
+    let revision = root.snapshot().revision();
+    let other = cell_document(1);
+    let snapshot = other.snapshot();
+    let resolver =
+        move |_: &str, _: &str| -> Result<Opened> { Ok(opened("other", id(999), 1, &snapshot)) };
+
+    let error = root
+        .submit(move |txn: &mut Txn| link::reload(txn, link_id, "root", &resolver))
+        .wait()
+        .unwrap_err();
+
+    assert_eq!(error.code(), codes::LINK_UNRESOLVED.code);
+    assert_eq!(
+        error.arguments().get("reason"),
+        Some(&arc_base::error::Value::Text("document".to_owned()))
+    );
+    assert_eq!(root.snapshot().revision(), revision);
+}

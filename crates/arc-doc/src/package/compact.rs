@@ -24,16 +24,19 @@ pub struct Compaction {
     pub saved: Saved,
     /// The size of the package file before the rewrite, in bytes.
     pub file_bytes_before: u64,
-    /// The size of the package file after the rewrite, in bytes.
+    /// The size of the package file after the rewrite, in bytes; zero when the file could not
+    /// be measured after the rewrite (a package file is never empty).
     pub file_bytes_after: u64,
-    /// The bytes the file shrank by; zero when it did not shrink.
+    /// The bytes the file shrank by; zero when it did not shrink, or when the file could not be
+    /// measured after the rewrite.
     pub reclaimed_bytes: u64,
-    /// The asset rows removed.
+    /// The asset rows removed; zero when the rows could not be counted after the rewrite.
     pub assets_removed: u64,
-    /// The chunk rows removed.
+    /// The chunk rows removed; zero when the rows could not be counted after the rewrite.
     pub chunks_removed: u64,
-    /// The journal rows removed. Records committed since the last save are not counted: they
-    /// are added to the journal by the rewrite, so this is the rows dropped net of them.
+    /// The journal rows removed; zero when the rows could not be counted after the rewrite.
+    /// Records committed since the last save are not counted: they are added to the journal by
+    /// the rewrite, so this is the rows dropped net of them.
     pub journal_records_removed: u64,
 }
 
@@ -73,7 +76,9 @@ impl Package {
     /// The document keeps its state and its journal; reopening the package gives the same
     /// document. Fails with the errors of [`Package::save_document`], and with
     /// `doc.package.io_failed` or `doc.package.corrupt` when the file's footprint cannot be read
-    /// before or after the rewrite.
+    /// before the rewrite. Once the file is replaced the compaction has happened, so a footprint
+    /// that cannot be read after it does not fail the call: the report carries zero for the
+    /// after-values (see [`Compaction`]).
     pub fn compact_document(
         &mut self,
         document: &Document,
@@ -84,15 +89,28 @@ impl Package {
         let limits = self.limits;
         let before = footprint(&self.path, &limits)?;
         let saved = self.save_document_with(document, previews, recovery, progress, true)?;
-        let after = footprint(&self.path, &limits)?;
+        // The file is already replaced: a failure to measure it now is not a failure of the
+        // compaction, so the after-values that cannot be measured are reported as zero.
+        let after = footprint(&self.path, &limits).ok();
+        let (file_bytes_after, reclaimed_bytes, assets_removed, chunks_removed, journal_removed) =
+            match after {
+                Some(after) => (
+                    after.file_bytes,
+                    before.file_bytes.saturating_sub(after.file_bytes),
+                    before.assets.saturating_sub(after.assets),
+                    before.chunks.saturating_sub(after.chunks),
+                    before.journal.saturating_sub(after.journal),
+                ),
+                None => (0, 0, 0, 0, 0),
+            };
         Ok(Compaction {
             saved,
             file_bytes_before: before.file_bytes,
-            file_bytes_after: after.file_bytes,
-            reclaimed_bytes: before.file_bytes.saturating_sub(after.file_bytes),
-            assets_removed: before.assets.saturating_sub(after.assets),
-            chunks_removed: before.chunks.saturating_sub(after.chunks),
-            journal_records_removed: before.journal.saturating_sub(after.journal),
+            file_bytes_after,
+            reclaimed_bytes,
+            assets_removed,
+            chunks_removed,
+            journal_records_removed: journal_removed,
         })
     }
 }
