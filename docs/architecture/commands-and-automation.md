@@ -149,12 +149,15 @@ remembers the choice in settings.
 | Documents | `document.list`, `document.new`, `document.open`, `document.save`, `document.saveAs`, `document.close`, `document.info` | Paths are checked against read and write roots |
 | Commands | `command.list`, `command.describe`, `command.validate`, `command.run`, `command.cancel` | `command.run` accepts `document`, `command`, `params`, optional `expectedRevision` and `preview: true` (runs and rolls back, returning the result and the change summary) |
 | Queries | `query.objects`, `query.object`, `query.references`, `query.diagnostics`, `query.history`, `query.compare`, `query.derived` | Filters by type, owner, partition, indexed property predicates and ids; projection of fields; cursor pagination; every result names the revision it was read from |
+| History | `history.undo`, `history.redo` | Steps the document's undo or redo stack; needs the `edit` permission; answers the command and label of the step it reversed |
 | Events | `event.subscribe`, `event.unsubscribe`; notification `event.notify` | Document events, command progress, selection changes |
 | Selection | `selection.get`, `selection.set`, `selection.add`, `selection.remove` | Session state; ids and sub-object keys |
 | Views | `view.list`, `view.get`, `view.setCamera`, `view.render` | `view.render` renders a view to PNG (width, height, camera, display mode, section state) and returns it inline (base64, up to 16 MiB) or writes it to a path in the write roots |
 
-Undo, redo and group control are commands (`core.edit.undo`, `core.edit.redo`,
-`core.edit.group_begin`, `core.edit.group_end`), not protocol methods.
+Undo and redo are commands (`core.edit.undo`, `core.edit.redo`) and also protocol methods
+(`history.undo`, `history.redo`); both change the document, so both need the `edit` permission, and
+both are journaled as an interactive undo or redo. Group control (`core.edit.group_begin`,
+`core.edit.group_end`) stays commands only.
 
 Example request and response:
 
@@ -220,7 +223,7 @@ subcommands but do not change the meaning of these.
 | `info <file>` | Prints format, versions, units, object counts, links and diagnostics |
 | `validate <file>` | Opens and validates; exits non-zero on errors; `--rules <file>` adds model-checking rules |
 | `convert <input> <output>` | Imports or exports by extension or `--format`; `--option key=value` for format options; writes a loss report beside the output or to `--loss-report` |
-| `run <file> --command <id> [--params <json or @file>]` | Runs one command; `--save` saves in place, `--output <file>` saves a copy |
+| `run <file> --command <id> [--params <json or @file>]` | Runs one command; `--save` saves in place, `--output <file>` saves a copy, `--create` makes the package first (inside a write root) |
 | `batch <file> <macro.jsonl>` | Runs a macro or batch file as one group |
 | `commands` | Prints the command catalog (`--json` for machine output) |
 | `render <file> --view <id> --out <png>` | Renders a view headless |

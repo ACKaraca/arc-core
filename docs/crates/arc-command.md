@@ -407,6 +407,11 @@ keys sorted. The first line is the header; every further line is one step.
   interactive only, so every successful invocation is recorded, transparent and read-only
   commands included. Prompt answers are never recorded; their resulting parameters are, as the
   canonical line.
+- A successful `history.undo` or `history.redo` of the session marks the recorder as
+  unrecordable (`Recorder::mark_unrecordable`, `is_unrecordable`). A macro has no step for it: a
+  playback is one undo group, and an undo inside an open group is refused. The runner then writes
+  no macro and fails the session's end with `cmd.macro.unrecordable` (exit 4), so a recording
+  never silently differs from the session it came from.
 
 ### Inputs
 
@@ -451,6 +456,11 @@ of the recorded one.
   the recorded identifiers. A step without a revision (a batch list line) mixes in an
   order-independent digest of the identifiers of the objects present when playback starts,
   because a package opened again starts at revision 0 and would otherwise repeat identifiers.
+- **No undo steps.** A macro cannot undo or redo. Playback is one undo group, and the document
+  refuses an undo inside an open group. A step that ends the group would make playback split into
+  several undo steps and break its promise that a failure leaves the content as before playback,
+  so the format has no such step yet (open item: a macro format version with history steps, and a
+  decision on what a failed playback restores). Scripts undo through the protocol.
 
 ## Automation protocol and file roots as implemented
 
@@ -554,6 +564,31 @@ the process that owns stdin and stdout is the [headless runner](#headless-runner
   "fraction", "messageId"}` before the run's response. A session receives the progress of its
   own runs until it unsubscribes from `command.progress` ([Events](#events)).
 
+### History methods
+
+`history.undo` and `history.redo` step the document's undo or redo stack (module `history`):
+`history.undo` and `history.redo` take `document` (required) and answer `command` (the identifier
+of the command the step reversed, or `null` when its record names none), `label` (the message
+identifier of that command's label, or `null`) and `revision` (the revision after the step). The
+stacks and journal change exactly as an interactive undo or redo changes them: the transaction is
+of kind `undo_of` or `redo_of` and names the transaction it reverses, and the step is read from
+that record, so a concurrent commit by another writer does not change the answer.
+
+- Both need the `edit` permission (`cmd.permission_denied`, detail `permission` `edit`), like any
+  change of the document.
+- They run in the session's request queue, after the runs sent before them, and wait behind them
+  like a `command.run` and count toward the 64 queued requests; `command.cancel` cancels one that
+  is still waiting (-32007) without stepping. A step that has started is no longer cancellable:
+  `command.cancel` answers `cancelled: false`, as it does for a request that has finished.
+- An undo or redo record names the record it reverses. A record that names no command (a redo
+  does not) is followed to the record it reverses, up to 64 links, so an undo after a redo
+  reports the command the redo restored. They take no `expectedRevision` and no `preview`.
+- With nothing to step over, `cmd.history.empty` (detail `operation`: `undo` or `redo`) and the
+  stacks are unchanged. Inside an open undo group the document's own `doc.undo.sequence_invalid`
+  is returned.
+- The Model Context Protocol endpoint has no undo tool: the architecture names one among its fixed
+  tools, and it is not implemented here.
+
 ### Errors
 
 Every error object has `code` (below), `message` (the stable error code) and `data` with
@@ -600,6 +635,25 @@ schema is the inline form (`data`) or the file form (`path`) of [View rendering]
   Commands reach files only through `Context::open_read` (class `file_read` or `file_write`)
   and `Context::create_write` (class `file_write`); a missing class is
   `cmd.permission_denied`.
+- `reserve(path)` is the first step of package creation (`--create`). It creates the file at
+  `path` exclusively (`O_EXCL` and no-follow, or `create_new` on Windows) under the held directory
+  chain of a write root, so an existing name, a link included, is `cmd.path.io` with reason
+  `exists`, and nothing is opened or truncated. The parent must resolve inside a write root; a
+  path under a directory that does not exist is `cmd.path.outside_roots` unless its deepest
+  existing ancestor lies inside a root, so the answer reveals nothing outside the roots. It
+  returns the resolved path; the file is an empty placeholder that the caller fills.
+- `check_write(path)` checks that a file the runner writes at the end (the macro of `--record`)
+  would be accepted: a new name in a write root, or an existing regular file inside one. It
+  creates and truncates nothing.
+- What creation guarantees, and what remains. The runner never opens, truncates or overwrites a
+  file it did not create: the name is reserved exclusively first, and the package is then written
+  by `arc_doc::package::write`, which builds a temporary file beside the name and renames it over
+  the placeholder, so only that placeholder is replaced. Not closed (the document layer takes
+  paths, and no arc-doc change is made here; open item): (a) the rename replaces whatever holds
+  the name when it runs, so a placeholder removed by another process and a file created at the
+  name in between would be replaced; (b) the temporary file and the rename are path-based, so a
+  directory on the path replaced by a link between the reservation and the write is followed,
+  outside the roots.
 - `open_read(path)` opens a regular file; `create_write(path)` creates a file in an existing
   directory or truncates an existing one. The architecture lists no directory operations, so
   there are none.
@@ -670,6 +724,15 @@ the edit-lock owner) and the three streams; it returns an `Exit` and never panic
 fault is exit 70). A product's `main` passes the process arguments and streams and returns the
 code. Arguments are parsed by hand: no argument-parsing crate is in the technology baseline.
 
+A product's per-document setup (its document validators and other document hooks) is a
+`DocumentSetup`, a closure given to `headless::run_with_setup` (with the renderer, or `None`).
+The runner calls it once for every document it opens or creates, before any command runs on it;
+an error it returns stops the subcommand and is reported like an error of opening the document.
+`run_with_renderer` is `run_with_setup` without one. The setup is passed beside `Product`, not in
+it, so a product's existing `Product` literal is unchanged. The sample set installs nothing, so the
+reference CLI passes none; a validator installed through the hook rejects a commit through the
+protocol like any other validator (`apps/arc-shell-cli/tests/scripted.rs` covers this).
+
 - Standard output carries JSON only: one value and a newline, sorted keys, or the protocol
   messages of `serve --stdio`, or one line per package for `batch`. Errors go to standard error as one line
   `{"error": <error object>}` with the protocol's error object
@@ -688,13 +751,13 @@ code. Arguments are parsed by hand: no argument-parsing crate is in the technolo
 | `commands` | Lists the commands exposed on `automation` | `command.list` result |
 | `describe <command>` | Describes one command (identifier or alias) | `command.describe` result |
 | `validate-params <command> [--params P]` | Validates parameters without running; exit 3 when invalid | `command.validate` result |
-| `run <file> --command <id> [--params P] [--seed N] [--save] [--record M]` | Opens the package, runs one command through the invoker; with `--save` opens it under the edit lock and saves the document in place after a successful run; with `--record` writes the run as a macro | `command.run` result |
-| `play <file> --macro M [--save]` | Opens the package and [plays](#playback) the macro or batch list `M` on it; with `--save` saves it in place after a successful playback | `{"revision", "results": [{"line", "command", "value"}]}` |
-| `batch <file>... --macro M [--save]` | Plays `M` on each package in turn, each opened, played and (with `--save`, only when its playback succeeded) saved on its own; a package that fails to open or play does not stop the others | One line per package, in order: `{"file", "result"}` with the `play` output, or `{"file", "error"}` with the error object |
+| `run <file> --command <id> [--params P] [--seed N] [--save] [--create] [--record M]` | Opens the package, runs one command through the invoker; with `--save` opens it under the edit lock and saves the document in place after a successful run; with `--record` writes the run as a macro | `command.run` result |
+| `play <file> --macro M [--save] [--create]` | Opens the package and [plays](#playback) the macro or batch list `M` on it; with `--save` saves it in place after a successful playback | `{"revision", "results": [{"line", "command", "value"}]}` |
+| `batch <file>... --macro M [--save] [--create]` | Plays `M` on each package in turn, each opened, played and (with `--save`, only when its playback succeeded) saved on its own; a package that fails to open or play does not stop the others | One line per package, in order: `{"file", "result"}` with the `play` output, or `{"file", "error"}` with the error object |
 | `inspect <file> [--check]` | `arc_doc::package::inspect`; with `--check` adds `findings`, exit 3 when there are any | Inspection JSON |
 | `validate <file>` | `arc_doc::package::check`; exit 3 when there are findings | `{"findings": [...]}` |
-| `serve --stdio [<file>...] [--save] [--record M]` | Serves the protocol on stdin and stdout; each package is a document named by its file stem (a stem twice, or one not UTF-8, is a usage error); with `--save` each is saved in place when the session ends; with `--record` the session's successful runs are written as a macro when it ends | Protocol messages |
-| `mcp [<file>] [--save] [--record M]` | Serves the [Model Context Protocol](#model-context-protocol-endpoint-and-local-socket-as-implemented) on stdin and stdout for the package (a document named by its file stem), or for no document; the surface is `mcp` and `--allow-edit` lifts read-only | MCP messages |
+| `serve --stdio [<file>...] [--save] [--create] [--record M]` | Serves the protocol on stdin and stdout; each package is a document named by its file stem (a stem twice, or one not UTF-8, is a usage error); with `--save` each is saved in place when the session ends; with `--record` the session's successful runs are written as a macro when it ends (none when the session stepped the history: `cmd.macro.unrecordable`) | Protocol messages |
+| `mcp [<file>] [--save] [--create] [--record M]` | Serves the [Model Context Protocol](#model-context-protocol-endpoint-and-local-socket-as-implemented) on stdin and stdout for the package (a document named by its file stem), or for no document; the surface is `mcp` and `--allow-edit` lifts read-only | MCP messages |
 | `help` (also `--help`) | Writes the usage text to standard error | Nothing |
 
 A finding is the protocol's error `data` (`code`, `category`, `messageId`, `arguments`,
@@ -709,8 +772,9 @@ A finding is the protocol's error `data` (`code`, `category`, `messageId`, `argu
 | `--params <P>` | `run`, `validate-params` | JSON text, or `@<file>` for a file's text (at most `input_bytes`); default `{}` |
 | `--seed <n>` | `run` | The invocation seed, a decimal `u64`; default 0 |
 | `--save` | `run`, `serve`, `play`, `batch` | Save in place |
+| `--create` | `run`, `serve`, `mcp`, `play`, `batch` | Create each package named, empty, instead of opening it. The path must be a new name inside a write root: `cmd.path.outside_roots` without one, `cmd.path.io` (reason `exists`) when the name is taken, `cmd.path.not_found` when the directory is missing (outside a root it is `cmd.path.outside_roots`). The name is reserved exclusively first (see [Read and write roots](#read-and-write-roots)), and the package then replaces only that placeholder. A package whose run or session fails before its result is kept, or before a successful `--save`, is removed again (`batch` does this per file). The package is created open for editing; `--save` writes the changes to it. The runner never opens, truncates or overwrites an existing file |
 | `--macro <M>` | `play`, `batch` | The macro or batch list; required. Read through the read roots (`cmd.path.outside_roots` without one), at most `input_bytes` |
-| `--record <M>` | `run`, `serve` | Record successful runs into the macro file `M`, created (or truncated) through the write roots before anything runs, and written when the run or session ends; a failed `run` leaves it empty. A macro names no document, so more than one package is a usage error (`record_documents`) |
+| `--record <M>` | `run`, `serve`, `mcp` | Record successful runs into the macro file `M`. The path is checked through the write roots before anything runs, and the file is only created or truncated when the macro is written: at the end of the run or session, and only if the recording has at least one step. A failed run, or a session with no recorded step, writes nothing and leaves an existing file as it was. A session that stepped the history writes nothing and fails with `cmd.macro.unrecordable`, before any `--save`. A macro names no document, so more than one package is a usage error (`record_documents`) |
 | `--check` | `inspect` | Add the check's findings |
 | `--stdio` | `serve` | Required; the only transport |
 
@@ -801,6 +865,8 @@ gives `validate <file>` the package check, so parameter validation is the separa
 | `cmd.macro.version_unsupported` | `unsupported` | A macro header names a format version that is not read; the detail `version` names it |
 | `cmd.macro.limit_exceeded` | `limit_exceeded` | A macro, one of its lines or a recording exceeds a limit; the detail `limit` names it |
 | `cmd.macro.input_missing` | `invalid_input` | A macro input has no value at playback; the detail `input` names it |
+| `cmd.macro.unrecordable` | `unsupported` | A recorded session stepped the undo or redo stack, which a macro cannot express; no macro is written |
+| `cmd.history.empty` | `conflict` | The undo or redo stack has no step to step over; the detail `operation` names it (`undo` or `redo`) |
 | `cmd.transparent.refused` | `conflict` | A transparent command cannot run beside the active prompt; the detail `reason` says why |
 | `cmd.socket.disabled` | `permission_denied` | The user has not enabled automation, so no socket is served |
 | `cmd.socket.unauthorized` | `permission_denied` | A connection did not present the session token |

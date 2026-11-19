@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_base::{Error, Limits};
 use arc_doc::graph::Evaluators;
-use arc_doc::package::{self, LockOwner, Mode, Package};
+use arc_doc::package::{self, Contents, LockOwner, Metadata, Mode, Package};
 use arc_doc::{Document, DocumentConfig, LoadOptions, TypeRegistry};
 use serde_json::{Map, Value, json};
 
@@ -144,18 +144,19 @@ usage: <product>-cli <subcommand> [flags]
   commands                                      list the commands (JSON)
   describe <command>                            describe one command
   validate-params <command> [--params P]        validate parameters without running
-  run <file> --command <id> [--params P] [--seed N] [--save] [--record M]
+  run <file> --command <id> [--params P] [--seed N] [--save] [--create] [--record M]
                                                 run one command against a package
-  play <file> --macro M [--save]                play a macro or command list on a package
-  batch <file>... --macro M [--save]            play it on each package, one result per file
+  play <file> --macro M [--save] [--create]     play a macro or command list on a package
+  batch <file>... --macro M [--save] [--create] play it on each package, one result per file
   inspect <file> [--check]                      dump a package (and check it)
   validate <file>                               check a package
-  serve --stdio [<file>...] [--save] [--record M]
+  serve --stdio [<file>...] [--save] [--create] [--record M]
                                                 serve the automation protocol on stdin/stdout
-  mcp [<file>] [--save] [--record M]            serve the Model Context Protocol on stdin/stdout
+  mcp [<file>] [--save] [--create] [--record M] serve the Model Context Protocol on stdin/stdout
   help                                          this text
 flags: --read-root <dir>, --write-root <dir> (repeatable), --allow-edit, --allow-network,
-       --allow-process, --json (output is always JSON); P is JSON text or @<file>;
+       --allow-process, --json (output is always JSON); --create makes an empty package at
+       a new path inside a write root; P is JSON text or @<file>;
        M is a macro file path inside the read roots (--macro) or write roots (--record)
 ";
 
@@ -184,6 +185,7 @@ struct Options {
     params: Option<OsString>,
     seed: Option<u64>,
     save: bool,
+    create: bool,
     check: bool,
     stdio: bool,
     macro_path: Option<PathBuf>,
@@ -234,12 +236,37 @@ where
     run_with_renderer(args, product, None, stdin, stdout, stderr)
 }
 
+/// The per-document setup a product gives the runner: it is called once for every document the
+/// runner opens or creates, before any command runs on it. A product installs its document
+/// validators and other document hooks here; an error stops the subcommand and is reported
+/// like an error of opening the document.
+pub type DocumentSetup = dyn Fn(&Document) -> arc_base::Result<()> + Send + Sync;
+
 /// [`run`] with a renderer for `view.render` and the MCP `render_view` tool of the protocol
 /// subcommands (`serve`, `mcp`). Without one those answer `cmd.render.unavailable`.
 pub fn run_with_renderer<R, W, E>(
     args: impl IntoIterator<Item = OsString>,
     product: &Product,
     renderer: Option<&dyn ViewRenderer>,
+    stdin: R,
+    stdout: W,
+    stderr: E,
+) -> Exit
+where
+    R: BufRead,
+    W: Write + Send,
+    E: Write + Send,
+{
+    run_with_setup(args, product, renderer, None, stdin, stdout, stderr)
+}
+
+/// [`run_with_renderer`] with the product's [`DocumentSetup`], called for every document the
+/// subcommand opens or creates.
+pub fn run_with_setup<R, W, E>(
+    args: impl IntoIterator<Item = OsString>,
+    product: &Product,
+    renderer: Option<&dyn ViewRenderer>,
+    setup: Option<&DocumentSetup>,
     stdin: R,
     stdout: W,
     mut stderr: E,
@@ -251,7 +278,7 @@ where
 {
     let args: Vec<OsString> = args.into_iter().collect();
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        execute(args, product, renderer, stdin, stdout, &mut stderr)
+        execute(args, product, renderer, setup, stdin, stdout, &mut stderr)
     }));
     let failure = match outcome {
         Ok(Ok(exit)) => return exit,
@@ -287,6 +314,7 @@ fn parse(args: Vec<OsString>) -> Result<Options, Failure> {
         params: None,
         seed: None,
         save: false,
+        create: false,
         check: false,
         stdio: false,
         macro_path: None,
@@ -402,6 +430,10 @@ fn flag_into(
                     allowed(&[Sub::Run, Sub::Serve, Sub::Mcp, Sub::Play, Sub::Batch])?;
                     o.save = true;
                 }
+                "--create" => {
+                    allowed(&[Sub::Run, Sub::Serve, Sub::Mcp, Sub::Play, Sub::Batch])?;
+                    o.create = true;
+                }
                 "--check" => {
                     allowed(&[Sub::Inspect])?;
                     o.check = true;
@@ -472,6 +504,7 @@ fn execute<R, W, E>(
     args: Vec<OsString>,
     product: &Product,
     renderer: Option<&dyn ViewRenderer>,
+    setup: Option<&DocumentSetup>,
     stdin: R,
     mut stdout: W,
     stderr: &mut E,
@@ -489,13 +522,54 @@ where
     let limits = Limits::DEFAULT;
     let config = config(&o, product)?;
     if o.sub == Sub::Batch {
-        return batch(&o, product, &config, &limits, &mut stdout);
+        return batch(&o, product, &config, setup, &limits, &mut stdout);
     }
-    // The record file is created first, so a path outside the write roots fails before
-    // anything runs.
-    let record_file = o.record.as_deref().map(|p| config.roots.create_write(p));
-    let record_file = record_file.transpose()?;
-    let recorder = Recorder::new(&product.name, &product.version, &limits);
+    // The recording's path is checked before anything runs; the file is written at the end.
+    if let Some(path) = o.record.as_deref() {
+        config.roots.check_write(path)?;
+    }
+    // The packages this run creates are removed again unless the run succeeds or saves them;
+    // the list outlives the packages, which must be closed before their files are removed.
+    let mut created = Vec::new();
+    let result = run_session(
+        &o,
+        product,
+        config,
+        renderer,
+        setup,
+        &limits,
+        stdin,
+        &mut stdout,
+        stderr,
+        &mut created,
+    );
+    if result.is_ok() {
+        keep(&mut created);
+    }
+    result
+}
+
+/// The body of [`execute`]: opens the documents, serves or runs, saves and records.
+#[allow(clippy::too_many_arguments, reason = "the parts of one invocation")]
+fn run_session<R, W, E>(
+    o: &Options,
+    product: &Product,
+    config: ServerConfig,
+    renderer: Option<&dyn ViewRenderer>,
+    setup: Option<&DocumentSetup>,
+    limits: &Limits,
+    stdin: R,
+    stdout: &mut W,
+    stderr: &mut E,
+    created: &mut Vec<Created>,
+) -> Result<Exit, Failure>
+where
+    R: BufRead,
+    W: Write + Send,
+    E: Write + Send,
+{
+    let recorder = Recorder::new(&product.name, &product.version, limits);
+    let record = o.record.as_deref();
     let log = StderrLog(Mutex::new(stderr));
     let mut documents = BTreeMap::new();
     let mut packages = Vec::new();
@@ -507,15 +581,17 @@ where
                 .and_then(|s| s.to_str())
                 .ok_or_else(|| usage("document_name"))?
                 .to_owned();
-            let (package, document) = open(product, path, o.save, &limits)?;
+            let (package, document) =
+                open(product, &config.roots, path, o, setup, limits, created)?;
             if documents.insert(key, document).is_some() {
                 return Err(usage("duplicate_document_name"));
             }
             packages.push(package);
         }
     }
-    let session = session(&config, &limits);
-    let recording = record_file.is_some().then_some(&recorder);
+    let session = session(&config, limits);
+    let roots = config.roots.clone();
+    let recording = record.is_some().then_some(&recorder);
     let server = Server::new(&product.registry, &documents, config, &log);
     let server = attached(server, recording, renderer);
     let call = |method: &str, params: Value| server.call(method, params).map_err(failure);
@@ -534,7 +610,7 @@ where
             Exit::Success,
         ),
         Sub::ValidateParams => {
-            let params = read_params(o.params.as_ref(), &limits)?;
+            let params = read_params(o.params.as_ref(), limits)?;
             let result = call(
                 "command.validate",
                 json!({"command": name()?, "params": params}),
@@ -547,33 +623,35 @@ where
             (result, exit)
         }
         Sub::Run => {
-            let params = read_params(o.params.as_ref(), &limits)?;
+            let params = read_params(o.params.as_ref(), limits)?;
             let document = documents.keys().next().cloned().unwrap_or_default();
             let result = call(
                 "command.run",
                 json!({"document": document, "command": o.command, "params": params,
                        "seed": o.seed.unwrap_or(0)}),
             )?;
-            save_if(o.save, &mut packages, &documents)?;
-            write_record(record_file, &recorder)?;
+            check_recording(record, &recorder)?;
+            save_if(o.save, &mut packages, &documents, created)?;
+            write_record(record, &roots, &recorder)?;
             (result, Exit::Success)
         }
         Sub::Play => {
-            let steps = read_macro(&session, o.macro_path.as_deref(), &limits)?;
+            let steps = read_macro(&session, o.macro_path.as_deref(), limits)?;
             let document = documents
                 .values()
                 .next()
                 .ok_or_else(|| usage("arguments"))?;
             let result = play_on(product, document, &session, &steps)?;
-            save_if(o.save, &mut packages, &documents)?;
+            save_if(o.save, &mut packages, &documents, created)?;
             (result, Exit::Success)
         }
-        Sub::Inspect | Sub::Validate => check(o.sub, o.check, file(), &limits)?,
+        Sub::Inspect | Sub::Validate => check(o.sub, o.check, file(), limits)?,
         Sub::Serve | Sub::Mcp | Sub::Batch | Sub::Help => {
-            serve_stdio(&server, o.sub == Sub::Mcp, &documents, stdin, &mut stdout)
+            serve_stdio(&server, o.sub == Sub::Mcp, &documents, stdin, stdout)
                 .map_err(io_failure)?;
-            save_if(o.save, &mut packages, &documents)?;
-            write_record(record_file, &recorder)?;
+            check_recording(record, &recorder)?;
+            save_if(o.save, &mut packages, &documents, created)?;
+            write_record(record, &roots, &recorder)?;
             return Ok(Exit::Success);
         }
     };
@@ -648,11 +726,25 @@ fn session(config: &ServerConfig, limits: &Limits) -> Session {
     }
 }
 
-/// Writes the recorded macro to the record file, if there is one.
-fn write_record(file: Option<std::fs::File>, recorder: &Recorder) -> Result<(), Failure> {
-    let Some(mut file) = file else {
+/// Refuses a recording the session could not express, before anything is saved.
+fn check_recording(record: Option<&Path>, recorder: &Recorder) -> Result<(), Failure> {
+    if record.is_some() && recorder.is_unrecordable() {
+        return Err(Error::new(codes::MACRO_UNRECORDABLE).into());
+    }
+    Ok(())
+}
+
+/// Writes the recorded macro to `record` through the write roots. Nothing is written, and an
+/// existing file stays as it is, when the recording has no step.
+fn write_record(record: Option<&Path>, roots: &Roots, recorder: &Recorder) -> Result<(), Failure> {
+    let Some(path) = record else {
         return Ok(());
     };
+    check_recording(Some(path), recorder)?;
+    if recorder.is_empty() {
+        return Ok(());
+    }
+    let mut file = roots.create_write(path)?;
     file.write_all(recorder.text().as_bytes())
         .and_then(|()| file.sync_all())
         .map_err(io_failure)
@@ -706,6 +798,7 @@ fn batch<W: Write>(
     o: &Options,
     product: &Product,
     config: &ServerConfig,
+    setup: Option<&DocumentSetup>,
     limits: &Limits,
     stdout: &mut W,
 ) -> Result<Exit, Failure> {
@@ -714,13 +807,20 @@ fn batch<W: Write>(
     let mut exit = Exit::Success;
     for path in &o.positional {
         let path = Path::new(path);
-        let played = open(product, path, o.save, limits).and_then(|(mut package, document)| {
-            let result = play_on(product, &document, &session, &steps)?;
-            if o.save {
-                package.save_document(&document, &[], None, &mut |_| Ok(()))?;
-            }
-            Ok(result)
-        });
+        // Each package stands on its own: a failed one is reported and its new file removed.
+        let mut created = Vec::new();
+        let played = open(product, &config.roots, path, o, setup, limits, &mut created).and_then(
+            |(mut package, document)| {
+                let result = play_on(product, &document, &session, &steps)?;
+                if o.save {
+                    package.save_document(&document, &[], None, &mut |_| Ok(()))?;
+                }
+                Ok(result)
+            },
+        );
+        if played.is_ok() {
+            keep(&mut created);
+        }
         let file = path.to_string_lossy();
         let line = match played {
             Ok(result) => json!({"file": file, "result": result}),
@@ -763,19 +863,47 @@ fn io_failure(error: io::Error) -> Failure {
         .into()
 }
 
-/// Opens the package at `path` (for editing when it is to be saved) as a document.
+/// Opens the package at `path` as a document, or creates it when `--create` is given; then
+/// calls the product's setup on the document. An existing package is opened for editing when
+/// it is to be saved, and read-only otherwise. A new package is reserved under the write roots
+/// (the name is taken exclusively, see [`Roots::reserve`]), written in place and opened for
+/// editing; the reserved file is listed in `created` before anything else can fail.
 fn open(
     product: &Product,
+    roots: &Roots,
     path: &Path,
-    edit: bool,
+    o: &Options,
+    setup: Option<&DocumentSetup>,
     limits: &Limits,
+    created: &mut Vec<Created>,
 ) -> Result<(Package, Document), Failure> {
-    let mode = if edit {
-        Mode::Edit(&product.owner)
+    let package = if o.create {
+        let target = roots.reserve(path)?;
+        created.push(Created {
+            path: target.clone(),
+            keep: false,
+        });
+        let metadata = Metadata {
+            created_by: Some(format!("{} {}", product.name, product.version)),
+            ..Metadata::default()
+        };
+        let contents = Contents {
+            metadata: &metadata,
+            types: &[],
+            objects: &[],
+            previews: &[],
+            snapshot: None,
+        };
+        package::write(&target, &contents, &mut |_| Ok(()))?;
+        Package::open(&target, Mode::Edit(&product.owner), limits)?
     } else {
-        Mode::ReadOnly
+        let mode = if o.save {
+            Mode::Edit(&product.owner)
+        } else {
+            Mode::ReadOnly
+        };
+        Package::open(path, mode, limits)?
     };
-    let package = Package::open(path, mode, limits)?;
     let options = LoadOptions {
         limits: *limits,
         ..LoadOptions::default()
@@ -786,19 +914,45 @@ fn open(
         &options,
         DocumentConfig::default(),
     )?;
+    if let Some(setup) = setup {
+        setup(&document)?;
+    }
     Ok((package, document))
 }
 
-/// [`save`] when `wanted`.
+/// [`save`] when `wanted`; a saved package is kept even if the run fails later.
 fn save_if(
     wanted: bool,
     packages: &mut [Package],
     documents: &BTreeMap<String, Document>,
+    created: &mut [Created],
 ) -> Result<(), Failure> {
     if wanted {
-        save(packages, documents)
-    } else {
-        Ok(())
+        save(packages, documents)?;
+        keep(created);
+    }
+    Ok(())
+}
+
+/// A package file this run created at a reserved name. It is removed when dropped unless kept,
+/// so a run that fails before its result is kept leaves no file behind.
+struct Created {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl Drop for Created {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Keeps the files `created` lists.
+fn keep(created: &mut [Created]) {
+    for file in created {
+        file.keep = true;
     }
 }
 

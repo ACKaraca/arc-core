@@ -212,6 +212,30 @@
       ],
       "additionalProperties": true
     },
+    "history.redo": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "document"
+      ],
+      "additionalProperties": true
+    },
+    "history.undo": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "document"
+      ],
+      "additionalProperties": true
+    },
     "query.objects": {
       "type": "object",
       "properties": {

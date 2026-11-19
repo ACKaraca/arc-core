@@ -55,6 +55,7 @@ pub use view::{
 
 use crate::context::{Clock, FixedClock, Probe, ProgressSink, Session};
 use crate::error::codes;
+use crate::history::Direction;
 use crate::invoke::{Invocation, Invoker, Outcome, Preview};
 use crate::macros::Recorder;
 use crate::registry::Registry;
@@ -97,6 +98,8 @@ pub const METHODS: &[&str] = &[
     "command.validate",
     "event.subscribe",
     "event.unsubscribe",
+    "history.redo",
+    "history.undo",
     "query.diagnostics",
     "query.history",
     "query.objects",
@@ -266,7 +269,15 @@ enum Reply {
     Shutdown,
 }
 
-/// One queued `command.run`.
+/// What a queued request does.
+enum Work {
+    /// A `command.run`: the invocation, and whether it is a preview.
+    Run(Invocation, bool),
+    /// A `history.undo` or `history.redo`, cancellable while it waits.
+    Step(Direction, Cancel),
+}
+
+/// One queued `command.run`, `history.undo` or `history.redo`.
 struct Job<'a> {
     id: Value,
     key: String,
@@ -274,11 +285,12 @@ struct Job<'a> {
     document: &'a Document,
     state: Arc<DocState>,
     session: Session,
-    invocation: Invocation,
-    preview: bool,
+    work: Work,
 }
 
-type Pending = Mutex<BTreeMap<String, Cancel>>;
+/// The requests waiting or running, by id. A request whose entry is `None` can no longer be
+/// cancelled: it is running and does not stop at a checkpoint (a history step).
+type Pending = Mutex<BTreeMap<String, Option<Cancel>>>;
 
 fn text(message: &Value) -> String {
     serde_json::to_string(message).unwrap_or_else(|_| {
@@ -408,6 +420,11 @@ struct RunParams {
 #[derive(Deserialize)]
 struct CancelParams {
     id: Value,
+}
+
+#[derive(Deserialize)]
+struct DocumentParams {
+    document: String,
 }
 
 /// Parses `major.minor`, each one to five digits.
@@ -642,25 +659,24 @@ impl<'a> Server<'a> {
                 document,
                 state,
                 session,
-                invocation,
-                preview,
+                work,
             } = job;
-            // A run queued before the revocation never starts: it is answered as cancelled.
+            let target = Target {
+                id: &doc_id,
+                document,
+                state: &state,
+            };
+            // A request queued before the revocation never starts: it is answered as cancelled.
             let answer = if revoked.load(Ordering::Acquire) {
                 Err(Error::new(codes::CANCELLED).into())
             } else {
-                catch_unwind(AssertUnwindSafe(|| {
-                    self.run_job(
-                        Some(hub),
-                        &Target {
-                            id: &doc_id,
-                            document,
-                            state: &state,
-                        },
-                        &session,
-                        invocation,
-                        preview,
-                    )
+                catch_unwind(AssertUnwindSafe(|| match work {
+                    Work::Run(invocation, preview) => {
+                        self.run_job(Some(hub), &target, &session, invocation, preview)
+                    }
+                    Work::Step(direction, cancel) => {
+                        self.step_job(&target, &session, direction, &cancel, pending, &key)
+                    }
                 }))
                 .unwrap_or_else(|payload| {
                     self.log.log(
@@ -1072,14 +1088,28 @@ impl<'a> Reader<'_, 'a> {
                 Ok(p) => return self.run_command(id, session, p),
                 Err(failure) => Err(failure),
             },
+            "history.undo" | "history.redo" => {
+                let direction = if method == "history.undo" {
+                    Direction::Undo
+                } else {
+                    Direction::Redo
+                };
+                match decode::<DocumentParams>(method, params) {
+                    Ok(p) => return self.history(id, session, p, direction),
+                    Err(failure) => Err(failure),
+                }
+            }
             "command.cancel" => decode::<CancelParams>(method, params).map(|p| {
                 let key = text(&p.id);
                 let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-                let cancel = pending.get(&key);
-                if let Some(cancel) = cancel {
-                    cancel.cancel();
-                }
-                json!({"cancelled": cancel.is_some()})
+                let cancelled = match pending.get(&key) {
+                    Some(Some(cancel)) => {
+                        cancel.cancel();
+                        true
+                    }
+                    _ => false,
+                };
+                json!({"cancelled": cancelled})
             }),
             _ => Err(Error::new(codes::PROTOCOL_METHOD_UNSUPPORTED)
                 .with_arg("method", method)
@@ -1168,15 +1198,8 @@ impl<'a> Reader<'_, 'a> {
         };
         let key = text(id);
         let cancel = Cancel::new();
-        {
-            let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-            if pending.contains_key(&key) {
-                return Reply::Now(Err(invalid_request("duplicate_id")));
-            }
-            if pending.len() >= MAX_QUEUED_RUNS {
-                return Reply::Now(Err(limit("queued_runs")));
-            }
-            pending.insert(key.clone(), cancel.clone());
+        if let Err(failure) = self.reserve(&key, &cancel) {
+            return Reply::Now(Err(failure));
         }
         let mut invocation = Invocation::new(p.command, p.params);
         invocation.seed = p.seed;
@@ -1186,16 +1209,64 @@ impl<'a> Reader<'_, 'a> {
             hub: Arc::clone(&self.hub),
             id: id.clone(),
         }));
-        let job = Job {
+        let work = Work::Run(invocation, p.preview);
+        self.enqueue(Job {
             id: id.clone(),
-            key: key.clone(),
+            key,
             doc_id: p.document,
             document,
             state,
             session,
-            invocation,
-            preview: p.preview,
+            work,
+        })
+    }
+
+    /// Queues `history.undo` or `history.redo` behind the requests of the session, so it steps
+    /// over the change the session's earlier requests made. It is cancellable while it waits.
+    fn history(
+        &mut self,
+        id: &Value,
+        session: Session,
+        p: DocumentParams,
+        direction: Direction,
+    ) -> Reply {
+        let (document, state) = match self.server.document_state(&p.document) {
+            Ok(found) => found,
+            Err(failure) => return Reply::Now(Err(failure)),
         };
+        let key = text(id);
+        let cancel = Cancel::new();
+        if let Err(failure) = self.reserve(&key, &cancel) {
+            return Reply::Now(Err(failure));
+        }
+        self.enqueue(Job {
+            id: id.clone(),
+            key,
+            doc_id: p.document,
+            document,
+            state,
+            session,
+            work: Work::Step(direction, cancel),
+        })
+    }
+
+    /// Records a pending request under `key` with its cancellation token, or refuses it: a
+    /// duplicate identifier, or the queue full.
+    fn reserve(&self, key: &str, cancel: &Cancel) -> Result<(), Failure> {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        if pending.contains_key(key) {
+            return Err(invalid_request("duplicate_id"));
+        }
+        if pending.len() >= MAX_QUEUED_RUNS {
+            return Err(limit("queued_runs"));
+        }
+        pending.insert(key.to_owned(), Some(cancel.clone()));
+        Ok(())
+    }
+
+    /// Sends a reserved request to the worker; `Later` when it is queued.
+    fn enqueue(&self, job: Job<'a>) -> Reply {
+        let key = job.key.clone();
         let sent = self
             .jobs
             .as_ref()
@@ -1218,6 +1289,7 @@ impl<'a> Reader<'_, 'a> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .values()
+            .flatten()
         {
             cancel.cancel();
         }
@@ -1328,6 +1400,53 @@ mod tests {
                 return line;
             }
         }
+    }
+
+    /// A history step waiting in the queue is cancelled by its token; once it starts it is no
+    /// longer cancellable, so its entry is `None` and `command.cancel` answers `cancelled: false`.
+    #[test]
+    fn a_started_history_step_is_no_longer_cancellable() {
+        let registry = Registry::new();
+        let document = Document::new(
+            Arc::new(arc_doc::TypeRegistry::new()),
+            Arc::new(arc_doc::graph::Evaluators::new()),
+        )
+        .unwrap();
+        let docs = BTreeMap::from([("main".to_owned(), document)]);
+        let config = ServerConfig::new("arc-test", "0.1.0", [Permission::Read, Permission::Edit]);
+        let server = Server::new(&registry, &docs, config, &NoLog);
+        let session = server.config.session(server.config.ceiling.clone());
+        let state = DocState::default();
+        let target = Target {
+            id: "main",
+            document: &docs["main"],
+            state: &state,
+        };
+        let pending: Pending = Mutex::new(BTreeMap::new());
+        let token = Cancel::new();
+        pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert("step".to_owned(), Some(token.clone()));
+
+        // Cancelled while waiting: it does not step.
+        token.cancel();
+        let answer = server.step_job(&target, &session, Direction::Undo, &token, &pending, "step");
+        assert!(answer.is_err());
+
+        // Not cancelled: the step starts, and from then on the request has no cancel token.
+        let token = Cancel::new();
+        pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert("step".to_owned(), Some(token.clone()));
+        let _ = server.step_job(&target, &session, Direction::Undo, &token, &pending, "step");
+        let entry = pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get("step")
+            .map(Option::is_none);
+        assert_eq!(entry, Some(true));
     }
 
     #[test]

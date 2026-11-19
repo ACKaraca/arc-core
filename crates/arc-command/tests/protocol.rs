@@ -624,6 +624,15 @@ fn conformance(c: &mut Client) {
         "a refused set changes nothing"
     );
 
+    // History: the last step of `main` is undone and redone, which restores its revision + 1.
+    let undone = c.call(&request(84, "history.undo", json!({"document": "main"})));
+    let redone = c.call(&request(85, "history.redo", json!({"document": "main"})));
+    assert_eq!(undone["result"]["command"], redone["result"]["command"]);
+    assert_eq!(
+        redone["result"]["revision"].as_u64().unwrap(),
+        undone["result"]["revision"].as_u64().unwrap() + 1
+    );
+
     // Event subscriptions (the notifications themselves are tested in `events.rs`).
     let r = c.call(&request(
         90,
@@ -1069,4 +1078,167 @@ proptest! {
             json!({"jsonrpc": "2.0", "id": "sentinel", "result": {}})
         );
     }
+}
+
+/// The `command.run` request that creates an item named `name` on `document`.
+fn create_item(id: u64, document: &str, name: &str) -> Value {
+    request(
+        id,
+        "command.run",
+        json!({"document": document, "command": "test.item.create",
+               "params": {"name": name, "length": 1}}),
+    )
+}
+
+#[test]
+fn history_undo_and_redo_step_over_the_session_and_are_journaled_as_interactive_steps() {
+    session(|c| {
+        c.call(&initialize(1, "1.0", "1.0", &["read", "edit"]));
+        // An empty stack is a stable conflict, with nothing changed.
+        let r = c.call(&request(2, "history.undo", json!({"document": "empty"})));
+        assert_eq!(
+            (error_code(&r), data_code(&r)),
+            (-32006, "cmd.history.empty")
+        );
+        assert_eq!(r["error"]["data"]["arguments"]["operation"], "undo");
+        let created = c.call(&create_item(3, "empty", "a"));
+        assert_eq!(created["result"]["revision"], 1);
+        let undone = c.call(&request(4, "history.undo", json!({"document": "empty"})));
+        assert_eq!(
+            undone["result"],
+            json!({"command": "test.item.create", "label": "test-create", "revision": 2})
+        );
+        let redone = c.call(&request(5, "history.redo", json!({"document": "empty"})));
+        assert_eq!(
+            redone["result"],
+            json!({"command": "test.item.create", "label": "test-create", "revision": 3})
+        );
+        let r = c.call(&request(6, "history.redo", json!({"document": "empty"})));
+        assert_eq!(data_code(&r), "cmd.history.empty");
+        assert_eq!(r["error"]["data"]["arguments"]["operation"], "redo");
+        // The journal holds the run, then the undo and the redo of it, as an interactive
+        // session would write them.
+        let history = c.call(&request(7, "query.history", json!({"document": "empty"})));
+        let kinds: Vec<&str> = history["result"]["transactions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["normal", "undo_of", "redo_of"]);
+        let transactions = &history["result"]["transactions"];
+        assert_eq!(transactions[1]["target"], transactions[0]["id"]);
+        assert_eq!(transactions[2]["target"], transactions[0]["id"]);
+    });
+}
+
+#[test]
+fn history_needs_the_edit_permission_like_any_change() {
+    session(|c| {
+        c.call(&initialize(1, "1.0", "1.0", &["read"]));
+        for (id, method) in [(2, "history.undo"), (3, "history.redo")] {
+            let r = c.call(&request(id, method, json!({"document": "empty"})));
+            assert_eq!(
+                (error_code(&r), data_code(&r)),
+                (-32004, "cmd.permission_denied")
+            );
+        }
+    });
+}
+
+#[test]
+fn history_requests_run_after_the_requests_sent_before_them() {
+    session(|c| {
+        c.call(&initialize(1, "1.0", "1.0", &["read", "edit"]));
+        // Pipelined: the undo is sent before the run has answered, so it must wait for it.
+        c.send(&create_item(2, "empty", "a"));
+        c.send(&request(3, "history.undo", json!({"document": "empty"})));
+        let created = c.recv();
+        let undone = c.recv();
+        assert_eq!(created["id"], 2);
+        assert_eq!(undone["id"], 3);
+        assert_eq!(undone["result"]["command"], "test.item.create");
+    });
+}
+
+#[test]
+fn history_on_an_unknown_document_is_not_found() {
+    session(|c| {
+        c.call(&initialize(1, "1.0", "1.0", &["read", "edit"]));
+        let r = c.call(&request(2, "history.undo", json!({"document": "nope"})));
+        assert_eq!(data_code(&r), "cmd.document.unknown");
+        let r = c.call_invalid(&request(3, "history.redo", json!({})));
+        assert_eq!(error_code(&r), -32602);
+    });
+}
+
+#[test]
+fn a_history_request_waiting_behind_a_run_is_cancelled_without_stepping() {
+    session(|c| {
+        c.call(&initialize(1, "1.0", "1.0", &["read", "edit"]));
+        c.call(&create_item(2, "empty", "a"));
+        // The long run holds the queue; the undo waits behind it and is cancelled there.
+        c.send(&request(
+            "long",
+            "command.run",
+            json!({"document": "empty", "command": "test.wait.cancel"}),
+        ));
+        c.send(&request(
+            "undo",
+            "history.undo",
+            json!({"document": "empty"}),
+        ));
+        c.send(&request(
+            "stop-undo",
+            "command.cancel",
+            json!({"id": "undo"}),
+        ));
+        let mut answers = Vec::new();
+        while answers.is_empty() {
+            let message = c.recv();
+            if message.get("id").is_some() {
+                answers.push(message);
+            }
+        }
+        // The cancel of the waiting undo is answered while the run still runs.
+        assert_eq!(answers[0]["id"], "stop-undo");
+        assert_eq!(answers[0]["result"], json!({"cancelled": true}));
+        c.send(&request(
+            "stop-long",
+            "command.cancel",
+            json!({"id": "long"}),
+        ));
+        // The cancel of the run, then the run and the undo, which the cancel of the run lets go.
+        let mut rest = Vec::new();
+        while rest.len() < 3 {
+            let message = c.recv();
+            if message.get("id").is_some() {
+                rest.push(message);
+            }
+        }
+        assert_eq!(rest[0]["id"], "stop-long");
+        let undo = rest.iter().find(|m| m["id"] == "undo").unwrap();
+        assert_eq!(error_code(undo), -32007);
+        // Nothing was stepped: the create is still on the undo stack, not the redo stack.
+        let r = c.call(&request(3, "history.redo", json!({"document": "empty"})));
+        assert_eq!(data_code(&r), "cmd.history.empty");
+    });
+}
+
+#[test]
+fn an_undo_after_a_redo_names_the_command_the_redo_restored() {
+    session(|c| {
+        c.call(&initialize(1, "1.0", "1.0", &["read", "edit"]));
+        c.call(&create_item(2, "empty", "a"));
+        let expected = json!({"command": "test.item.create", "label": "test-create"});
+        for (id, method) in [
+            (3, "history.undo"),
+            (4, "history.redo"),
+            (5, "history.undo"),
+        ] {
+            let r = c.call(&request(id, method, json!({"document": "empty"})));
+            assert_eq!(r["result"]["command"], expected["command"], "{method}");
+            assert_eq!(r["result"]["label"], expected["label"], "{method}");
+        }
+    });
 }

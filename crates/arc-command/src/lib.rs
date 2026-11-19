@@ -61,6 +61,7 @@ pub mod context;
 pub mod error;
 #[cfg(feature = "headless")]
 pub mod headless;
+pub mod history;
 pub mod invoke;
 pub mod line;
 pub mod macros;

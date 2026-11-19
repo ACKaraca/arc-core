@@ -9,6 +9,7 @@
 //! specified in `docs/crates/arc-command.md`, section "Macros and batch as implemented".
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use arc_base::id::Identifier;
@@ -272,6 +273,8 @@ pub struct Recorder {
     header: MacroHeader,
     max_steps: u64,
     steps: Mutex<Vec<MacroStep>>,
+    /// Set when the session ran something a macro cannot express (an undo or redo).
+    unrecordable: AtomicBool,
 }
 
 impl Recorder {
@@ -298,6 +301,7 @@ impl Recorder {
             },
             max_steps: limits.record_count,
             steps: Mutex::new(Vec::new()),
+            unrecordable: AtomicBool::new(false),
         }
     }
 
@@ -350,6 +354,18 @@ impl Recorder {
             .get_mut(index)
             .ok_or_else(|| malformed(index.saturating_add(2), "step"))?;
         step.set_input(registry, param, name)
+    }
+
+    /// Marks the recording as not faithful: the session did something a macro cannot express,
+    /// so the steps recorded so far do not reproduce it. [`Recorder::is_unrecordable`] tells.
+    pub fn mark_unrecordable(&self) {
+        self.unrecordable.store(true, Ordering::Release);
+    }
+
+    /// True once [`Recorder::mark_unrecordable`] was called.
+    #[must_use]
+    pub fn is_unrecordable(&self) -> bool {
+        self.unrecordable.load(Ordering::Acquire)
     }
 
     /// The number of recorded steps.

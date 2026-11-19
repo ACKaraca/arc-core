@@ -78,3 +78,5 @@ cmd-render-too-large = Görüntü satır içi döndürülemeyecek kadar büyük;
 cmd-render-unsupported = İşleyici istenen { $feature } özelliğini çizemiyor.
 cmd-transparent-refused = Başka bir komut etkinken komut çalıştırılamaz.
 cmd-macro-input-missing = { $input } makro girdisinin değeri yok.
+cmd-macro-unrecordable = Oturum makronun ifade edemeyeceği bir geri alma veya yineleme çalıştırdı; makro yazılmadı.
+cmd-history-empty = {$operation} için adım yok.

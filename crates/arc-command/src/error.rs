@@ -446,6 +446,19 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "cmd-macro-input-missing",
     };
+    /// A session ran a history operation, which a macro cannot express, so the recording is not
+    /// a faithful macro; the recording is not written.
+    pub const MACRO_UNRECORDABLE: ErrorCode = ErrorCode {
+        code: "cmd.macro.unrecordable",
+        category: Category::Unsupported,
+        message_id: "cmd-macro-unrecordable",
+    };
+    /// The undo or redo stack has no step to step over; the detail `operation` names it.
+    pub const HISTORY_EMPTY: ErrorCode = ErrorCode {
+        code: "cmd.history.empty",
+        category: Category::Conflict,
+        message_id: "cmd-history-empty",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -520,6 +533,8 @@ pub mod codes {
         RENDER_UNSUPPORTED,
         TRANSPARENT_REFUSED,
         MACRO_INPUT_MISSING,
+        MACRO_UNRECORDABLE,
+        HISTORY_EMPTY,
     ];
 }
 

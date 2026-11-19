@@ -148,6 +148,56 @@ impl Roots {
         let parent = path.parent().ok_or_else(|| rejected("not_a_file_name"))?;
         native::create_write(self, parent, Path::new(name))
     }
+
+    /// Reserves `path` as a new file inside a write root: the file is created exclusively, so
+    /// nothing, a link included, may exist under the name, and no existing file is opened or
+    /// truncated. The parent directory is resolved and must lie in a write root; a path under a
+    /// directory that does not exist is `cmd.path.outside_roots` unless the deepest existing
+    /// ancestor lies inside a root. The file stays as an empty placeholder: the caller fills
+    /// the path. Returns the resolved path.
+    ///
+    /// # Errors
+    ///
+    /// `cmd.path.rejected`, `cmd.path.too_long`, `cmd.path.outside_roots`, `cmd.path.not_found`
+    /// or `cmd.path.io` (reason `exists` when the name is taken, `denied` or `other`).
+    pub fn reserve(&self, path: &Path) -> Result<PathBuf> {
+        check_text(path, self)?;
+        let name = match path.components().next_back() {
+            Some(std::path::Component::Normal(name)) => name,
+            _ => return Err(rejected("not_a_file_name")),
+        };
+        let parent = path.parent().ok_or_else(|| rejected("not_a_file_name"))?;
+        native::reserve(self, parent, Path::new(name))
+    }
+
+    /// Checks that [`Roots::create_write`] would accept `path` for a macro or another file the
+    /// runner writes at the end: a new name, or an existing regular file, inside a write root.
+    /// Nothing is created or truncated.
+    ///
+    /// # Errors
+    ///
+    /// As [`Roots::create_write`], without the truncation.
+    pub fn check_write(&self, path: &Path) -> Result<()> {
+        check_text(path, self)?;
+        let parent = path.parent().ok_or_else(|| rejected("not_a_file_name"))?;
+        let parent = canonical(self, parent, true)?;
+        if self.holder(&parent, true).is_none() {
+            return Err(outside());
+        }
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {
+                let target = canonical(self, path, true)?;
+                self.holder(&target, true).ok_or_else(outside)?;
+                self.open_read(path).map(drop)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(io_error(&error)),
+        }
+    }
+}
+
+fn exists_error() -> Error {
+    Error::new(codes::PATH_IO).with_detail("reason", "exists")
 }
 
 /// The checks of a path before the file system sees it.
@@ -290,6 +340,10 @@ mod native {
     pub(super) fn create_write(_: &Roots, _: &Path, _: &Path) -> Result<File> {
         Err(outside())
     }
+
+    pub(super) fn reserve(_: &Roots, _: &Path, _: &Path) -> Result<PathBuf> {
+        Err(outside())
+    }
 }
 
 #[cfg(unix)]
@@ -302,7 +356,7 @@ mod native {
     use rustix::fs::{CWD, Mode, OFlags, openat};
     use rustix::io::Errno;
 
-    use super::{Roots, canonical, io_error, outside, rejected};
+    use super::{Roots, canonical, exists_error, io_error, outside, rejected};
 
     pub(super) fn canonical_dir(path: &Path) -> Option<PathBuf> {
         fs::canonicalize(path).ok().filter(|p| p.is_dir())
@@ -364,7 +418,14 @@ mod native {
 
     /// Creates `name` in the canonical directory `parent`, or opens and then truncates the
     /// regular file already there.
-    fn create_canonical(roots: &Roots, parent: &Path, name: &Path) -> Result<File> {
+    /// Creates `name` in the directory `parent`, which must lie in a write root. `exclusive` makes
+    /// an existing name an error; otherwise the existing file is opened and truncated.
+    fn create_canonical(
+        roots: &Roots,
+        parent: &Path,
+        name: &Path,
+        exclusive: bool,
+    ) -> Result<File> {
         let root = roots.holder(parent, true).ok_or_else(outside)?;
         let dir = walk(root, parent)?;
         let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL;
@@ -376,6 +437,7 @@ mod native {
         ) {
             Ok(fd) => Ok(File::from(fd)),
             // An existing name, a link among them, is resolved and checked like a read.
+            Err(e) if e == Errno::EXIST && exclusive => Err(exists_error()),
             Err(e) if e == Errno::EXIST => {
                 drop(dir);
                 let target = canonical(roots, &parent.join(name), true)?;
@@ -392,7 +454,13 @@ mod native {
     }
 
     pub(super) fn create_write(roots: &Roots, parent: &Path, name: &Path) -> Result<File> {
-        create_canonical(roots, &canonical(roots, parent, true)?, name)
+        create_canonical(roots, &canonical(roots, parent, true)?, name, false)
+    }
+
+    pub(super) fn reserve(roots: &Roots, parent: &Path, name: &Path) -> Result<PathBuf> {
+        let parent = canonical(roots, parent, true)?;
+        drop(create_canonical(roots, &parent, name, true)?);
+        Ok(parent.join(name))
     }
 
     #[cfg(test)]
@@ -425,7 +493,7 @@ mod native {
                 "cmd.path.outside_roots"
             );
             assert_eq!(
-                code(create_canonical(&roots, &dir, Path::new("new.txt"))),
+                code(create_canonical(&roots, &dir, Path::new("new.txt"), false)),
                 "cmd.path.outside_roots"
             );
             let entries: Vec<_> = fs::read_dir(&outside_dir).unwrap().collect();
@@ -446,7 +514,7 @@ mod native {
 
     use arc_base::Result;
 
-    use super::{Roots, canonical, io_error, outside, rejected};
+    use super::{Roots, canonical, exists_error, io_error, outside, rejected};
 
     const FILE_SHARE_READ: u32 = 0x1;
     const FILE_SHARE_WRITE: u32 = 0x2;
@@ -540,6 +608,26 @@ mod native {
 
     pub(super) fn open_read(roots: &Roots, path: &Path) -> Result<File> {
         open_existing(roots, path, false, &options(false, false))
+    }
+
+    /// Creates the file exclusively under the held directory chain; nothing may exist under the
+    /// name, a link included.
+    pub(super) fn reserve(roots: &Roots, parent: &Path, name: &Path) -> Result<PathBuf> {
+        let parent = canonical(roots, parent, true)?;
+        let root = roots
+            .holder(&parent, true)
+            .ok_or_else(outside)?
+            .to_path_buf();
+        let held = hold_chain(&root, &parent)?;
+        let target = parent.join(name);
+        let created = options(true, true).open(&target);
+        drop(held);
+        let file = created.map_err(|e| match e.kind() {
+            ErrorKind::AlreadyExists => exists_error(),
+            _ => io_error(&e),
+        })?;
+        plain(&file, false)?;
+        Ok(target)
     }
 
     pub(super) fn create_write(roots: &Roots, parent: &Path, name: &Path) -> Result<File> {

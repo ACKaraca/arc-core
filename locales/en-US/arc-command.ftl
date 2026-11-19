@@ -78,3 +78,5 @@ cmd-render-too-large = The image is too large to return inline; the detail { $li
 cmd-render-unsupported = The renderer cannot draw the requested { $feature }.
 cmd-transparent-refused = The command cannot run while another command is active.
 cmd-macro-input-missing = The macro input { $input } has no value.
+cmd-macro-unrecordable = The session ran undo or redo, which a macro cannot express, so no macro was written.
+cmd-history-empty = There is no step to {$operation}.

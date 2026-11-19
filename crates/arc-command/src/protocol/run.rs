@@ -10,7 +10,7 @@
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use arc_base::{Error, ObjectId, TransactionId};
+use arc_base::{Cancel, Error, ObjectId, TransactionId};
 use arc_doc::Document;
 use serde_json::{Value, json};
 
@@ -19,6 +19,7 @@ use super::events::Hub;
 use super::{Answer, Server};
 use crate::context::Session;
 use crate::error::codes;
+use crate::history::{self, Direction};
 use crate::invoke::{Invocation, Outcome};
 
 /// What the server shares between sessions about one document.
@@ -112,6 +113,41 @@ impl Server<'_> {
             revision: outcome.revision,
         };
         Ok(run_result(&outcome, &extra))
+    }
+
+    /// Steps the undo or redo stack of the document for `session`, after the requests queued
+    /// before it. A cancelled request does not step. A step changes the document, which a
+    /// macro cannot express, so a recording of the session is marked as not faithful.
+    pub(super) fn step_job(
+        &self,
+        target: &Target<'_>,
+        session: &Session,
+        direction: Direction,
+        cancel: &Cancel,
+        pending: &super::Pending,
+        key: &str,
+    ) -> Answer {
+        let _run = Self::lock_run(target.state);
+        {
+            // From here on the step runs to its end: `command.cancel` answers `cancelled: false`.
+            let mut pending = pending.lock().unwrap_or_else(PoisonError::into_inner);
+            if cancel.is_cancelled() {
+                return Err(Error::new(codes::CANCELLED).into());
+            }
+            if let Some(entry) = pending.get_mut(key) {
+                *entry = None;
+            }
+        }
+        let stepped = history::step(target.document, session, direction)
+            .map_err(|error| self.failed(error))?;
+        if let Some(recorder) = self.recorder {
+            recorder.mark_unrecordable();
+        }
+        Ok(json!({
+            "command": stepped.command,
+            "label": stepped.label,
+            "revision": stepped.revision,
+        }))
     }
 
     /// Runs `invocation` as a dry run and answers with the would-be change summary. The
