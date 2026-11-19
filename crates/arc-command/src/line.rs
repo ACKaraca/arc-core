@@ -913,6 +913,16 @@ fn value_candidates(
     }
 }
 
+/// The cursor `cursor` moved into the line: at most its length and [`MAX_LINE_BYTES`], then back to
+/// the start of the character it falls in.
+pub(crate) fn clamp_cursor(text: &str, cursor: usize) -> usize {
+    let mut cursor = cursor.min(text.len()).min(MAX_LINE_BYTES);
+    while !text.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    cursor
+}
+
 /// [`complete_in`] without a document: object names are not completed.
 #[must_use]
 pub fn complete(
@@ -942,10 +952,7 @@ pub fn complete_in(
     text: &str,
     cursor: usize,
 ) -> Completion {
-    let mut cursor = cursor.min(text.len()).min(MAX_LINE_BYTES);
-    while !text.is_char_boundary(cursor) {
-        cursor -= 1;
-    }
+    let cursor = clamp_cursor(text, cursor);
     let prefix = text.get(..cursor).unwrap_or_default();
     let lead = prefix.len() - prefix.trim_start().len();
     let words: Vec<&str> = prefix.split_whitespace().collect();

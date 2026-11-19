@@ -37,9 +37,11 @@ changes.
 
 - A connection to the local socket starts with one transport message before the protocol:
   `{"jsonrpc":"2.0","id":<id>,"method":"arc.authenticate","params":{"token":"<token>"}}`, at most
-  1,024 bytes, answered with `{"result":{}}`. A connection that fails it receives one
-  `cmd.socket.unauthorized` error (-32004) and is closed. The message is not a protocol method:
-  stdio sessions have no handshake, and the published method schemas do not describe it.
+  1,024 bytes before its newline, answered with `{"result":{}}`. The whole line must arrive within
+  10 seconds of the connection being accepted: one absolute deadline, not a timeout per read. A
+  connection that fails it receives one `cmd.socket.unauthorized` error (-32004) and is closed. The
+  message is not a protocol method: stdio sessions have no handshake, and the published method
+  schemas do not describe it.
 - On Windows the same handshake applies to named pipes when they are provided.
 - The Model Context Protocol endpoint uses the same newline-delimited framing and size limits.
 

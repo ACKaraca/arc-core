@@ -9,6 +9,7 @@
 //! Windows are not provided yet: [`LocalSocket::bind`] answers `cmd.socket.unsupported` there.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use arc_base::Error;
 
@@ -19,6 +20,9 @@ pub const MAX_CONNECTIONS: usize = 16;
 
 /// The longest handshake line, in bytes.
 pub const MAX_HANDSHAKE_BYTES: usize = 1024;
+
+/// The default handshake deadline: ten seconds from the accept to the end of the handshake line.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What to listen on.
 #[derive(Debug, Clone)]
@@ -33,6 +37,8 @@ pub struct SocketConfig {
     /// `-` and `.`, not starting with a dot. The socket is `<name>.sock`, the token file
     /// `<name>.token`.
     pub name: String,
+    /// The time a connection has to send its handshake line, counted from the accept.
+    pub handshake_timeout: Duration,
 }
 
 fn name_ok(name: &str) -> bool {
@@ -47,6 +53,16 @@ fn name_ok(name: &str) -> bool {
 #[cfg(unix)]
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
+}
+
+/// Refuses a token file whose owner differs from the owner of its directory.
+#[cfg(unix)]
+fn same_owner(directory_uid: u32, file_uid: u32) -> Result<(), Error> {
+    if directory_uid == file_uid {
+        Ok(())
+    } else {
+        Err(directory_error("owner"))
+    }
 }
 
 fn directory_error(reason: &'static str) -> Error {
@@ -74,38 +90,47 @@ pub use unix::{LocalSocket, SocketStop};
 #[cfg(unix)]
 mod unix {
     use std::collections::BTreeMap;
+    use std::fmt;
     use std::fs::{self, DirBuilder, File, OpenOptions};
-    use std::io::{self, BufReader, Read, Write};
-    use std::os::unix::fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsExt};
+    use std::io::{self, BufRead, BufReader, Read, Write};
+    use std::os::unix::fs::{
+        DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt,
+    };
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use arc_base::Error;
     use serde_json::Value;
 
     use super::{
         MAX_CONNECTIONS, MAX_HANDSHAKE_BYTES, SocketConfig, check_enabled, constant_time_eq,
-        directory_error, io_error,
+        directory_error, io_error, same_owner,
     };
     use crate::error::codes;
-    use crate::protocol::framing::{Frame, next_frame};
     use crate::protocol::{LogLevel, Server, response};
 
-    /// How long a connection may take to present its token.
-    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
-    /// A listening local socket with its token file. Dropping it removes both files.
-    #[derive(Debug)]
+    /// A listening local socket with its token file. Dropping it removes both files, which
+    /// `bind` created.
     pub struct LocalSocket {
         listener: UnixListener,
         socket_path: PathBuf,
         token_path: PathBuf,
         token: String,
+        handshake_timeout: Duration,
         stop: Arc<AtomicBool>,
+    }
+
+    impl fmt::Debug for LocalSocket {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("LocalSocket")
+                .field("socket_path", &self.socket_path)
+                .field("token_path", &self.token_path)
+                .finish_non_exhaustive()
+        }
     }
 
     /// Ends [`LocalSocket::serve`] from another thread.
@@ -151,15 +176,64 @@ mod unix {
         }
     }
 
+    /// Writes a new token file at `path`, which must not exist, and checks that its owner is
+    /// the owner of `directory`. A file that fails either step is removed again.
+    fn write_token(directory: &Path, path: &Path) -> Result<String, Error> {
+        let token = new_token().map_err(|_| io_error("token"))?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|_| io_error("token"))?;
+        let checked = file
+            .write_all(token.as_bytes())
+            .map_err(|_| io_error("token"))
+            .and_then(|()| owner_matches(&file, directory));
+        if checked.is_err() {
+            let _ = fs::remove_file(path);
+        }
+        checked.map(|()| token)
+    }
+
+    fn owner_matches(file: &File, directory: &Path) -> Result<(), Error> {
+        let file_uid = file.metadata().map_err(|_| io_error("token"))?.uid();
+        let directory_uid = fs::metadata(directory)
+            .map_err(|_| directory_error("create"))?
+            .uid();
+        same_owner(directory_uid, file_uid)
+    }
+
+    /// Reads from a connection. While a deadline is set, each read waits no longer than the time
+    /// left before it, so the whole handshake line shares one bound.
+    struct Until<'a> {
+        stream: &'a UnixStream,
+        deadline: Option<Instant>,
+    }
+
+    impl Read for Until<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if let Some(deadline) = self.deadline {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(io::Error::from(io::ErrorKind::TimedOut));
+                }
+                self.stream.set_read_timeout(Some(left))?;
+            }
+            let mut stream = self.stream;
+            stream.read(buf)
+        }
+    }
+
     impl LocalSocket {
-        /// Creates the private directory, the token file and the socket, in this order, and
-        /// returns the socket ready to accept.
+        /// Binds the socket, then creates the token file, and returns the socket ready to
+        /// accept. A failed call removes only the files it created.
         ///
         /// # Errors
         ///
         /// `cmd.socket.disabled` when automation is not enabled; `cmd.socket.directory` (detail
-        /// `reason`: `name`, `not_directory`, `not_private`, `create`); `cmd.socket.io`
-        /// (`in_use` when a live socket of that name exists, `exists`, `token`, `bind`).
+        /// `reason`: `name`, `not_directory`, `not_private`, `create`, `owner`); `cmd.socket.io`
+        /// (`in_use` when a live socket of that name exists, `exists`, `bind`, `token`).
         pub fn bind(config: &SocketConfig) -> Result<Self, Error> {
             check_enabled(config)?;
             private_directory(&config.directory)?;
@@ -171,35 +245,29 @@ mod unix {
                         return Err(io_error("in_use"));
                     }
                     fs::remove_file(&socket_path).map_err(|_| io_error("exists"))?;
+                    // The instance that left this socket behind ended without removing its token.
+                    let _ = fs::remove_file(&token_path);
                 }
                 Ok(_) => return Err(io_error("exists")),
                 Err(_) => {}
             }
-            let token = new_token().map_err(|_| io_error("token"))?;
-            let _ = fs::remove_file(&token_path);
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&token_path)
-                .and_then(|mut file| file.write_all(token.as_bytes()))
-                .map_err(|_| io_error("token"))?;
-            let bound = UnixListener::bind(&socket_path).and_then(|listener| {
-                fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
-                Ok(listener)
-            });
-            match bound {
-                Ok(listener) => Ok(Self {
+            let listener = UnixListener::bind(&socket_path).map_err(|_| io_error("bind"))?;
+            // From here the socket is this call's: a failure below removes it and nothing else.
+            let prepared = fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+                .map_err(|_| io_error("bind"))
+                .and_then(|()| write_token(&config.directory, &token_path));
+            match prepared {
+                Ok(token) => Ok(Self {
                     listener,
                     socket_path,
                     token_path,
                     token,
+                    handshake_timeout: config.handshake_timeout,
                     stop: Arc::default(),
                 }),
-                Err(_) => {
-                    let _ = fs::remove_file(&token_path);
+                Err(error) => {
                     let _ = fs::remove_file(&socket_path);
-                    Err(io_error("bind"))
+                    Err(error)
                 }
             }
         }
@@ -302,14 +370,19 @@ mod unix {
         }
 
         fn connection(&self, server: &Server<'_>, stream: UnixStream) {
-            let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
-            let Ok(read_half) = stream.try_clone() else {
-                return;
-            };
-            let mut reader = BufReader::new(read_half);
+            let deadline = Instant::now() + self.handshake_timeout;
+            let mut reader = BufReader::new(Until {
+                stream: &stream,
+                deadline: Some(deadline),
+            });
+            // At most one byte past the limit is read: a line with no newline within the limit
+            // ends the connection, and nothing beyond the handshake is consumed.
             let mut line = Vec::new();
-            let id = match next_frame(&mut reader, MAX_HANDSHAKE_BYTES, &mut line) {
-                Ok(Frame::Line) => self.handshake(&line),
+            let read = (&mut reader)
+                .take(MAX_HANDSHAKE_BYTES as u64 + 1)
+                .read_until(b'\n', &mut line);
+            let id = match read {
+                Ok(_) if line.last() == Some(&b'\n') => self.handshake(&line),
                 _ => None,
             };
             let mut out = &stream;
@@ -325,6 +398,8 @@ mod unix {
                 return;
             };
             let accepted = response(&id, Ok(serde_json::json!({})));
+            // The session that follows is not bound by the handshake deadline.
+            reader.get_mut().deadline = None;
             if writeln!(out, "{accepted}").is_err() || stream.set_read_timeout(None).is_err() {
                 return;
             }
@@ -420,6 +495,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_token_file_must_have_the_owner_of_its_directory() {
+        assert!(same_owner(1000, 1000).is_ok());
+        let error = same_owner(1000, 1001).unwrap_err();
+        assert_eq!(error.code(), "cmd.socket.directory");
+        assert!(format!("{:?}", error.details().get("reason")).contains("owner"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn comparison_is_exact() {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
@@ -432,6 +516,7 @@ mod tests {
             enabled: false,
             directory: PathBuf::from("/nonexistent/arc-test"),
             name: "x".into(),
+            handshake_timeout: Duration::from_secs(10),
         };
         assert_eq!(
             LocalSocket::bind(&config).unwrap_err().code(),

@@ -412,3 +412,35 @@ fn inputs_are_validated_and_version_one_is_still_read() {
     .unwrap();
     assert_eq!(env.count(), 1);
 }
+
+#[test]
+fn a_doubled_prefix_answers_a_text_prompt_with_a_prefix() {
+    let env = Env::new();
+    let t = env.target();
+    let mut line = CommandLine::new();
+    line.submit(&t, "test.shape.draw").unwrap();
+    line.submit(&t, "0,0").unwrap();
+    line.submit(&t, "3,4").unwrap();
+    // The name prompt takes free text: `''` is an escape for the prefix, not a transparent command.
+    let Submitted::Prompt(next) = line.submit(&t, "''abc").unwrap() else {
+        panic!("expected the next prompt");
+    };
+    assert_eq!(next.key, "copies");
+    let answers = format!("{:?}", line.active().unwrap().answers());
+    assert!(answers.contains(r#"Text("'abc")"#), "{answers}");
+    assert_eq!(env.count(), 0);
+}
+
+#[test]
+fn completion_clamps_a_cursor_inside_a_character_to_its_start() {
+    let env = Env::new();
+    let t = env.target();
+    let mut line = CommandLine::new();
+    line.submit(&t, "test.item.create").unwrap();
+    line.submit(&t, "x").unwrap();
+    // The cursor at byte 3 is inside the two-byte "é" and completes as if it were at byte 2.
+    let c = line.complete(&t, "5mé", 3);
+    let span = c.span.unwrap();
+    assert_eq!((span.start, span.end), (1, 2));
+    assert!(c.candidates.iter().any(|c| c.text == "mm"));
+}

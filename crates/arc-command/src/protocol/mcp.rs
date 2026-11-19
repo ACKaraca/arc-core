@@ -66,6 +66,25 @@ pub fn tool_name(command: &str) -> String {
     command.replace('.', "_")
 }
 
+/// The most characters of a client's method name that reach the log.
+const LOGGED_METHOD_CHARS: usize = 64;
+
+/// A client's method name for the log: at most [`LOGGED_METHOD_CHARS`] characters, with control
+/// characters replaced, so a client cannot fill the log or start new lines in it.
+fn loggable_method(method: &str) -> String {
+    method
+        .chars()
+        .take(LOGGED_METHOD_CHARS)
+        .map(|c| {
+            if c.is_control() {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 fn object_schema(properties: &Value, required: &[&str]) -> Value {
     json!({
         "type": "object",
@@ -251,9 +270,11 @@ impl Session<'_, '_> {
         let Some(id) = id else {
             // Notifications (`notifications/initialized`, `notifications/cancelled`) need no
             // answer and change nothing: requests are answered one at a time.
-            self.server
-                .log
-                .log(LogLevel::Debug, "mcp.notification_ignored", method);
+            self.server.log.log(
+                LogLevel::Debug,
+                "mcp.notification_ignored",
+                &loggable_method(method),
+            );
             return None;
         };
         let params = match message.get("params") {
@@ -458,5 +479,23 @@ impl Server<'_> {
                 output.flush()?;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logged_method_names_are_bounded_and_plain() {
+        let long = "m".repeat(200);
+        assert_eq!(loggable_method(&long).chars().count(), LOGGED_METHOD_CHARS);
+        assert_eq!(
+            loggable_method("notifications/cancelled"),
+            "notifications/cancelled"
+        );
+        let hostile = loggable_method("a\nb\u{7}\u{1b}[2J");
+        assert!(!hostile.chars().any(char::is_control));
+        assert_eq!(hostile.chars().count(), 8);
     }
 }

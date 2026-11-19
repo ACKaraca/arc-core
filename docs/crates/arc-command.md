@@ -337,8 +337,10 @@ group      = "(" , { group | char - ( "(" | ")" ) } , ")" ;
 - **Transparent commands** (CORE-CMD-012). `CommandLine::transparent(target, line)`, and
   `submit` for a line starting with `'` (`TRANSPARENT_PREFIX`) while a prompt is active, run a
   command marked transparent beside the prompt: the prompt session, its answers and the last
-  command are untouched, and the run goes through the same invoker (or `drive` runner). Without
-  an active prompt the prefix is not special. Refused with `cmd.transparent.refused` (detail
+  command are untouched, and the run goes through the same invoker (or `drive` runner). A doubled
+  prefix (`''`) at the start is an escape: the line answers the active prompt with the text after
+  the first prefix, so `''abc` answers a text prompt with `'abc`. Without an active prompt the
+  prefix is not special. Refused with `cmd.transparent.refused` (detail
   `reason`): `empty`, `not_transparent`, `missing_params` (a transparent command cannot prompt
   while another prompt is active), and `group_open`, when the command is undoable and the
   document has an open undo group, or controls undo. A `not_undoable` transparent command
@@ -784,7 +786,7 @@ gives `validate <file>` the package check, so parameter validation is the separa
 | `cmd.socket.disabled` | `permission_denied` | The user has not enabled automation, so no socket is served |
 | `cmd.socket.unauthorized` | `permission_denied` | A connection did not present the session token |
 | `cmd.socket.unsupported` | `unsupported` | Local sockets are not available on this platform yet |
-| `cmd.socket.directory` | `invalid_input` | The socket directory is not a private directory of the user; the detail `reason` says why |
+| `cmd.socket.directory` | `invalid_input` | The socket directory is not a private directory of the user, or its owner is not the owner of the token file; the detail `reason` says why |
 | `cmd.socket.io` | `io` | The system refused an operation on the socket or its token; the detail `reason` says which |
 | `cmd.render.unavailable` | `unsupported` | No renderer is attached, so a view cannot be rendered |
 
@@ -847,20 +849,27 @@ after [ADR-0010](../adr/0010-automation-protocol-transport.md).
 - **Enabling**: `SocketConfig::enabled` is the user's choice, made by the application. Without
   it `bind` is `cmd.socket.disabled` and nothing is created.
 - **Files**: `directory` is created with mode 0700 when missing (its parent must exist); an
-  existing one must be a directory, not a link, that group and others cannot access
-  (`cmd.socket.directory`, reasons `not_directory`, `not_private`, `create`, `name`). `bind`
-  writes `<name>.token`, created with mode 0600 and exclusive creation, then the socket
-  `<name>.sock`, set to mode 0600 before `serve` accepts anything; the directory already keeps
-  other users out in between. A socket file left by a dead process is replaced; one that
-  accepts a connection is `cmd.socket.io` with reason `in_use`. Dropping the `LocalSocket`
-  removes both files. The application chooses the directory (for example below the user's
+  existing one must be a directory, not a link, that group and others cannot access, and its
+  owner must be the owner of the token file (`cmd.socket.directory`, reasons `not_directory`,
+  `not_private`, `create`, `name`, `owner`). `bind` creates the socket `<name>.sock` first and
+  sets it to mode 0600 before `serve` accepts anything, then writes `<name>.token`, created with
+  mode 0600 and exclusive creation, and checks its owner against the directory's. A failed `bind`
+  removes only the files it created: the socket it bound, or the token file it wrote. A socket
+  file left by a dead process is replaced, with the token file that process left behind; one that
+  accepts a connection is `cmd.socket.io` with reason `in_use`, and a token file that already
+  exists is `cmd.socket.io` with reason `token`. Dropping the `LocalSocket` removes the two files
+  its `bind` created. The application chooses the directory (for example below the user's
   runtime directory); this layer reads no environment.
 - **Token**: 32 bytes from the operating system's random source (`/dev/urandom`), as 64
   hexadecimal digits. It is compared in constant time (equal lengths, every byte folded), and
-  never logged, sent or reported in an error.
-- **Handshake**: the first line of a connection, at most 1,024 bytes, within 10 seconds, must be
+  never logged, sent, printed by `Debug` or reported in an error.
+- **Handshake**: the first line of a connection, at most 1,024 bytes before its newline, must be
   `{"jsonrpc":"2.0","id":<string or integer>,"method":"arc.authenticate","params":{"token":"<token>"}}`.
-  It belongs to the transport, not to the protocol methods: it is not in `METHODS` and not in the
+  The whole line must arrive within one deadline counted from the accept: 10 seconds by default
+  (`HANDSHAKE_TIMEOUT`, set per socket in `SocketConfig::handshake_timeout`). The deadline is not
+  extended by each byte that arrives. The bytes read for the handshake stop at the newline or at
+  1,025 bytes, whichever comes first; the protocol session that follows is not bound by the
+  deadline. It belongs to the transport, not to the protocol methods: it is not in `METHODS` and not in the
   published schemas. Success answers `{"jsonrpc":"2.0","id":<id>,"result":{}}`, after which the
   connection is an ordinary session that starts with `arc.initialize`. Anything else (a wrong,
   missing or mistyped token, another first message, an oversize or malformed line, no line in

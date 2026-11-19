@@ -11,9 +11,11 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 
-use arc_command::protocol::{LocalSocket, SocketConfig};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
+
+use arc_command::protocol::{LocalSocket, MAX_HANDSHAKE_BYTES, SocketConfig};
 use arc_command::{NoLog, Permission, Server, ServerConfig};
 use arc_doc::Document;
 use common::{document, registry};
@@ -43,6 +45,7 @@ impl Temp {
             enabled,
             directory: self.socket_dir(),
             name: "arc".into(),
+            handshake_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -73,7 +76,8 @@ impl Conn {
 
     fn send(&mut self, line: &str) {
         self.stream.write_all(line.as_bytes()).unwrap();
-        self.stream.write_all(b"\n").unwrap();
+        // The server may close a connection that exceeded the handshake limit before the newline.
+        let _ = self.stream.write_all(b"\n");
     }
 
     /// The next line, or `None` at the end of the stream.
@@ -110,7 +114,12 @@ fn documents() -> BTreeMap<String, Document> {
 
 /// Runs `client` against a serving socket and stops the server afterwards.
 fn serve(temp: &Temp, max_message: u64, client: impl FnOnce(&LocalSocket)) {
-    let socket = LocalSocket::bind(&temp.config(true)).unwrap();
+    serve_config(temp.config(true), max_message, client);
+}
+
+/// [`serve`] with the given configuration.
+fn serve_config(config: SocketConfig, max_message: u64, client: impl FnOnce(&LocalSocket)) {
+    let socket = LocalSocket::bind(&config).unwrap();
     let mut config = ServerConfig::new("arc-test", "0.1.0", [Permission::Read, Permission::Edit]);
     config.max_message_bytes = max_message;
     let registry = registry();
@@ -304,5 +313,104 @@ fn stopping_closes_open_connections() {
         assert!(conn.authenticate(&token(socket)).is_some());
         socket.stopper().stop();
         assert!(conn.read().is_none());
+    });
+}
+
+#[test]
+fn a_failed_bind_leaves_the_first_instance_serving() {
+    let temp = Temp::new();
+    serve(&temp, 1 << 20, |socket| {
+        let before = token(socket);
+        let error = LocalSocket::bind(&temp.config(true)).unwrap_err();
+        assert_eq!(error.code(), "cmd.socket.io");
+        assert_eq!(token(socket), before);
+        assert!(socket.socket_path().exists());
+        let mut conn = Conn::open(socket.socket_path());
+        assert_eq!(conn.authenticate(&before).unwrap()["result"], json!({}));
+    });
+}
+
+#[test]
+fn a_failed_bind_removes_only_what_it_created() {
+    let temp = Temp::new();
+    let first = LocalSocket::bind(&temp.config(true)).unwrap();
+    let before = std::fs::read_to_string(first.token_path()).unwrap();
+    // The socket file vanishes while the first instance lives; its token file stays.
+    std::fs::remove_file(first.socket_path()).unwrap();
+    let error = LocalSocket::bind(&temp.config(true)).unwrap_err();
+    assert_eq!(error.code(), "cmd.socket.io");
+    assert_eq!(std::fs::read_to_string(first.token_path()).unwrap(), before);
+    assert!(!first.socket_path().exists());
+}
+
+#[test]
+fn the_debug_output_omits_the_token() {
+    let temp = Temp::new();
+    let socket = LocalSocket::bind(&temp.config(true)).unwrap();
+    let text = format!("{socket:?}");
+    assert!(text.contains("LocalSocket"));
+    assert!(!text.contains(&token(&socket)));
+}
+
+#[test]
+fn a_handshake_line_is_bounded_and_a_line_at_the_limit_is_read() {
+    let temp = Temp::new();
+    serve(&temp, 1 << 20, |socket| {
+        let good = token(socket);
+        // More than the limit without a newline: refused and closed.
+        let mut conn = Conn::open(socket.socket_path());
+        conn.stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let _ = conn
+            .stream
+            .write_all(&vec![b'a'; MAX_HANDSHAKE_BYTES + 4096]);
+        assert_refused_and_closed(&mut conn);
+        // A handshake of exactly the limit, newline excluded, is accepted.
+        let base = json!({"jsonrpc": "2.0", "id": 1, "method": "arc.authenticate",
+                          "params": {"token": good, "pad": ""}})
+        .to_string();
+        let pad = "x".repeat(MAX_HANDSHAKE_BYTES - base.len());
+        let line = base.replace(r#""pad":"""#, &format!(r#""pad":"{pad}""#));
+        assert_eq!(line.len(), MAX_HANDSHAKE_BYTES);
+        let mut conn = Conn::open(socket.socket_path());
+        conn.send(&line);
+        assert_eq!(conn.read().unwrap()["result"], json!({}));
+    });
+}
+
+#[test]
+fn the_handshake_has_one_deadline_for_the_whole_line() {
+    let temp = Temp::new();
+    let mut config = temp.config(true);
+    config.handshake_timeout = Duration::from_millis(200);
+    serve_config(config, 1 << 20, |socket| {
+        // One byte, then nothing: the deadline ends the connection.
+        let mut silent = Conn::open(socket.socket_path());
+        silent
+            .stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        silent.stream.write_all(b"{").unwrap();
+        assert_refused_and_closed(&mut silent);
+        // Bytes that keep arriving do not extend the deadline.
+        let mut trickle = Conn::open(socket.socket_path());
+        trickle
+            .stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let started = Instant::now();
+        for _ in 0..40 {
+            let _ = trickle.stream.write_all(b"{");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_refused_and_closed(&mut trickle);
+        // A correct client is served after both.
+        let mut conn = Conn::open(socket.socket_path());
+        assert_eq!(
+            conn.authenticate(&token(socket)).unwrap()["result"],
+            json!({})
+        );
     });
 }

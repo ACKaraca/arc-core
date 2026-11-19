@@ -39,7 +39,9 @@ pub use events::{EVENT_QUEUE, EVENTS, MAX_SELECTED};
 pub use framing::{PipeReader, PipeWriter, pipe};
 pub use mcp::{MCP_FIXED_TOOLS, MCP_VERSIONS, McpConfig, tool_name};
 pub use query::MAX_PAGE;
-pub use socket::{LocalSocket, MAX_CONNECTIONS, MAX_HANDSHAKE_BYTES, SocketConfig, SocketStop};
+pub use socket::{
+    HANDSHAKE_TIMEOUT, LocalSocket, MAX_CONNECTIONS, MAX_HANDSHAKE_BYTES, SocketConfig, SocketStop,
+};
 
 use crate::context::{Clock, FixedClock, Probe, ProgressSink, Session};
 use crate::error::codes;

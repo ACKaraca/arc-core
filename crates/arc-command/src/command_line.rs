@@ -91,7 +91,8 @@ pub enum LineStep<'a> {
     Transparent(&'a str),
 }
 
-/// The prefix that marks a typed line as a transparent command while a prompt is active.
+/// The prefix that marks a typed line as a transparent command while a prompt is active. A
+/// doubled prefix is an escape: the line answers the prompt with the text after the first one.
 pub const TRANSPARENT_PREFIX: char = '\'';
 
 /// Runs a completed invocation for [`CommandLine::drive`].
@@ -201,14 +202,14 @@ impl CommandLine {
             }
             LineStep::Transparent(text) => self.run_transparent(target, text, runner),
             LineStep::Submit(text) => {
-                if self.active.is_some()
-                    && let Some(rest) = text.trim_start().strip_prefix(TRANSPARENT_PREFIX)
-                {
-                    return self.run_transparent(target, rest, runner);
-                }
-                if let Some(active) = self.active.as_mut() {
-                    let feedback = active.answer_text(text, &target.document.snapshot());
-                    return self.follow(target, feedback, runner);
+                if self.active.is_some() {
+                    return match text.trim_start().strip_prefix(TRANSPARENT_PREFIX) {
+                        Some(rest) if !rest.starts_with(TRANSPARENT_PREFIX) => {
+                            self.run_transparent(target, rest, runner)
+                        }
+                        Some(escaped) => self.answer_typed(target, escaped, runner),
+                        None => self.answer_typed(target, text, runner),
+                    };
                 }
                 let Some(parsed) = line::parse_line(target.registry, target.localized, text)?
                 else {
@@ -256,6 +257,20 @@ impl CommandLine {
                 self.run(target, &last.command, last.params, runner)
             }
         }
+    }
+
+    /// Answers the active prompt with a typed text and follows its feedback.
+    fn answer_typed(
+        &mut self,
+        target: &Target<'_>,
+        text: &str,
+        runner: Runner<'_>,
+    ) -> Result<Submitted> {
+        let Some(active) = self.active.as_mut() else {
+            return Err(Error::new(codes::PROMPT_ENDED));
+        };
+        let feedback = active.answer_text(text, &target.document.snapshot());
+        self.follow(target, feedback, runner)
     }
 
     /// Runs a transparent command line beside the active prompt: the prompt session and the
@@ -398,7 +413,9 @@ impl CommandLine {
                 cursor,
             );
         };
-        let partial = text.get(..cursor.min(text.len())).unwrap_or(text);
+        let partial = text
+            .get(..line::clamp_cursor(text, cursor))
+            .unwrap_or_default();
         let lead = partial.len() - partial.trim_start().len();
         let typed = partial.trim_start();
         let at = |start: usize| line::Span {
