@@ -187,16 +187,23 @@ fn build_tile(mesh: &TriMesh, set: &[u32], origin: Point3) -> Result<MeshTile> {
 }
 
 /// Splits polylines (points and a closed flag) into runs whose bounds are at most `max_extent`
-/// on every axis. Empty paths are skipped.
+/// on every axis. Empty paths are skipped. `max_segments` bounds the segments of all the paths
+/// together, after the divisions of long segments (the segments of one item, as
+/// [`crate::SceneLimits::max_segments_per_item`] counts them).
 ///
 /// # Errors
 ///
 /// `gpu.settings.invalid` for a bound that is not positive and finite; `gpu.value.not_finite`
-/// for a point that is not finite; `gpu.limit.exceeded` when the divided segments exceed the
-/// number of runs a `u32` can count.
-pub fn split_lines(paths: &[(Vec<Point3>, bool)], max_extent: f64) -> Result<Vec<LineTile>> {
+/// for a point that is not finite; `gpu.limit.exceeded` when the divided segments exceed
+/// `max_segments`, which is checked before the divided points are built.
+pub fn split_lines(
+    paths: &[(Vec<Point3>, bool)],
+    max_extent: f64,
+    max_segments: u32,
+) -> Result<Vec<LineTile>> {
     check_bound(max_extent)?;
     let mut tiles = Vec::new();
+    let mut budget = max_segments;
     for (points, closed) in paths {
         if points.iter().any(|p| p.iter().any(|c| !c.is_finite())) {
             return Err(Error::new(codes::VALUE_NOT_FINITE));
@@ -205,7 +212,7 @@ pub fn split_lines(paths: &[(Vec<Point3>, bool)], max_extent: f64) -> Result<Vec
         if *closed && let Some(first) = points.first() {
             chain.push(*first);
         }
-        let divided = divide(&chain, max_extent / 2.0)?;
+        let divided = divide(&chain, max_extent / 2.0, &mut budget)?;
         let mut run: Vec<Point3> = Vec::new();
         let flush = |run: &mut Vec<Point3>, tiles: &mut Vec<LineTile>| {
             if let Some((low, high)) = bounds(run.iter().copied()) {
@@ -246,8 +253,10 @@ fn narrow(v: f64) -> f32 {
 }
 
 /// `points` with every segment longer than `piece` divided into equal parts of at most `piece`.
-fn divide(points: &[Point3], piece: f64) -> Result<Vec<Point3>> {
-    let mut out = Vec::with_capacity(points.len());
+/// Each segment takes its parts from `budget` before any point is built; a segment that needs
+/// more than the budget left is `gpu.limit.exceeded`.
+fn divide(points: &[Point3], piece: f64, budget: &mut u32) -> Result<Vec<Point3>> {
+    let mut out = Vec::new();
     for pair in points.windows(2) {
         let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
             continue;
@@ -256,12 +265,16 @@ fn divide(points: &[Point3], piece: f64) -> Result<Vec<Point3>> {
             out.push(*a);
         }
         let length = (b - a).norm();
-        let parts = (length / piece).ceil();
-        if !(parts.is_finite() && parts <= f64::from(u32::MAX)) {
-            return Err(Error::new(codes::LIMIT_EXCEEDED));
+        let parts = (length / piece).ceil().max(1.0);
+        // The comparison is in `f64`, so a huge or infinite ratio fails before any cast.
+        if !(parts.is_finite() && parts <= f64::from(*budget)) {
+            return Err(
+                Error::new(codes::LIMIT_EXCEEDED).with_detail("limit", "max_segments_per_item")
+            );
         }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Checked above.
-        let parts = (parts as u32).max(1);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // At most the budget.
+        let parts = parts as u32;
+        *budget -= parts;
         for k in 1..parts {
             out.push(a + (b - a) * (f64::from(k) / f64::from(parts)));
         }
@@ -280,6 +293,9 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    /// The segments of one line item by default.
+    const SEGMENTS: u32 = crate::scene::SceneLimits::DEFAULT.max_segments_per_item;
 
     fn grid(n: u32, spacing: f64, origin: Point3) -> TriMesh {
         let mut positions = Vec::new();
@@ -348,12 +364,34 @@ mod tests {
     }
 
     #[test]
+    fn a_path_that_divides_into_too_many_segments_is_refused_before_it_is_built() {
+        // Two points 2e12 apart need 4e9 segments at a bound of 1 km; the budget refuses them
+        // before any divided point is built.
+        let far = (vec![Point3::origin(), Point3::new(2.0e12, 0.0, 0.0)], false);
+        assert_eq!(
+            split_lines(std::slice::from_ref(&far), TILE_SIZE, SEGMENTS)
+                .unwrap_err()
+                .code(),
+            codes::LIMIT_EXCEEDED.code
+        );
+        // The budget is shared by the paths of one call.
+        let near = (vec![Point3::origin(), Point3::new(5000.0, 0.0, 0.0)], false);
+        assert!(split_lines(std::slice::from_ref(&near), TILE_SIZE, 100).is_ok());
+        assert_eq!(
+            split_lines(&[near.clone(), near], TILE_SIZE, 10)
+                .unwrap_err()
+                .code(),
+            codes::LIMIT_EXCEEDED.code
+        );
+    }
+
+    #[test]
     fn lines_longer_than_the_bound_are_cut_and_stay_connected() {
         let path = (
             vec![Point3::new(0.0, 0.0, 0.0), Point3::new(5000.0, 0.0, 0.0)],
             false,
         );
-        let tiles = split_lines(&[path], TILE_SIZE).unwrap();
+        let tiles = split_lines(&[path], TILE_SIZE, SEGMENTS).unwrap();
         assert!(tiles.len() >= 5);
         for pair in tiles.windows(2) {
             let end = |t: &LineTile| {
@@ -414,7 +452,7 @@ mod tests {
             bound in 700.0_f64..1500.0,
         ) {
             let points: Vec<Point3> = points.into_iter().map(|(x, y, z)| Point3::new(x + 1.0e7, y, z)).collect();
-            let tiles = split_lines(&[(points.clone(), false)], bound).unwrap();
+            let tiles = split_lines(&[(points.clone(), false)], bound, SEGMENTS).unwrap();
             let world = |t: &LineTile, p: [f32; 3]| t.origin + arc_base::math::Vector3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2]));
             for t in &tiles {
                 let pts: Vec<Point3> = t.paths[0].points.iter().map(|p| world(t, *p)).collect();

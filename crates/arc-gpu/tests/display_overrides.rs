@@ -321,3 +321,84 @@ fn invalid_overrides_are_errors() {
         arc_gpu::error::codes::SETTINGS_INVALID.code
     );
 }
+
+#[test]
+fn an_isolation_ghosts_an_object_that_has_its_own_style() {
+    let (_, mut scene, mut renderer) = setup();
+    let objects = scene_of_three(&mut scene, 0);
+    // A is isolated and B, which is not, has its own red color: B is ghosted in red, not opaque.
+    let overrides = DisplayOverrides {
+        objects: vec![(objects[1], OverrideStyle::colored(RED))],
+        isolation: Some(Isolation {
+            objects: vec![objects[0]],
+            others: Others::Ghost,
+        }),
+        ghost_opacity: 0.15,
+        ..DisplayOverrides::default()
+    };
+    let image = render(&mut renderer, &mut scene, Some(&overrides));
+    assert!(
+        near(center(&image, 0), [255, 0, 0], 1),
+        "the isolated object is unchanged"
+    );
+    assert!(
+        near(center(&image, 1), [srgb(0.15), 0, 0], 3),
+        "{:?}",
+        center(&image, 1)
+    );
+    let frame = top_view(Point3::origin(), 12.0);
+    let extras = FrameExtras {
+        overrides: Some(&overrides),
+        ..FrameExtras::default()
+    };
+    let hits = renderer
+        .pick_with(
+            &mut scene,
+            &frame,
+            (SIZE, SIZE),
+            &RenderSettings::default(),
+            &PickRegion::pixel(CENTERS[1], 48, 0.0),
+            &extras,
+        )
+        .unwrap();
+    assert!(hits.is_empty(), "a ghosted object is not picked");
+}
+
+#[test]
+fn a_hidden_category_stays_hidden_under_an_isolation_ghost_and_an_object_style() {
+    let (_, mut scene, mut renderer) = setup();
+    let objects = scene_of_three(&mut scene, category_flags(0, 3));
+    let hidden_category =
+        |objects: Vec<(ObjectId, OverrideStyle)>, isolation: Option<Isolation>| DisplayOverrides {
+            categories: vec![(3, OverrideStyle::hidden())],
+            objects,
+            isolation,
+            ghost_opacity: 0.25,
+        };
+    // The objects outside the isolation are ghosted; their category hides them, so they stay
+    // invisible. The isolated object is hidden by its category too.
+    let ghosted = hidden_category(
+        Vec::new(),
+        Some(Isolation {
+            objects: vec![objects[1]],
+            others: Others::Ghost,
+        }),
+    );
+    let image = render(&mut renderer, &mut scene, Some(&ghosted));
+    assert!(
+        (0..3).all(|i| near(center(&image, i), [0, 0, 0], 0)),
+        "{:?}",
+        [0, 1, 2].map(|i| center(&image, i))
+    );
+    // An object's own style does not show an instance of a hidden category either.
+    let styled = hidden_category(
+        vec![(objects[0], OverrideStyle::colored(Color::WHITE))],
+        None,
+    );
+    let image = render(&mut renderer, &mut scene, Some(&styled));
+    assert!(
+        near(center(&image, 0), [0, 0, 0], 0),
+        "{:?}",
+        center(&image, 0)
+    );
+}

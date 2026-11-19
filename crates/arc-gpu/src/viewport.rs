@@ -41,8 +41,11 @@ use crate::scene::{Scene, SceneLimits};
 /// How long dropping a [`Viewport`] waits for its render thread.
 pub const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The clock of the adaptive quality rules: the time since an origin the clock chooses.
+pub type Clock = Arc<dyn Fn() -> Duration + Send + Sync>;
+
 /// The initial state of a [`Viewport`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone)]
 pub struct ViewportConfig {
     /// The target width in pixels.
     pub width: u32,
@@ -57,6 +60,25 @@ pub struct ViewportConfig {
     /// Whether each frame is also read back into [`Frame::image`] (headless use). Without it
     /// frames carry only the texture, for a compositor on the same device.
     pub readback: bool,
+    /// The time the camera must stay still before full quality returns (CORE-GPU-021).
+    pub settle: Duration,
+    /// The clock the settle time is measured with. `None` reads the time since the render
+    /// thread started; tests inject a clock they advance by hand.
+    pub clock: Option<Clock>,
+}
+
+impl fmt::Debug for ViewportConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ViewportConfig")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("frame", &self.frame)
+            .field("settings", &self.settings)
+            .field("limits", &self.limits)
+            .field("readback", &self.readback)
+            .field("settle", &self.settle)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ViewportConfig {
@@ -70,6 +92,8 @@ impl ViewportConfig {
             settings: RenderSettings::DEFAULT,
             limits: SceneLimits::DEFAULT,
             readback: true,
+            settle: SETTLE_TIME,
+            clock: None,
         }
     }
 }
@@ -253,11 +277,19 @@ impl Viewport {
         });
         let thread_shared = Arc::clone(&shared);
         let readback = config.readback;
+        let settle = config.settle;
+        let clock: Clock = match config.clock {
+            Some(clock) => clock,
+            None => {
+                let start = Instant::now();
+                Arc::new(move || start.elapsed())
+            }
+        };
         let thread = std::thread::Builder::new()
             .name("arc-gpu viewport".into())
             .spawn(move || {
                 let guard = ExitGuard(thread_shared);
-                render_loop(&guard.0, scene, renderer, readback);
+                render_loop(&guard.0, scene, renderer, readback, settle, &clock);
             })
             .map_err(|e| Error::new(codes::THREAD_FAILED).with_source(e))?;
         Ok(Self {
@@ -265,6 +297,15 @@ impl Viewport {
             limits: config.limits,
             thread: Some(thread),
         })
+    }
+
+    /// Wakes the render thread so it reads the clock again. A test that advances an injected
+    /// clock calls it; the thread draws only if the settled camera then needs a frame.
+    #[cfg(test)]
+    pub(crate) fn wake(&self) {
+        let guard = lock(&self.shared);
+        self.shared.wake.notify_all();
+        drop(guard);
     }
 
     /// Records an input: `change` returns whether it changed anything the thread must handle.
@@ -463,10 +504,12 @@ impl Viewport {
     }
 
     /// Runs `job` on the render thread with the viewport's renderer, scene (with every
-    /// extraction result queued before this call applied) and current render settings, and
-    /// waits at most `timeout` for its result. Picking a viewport's scene
-    /// ([`Renderer::pick`], [`Scene::bounding_sphere`]) goes through this, since the scene
-    /// lives on the thread. The job runs between frames; it draws nothing by itself.
+    /// extraction result queued before this call applied) and the render settings of the frame
+    /// that is drawn at that time, lowered while the camera moves (see
+    /// [`AdaptiveQuality`]), and waits at most `timeout` for its result. Picking a viewport's
+    /// scene ([`Renderer::pick`], [`Scene::bounding_sphere`]) goes through this, so a pick
+    /// during navigation tests the same levels of detail as the frame on screen. The job runs
+    /// between frames; it draws nothing by itself.
     ///
     /// # Errors
     ///
@@ -616,10 +659,15 @@ impl Drop for ExitGuard {
 }
 
 #[allow(clippy::too_many_lines)] // The loop: wait, take the inputs, apply, draw, publish.
-fn render_loop(shared: &Shared, mut scene: Scene, mut renderer: Renderer, readback: bool) {
-    // The clock of the quality rules: the time since the thread started.
-    let clock = Instant::now();
-    let mut quality = AdaptiveQuality::new(SETTLE_TIME);
+fn render_loop(
+    shared: &Shared,
+    mut scene: Scene,
+    mut renderer: Renderer,
+    readback: bool,
+    settle: Duration,
+    clock: &Clock,
+) {
+    let mut quality = AdaptiveQuality::new(settle);
     // Whether the last frame was drawn at navigation quality.
     let mut navigating = false;
     loop {
@@ -629,7 +677,7 @@ fn render_loop(shared: &Shared, mut scene: Scene, mut renderer: Renderer, readba
                 if state.shutdown {
                     return;
                 }
-                let now = clock.elapsed();
+                let now = clock();
                 // Navigation has settled since the last frame: draw at full quality.
                 let settled = navigating && !quality.is_navigating(now);
                 if state.dirty.any() || !state.scene.is_empty() || !state.jobs.is_empty() || settled
@@ -671,7 +719,7 @@ fn render_loop(shared: &Shared, mut scene: Scene, mut renderer: Renderer, readba
             let moved = reasons.camera && state.frames > 0;
             (inputs, reasons, results, jobs, state.requested, moved)
         };
-        let now = clock.elapsed();
+        let now = clock();
         if moved {
             quality.camera_moved(now);
         }
@@ -687,7 +735,7 @@ fn render_loop(shared: &Shared, mut scene: Scene, mut renderer: Renderer, readba
             error = report.failed.into_iter().next().map(|(_, e)| e);
         }
         for job in jobs {
-            job(&mut renderer, &mut scene, &inputs.settings);
+            job(&mut renderer, &mut scene, &settings);
         }
         let mut drawn = None;
         if reasons.any() && !scene.gpu().is_lost() {
@@ -765,10 +813,28 @@ mod tests {
     use crate::adapter::GpuSettings;
     use crate::extract::{Extraction, Outcome};
     use crate::overlay::{Anchor, MarkerShape, OverlayPrimitive};
+    use crate::quality::NAVIGATION_LOD_FACTOR;
     use crate::scene::{LineItem, LinePath, LineStyle, LineWidth, RenderItem};
 
     /// Generous: bounds only a hung thread on a loaded machine.
     const WAIT: Duration = Duration::from_secs(60);
+    /// A settle time no test reaches: without a clock the thread never draws a settle frame.
+    const NEVER: Duration = Duration::from_secs(1 << 30);
+
+    /// A clock the test moves by hand; the render thread reads it through [`Clock`].
+    #[derive(Clone, Default)]
+    struct ManualClock(Arc<Mutex<Duration>>);
+
+    impl ManualClock {
+        fn advance(&self, by: Duration) {
+            *self.0.lock().unwrap_or_else(PoisonError::into_inner) += by;
+        }
+
+        fn reader(&self) -> Clock {
+            let now = Arc::clone(&self.0);
+            Arc::new(move || *now.lock().unwrap_or_else(PoisonError::into_inner))
+        }
+    }
 
     fn gpu() -> Gpu {
         Gpu::new(&GpuSettings::default()).unwrap()
@@ -810,6 +876,19 @@ mod tests {
     fn viewport(readback: bool) -> Viewport {
         let mut config = ViewportConfig::new(32, 32, view(10.0));
         config.readback = readback;
+        config.settle = NEVER;
+        let viewport = Viewport::new(&gpu(), config).unwrap();
+        viewport.sync(WAIT).unwrap();
+        assert_eq!(viewport.frames(), 1);
+        viewport
+    }
+
+    /// A viewport whose settle time is the default one, measured by `clock`.
+    fn viewport_with_clock(clock: &ManualClock) -> Viewport {
+        let mut config = ViewportConfig::new(32, 32, view(10.0));
+        config.readback = false;
+        config.settle = SETTLE_TIME;
+        config.clock = Some(clock.reader());
         let viewport = Viewport::new(&gpu(), config).unwrap();
         viewport.sync(WAIT).unwrap();
         assert_eq!(viewport.frames(), 1);
@@ -869,7 +948,8 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)] // One case per kind of input.
     fn an_idle_viewport_draws_nothing_and_each_change_draws_one_frame() {
-        let viewport = viewport(false);
+        let clock = ManualClock::default();
+        let viewport = viewport_with_clock(&clock);
         let only = |f: fn(&mut DirtyReasons)| {
             let mut r = DirtyReasons::default();
             f(&mut r);
@@ -890,6 +970,8 @@ mod tests {
             }
             // A camera change ends with one frame at full quality once the camera is still.
             if reasons.camera {
+                clock.advance(SETTLE_TIME);
+                viewport.wake();
                 let settled = viewport.wait_frame(viewport.frames(), WAIT).unwrap();
                 assert_eq!(
                     settled.reasons,
@@ -1018,6 +1100,26 @@ mod tests {
     }
 
     #[test]
+    fn a_job_sees_the_settings_of_the_frame_it_runs_with() {
+        let clock = ManualClock::default();
+        let viewport = viewport_with_clock(&clock);
+        let budget = |v: &Viewport| {
+            v.with_scene(WAIT, |_, _, settings| settings.lod_budget_px)
+                .unwrap()
+        };
+        assert_eq!(budget(&viewport), RenderSettings::DEFAULT.lod_budget_px);
+        // The camera moves and the clock stays: the frame is drawn at navigation quality, and a
+        // pick run with it tests the same levels of detail.
+        viewport.set_camera(view(11.0)).unwrap();
+        assert_eq!(
+            budget(&viewport),
+            RenderSettings::DEFAULT.lod_budget_px * NAVIGATION_LOD_FACTOR
+        );
+        clock.advance(SETTLE_TIME);
+        assert_eq!(budget(&viewport), RenderSettings::DEFAULT.lod_budget_px);
+    }
+
+    #[test]
     fn thread_errors_surface_on_the_next_call() {
         let viewport = viewport(false);
         let mut bad = line(1, 1, 0.0);
@@ -1039,7 +1141,9 @@ mod tests {
     #[test]
     fn device_errors_surface_as_codes_and_drop_stays_bounded() {
         let gpu = gpu();
-        let viewport = Viewport::new(&gpu, ViewportConfig::new(16, 16, view(10.0))).unwrap();
+        let mut config = ViewportConfig::new(16, 16, view(10.0));
+        config.settle = NEVER;
+        let viewport = Viewport::new(&gpu, config).unwrap();
         viewport.sync(WAIT).unwrap();
         // On the pinned adapter a destroyed device reports validation errors; a backend that
         // reports the loss stops the viewport with `gpu.device.lost`.
@@ -1087,7 +1191,8 @@ mod tests {
 
     #[test]
     fn a_settled_camera_draws_one_frame_at_full_quality() {
-        let viewport = viewport(false);
+        let clock = ManualClock::default();
+        let viewport = viewport_with_clock(&clock);
         let before = viewport.frames();
         viewport.set_camera(view(12.0)).unwrap();
         let moved = viewport.wait_frame(before, WAIT).unwrap();
@@ -1097,6 +1202,8 @@ mod tests {
             "navigation draws at the camera's own reason"
         );
         // Without further input the thread draws again once the camera has been still.
+        clock.advance(SETTLE_TIME);
+        viewport.wake();
         let settled = viewport.wait_frame(moved.number, WAIT).unwrap();
         assert!(settled.reasons.quality);
         assert!(!settled.reasons.camera);

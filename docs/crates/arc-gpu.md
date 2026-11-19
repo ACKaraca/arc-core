@@ -438,7 +438,9 @@ the thread, which draws the first frame.
   earlier call handled) wait with a caller-given bound and fail with `gpu.timeout`.
 - **Jobs on the scene.** `with_scene(timeout, job)` runs `job` on the render thread with the
   renderer, the scene (after every extraction result queued before the call is applied) and the
-  current render settings, between frames, and waits at most `timeout` for its result
+  render settings of the frame drawn with it (lowered while the camera moves, see
+  [Adaptive quality](#adaptive-quality-core-gpu-021)), between frames, and waits at most `timeout`
+  for its result
   (`gpu.timeout` otherwise; the job still runs later and its result is dropped). Picking a
   viewport's scene and reading its bounding sphere go through it. A job draws nothing by
   itself.
@@ -511,10 +513,15 @@ part of these steps.
   and return `TiledGeometry { geometry, origin }`; `TiledGeometry::item(instances)` makes the
   mesh item of a tile. Instance transforms are relative to the tile origin, so the identity
   places the mesh where it was authored. A mesh within the bound is one tile.
-- `tile::split_lines(paths, max_extent)` splits polylines into runs with their own origins. A
-  segment longer than half the bound is divided into equal parts first; the runs of a polyline
-  share their end points. A join at a run boundary is two caps, so miter and bevel joins are
-  not exact at a boundary vertex.
+- `tile::split_lines(paths, max_extent, max_segments)` splits polylines into runs with their own
+  origins. A segment longer than half the bound is divided into equal parts first; the runs of a
+  polyline share their end points. The divided segments of all paths of one call are bounded by
+  `max_segments` (the caller passes `SceneLimits::max_segments_per_item`); the parts of a segment
+  are counted before any point is built, so a path of 2 × 10^12 units at a 1 km bound fails with
+  `gpu.limit.exceeded` at once. A join at a run boundary is two caps, so miter and bevel joins
+  are not exact at a boundary vertex. Open item: the dash phase is also lost at a run boundary,
+  because each run is a path of its own that starts its pattern at 0, so a dashed split line
+  does not keep its pattern across tiles.
 - Tiling is explicit: `Scene::add_geometry` and `Scene::update` do not split what they are
   given. A producer calls the functions above for items larger than the bound.
 
@@ -529,11 +536,13 @@ part of these steps.
 - **Categories** are resolved on the GPU: an instance carries a category 0 to 15 in the bits 24
   to 27 of its flags (`category_flags`); the vertex shader looks the style up in a table of 16
   entries in the view uniform. One draw can therefore mix categories. An object's own style
-  replaces the style of its instances' categories.
+  replaces the style of its instances' categories, except for hiding: an instance is hidden when
+  its category or the object's style hides it.
 - **Rules** (by property, layer or type) are evaluated by the caller into object lists or a
   category; the renderer has no access to document properties.
 - **Isolation** shows the listed objects; the others are hidden or ghosted (`Others`).
-  **Ghosts** are drawn at the ghost opacity and are not picked.
+  **Ghosts** are drawn at the ghost opacity and are not picked. An object outside the isolation
+  that has its own style keeps that style (color and opacity) and is ghosted as well.
 - **Effects.** A color replaces the instance color of faces and of edges drawn in the instance
   color; the alpha is kept. An opacity below 1 blends faces: in the modes with colored opaque
   faces (shaded, shaded with edges, consistent colors) such faces are discarded from the opaque
@@ -612,7 +621,7 @@ indirect is not implemented; every frame and pick uses the CPU path below.
 - `arc_gpu::quality::AdaptiveQuality` decides the quality of a frame from the camera's motion. Its
   methods take the time `now` as a `Duration` from an origin the caller chooses; the type never
   reads the system clock. `camera_moved(now)` records a camera change, `is_navigating(now)` tells
-  whether the camera is moving (its last change is less than `SETTLE_TIME`, 250 ms, before `now`),
+  whether the camera is moving (its last change is less than the settle time before `now`),
   `settled_at()` gives the time full quality returns, and `apply(settings, now)` gives the
   settings a frame is drawn with.
 - **Lowered effects.** While the camera moves, `apply` sets `sample_count` to 1, turns
@@ -623,7 +632,11 @@ indirect is not implemented; every frame and pick uses the CPU path below.
   draws each change at navigation quality. Once the camera has been still for the settle time it
   draws one more frame at full quality, with the reason `DirtyReasons::quality`; the thread waits
   for that time with a timeout, not by polling. The clock of the thread is the time since it
-  started. The settle time is not a setting.
+  started. The settle time is `ViewportConfig::settle` (default `SETTLE_TIME`, 250 ms), and the
+  clock is `ViewportConfig::clock`: `None` reads the time since the thread started, and a clock
+  a caller injects is read by the thread instead. The viewport's tests inject a clock they advance
+  by hand and wake the thread after each advance, and set the settle time to a value no test
+  reaches where no settle frame is wanted; no test depends on the elapsed real time.
 - **Rest.** A frame drawn at rest is the same before and after a navigation episode (test in
   `tests/adaptive_quality.rs`).
 
@@ -641,7 +654,9 @@ indirect is not implemented; every frame and pick uses the CPU path below.
   in the cap color, which fills the cut. Back-face culling is off while a section has a cap
   color. Caps are drawn in the modes with colored opaque faces. The cap has the depth of the
   back face behind the cut, not of the cutting plane, so objects inside a cut solid show
-  through it, and a mirrored instance transform inverts front and back faces. A stencil cap on
+  through it. A mirrored instance (a negative determinant of its linear part) winds its triangles
+  the other way, so the shader takes a face as front when its winding is front for a positive
+  determinant and back otherwise; a mirrored solid is capped at its cut and shaded outside. A stencil cap on
   the cutting plane needs a stencil format outside the default features and was not built.
 - **Hatch.** A `Section` may carry a `CapHatch` (`hatch`): parallel lines in a second color drawn
   over the caps. The lines are in screen space, so their spacing and width are in pixels and their

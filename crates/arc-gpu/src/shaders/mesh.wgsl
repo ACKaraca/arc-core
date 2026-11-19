@@ -80,6 +80,9 @@ struct VertexOut {
     @location(5) @interpolate(flat) fade: f32,
     // The normal of the second face of a silhouette edge.
     @location(6) @interpolate(flat) other: vec3<f32>,
+    // The sign of the determinant of the instance's linear part: negative for a mirrored instance,
+    // whose triangles wind the other way.
+    @location(7) @interpolate(flat) det: f32,
 };
 
 fn transform(in: VertexIn) -> VertexOut {
@@ -98,10 +101,12 @@ fn transform(in: VertexIn) -> VertexOut {
     out.color = in.color;
     out.misc = in.misc;
     out.other = vec3<f32>(0.0);
+    out.det = dot(cross(c0, c1), c2);
     // Display overrides: the object's style, or the style of the instance's category.
     let category = (in.misc.y >> 24u) & 15u;
+    let category_params = view.styles[category * 2u + 1u];
     var style_color = view.styles[category * 2u];
-    var style_params = view.styles[category * 2u + 1u];
+    var style_params = category_params;
     if (view.over.z > 0.5) {
         style_color = view.object_color;
         style_params = view.object_params;
@@ -110,8 +115,10 @@ fn transform(in: VertexIn) -> VertexOut {
         out.color = vec4<f32>(style_color.rgb, in.color.a);
     }
     out.fade = style_params.x;
-    // A hidden instance (or a ghost in the identifier pass) collapses outside the depth range.
-    if (style_params.y > 0.5 || (style_params.z > 0.5 && view.over.y > 0.5)) {
+    // An instance is hidden when its category or the object's style hides it; a ghost is hidden
+    // in the identifier pass. The collapse lies outside the depth range.
+    let hidden = category_params.y > 0.5 || style_params.y > 0.5;
+    if (hidden || (style_params.z > 0.5 && view.over.y > 0.5)) {
         out.clip = vec4<f32>(0.0, 0.0, -1.0, 1.0);
     }
     return out;
@@ -257,15 +264,17 @@ fn face_color(in: VertexOut, front: bool, faded: bool) -> vec4<f32> {
     return vec4<f32>(result.rgb, result.a * in.fade);
 }
 
+// A mirrored instance (negative determinant) winds its triangles the other way, so a face is
+// front when its winding is front for a positive determinant and back otherwise.
 @fragment
-fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    return face_color(in, front, false);
+fn fs_main(in: VertexOut, @builtin(front_facing) facing: bool) -> @location(0) vec4<f32> {
+    return face_color(in, facing == (in.det > 0.0), false);
 }
 
 // The blended pass of faces with an override opacity below 1.
 @fragment
-fn fs_fade(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    return face_color(in, front, true);
+fn fs_fade(in: VertexOut, @builtin(front_facing) facing: bool) -> @location(0) vec4<f32> {
+    return face_color(in, facing == (in.det > 0.0), true);
 }
 
 @fragment

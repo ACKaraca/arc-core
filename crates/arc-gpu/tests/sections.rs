@@ -14,6 +14,7 @@ mod support;
 
 use arc_base::Color;
 use arc_base::math::{Point3, Vector3};
+use arc_geom::view::{Projection, ViewFrame};
 use arc_gpu::display::FLAG_SOLID;
 use arc_gpu::{
     Anchor, CapHatch, FrameExtras, MarkerShape, MeshInstance, MeshItem, Overlay, OverlayPrimitive,
@@ -341,4 +342,78 @@ fn a_hatch_draws_lines_over_the_cap_and_nothing_outside_it() {
         .filter(|(x, y)| is(&plain, *x, *y, [0, 0, 255]))
         .count();
     assert_eq!(plain_lines, 0);
+}
+
+#[test]
+fn a_mirrored_solid_is_capped_only_at_the_cut() {
+    let (_, mut scene, mut renderer) = setup();
+    let geometry = scene.add_geometry(&cube(), &Point3::origin()).unwrap();
+    let id = ids(1)[0];
+    // Mirrored in x: the linear part has a negative determinant.
+    let mirrored = MeshInstance {
+        flags: FLAG_SOLID,
+        transform: [
+            [-1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ],
+        ..MeshInstance::new(RED)
+    };
+    scene
+        .update(vec![(
+            id,
+            vec![RenderItem::Mesh(MeshItem {
+                geometry,
+                origin: Point3::origin(),
+                instances: vec![mirrored],
+            })],
+        )])
+        .unwrap();
+    // Removes everything above z = 0; seen from above, the cut shows the back of the bottom face.
+    let cut = Section {
+        planes: vec![plane([0.0; 3], [0.0, 0.0, 1.0])],
+        cap_color: Some(GREEN),
+        ..Section::default()
+    };
+    let from_above = render(
+        &mut renderer,
+        &mut scene,
+        Point3::origin(),
+        Some(&cut),
+        None,
+    );
+    assert!(
+        is(&from_above, 48, 48, [0, 255, 0]),
+        "the cut is capped: {:?}",
+        from_above.pixel(48, 48)
+    );
+    // Seen from −y, the outer face of the lower half faces the eye: it is in the surface color.
+    let from_front = ViewFrame::new(
+        Point3::new(0.0, -100.0, 0.0),
+        Point3::origin(),
+        Vector3::z(),
+        Projection::Orthographic { height: 3.0 },
+        1.0,
+        1000.0,
+    )
+    .unwrap();
+    let image = renderer
+        .render_with(
+            &mut scene,
+            &from_front,
+            SIZE,
+            SIZE,
+            &RenderSettings::default(),
+            &FrameExtras {
+                section: Some(&cut),
+                ..FrameExtras::default()
+            },
+        )
+        .unwrap();
+    // Image y points down: z = −0.25 is 8 pixels below the center.
+    assert!(
+        is(&image, 48, 56, [255, 0, 0]),
+        "the outer face of a mirrored solid is not capped: {:?}",
+        image.pixel(48, 56)
+    );
 }

@@ -286,14 +286,18 @@ impl Resolved {
         self.by_object.insert(object, at);
     }
 
-    /// The style of an object: its own, or the ghost style of an isolation that ghosts it.
+    /// The style of an object: its own, with ghosting added when an isolation ghosts it.
     fn style_of(&self, object: &ObjectId) -> Option<OverrideStyle> {
-        if let Some(at) = self.by_object.get(object) {
-            return self.styles.get(*at).copied();
-        }
+        let own = self
+            .by_object
+            .get(object)
+            .and_then(|at| self.styles.get(*at).copied());
         match &self.isolated {
-            Some((set, Others::Ghost)) if !set.contains(object) => Some(OverrideStyle::ghost()),
-            _ => None,
+            Some((set, Others::Ghost)) if !set.contains(object) => Some(OverrideStyle {
+                ghost: true,
+                ..own.unwrap_or(OverrideStyle::NONE)
+            }),
+            _ => own,
         }
     }
 
