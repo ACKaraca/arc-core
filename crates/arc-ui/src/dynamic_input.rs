@@ -1,0 +1,207 @@
+//! Dynamic input near the cursor (CORE-UI-009).
+//!
+//! During point input the panel floats beside the pointer and shows the prompt, a distance
+//! field in meters and an angle field in degrees. The fields are measured from the last point.
+//!
+//! Typing in a field locks it: a locked field emits what was typed. An unlocked field follows
+//! the values the caller derives from the pointer ([`Relative`]), and emits those exact values
+//! (not their displayed text). Tab moves between the fields, Enter emits the two values as
+//! point input, and the panel stays inside the viewport rectangle: it flips to the other side of
+//! the pointer near an edge and is clamped into the viewport when neither side fits.
+//!
+//! The widget emits values. It never computes geometry and never runs a command.
+
+use egui::{Area, Context, Frame, Id, Key, Modifiers, Order, Pos2, Rect, Role, Vec2, WidgetInfo};
+
+use crate::text::{Localize, messages, resolve};
+
+/// The gap between the pointer and the panel, in logical points.
+pub const POINTER_GAP: f32 = 16.0;
+
+/// The size assumed for the panel before it has been drawn once.
+const ESTIMATED_SIZE: Vec2 = Vec2::new(220.0, 96.0);
+
+/// A point relative to the last point: a distance in meters and an angle in radians.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Relative {
+    /// The distance from the last point, in meters.
+    pub distance: f64,
+    /// The angle from the x axis, in radians.
+    pub angle: f64,
+}
+
+/// One field: its text and whether typing locked it.
+#[derive(Debug, Clone, Default)]
+struct Field {
+    text: String,
+    locked: bool,
+}
+
+/// The dynamic input's state: its two fields, the focused one and the panel's last size.
+#[derive(Debug, Clone)]
+pub struct DynamicInput {
+    fields: [Field; 2],
+    focus: usize,
+    /// The distance field takes focus once, when the input starts.
+    focus_pending: bool,
+    size: Vec2,
+}
+
+impl Default for DynamicInput {
+    fn default() -> Self {
+        Self {
+            fields: [Field::default(), Field::default()],
+            focus: 0,
+            focus_pending: true,
+            size: ESTIMATED_SIZE,
+        }
+    }
+}
+
+/// The place of a panel of `size` next to `pointer`: right and below the pointer, flipped to the
+/// left or upward when it would leave `viewport`, then clamped into `viewport`.
+#[must_use]
+pub fn place(pointer: Pos2, size: Vec2, viewport: Rect) -> Pos2 {
+    let mut x = pointer.x + POINTER_GAP;
+    if x + size.x > viewport.right() {
+        x = pointer.x - POINTER_GAP - size.x;
+    }
+    let mut y = pointer.y + POINTER_GAP;
+    if y + size.y > viewport.bottom() {
+        y = pointer.y - POINTER_GAP - size.y;
+    }
+    Pos2::new(
+        clamp_into(x, viewport.left(), viewport.right(), size.x),
+        clamp_into(y, viewport.top(), viewport.bottom(), size.y),
+    )
+}
+
+/// `value` moved into `[low, high - length]`, or to `low` when the span is shorter than `length`.
+fn clamp_into(value: f32, low: f32, high: f32, length: f32) -> f32 {
+    let top = (high - length).max(low);
+    value.clamp(low, top)
+}
+
+/// Parses a number typed in a field: a decimal point or comma, finite values only.
+#[must_use]
+pub fn parse_number(text: &str) -> Option<f64> {
+    let text = text.trim().replace(',', ".");
+    text.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// The text a derived value shows in an unlocked field.
+fn shown(distance: f64, angle_degrees: f64) -> [String; 2] {
+    [format!("{distance:.3}"), format!("{angle_degrees:.2}")]
+}
+
+impl DynamicInput {
+    /// Draws the panel for `prompt` (a message identifier) beside `pointer`, inside `viewport`,
+    /// with `derived` as the pointer's distance and angle. Returns the point input when Enter is
+    /// pressed in a field: each locked field's typed value and each unlocked field's derived
+    /// value. Returns `None` when Enter gives no complete value.
+    pub fn show(
+        &mut self,
+        ctx: &Context,
+        localize: &dyn Localize,
+        prompt: &str,
+        viewport: Rect,
+        pointer: Pos2,
+        derived: Option<Relative>,
+    ) -> Option<Relative> {
+        let ids = [field_id(0), field_id(1)];
+        let anything_focused = ctx.memory(|m| m.focused().is_some());
+        let ours = ctx.memory(|m| ids.iter().any(|id| m.has_focus(*id)));
+        let focused_id = ids.get(self.focus).copied().unwrap_or(ids[0]);
+        // Tab moves between the fields through egui's own focus order, which needs the fields'
+        // focus to be set by egui; requesting focus on every frame would break that order.
+        if self.focus_pending && !anything_focused {
+            ctx.memory_mut(|m| m.request_focus(focused_id));
+        }
+        // Enter is read before the fields draw, so a value typed in the same frame is not lost.
+        let enter = ours && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+
+        // The values are those of the fields before this frame draws, the state Enter refers to.
+        let emitted = if enter { self.values(derived) } else { None };
+        let mut focus_index = self.focus;
+        let position = place(pointer, self.size, viewport);
+        let response = Area::new(Id::unique("arc-dynamic-input"))
+            .order(Order::Foreground)
+            .fixed_pos(position)
+            .show(ctx, |ui| {
+                Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(resolve(localize, prompt, &[]));
+                    let texts = derived.map(|d| shown(d.distance, d.angle.to_degrees()));
+                    let labels = [messages::DYNAMIC_DISTANCE, messages::DYNAMIC_ANGLE];
+                    for (index, field) in self.fields.iter_mut().enumerate() {
+                        let Some(label_message) = labels.get(index) else {
+                            continue;
+                        };
+                        if !field.locked
+                            && let Some(text) = texts.as_ref().and_then(|t| t.get(index))
+                        {
+                            field.text.clone_from(text);
+                        }
+                        let id = ids.get(index).copied().unwrap_or(focused_id);
+                        ui.horizontal(|ui| {
+                            let label = ui.label(label_message.text(localize));
+                            let edit = ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut field.text)
+                                        .id(id)
+                                        .desired_width(90.0),
+                                )
+                                .labelled_by(label.id);
+                            if edit.has_focus() {
+                                focus_index = index;
+                            }
+                            if edit.changed() {
+                                field.locked = !field.text.trim().is_empty();
+                            }
+                        });
+                    }
+                });
+            })
+            .response;
+        self.focus = focus_index;
+        if ours || ctx.memory(|m| ids.iter().any(|id| m.has_focus(*id))) {
+            self.focus_pending = false;
+        }
+        self.size = response.rect.size();
+        let name = messages::DYNAMIC_INPUT.text(localize);
+        response.widget_info(|| WidgetInfo::labeled(Role::Group, true, name.as_str()));
+        emitted
+    }
+
+    /// The point input from the fields: a locked field gives its typed value, an unlocked one the
+    /// derived value. `None` when a needed value is missing or not a number.
+    fn values(&self, derived: Option<Relative>) -> Option<Relative> {
+        let [distance_field, angle_field] = &self.fields;
+        let distance = if distance_field.locked {
+            parse_number(&distance_field.text)?
+        } else {
+            derived?.distance
+        };
+        let angle = if angle_field.locked {
+            parse_number(&angle_field.text)?.to_radians()
+        } else {
+            derived?.angle
+        };
+        Some(Relative { distance, angle })
+    }
+
+    /// The index of the focused field: 0 for distance, 1 for angle.
+    #[must_use]
+    pub fn focused_field(&self) -> usize {
+        self.focus
+    }
+
+    /// Whether field `index` (0 distance, 1 angle) is locked by typing.
+    #[must_use]
+    pub fn is_locked(&self, index: usize) -> bool {
+        self.fields.get(index).is_some_and(|f| f.locked)
+    }
+}
+
+fn field_id(index: usize) -> Id {
+    Id::unique(("arc-dynamic-input-field", index))
+}

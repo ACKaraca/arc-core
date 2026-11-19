@@ -24,6 +24,10 @@
 //! - the virtualized tree and outliner (CORE-UI-012, [`tree`]);
 //! - the diagnostics panel (CORE-UI-020, [`diagnostics`]);
 //! - the virtualized table and its clipboard (CORE-UI-013, CORE-UI-014, [`table`]);
+//! - the tool option bar of the active prompt (CORE-UI-008, [`option_bar`]);
+//! - the dynamic input panel for point input near the pointer (CORE-UI-009, [`dynamic_input`]);
+//! - the snapping feedback: marker, name and tracking lines (CORE-UI-030, [`snap`]);
+//! - the layout direction of right-to-left languages (CORE-UI-025, [`text::Direction`]);
 //! - the style pickers for color, layer, linetype, lineweight and material (CORE-UI-015,
 //!   [`style`]);
 //! - with the feature `viewport`, the viewport widget, its interaction state machine and the
@@ -36,6 +40,7 @@ pub mod command;
 pub mod command_line;
 pub mod diagnostics;
 pub mod dock;
+pub mod dynamic_input;
 pub mod error;
 #[cfg(feature = "viewport")]
 pub mod gesture;
@@ -43,9 +48,11 @@ pub mod icons;
 pub mod keys;
 pub mod menu;
 pub mod notify;
+pub mod option_bar;
 pub mod palette;
 pub mod property;
 pub mod quantity;
+pub mod snap;
 pub mod style;
 pub mod table;
 pub mod text;
@@ -66,6 +73,7 @@ pub use command_line::{
 };
 pub use diagnostics::{DiagnosticsFilter, DiagnosticsPanel, filter_in};
 pub use dock::{Axis, Dock, DockArea, DockLayout, Floating, Side, Target};
+pub use dynamic_input::{DynamicInput, Relative};
 pub use error::codes;
 #[cfg(feature = "viewport")]
 pub use gesture::{
@@ -75,14 +83,16 @@ pub use icons::{IconAtlas, Icons};
 pub use keys::{Binding, ChordResolver, KeyCombo, KeyOutcome, KeySequence, Keymap};
 pub use menu::{Entry, Menu, MenuItem, ToolEntry, Toolbar, ToolbarItem};
 pub use notify::{Notification, Notifications, Progress, ProgressView, Severity};
+pub use option_bar::{OptionBar, OptionControl, ParameterControl, PromptControls};
 pub use palette::{MatchKind, Palette, Ranked, Recent, rank, rank_in};
 pub use property::{GridContext, PropertyGrid, PropertyModel, PropertyObject, PropertyRow, Shown};
 pub use quantity::{QuantityField, QuantityInput};
+pub use snap::{MarkerShape, Snap, SnapKind};
 pub use style::{Preview, StyleEntry, StyleKind, StylePicker};
 pub use table::{
     CellRef, ColumnInfo, Selection, Sort, SortDirection, TableCommands, TableSource, TableView,
 };
-pub use text::{Fallback, Localize, Message, fold_case, matches_filter, resolve};
+pub use text::{Direction, Fallback, Localize, Message, fold_case, matches_filter, resolve};
 pub use theme::{Appearance, Colors, Density, Metrics, Theme, ThemeId, UiScale};
 pub use tree::{TreeCommands, TreeItem, TreeSource, TreeView};
 #[cfg(feature = "viewport")]

@@ -69,6 +69,107 @@ pub fn matches_filter(name: &str, filter: &str, language: &str) -> bool {
     fold_case(name, language).contains(&fold_case(filter.trim(), language))
 }
 
+/// The direction of a layout: the order of panels, columns and controls, and the side text
+/// starts from (CORE-UI-025).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Direction {
+    /// Logical start on the left (the default).
+    #[default]
+    LeftToRight,
+    /// Logical start on the right.
+    RightToLeft,
+}
+
+/// Primary language subtags of scripts written right to left.
+const RIGHT_TO_LEFT_LANGUAGES: [&str; 11] = [
+    "ar", "ckb", "dv", "fa", "he", "iw", "ps", "sd", "ug", "ur", "yi",
+];
+
+/// Script subtags written right to left, for tags such as `ku-Arab`.
+const RIGHT_TO_LEFT_SCRIPTS: [&str; 4] = ["Arab", "Hebr", "Thaa", "Syrc"];
+
+impl Direction {
+    /// The direction of a BCP 47 `language` tag: right to left for the Arabic, Hebrew, Persian,
+    /// Urdu and similar languages, or for a right-to-left script subtag, unless the tag names the
+    /// Latin script. An empty tag is left to right.
+    #[must_use]
+    pub fn of_language(language: &str) -> Self {
+        let mut subtags = language.split(['-', '_']);
+        let primary = subtags.next().unwrap_or_default();
+        let rest: Vec<&str> = subtags.collect();
+        if rest.iter().any(|s| s.eq_ignore_ascii_case("Latn")) {
+            return Self::LeftToRight;
+        }
+        let by_language = RIGHT_TO_LEFT_LANGUAGES
+            .iter()
+            .any(|l| primary.eq_ignore_ascii_case(l));
+        let by_script = rest.iter().any(|s| {
+            RIGHT_TO_LEFT_SCRIPTS
+                .iter()
+                .any(|r| s.eq_ignore_ascii_case(r))
+        });
+        if by_language || by_script {
+            Self::RightToLeft
+        } else {
+            Self::LeftToRight
+        }
+    }
+
+    /// The direction a widget uses: the explicit `override_direction` when one is given,
+    /// otherwise the direction of `language`.
+    #[must_use]
+    pub fn resolve(language: &str, override_direction: Option<Self>) -> Self {
+        override_direction.unwrap_or_else(|| Self::of_language(language))
+    }
+
+    /// Whether the logical start is on the right.
+    #[must_use]
+    pub fn is_right_to_left(self) -> bool {
+        self == Self::RightToLeft
+    }
+
+    /// The alignment of text that starts at the logical start: left in left-to-right layouts,
+    /// right in right-to-left ones.
+    #[must_use]
+    pub fn start_align(self) -> egui::Align2 {
+        match self {
+            Self::LeftToRight => egui::Align2::LEFT_CENTER,
+            Self::RightToLeft => egui::Align2::RIGHT_CENTER,
+        }
+    }
+
+    /// The egui layout whose main direction runs from the logical start, with the given
+    /// cross alignment.
+    #[must_use]
+    pub fn layout(self, cross_align: egui::Align) -> egui::Layout {
+        match self {
+            Self::LeftToRight => egui::Layout::left_to_right(cross_align),
+            Self::RightToLeft => egui::Layout::right_to_left(cross_align),
+        }
+    }
+
+    /// Lays out `add_contents` in one row that runs from the logical start and takes the width
+    /// the parent has left, like `Ui::horizontal`; with `wrap` the row continues on the next
+    /// line, like `Ui::horizontal_wrapped`.
+    pub fn row<R>(
+        self,
+        ui: &mut egui::Ui,
+        wrap: bool,
+        add_contents: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> egui::InnerResponse<R> {
+        let size = egui::vec2(
+            ui.available_size_before_wrap().x,
+            ui.spacing().interact_size.y,
+        );
+        let rect = egui::Rect::from_min_size(ui.cursor().min, size);
+        let layout = self.layout(egui::Align::Center).with_main_wrap(wrap);
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(rect).layout(layout),
+            add_contents,
+        )
+    }
+}
+
 /// A message this crate shows, identified for the catalog check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Message {
@@ -272,6 +373,105 @@ pub mod messages {
     pub const STYLE_TRUE_COLOR: Message = Message {
         message_id: "ui-style-true-color",
     };
+    /// The accessible name of an in-place cell editor.
+    pub const TABLE_EDIT: Message = Message {
+        message_id: "ui-table-edit",
+    };
+    /// The accessible name of a table's horizontal scroll bar.
+    pub const TABLE_SCROLL_HORIZONTAL: Message = Message {
+        message_id: "ui-table-scroll-horizontal",
+    };
+    /// The accessible name of a table's vertical scroll bar.
+    pub const TABLE_SCROLL_VERTICAL: Message = Message {
+        message_id: "ui-table-scroll-vertical",
+    };
+    /// The accessible name of the tool option bar.
+    pub const OPTION_BAR: Message = Message {
+        message_id: "ui-option-bar",
+    };
+    /// The accessible name of the dynamic input panel.
+    pub const DYNAMIC_INPUT: Message = Message {
+        message_id: "ui-dynamic-input",
+    };
+    /// The label of the distance field of the dynamic input.
+    pub const DYNAMIC_DISTANCE: Message = Message {
+        message_id: "ui-dynamic-distance",
+    };
+    /// The label of the angle field of the dynamic input.
+    pub const DYNAMIC_ANGLE: Message = Message {
+        message_id: "ui-dynamic-angle",
+    };
+    /// The name of an endpoint snap.
+    pub const SNAP_ENDPOINT: Message = Message {
+        message_id: "ui-snap-endpoint",
+    };
+    /// The name of a midpoint snap.
+    pub const SNAP_MIDPOINT: Message = Message {
+        message_id: "ui-snap-midpoint",
+    };
+    /// The name of a center snap.
+    pub const SNAP_CENTER: Message = Message {
+        message_id: "ui-snap-center",
+    };
+    /// The name of an intersection snap.
+    pub const SNAP_INTERSECTION: Message = Message {
+        message_id: "ui-snap-intersection",
+    };
+    /// The name of a perpendicular snap.
+    pub const SNAP_PERPENDICULAR: Message = Message {
+        message_id: "ui-snap-perpendicular",
+    };
+    /// The name of a tangent snap.
+    pub const SNAP_TANGENT: Message = Message {
+        message_id: "ui-snap-tangent",
+    };
+    /// The name of a nearest snap.
+    pub const SNAP_NEAREST: Message = Message {
+        message_id: "ui-snap-nearest",
+    };
+    /// The name of a node snap.
+    pub const SNAP_NODE: Message = Message {
+        message_id: "ui-snap-node",
+    };
+    /// The name of a quadrant snap.
+    pub const SNAP_QUADRANT: Message = Message {
+        message_id: "ui-snap-quadrant",
+    };
+}
+
+#[cfg(test)]
+mod direction_tests {
+    use super::Direction;
+    use egui::Align2;
+
+    #[test]
+    fn the_language_gives_the_direction_of_its_script() {
+        assert_eq!(Direction::of_language("ar"), Direction::RightToLeft);
+        assert_eq!(Direction::of_language("he-IL"), Direction::RightToLeft);
+        assert_eq!(Direction::of_language("fa_IR"), Direction::RightToLeft);
+        assert_eq!(Direction::of_language("ku-Arab"), Direction::RightToLeft);
+        assert_eq!(Direction::of_language("az-Arab"), Direction::RightToLeft);
+        assert_eq!(Direction::of_language("ar-Latn"), Direction::LeftToRight);
+        assert_eq!(Direction::of_language("tr-TR"), Direction::LeftToRight);
+        assert_eq!(Direction::of_language("en-US"), Direction::LeftToRight);
+        assert_eq!(Direction::of_language(""), Direction::LeftToRight);
+    }
+
+    #[test]
+    fn an_explicit_direction_overrides_the_language() {
+        assert_eq!(
+            Direction::resolve("ar", Some(Direction::LeftToRight)),
+            Direction::LeftToRight
+        );
+        assert_eq!(Direction::resolve("en", None), Direction::LeftToRight);
+        assert_eq!(Direction::resolve("he", None), Direction::RightToLeft);
+    }
+
+    #[test]
+    fn text_starts_at_the_logical_start() {
+        assert_eq!(Direction::LeftToRight.start_align(), Align2::LEFT_CENTER);
+        assert_eq!(Direction::RightToLeft.start_align(), Align2::RIGHT_CENTER);
+    }
 }
 
 #[cfg(test)]
@@ -408,6 +608,22 @@ pub(crate) mod tests {
             messages::STYLE_MATERIAL,
             messages::STYLE_FILTER,
             messages::STYLE_TRUE_COLOR,
+            messages::TABLE_EDIT,
+            messages::TABLE_SCROLL_HORIZONTAL,
+            messages::TABLE_SCROLL_VERTICAL,
+            messages::OPTION_BAR,
+            messages::DYNAMIC_INPUT,
+            messages::DYNAMIC_DISTANCE,
+            messages::DYNAMIC_ANGLE,
+            messages::SNAP_ENDPOINT,
+            messages::SNAP_MIDPOINT,
+            messages::SNAP_CENTER,
+            messages::SNAP_INTERSECTION,
+            messages::SNAP_PERPENDICULAR,
+            messages::SNAP_TANGENT,
+            messages::SNAP_NEAREST,
+            messages::SNAP_NODE,
+            messages::SNAP_QUADRANT,
         ] {
             assert!(
                 catalog.contains(&format!("\n{} = ", m.message_id)),

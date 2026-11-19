@@ -22,7 +22,7 @@ use arc_base::error::Value;
 use arc_base::{Error, Result};
 
 use crate::error::codes;
-use crate::text::{Localize, Message, matches_filter, messages, resolve};
+use crate::text::{Direction, Localize, Message, matches_filter, messages, resolve};
 
 /// The most entries a picker offers; a longer list is checked with [`StylePicker::check`].
 pub const MAX_ENTRIES: usize = 4_096;
@@ -192,8 +192,9 @@ impl StylePicker {
             None => (Preview::None, String::new()),
         };
         let kind = self.kind.message().text(localize);
+        let direction = Direction::of_language(&self.language);
         let mut chosen = None;
-        ui.horizontal(|ui| {
+        direction.row(ui, false, |ui| {
             draw_preview(ui, &preview);
             let response = ui.add(Button::new(name.as_str()));
             let label = format!("{kind}: {name}");
@@ -249,8 +250,9 @@ impl StylePicker {
         self.highlight = self.highlight.min(last);
 
         let filter_label = messages::STYLE_FILTER.text(localize);
+        let direction = Direction::of_language(&self.language);
         let mut changed = false;
-        ui.horizontal(|ui| {
+        direction.row(ui, false, |ui| {
             let label = ui.label(filter_label);
             let edit = ui
                 .add(TextEdit::singleline(&mut self.filter))
@@ -277,7 +279,7 @@ impl StylePicker {
                 for index in range {
                     let Some(row) = rows.get(index) else { continue };
                     let (name, preview) = row_text(row, entries, localize);
-                    ui.horizontal(|ui| {
+                    direction.row(ui, false, |ui| {
                         draw_preview(ui, &preview);
                         let response = ui.selectable_label(index == self.highlight, name);
                         if response.clicked() {

@@ -4,32 +4,42 @@
 //! descriptions and cell texts for a window of rows and a span of columns; the view asks only
 //! for the rows inside the viewport plus [`MARGIN`] rows on each side, so a frame costs the same
 //! for a million rows as for a hundred. Leading columns named by [`TableView::frozen`] stay at
-//! the left edge while the others scroll horizontally.
+//! the logical start while the others scroll horizontally.
 //!
-//! The view never sorts: a click on a sortable header, or Enter on the cursor column, returns the
-//! intent of [`TableCommands::sort`] with `column` and `direction`, and the application reports
-//! it to the source. Cell selection, column widths and scroll positions are view state. A paste
-//! of tab-separated text returns one intent of [`TableCommands::paste`] with the accepted cells
-//! (`cells`, each with `row`, `column` and `value`); the source decides per cell through
-//! [`TableSource::accepts`], and refused cells are kept in [`TableView::refused`].
+//! The vertical position is an integer index of the first visible row and a small offset in
+//! points below it, so a row far down a table of tens of millions of rows is placed exactly.
+//! Rows are laid out relative to the first visible row, never at an absolute position.
+//!
+//! The view never sorts or edits data itself. A click on a sortable header, or Enter on the
+//! cursor column, returns the intent of [`TableCommands::sort`]. An in-place edit (Enter, F2 or a
+//! double click on a cell the source reports through [`TableSource::editable`]) shows a text field
+//! over the cell; Enter returns one intent of the edit command named by [`TableView::edit`] with
+//! `row`, `column` and `value`, and Escape cancels. A paste of tab-separated text returns one
+//! intent of [`TableCommands::paste`] with the accepted cells (`cells`, each with `row`, `column`
+//! and `value`); the source decides per cell through [`TableSource::accepts`], and refused cells
+//! are kept in [`TableView::refused`].
 //!
 //! Copy and paste use the events egui delivers to a focused widget: `Event::Copy` puts the
 //! selected cells on the clipboard through [`egui::Context::copy_text`], and `Event::Paste` carries
 //! the text that [`parse_grid`] reads. [`format_grid`] and [`parse_grid`] are pure and inverse to
 //! each other for grids without empty rows.
+//!
+//! In a right-to-left layout ([`crate::text::Direction`]) the first column is at the right edge,
+//! the frozen columns stay at the right, text aligns to the right, and the Left and Right arrows
+//! move in the visual direction.
 
 use std::ops::Range;
 
 use arc_base::error::Value;
 use arc_base::{Error, Result};
 use egui::{
-    Align2, CursorIcon, Event, Id, Key, Modifiers, Rect, Role, ScrollArea, Sense, StrokeKind,
-    TextStyle, Ui, UiBuilder, WidgetInfo, pos2, vec2,
+    CursorIcon, Event, FontId, Id, Key, Modifiers, MouseWheelUnit, Pos2, Rect, Role, Sense,
+    StrokeKind, TextEdit, TextStyle, Ui, Vec2, WidgetInfo, pos2, vec2,
 };
 
 use crate::command::Intent;
 use crate::error::codes;
-use crate::text::{Localize, Message, messages, resolve};
+use crate::text::{Direction, Localize, Message, messages, resolve};
 
 /// The most columns shown; the columns beyond are not drawn.
 pub const MAX_COLUMNS: usize = 256;
@@ -47,6 +57,8 @@ pub const DEFAULT_WIDTH: f32 = 120.0;
 pub const RESIZE_STEP: f32 = 8.0;
 /// The width of the grip that resizes a column, in logical points.
 pub const GRIP_WIDTH: f32 = 6.0;
+/// The thickness of the scroll bars at the right and bottom edges, in logical points.
+pub const BAR_WIDTH: f32 = 10.0;
 /// Characters drawn per cell.
 pub const MAX_CELL_CHARS: usize = 256;
 /// The most cells a copy puts on the clipboard.
@@ -114,6 +126,10 @@ pub trait TableSource {
     fn sorted(&self) -> Option<Sort>;
     /// Whether cell (`row`, `column`) accepts `text` from a paste.
     fn accepts(&self, row: usize, column: usize, text: &str) -> bool;
+    /// Whether cell (`row`, `column`) can be edited in place. The default is read-only.
+    fn editable(&self, _row: usize, _column: usize) -> bool {
+        false
+    }
 }
 
 /// The intent names of a table: `sort` takes `column` and `direction`; `paste` takes `cells`, an
@@ -152,20 +168,40 @@ impl Selection {
     }
 }
 
-/// The table's view state: frozen columns, column widths, scroll positions, the selection and
-/// the report of the last paste.
+/// A cell being edited in place: its text so far, and whether the editor still needs focus.
+#[derive(Debug, Clone)]
+struct Editing {
+    cell: CellRef,
+    text: String,
+    focus: bool,
+}
+
+/// The table's view state: frozen columns, column widths, scroll positions, the selection, the
+/// cell being edited and the report of the last paste.
 #[derive(Debug, Clone, Default)]
 pub struct TableView {
-    /// Leading columns that stay at the left edge while the others scroll.
+    /// Leading columns that stay at the logical start while the others scroll.
     pub frozen: usize,
+    /// The language tag of the table's text; its direction sets the layout direction.
+    pub language: String,
+    /// Overrides the direction the language gives.
+    pub direction: Option<Direction>,
+    /// The command an in-place edit emits, with `row`, `column` and `value`. `None` disables
+    /// in-place editing.
+    pub edit: Option<String>,
     widths: Vec<f32>,
+    /// Horizontal scroll in logical points from the first scrolling column's left edge.
     scroll_x: f32,
-    scroll_y: f32,
+    /// The first row at the top of the body.
+    scroll_row: usize,
+    /// How far the first row is scrolled up, in points: `[0, row height)` after clamping.
+    scroll_offset: f32,
     anchor: Option<CellRef>,
     cursor: Option<CellRef>,
     refused: Vec<CellRef>,
     refused_count: usize,
     notice: Option<Message>,
+    editing: Option<Editing>,
 }
 
 /// Commands of the table's keyboard navigation.
@@ -180,7 +216,11 @@ enum Nav {
 
 /// The geometry of one frame, in screen coordinates except for `offsets`.
 struct Geometry {
+    /// The whole table, including the header and the scroll bars.
     rect: Rect,
+    /// The header row over the columns.
+    header: Rect,
+    /// The rows and columns, without the scroll bars.
     body: Rect,
     rows: usize,
     columns: usize,
@@ -189,7 +229,9 @@ struct Geometry {
     offsets: Vec<f32>,
     row_height: f32,
     frozen_width: f32,
+    /// The width of the body that the scrolling columns share.
     scroll_width: f32,
+    rtl: bool,
 }
 
 impl Geometry {
@@ -203,6 +245,11 @@ impl Geometry {
 
     fn scrollable_width(&self) -> f32 {
         self.total_width() - self.frozen_width
+    }
+
+    /// The whole rows that fit in the body, at least one.
+    fn rows_fit(&self) -> usize {
+        f64_to_usize((self.body_height() / self.row_height).floor()).max(1)
     }
 }
 
@@ -241,6 +288,19 @@ impl TableView {
         self.refused_count
     }
 
+    /// Whether a cell is being edited in place.
+    #[must_use]
+    pub fn is_editing(&self) -> bool {
+        self.editing.is_some()
+    }
+
+    /// The layout direction: [`TableView::direction`] when set, else the direction of
+    /// [`TableView::language`].
+    #[must_use]
+    pub fn layout_direction(&self) -> Direction {
+        Direction::resolve(&self.language, self.direction)
+    }
+
     fn sync_widths(&mut self, source: &dyn TableSource, columns: usize) {
         for index in self.widths.len()..columns {
             let width = source.column(index).map_or(DEFAULT_WIDTH, |c| c.width);
@@ -258,7 +318,8 @@ impl TableView {
         }
     }
 
-    /// Draws the table in the space left in `ui` and returns the intent of a sort or a paste.
+    /// Draws the table in the space left in `ui` and returns the intent of a sort, an edit or a
+    /// paste.
     pub fn show(
         &mut self,
         ui: &mut Ui,
@@ -270,69 +331,146 @@ impl TableView {
         let columns = source.column_count().min(MAX_COLUMNS);
         self.sync_widths(source, columns);
         self.clamp_selection(rows, columns);
+        self.clamp_editing(rows, columns);
         self.show_notices(ui, localize);
 
         let row_height = ui.spacing().interact_size.y.max(1.0);
         let size = vec2(
             ui.available_width().max(1.0),
-            ui.available_height().max(row_height * 2.0),
+            ui.available_height().max(row_height * 4.0),
         );
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
         let id = ui.scope_id().with("arc-table");
         let container = ui.interact(rect, id, Sense::click());
         let label = messages::TABLE.text(localize);
         container.widget_info(|| WidgetInfo::labeled(Role::Table, true, label.as_str()));
-        if container.clicked() {
+        if container.clicked() && self.editing.is_none() {
             ui.ctx().memory_mut(|m| m.request_focus(id));
         }
 
-        let mut g = self.geometry(rect, rows, columns, row_height);
+        let rtl = self.layout_direction().is_right_to_left();
+        let g = self.geometry(rect, rows, columns, row_height, rtl);
+        self.settle(&g);
+        self.wheel(ui, &g);
+        self.settle(&g);
         let mut intent = None;
         if container.has_focus() {
             intent = self.keyboard(ui, source, commands, &g);
+            self.settle(&g);
         }
-        let max_x = (g.scrollable_width() - g.scroll_width).max(0.0);
-        self.scroll_x = clamp_offset(self.scroll_x, max_x);
-        g.body = Rect::from_min_max(pos2(rect.left(), rect.top() + row_height), rect.max);
-
         intent = intent.or(self.header(ui, source, commands, &g, id, localize));
-        let font = TextStyle::Body.resolve(ui.style());
-        let offset = self.scroll_y;
-        let area = ui.scope_builder(UiBuilder::new().max_rect(g.body), |ui| {
-            ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .vertical_scroll_offset(offset)
-                .show_viewport(ui, |ui, viewport| {
-                    self.body(ui, source, &g, viewport, id, &font);
-                })
-        });
-        self.scroll_y = area.inner.state.clamped_offset().y;
+        self.body(ui, source, &g, id);
+        intent = intent.or(self.editor(ui, &g, id, localize));
+        self.scrollbars(ui, &g, id, localize);
         intent
     }
 
-    fn geometry(&self, rect: Rect, rows: usize, columns: usize, row_height: f32) -> Geometry {
-        let offsets = column_offsets(
-            &self
-                .widths
-                .iter()
-                .take(columns)
-                .copied()
-                .collect::<Vec<f32>>(),
-        );
+    fn geometry(
+        &self,
+        rect: Rect,
+        rows: usize,
+        columns: usize,
+        row_height: f32,
+        rtl: bool,
+    ) -> Geometry {
+        let widths: Vec<f32> = self.widths.iter().take(columns).copied().collect();
+        let offsets = column_offsets(&widths);
         let frozen = self.frozen.min(columns);
         let frozen_width = offsets.get(frozen).copied().unwrap_or(0.0);
         let total = offsets.last().copied().unwrap_or(0.0);
-        let scroll_width = (rect.width() - frozen_width).max(0.0);
+        let right = (rect.right() - BAR_WIDTH).max(rect.left());
+        let top = rect.top() + row_height;
+        let bottom = (rect.bottom() - BAR_WIDTH).max(top);
+        let body = Rect::from_min_max(pos2(rect.left(), top), pos2(right, bottom));
+        let header = Rect::from_min_max(pos2(rect.left(), rect.top()), pos2(right, top));
         Geometry {
             rect,
-            body: Rect::from_min_max(pos2(rect.left(), rect.top() + row_height), rect.max),
+            header,
+            body,
             rows,
             columns,
             frozen,
             offsets,
             row_height,
             frozen_width,
-            scroll_width: scroll_width.min(total),
+            scroll_width: (body.width() - frozen_width).max(0.0).min(total),
+            rtl,
+        }
+    }
+
+    /// The largest horizontal scroll: the scrollable columns beyond the body's width.
+    fn max_scroll_x(&self, g: &Geometry) -> f32 {
+        (g.scrollable_width() - g.scroll_width).max(0.0)
+    }
+
+    /// Keeps both scroll positions and the cursor's row inside the table.
+    fn settle(&mut self, g: &Geometry) {
+        self.scroll_x = clamp_offset(self.scroll_x, self.max_scroll_x(g));
+        let (max_row, max_offset) = bottom(g.rows, g.body_height(), g.row_height);
+        if !self.scroll_offset.is_finite() {
+            self.scroll_offset = 0.0;
+        }
+        self.scroll_offset = self.scroll_offset.clamp(0.0, g.row_height);
+        if self.scroll_row > max_row {
+            self.scroll_row = max_row;
+            self.scroll_offset = max_offset;
+        }
+        if self.scroll_row == max_row {
+            self.scroll_offset = self.scroll_offset.min(max_offset);
+        }
+    }
+
+    /// Scrolls the rows by `dy` points (positive moves the content down, showing rows above).
+    fn scroll_rows(&mut self, g: &Geometry, dy: f32) {
+        if !dy.is_finite() {
+            return;
+        }
+        let h = g.row_height;
+        let total = self.scroll_offset - dy;
+        let steps = (total / h).floor();
+        let whole = steps_of(steps);
+        let row = self.scroll_row.cast_signed() + whole;
+        if row < 0 {
+            self.scroll_row = 0;
+            self.scroll_offset = 0.0;
+        } else {
+            self.scroll_row = usize::try_from(row).unwrap_or(0);
+            self.scroll_offset = (total - steps * h).clamp(0.0, h);
+        }
+        self.settle(g);
+    }
+
+    /// Applies wheel input over the table: vertical wheel moves rows, horizontal wheel (or Shift
+    /// with the vertical wheel) moves the scrolling columns. The events are consumed.
+    fn wheel(&mut self, ui: &Ui, g: &Geometry) {
+        if !ui.rect_contains_pointer(g.rect) {
+            return;
+        }
+        for event in take_events(ui, |e| matches!(e, Event::MouseWheel { .. })) {
+            let Event::MouseWheel {
+                unit,
+                delta,
+                modifiers,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            let scale = match unit {
+                MouseWheelUnit::Point => 1.0,
+                MouseWheelUnit::Line => g.row_height,
+                MouseWheelUnit::Page => g.body_height(),
+            };
+            let delta: Vec2 = delta * scale;
+            let (dx, dy) = if modifiers.shift {
+                (if delta.x != 0.0 { delta.x } else { delta.y }, 0.0)
+            } else {
+                (delta.x, delta.y)
+            };
+            if dx.is_finite() {
+                self.scroll_x = clamp_offset(self.scroll_x - dx, self.max_scroll_x(g));
+            }
+            self.scroll_rows(g, dy);
         }
     }
 
@@ -341,6 +479,14 @@ impl TableView {
         self.cursor = self.cursor.and_then(|c| clamp_cell(c, rows, columns));
         if self.cursor.is_none() {
             self.anchor = None;
+        }
+    }
+
+    fn clamp_editing(&mut self, rows: usize, columns: usize) {
+        if let Some(editing) = &self.editing
+            && (editing.cell.row >= rows || editing.cell.column >= columns)
+        {
+            self.editing = None;
         }
     }
 
@@ -372,27 +518,58 @@ impl TableView {
         first..end.max(first)
     }
 
-    /// The left edge of column `index` on screen, after the horizontal scroll.
+    /// The left edge of column `index` on screen. Logical order runs left to right, or right to
+    /// left in a right-to-left layout; the frozen columns never scroll.
     fn column_left(&self, g: &Geometry, index: usize) -> f32 {
-        let at = g.offsets.get(index).copied().unwrap_or(0.0);
         let shift = if index < g.frozen { 0.0 } else { self.scroll_x };
-        g.rect.left() + at - shift
+        if g.rtl {
+            let end = g.offsets.get(index + 1).copied().unwrap_or(0.0);
+            g.body.right() - end + shift
+        } else {
+            let at = g.offsets.get(index).copied().unwrap_or(0.0);
+            g.body.left() + at - shift
+        }
     }
 
-    /// The region a column's cells may be drawn in: frozen columns at the left, the others to
-    /// the right of them.
-    fn region(&self, g: &Geometry, index: usize) -> Rect {
-        if index < g.frozen {
-            Rect::from_min_max(
-                g.rect.min,
-                pos2(g.rect.left() + g.frozen_width, g.rect.bottom()),
-            )
-        } else {
-            Rect::from_min_max(
-                pos2(g.rect.left() + g.frozen_width, g.rect.top()),
-                g.rect.max,
-            )
+    /// The horizontal extent a column's cells may be drawn in: the frozen columns at the logical
+    /// start, the others beside them.
+    fn region(&self, g: &Geometry, index: usize) -> (f32, f32) {
+        let frozen = index < g.frozen;
+        let fw = g.frozen_width;
+        match (frozen, g.rtl) {
+            (true, false) => (g.body.left(), g.body.left() + fw),
+            (false, false) => (g.body.left() + fw, g.body.right()),
+            (true, true) => (g.body.right() - fw, g.body.right()),
+            (false, true) => (g.body.left(), g.body.right() - fw),
         }
+    }
+
+    /// `cell` cut to the column's region and to the vertical `band`. The result may be empty.
+    fn clip_to_region(&self, g: &Geometry, index: usize, cell: Rect, band: Rect) -> Rect {
+        let (lo, hi) = self.region(g, index);
+        Rect::from_min_max(
+            pos2(cell.left().max(lo), cell.top().max(band.top())),
+            pos2(cell.right().min(hi), cell.bottom().min(band.bottom())),
+        )
+    }
+
+    /// The top of row `row` on screen, computed from the first visible row so that the
+    /// difference is a small integer.
+    fn row_top(&self, g: &Geometry, row: usize) -> f32 {
+        let steps = row.cast_signed() - self.scroll_row.cast_signed();
+        g.body.top() + rows_to_points(steps, g.row_height) - self.scroll_offset
+    }
+
+    /// The rows whose cells are fetched and drawn: the rows in view plus [`MARGIN`] on each side.
+    fn window(&self, g: &Geometry) -> Range<usize> {
+        let in_view = f64_to_usize(((self.scroll_offset + g.body_height()) / g.row_height).ceil());
+        let first = self.scroll_row.saturating_sub(MARGIN);
+        let end = self
+            .scroll_row
+            .saturating_add(in_view)
+            .saturating_add(MARGIN)
+            .min(g.rows);
+        first..end.max(first)
     }
 
     fn header(
@@ -405,15 +582,13 @@ impl TableView {
         localize: &dyn Localize,
     ) -> Option<Intent> {
         let mut intent = None;
-        let header_top = g.rect.top();
         let sort = source.sorted();
         let columns = (0..g.frozen).chain(self.scroll_columns(g));
         for index in columns {
             let left = self.column_left(g, index);
             let width = self.widths.get(index).copied().unwrap_or(DEFAULT_WIDTH);
-            let cell = Rect::from_min_size(pos2(left, header_top), vec2(width, g.row_height));
-            let region = self.region(g, index);
-            let visible = cell.intersect(region);
+            let cell = Rect::from_min_size(pos2(left, g.header.top()), vec2(width, g.row_height));
+            let visible = self.clip_to_region(g, index, cell, g.header);
             if !visible.is_positive() {
                 continue;
             }
@@ -453,24 +628,28 @@ impl TableView {
             let painter = ui.painter().with_clip_rect(visible);
             painter.rect_filled(cell, 0.0, ui.visuals().widgets.inactive.weak_bg_fill);
             painter.text(
-                pos2(cell.left() + 6.0, cell.center().y),
-                Align2::LEFT_CENTER,
+                text_point(cell, g.rtl, cell.center().y),
+                self.text_align(g),
                 shown,
                 TextStyle::Body.resolve(ui.style()),
                 ui.visuals().strong_text_color(),
             );
 
+            // The grip sits at the logical end of the column: the right edge, or the left edge
+            // in a right-to-left layout.
+            let end_x = if g.rtl { cell.left() } else { cell.right() };
             let grip = Rect::from_min_max(
-                pos2(cell.right() - GRIP_WIDTH / 2.0, header_top),
-                pos2(cell.right() + GRIP_WIDTH / 2.0, g.rect.top() + g.row_height),
-            )
-            .intersect(region);
+                pos2(end_x - GRIP_WIDTH / 2.0, g.header.top()),
+                pos2(end_x + GRIP_WIDTH / 2.0, g.header.bottom()),
+            );
+            let grip = self.clip_to_region(g, index, grip, g.header);
             if grip.is_positive() {
                 let handle = ui.interact(grip, id.with(("grip", index)), Sense::DRAG);
                 if handle.dragged() {
+                    let sign = if g.rtl { -1.0 } else { 1.0 };
                     let width = self.widths.get(index).copied().unwrap_or(DEFAULT_WIDTH);
                     if let Some(slot) = self.widths.get_mut(index) {
-                        *slot = clamp_width(width + handle.drag_delta().x);
+                        *slot = clamp_width(width + sign * handle.drag_delta().x);
                     }
                 }
                 if handle.hovered() || handle.dragged() {
@@ -481,23 +660,17 @@ impl TableView {
         intent
     }
 
-    fn body(
-        &mut self,
-        ui: &mut Ui,
-        source: &dyn TableSource,
-        g: &Geometry,
-        viewport: Rect,
-        id: Id,
-        font: &egui::FontId,
-    ) {
-        ui.set_height(to_f32(g.rows) * g.row_height);
-        let top = ui.max_rect().top();
-        let clip = ui.clip_rect();
-        let window = padded(
-            visible_rows(viewport.min.y, viewport.height(), g.row_height, g.rows),
-            MARGIN,
-            g.rows,
-        );
+    /// The alignment of cell text: from the logical start.
+    fn text_align(&self, g: &Geometry) -> egui::Align2 {
+        if g.rtl {
+            Direction::RightToLeft.start_align()
+        } else {
+            Direction::LeftToRight.start_align()
+        }
+    }
+
+    fn body(&mut self, ui: &mut Ui, source: &dyn TableSource, g: &Geometry, id: Id) {
+        let window = self.window(g);
         let frozen_cells = if g.frozen > 0 && !window.is_empty() {
             source.cells(window.clone(), 0..g.frozen)
         } else {
@@ -509,13 +682,16 @@ impl TableView {
         } else {
             Vec::new()
         };
+        let font: FontId = TextStyle::Body.resolve(ui.style());
         let selection = self.selection();
         let cursor = self.cursor;
         let visuals = ui.visuals().clone();
         let mut clicked = None;
-        for (line, row) in window.clone().enumerate() {
-            let y = top + to_f32(row) * g.row_height;
-            if y + g.row_height < clip.top() || y > clip.bottom() {
+        let mut double = None;
+        for row in window.clone() {
+            let line = row - window.start;
+            let y = self.row_top(g, row);
+            if y + g.row_height < g.body.top() || y > g.body.bottom() {
                 continue;
             }
             for column in (0..g.frozen).chain(scroll.clone()) {
@@ -527,7 +703,7 @@ impl TableView {
                 let left = self.column_left(g, column);
                 let width = self.widths.get(column).copied().unwrap_or(DEFAULT_WIDTH);
                 let cell = Rect::from_min_size(pos2(left, y), vec2(width, g.row_height));
-                let visible = cell.intersect(self.region(g, column)).intersect(clip);
+                let visible = self.clip_to_region(g, column, cell, g.body);
                 if !visible.is_positive() {
                     continue;
                 }
@@ -537,14 +713,17 @@ impl TableView {
                 if response.clicked() {
                     clicked = Some(at);
                 }
+                if response.double_clicked() {
+                    double = Some(at);
+                }
                 let painter = ui.painter().with_clip_rect(visible);
                 if selection.as_ref().is_some_and(|s| s.contains(at)) {
                     painter.rect_filled(cell, 0.0, visuals.selection.bg_fill);
                 }
                 let shown: String = text.chars().take(MAX_CELL_CHARS).collect();
                 painter.text(
-                    pos2(cell.left() + 6.0, cell.center().y),
-                    Align2::LEFT_CENTER,
+                    text_point(cell, g.rtl, cell.center().y),
+                    self.text_align(g),
                     shown,
                     font.clone(),
                     visuals.text_color(),
@@ -563,6 +742,172 @@ impl TableView {
             let extend = ui.input(|i| i.modifiers.shift);
             self.click(cell, extend);
             ui.ctx().memory_mut(|m| m.request_focus(id));
+        }
+        if let Some(cell) = double {
+            self.start_edit(source, cell);
+        }
+    }
+
+    /// Starts an in-place edit of `cell` when the view has an edit command and the source
+    /// reports the cell editable. The text is read from the source.
+    fn start_edit(&mut self, source: &dyn TableSource, cell: CellRef) {
+        if self.edit.is_none() || !source.editable(cell.row, cell.column) {
+            return;
+        }
+        let text = source
+            .cells(
+                cell.row..cell.row.saturating_add(1),
+                cell.column..cell.column.saturating_add(1),
+            )
+            .first()
+            .and_then(|row| row.first())
+            .cloned()
+            .unwrap_or_default();
+        self.editing = Some(Editing {
+            cell,
+            text,
+            focus: true,
+        });
+    }
+
+    /// Draws the in-place editor over the cell being edited. Enter returns the edit intent and
+    /// closes the editor, Escape and losing focus close it without an intent.
+    fn editor(
+        &mut self,
+        ui: &mut Ui,
+        g: &Geometry,
+        id: Id,
+        localize: &dyn Localize,
+    ) -> Option<Intent> {
+        let mut editing = self.editing.take()?;
+        let editor_id = id.with("editor");
+        let mut commit = false;
+        if ui.memory(|m| m.has_focus(editor_id)) {
+            let (enter, escape) = ui.input_mut(|i| {
+                (
+                    i.consume_key(Modifiers::NONE, Key::Enter),
+                    i.consume_key(Modifiers::NONE, Key::Escape),
+                )
+            });
+            if escape {
+                ui.ctx().memory_mut(|m| m.request_focus(id));
+                return None;
+            }
+            commit = enter;
+        }
+        if commit {
+            ui.ctx().memory_mut(|m| m.request_focus(id));
+            let command = self.edit.as_ref()?;
+            return Some(
+                Intent::new(command.clone())
+                    .with("row", editing.cell.row)
+                    .with("column", editing.cell.column)
+                    .with("value", editing.text),
+            );
+        }
+        let cell = self.cell_rect(g, editing.cell);
+        let (lo, hi) = self.region(g, editing.cell.column);
+        let area = Rect::from_min_max(
+            pos2(cell.left().max(lo), cell.top().max(g.body.top())),
+            pos2(cell.right().min(hi), cell.bottom().min(g.body.bottom())),
+        );
+        if area.is_positive() {
+            let label = messages::TABLE_EDIT.text(localize);
+            let response = ui.put(
+                area,
+                TextEdit::singleline(&mut editing.text)
+                    .id(editor_id)
+                    .desired_width(f32::INFINITY),
+            );
+            response.widget_info(|| WidgetInfo::labeled(Role::TextInput, true, label.as_str()));
+            if editing.focus {
+                response.request_focus();
+                editing.focus = false;
+            } else if !response.has_focus() {
+                // Focus moved elsewhere: the edit is cancelled.
+                return None;
+            }
+        }
+        self.editing = Some(editing);
+        None
+    }
+
+    /// The rectangle of `cell` in screen coordinates, including the part scrolled out of view.
+    fn cell_rect(&self, g: &Geometry, cell: CellRef) -> Rect {
+        let left = self.column_left(g, cell.column);
+        let width = self
+            .widths
+            .get(cell.column)
+            .copied()
+            .unwrap_or(DEFAULT_WIDTH);
+        Rect::from_min_size(
+            pos2(left, self.row_top(g, cell.row)),
+            vec2(width, g.row_height),
+        )
+    }
+
+    /// Draws the vertical scroll bar at the right edge and the horizontal one at the bottom, and
+    /// moves the view when they are clicked or dragged.
+    fn scrollbars(&mut self, ui: &mut Ui, g: &Geometry, id: Id, localize: &dyn Localize) {
+        let track_color = ui.visuals().widgets.inactive.weak_bg_fill;
+        let thumb_color = ui.visuals().widgets.inactive.bg_fill;
+        let rect = g.rect;
+
+        // Vertical: the track is the height of the body.
+        let vtrack = Rect::from_min_max(
+            pos2(g.body.right(), g.body.top()),
+            pos2(rect.right(), g.body.bottom()),
+        );
+        let (max_row, _) = bottom(g.rows, g.body_height(), g.row_height);
+        let response = ui.interact(vtrack, id.with("vscroll"), Sense::click_and_drag());
+        let label = messages::TABLE_SCROLL_VERTICAL.text(localize);
+        response.widget_info(|| WidgetInfo::labeled(Role::ScrollBar, true, label.as_str()));
+        if (response.clicked() || response.dragged())
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let ratio = fraction_of(pos.y, vtrack.top(), vtrack.height());
+            self.scroll_row = ratio_to_index(ratio, max_row);
+            self.scroll_offset = 0.0;
+            self.settle(g);
+        }
+        ui.painter().rect_filled(vtrack, 0.0, track_color);
+        if g.rows > g.rows_fit() {
+            let shown = to_f32(g.rows_fit()) / to_f32(g.rows);
+            let length = thumb_length(vtrack.height(), shown);
+            let position = ratio_of(self.scroll_row, max_row);
+            let top = vtrack.top() + position * (vtrack.height() - length);
+            let thumb = Rect::from_min_size(pos2(vtrack.left(), top), vec2(vtrack.width(), length));
+            ui.painter().rect_filled(thumb, 0.0, thumb_color);
+        }
+
+        // Horizontal: the track is the width of the body, and the thumb starts at the logical
+        // start (the right edge in a right-to-left layout).
+        let htrack = Rect::from_min_max(
+            pos2(g.body.left(), g.body.bottom()),
+            pos2(g.body.right(), rect.bottom()),
+        );
+        let max_x = self.max_scroll_x(g);
+        let response = ui.interact(htrack, id.with("hscroll"), Sense::click_and_drag());
+        let label = messages::TABLE_SCROLL_HORIZONTAL.text(localize);
+        response.widget_info(|| WidgetInfo::labeled(Role::ScrollBar, true, label.as_str()));
+        if (response.clicked() || response.dragged())
+            && let Some(pos) = response.interact_pointer_pos()
+            && max_x > 0.0
+        {
+            let ratio = fraction_of(pos.x, htrack.left(), htrack.width());
+            let ratio = if g.rtl { 1.0 - ratio } else { ratio };
+            self.scroll_x = clamp_offset(ratio * max_x, max_x);
+        }
+        ui.painter().rect_filled(htrack, 0.0, track_color);
+        if max_x > 0.0 {
+            let shown = g.scroll_width / g.scrollable_width().max(1.0);
+            let length = thumb_length(htrack.width(), shown);
+            let position = self.scroll_x / max_x;
+            let position = if g.rtl { 1.0 - position } else { position };
+            let left = htrack.left() + position * (htrack.width() - length);
+            let thumb =
+                Rect::from_min_size(pos2(left, htrack.top()), vec2(length, htrack.height()));
+            ui.painter().rect_filled(thumb, 0.0, thumb_color);
         }
     }
 
@@ -595,7 +940,8 @@ impl TableView {
             *slot = clamp_width(*slot + delta);
         }
 
-        let page = to_steps((g.body_height() / g.row_height).floor());
+        let page = to_steps(g.rows_fit() as f32);
+        let mirror = if g.rtl { -1 } else { 1 };
         for (nav, extend) in ui.input_mut(take_navigation) {
             let Some(cursor) = self.cursor else { break };
             let target = match nav {
@@ -605,7 +951,7 @@ impl TableView {
                 },
                 Nav::Columns(d) => CellRef {
                     row: cursor.row,
-                    column: step(cursor.column, d, g.columns),
+                    column: step(cursor.column, d * mirror, g.columns),
                 },
                 Nav::Pages(d) => CellRef {
                     row: step(cursor.row, d.saturating_mul(page), g.rows),
@@ -624,10 +970,16 @@ impl TableView {
             self.follow(g, target);
         }
 
+        let f2 = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F2));
+        if f2 && let Some(cursor) = self.cursor {
+            self.start_edit(source, cursor);
+        }
+
         let enter = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
         if enter && let Some(cursor) = self.cursor {
-            let sortable = source.column(cursor.column).is_some_and(|c| c.sortable);
-            if sortable {
+            if self.edit.is_some() && source.editable(cursor.row, cursor.column) {
+                self.start_edit(source, cursor);
+            } else if source.column(cursor.column).is_some_and(|c| c.sortable) {
                 intent = Some(sort_intent(commands, cursor.column, source.sorted()));
             }
         }
@@ -648,12 +1000,15 @@ impl TableView {
 
     /// Scrolls the body (and the scrolling columns) so that `cell` is inside the viewport.
     fn follow(&mut self, g: &Geometry, cell: CellRef) {
-        self.scroll_y = scroll_to_show(
-            self.scroll_y,
-            g.body_height(),
-            to_f32(cell.row) * g.row_height,
-            g.row_height,
-        );
+        let shown = g.rows_fit();
+        if cell.row <= self.scroll_row {
+            self.scroll_row = cell.row;
+            self.scroll_offset = 0.0;
+        } else if cell.row >= self.scroll_row.saturating_add(shown) {
+            self.scroll_row = cell.row + 1 - shown;
+            self.scroll_offset = 0.0;
+        }
+        self.settle(g);
         if cell.column >= g.frozen {
             let start = g.offsets.get(cell.column).copied().unwrap_or(0.0) - g.frozen_width;
             let length = self
@@ -747,6 +1102,16 @@ fn sort_intent(commands: &TableCommands, column: usize, current: Option<Sort>) -
         .with("direction", direction.as_str())
 }
 
+/// The point where a cell's text starts: inside the left edge, or the right edge in a
+/// right-to-left layout, at height `y`.
+fn text_point(cell: Rect, rtl: bool, y: f32) -> Pos2 {
+    if rtl {
+        pos2(cell.right() - 6.0, y)
+    } else {
+        pos2(cell.left() + 6.0, y)
+    }
+}
+
 /// Removes the navigation key presses from the input, in order, and returns them with whether
 /// Shift is held. Presses with Alt, Ctrl or Command are left for others.
 fn take_navigation(i: &mut egui::InputState) -> Vec<(Nav, bool)> {
@@ -830,10 +1195,71 @@ fn f64_to_usize(value: f32) -> usize {
 
 #[allow(
     clippy::cast_precision_loss,
-    reason = "display coordinates; above 2^24 points a position is rounded to about two points"
+    reason = "display coordinates; the value is a count of rows or columns, exact below 2^24"
 )]
 fn to_f32(n: usize) -> f32 {
     n as f32
+}
+
+/// Whole steps of a finite float, saturating.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "saturating conversion of a step count, clamped first"
+)]
+fn steps_of(value: f32) -> isize {
+    if value.is_finite() {
+        value.clamp(-1.0e12, 1.0e12) as isize
+    } else {
+        0
+    }
+}
+
+/// The vertical distance of `steps` rows, exact for a small count of rows.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "a count of rows next to the first visible one; exact below 2^24"
+)]
+fn rows_to_points(steps: isize, row_height: f32) -> f32 {
+    steps as f32 * row_height
+}
+
+/// The fraction `[0, 1]` of `position` along a track that starts at `start` and is `length` long.
+fn fraction_of(position: f32, start: f32, length: f32) -> f32 {
+    if length > 0.0 && position.is_finite() {
+        ((position - start) / length).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// The row index at `ratio` of the way through `max` rows.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "rounded and clamped to the range of rows"
+)]
+fn ratio_to_index(ratio: f32, max: usize) -> usize {
+    (f64::from(ratio) * max as f64)
+        .round()
+        .clamp(0.0, max as f64) as usize
+}
+
+/// The position `index` of `max` as a fraction.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a fraction in [0, 1] of a scroll bar's track; the narrowing is intended"
+)]
+fn ratio_of(index: usize, max: usize) -> f32 {
+    if max == 0 {
+        0.0
+    } else {
+        (index as f64 / max as f64).min(1.0) as f32
+    }
+}
+
+/// The length of a scroll thumb for a visible `share` of the track of `track` points.
+fn thumb_length(track: f32, share: f32) -> f32 {
+    (track * share.clamp(0.0, 1.0)).clamp((BAR_WIDTH * 2.0).min(track), track.max(0.0))
 }
 
 fn span(a: usize, b: usize) -> Range<usize> {
@@ -860,6 +1286,25 @@ fn clamp_offset(offset: f32, max: f32) -> f32 {
         offset.clamp(0.0, max.max(0.0))
     } else {
         0.0
+    }
+}
+
+/// The greatest scroll position of a table of `rows` rows in a body of `body` points, as a row
+/// index and an offset below it. Computed from whole rows, so it is exact for any row count.
+#[must_use]
+pub fn bottom(rows: usize, body: f32, row_height: f32) -> (usize, f32) {
+    let fit = f64_to_usize((body / row_height).floor());
+    if fit == 0 {
+        return (rows.saturating_sub(1), 0.0);
+    }
+    if rows <= fit {
+        return (0, 0.0);
+    }
+    let rest = body - to_f32(fit) * row_height;
+    if rest > 0.0 {
+        (rows - fit - 1, row_height - rest)
+    } else {
+        (rows - fit, 0.0)
     }
 }
 
@@ -918,10 +1363,6 @@ fn index_at(position: f32, size: f32) -> usize {
     } else {
         0
     }
-}
-
-fn padded(range: Range<usize>, margin: usize, len: usize) -> Range<usize> {
-    range.start.saturating_sub(margin)..range.end.saturating_add(margin).min(len)
 }
 
 /// The offset that shows the span from `start` for `length` points in a viewport of `viewport`
@@ -1077,6 +1518,17 @@ mod tests {
         assert_eq!(scroll_to_show(0.0, 100.0, 120.0, 20.0), 40.0);
         assert_eq!(scroll_to_show(200.0, 100.0, 120.0, 20.0), 120.0);
         assert_eq!(scroll_to_show(f32::NAN, 100.0, 0.0, 20.0), 0.0);
+    }
+
+    #[test]
+    fn the_bottom_of_a_very_long_table_is_exact() {
+        // 50,000,000 rows of 20 points in a 100 point body: four whole rows and a rest of 20
+        // points, so the bottom is row 49,999,995 scrolled by nothing.
+        assert_eq!(bottom(50_000_000, 100.0, 20.0), (49_999_995, 0.0));
+        // A body of 110 points leaves a rest of 10 points: the first row is scrolled up by 10.
+        assert_eq!(bottom(50_000_000, 110.0, 20.0), (49_999_994, 10.0));
+        assert_eq!(bottom(3, 100.0, 20.0), (0, 0.0));
+        assert_eq!(bottom(0, 100.0, 20.0), (0, 0.0));
     }
 
     #[test]

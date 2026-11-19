@@ -19,7 +19,7 @@ use egui::{Button, Key, Modifiers, Rect, Role, Sense, Ui, UiBuilder, WidgetInfo,
 use serde::{Deserialize, Serialize};
 
 use crate::error::codes;
-use crate::text::{Localize, messages};
+use crate::text::{Direction, Localize, messages};
 
 /// The most panels in one layout, over all trees.
 pub const MAX_PANELS: usize = 256;
@@ -722,11 +722,17 @@ struct TabDrag(String);
 pub struct DockArea {
     /// The width of the separators between split parts, in logical points.
     pub separator: f32,
+    /// The layout direction. Right to left puts the first part of a horizontal split at the
+    /// right and orders the tabs of a group from the right (CORE-UI-025).
+    pub direction: Direction,
 }
 
 impl Default for DockArea {
     fn default() -> Self {
-        Self { separator: 6.0 }
+        Self {
+            separator: 6.0,
+            direction: Direction::LeftToRight,
+        }
     }
 }
 
@@ -794,7 +800,8 @@ impl DockArea {
                 first,
                 second,
             } => {
-                let (a, sep, b) = divide(rect, *axis, *fraction, self.separator);
+                let reversed = self.direction.is_right_to_left() && *axis == Axis::Horizontal;
+                let (a, sep, b) = divide(rect, *axis, *fraction, self.separator, reversed);
                 self.draw_child(ui, first, a, path, false, localize, title, content, changes);
                 let id = ui.make_persistent_id(("arc-dock-separator", path.clone()));
                 let response = ui.interact(sep, id, Sense::drag());
@@ -813,6 +820,9 @@ impl DockArea {
                 if response.dragged() && length > 0.0 {
                     let delta = response.drag_delta();
                     let moved = match axis {
+                        // In a reversed split the first part is at the right: dragging right
+                        // shrinks it.
+                        Axis::Horizontal if reversed => -delta.x,
                         Axis::Horizontal => delta.x,
                         Axis::Vertical => delta.y,
                     };
@@ -820,6 +830,7 @@ impl DockArea {
                 }
                 if response.has_focus() {
                     let (back, forward) = match axis {
+                        Axis::Horizontal if reversed => (Key::ArrowRight, Key::ArrowLeft),
                         Axis::Horizontal => (Key::ArrowLeft, Key::ArrowRight),
                         Axis::Vertical => (Key::ArrowUp, Key::ArrowDown),
                     };
@@ -888,7 +899,7 @@ impl DockArea {
     ) {
         let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
         child.set_clip_rect(rect.intersect(ui.clip_rect()));
-        let bar = child.horizontal(|ui| {
+        let bar = self.direction.row(&mut child, false, |ui| {
             for (index, panel) in tabs.iter().enumerate() {
                 let name = title(panel);
                 let tab = ui.add(
@@ -966,10 +977,25 @@ enum Change {
     Fraction(Vec<bool>, f32),
 }
 
-/// The two parts and the separator of a split rectangle.
-fn divide(rect: Rect, axis: Axis, fraction: f32, separator: f32) -> (Rect, Rect, Rect) {
+/// The two parts and the separator of a split rectangle. The first part is the left one, or the
+/// right one when `reversed` (a horizontal split in a right-to-left layout).
+fn divide(
+    rect: Rect,
+    axis: Axis,
+    fraction: f32,
+    separator: f32,
+    reversed: bool,
+) -> (Rect, Rect, Rect) {
     let fraction = fraction.clamp(MIN_FRACTION, 1.0 - MIN_FRACTION);
     match axis {
+        Axis::Horizontal if reversed => {
+            let at = rect.left() + (rect.width() - separator).max(0.0) * (1.0 - fraction);
+            (
+                Rect::from_min_max(egui::pos2(at + separator, rect.top()), rect.max),
+                Rect::from_min_size(egui::pos2(at, rect.top()), vec2(separator, rect.height())),
+                Rect::from_min_max(rect.min, egui::pos2(at, rect.bottom())),
+            )
+        }
         Axis::Horizontal => {
             let at = rect.left() + (rect.width() - separator).max(0.0) * fraction;
             (

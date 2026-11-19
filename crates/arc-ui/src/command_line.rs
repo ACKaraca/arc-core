@@ -16,7 +16,7 @@ use arc_command::{CommandLine, Prompt};
 use egui::{Button, EventFilter, Key, Modifiers, TextEdit, Ui};
 
 use crate::command::Intent;
-use crate::text::{Localize, messages, resolve};
+use crate::text::{Direction, Localize, messages, resolve};
 
 /// History entries kept.
 pub const MAX_HISTORY: usize = 200;
@@ -201,6 +201,10 @@ pub struct CommandLineView {
     pub input: String,
     /// The submitted lines.
     pub history: History,
+    /// The language tag of the labels; its direction orders the options and aligns the text.
+    pub language: String,
+    /// Overrides the direction the language gives.
+    pub direction: Option<Direction>,
     highlighted: Option<usize>,
     recall: Option<(String, usize)>,
 }
@@ -279,9 +283,14 @@ impl CommandLineView {
             || messages::COMMAND_LINE.text(context.localize),
             |p| prompt_text(p, context.localize),
         );
-        let label = ui.label(label_text);
+        let direction = self.layout_direction();
+        let label = if direction.is_right_to_left() {
+            direction.row(ui, false, |ui| ui.label(label_text)).inner
+        } else {
+            ui.label(label_text)
+        };
         if let Some(prompt) = line.active().and_then(|s| s.prompt()) {
-            ui.horizontal_wrapped(|ui| {
+            direction.row(ui, true, |ui| {
                 for option in prompt.keyword_options() {
                     let mut text = resolve(context.localize, &option.label, &[]);
                     if let Some(c) = option.shortcut {
@@ -298,6 +307,7 @@ impl CommandLineView {
                 TextEdit::singleline(&mut self.input)
                     .id(id)
                     .desired_width(f32::INFINITY)
+                    .align(direction.start_align())
                     // Escape and the vertical arrows belong to the command line, not to
                     // focus movement.
                     .event_filter(EventFilter {
@@ -323,6 +333,13 @@ impl CommandLineView {
             }
         }
         action
+    }
+
+    /// The layout direction: [`CommandLineView::direction`] when set, else the direction of
+    /// [`CommandLineView::language`].
+    #[must_use]
+    pub fn layout_direction(&self) -> Direction {
+        Direction::resolve(&self.language, self.direction)
     }
 
     fn submit(&mut self, status: LineStatus) -> Option<LineAction> {

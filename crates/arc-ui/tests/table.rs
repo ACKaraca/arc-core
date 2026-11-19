@@ -435,3 +435,325 @@ fn a_paste_with_only_refused_cells_emits_no_intent() {
     assert!(intent.is_none());
     assert_eq!(view.refused_count(), 1);
 }
+
+/// A grid whose cells all accept in-place edits.
+struct Editable(Grid);
+
+impl TableSource for Editable {
+    fn row_count(&self) -> usize {
+        self.0.row_count()
+    }
+    fn column_count(&self) -> usize {
+        self.0.column_count()
+    }
+    fn column(&self, index: usize) -> Option<ColumnInfo> {
+        self.0.column(index)
+    }
+    fn cells(&self, rows: Range<usize>, columns: Range<usize>) -> Vec<Vec<String>> {
+        self.0.cells(rows, columns)
+    }
+    fn sorted(&self) -> Option<Sort> {
+        self.0.sorted()
+    }
+    fn accepts(&self, row: usize, column: usize, text: &str) -> bool {
+        self.0.accepts(row, column, text)
+    }
+    fn editable(&self, _row: usize, _column: usize) -> bool {
+        true
+    }
+}
+
+const BAR: f64 = 10.0;
+
+/// Like [`pass`] with an input time, so that double clicks can be recognized.
+fn frame_at(
+    ctx: &egui::Context,
+    time: f64,
+    view: &mut TableView,
+    source: &dyn TableSource,
+    events: Vec<egui::Event>,
+) -> (Pass, Option<Intent>) {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(800.0, 600.0),
+        )),
+        events,
+        time: Some(time),
+        ..Default::default()
+    };
+    let mut result = None;
+    let mut full = ctx.run_ui(input, |ui| {
+        result = view.show(ui, source, &commands(), &English);
+    });
+    full.textures_delta.clear();
+    let nodes = full
+        .platform_output
+        .accesskit_update
+        .map(|u| u.nodes.into_iter().map(|(_, n)| n).collect())
+        .unwrap_or_default();
+    let commands = full.platform_output.commands;
+    (Pass { nodes, commands }, result)
+}
+
+fn table_node(pass: &Pass) -> accesskit::Node {
+    pass.nodes
+        .iter()
+        .find(|n| n.role() == accesskit::Role::Table)
+        .cloned()
+        .expect("the table is drawn")
+}
+
+fn select(ctx: &egui::Context, view: &mut TableView, source: &dyn TableSource, text: &str) {
+    let (first, _) = frame(ctx, view, source, vec![]);
+    let target = cell(&first, text).expect("the cell is drawn");
+    let _ = frame(ctx, view, source, click(center(&target)));
+    let _ = frame(ctx, view, source, vec![]);
+}
+
+fn edit_view() -> TableView {
+    let mut view = TableView::default();
+    view.edit = Some("demo.table.edit".into());
+    view
+}
+
+#[test]
+fn enter_after_f2_commits_one_edit_intent_with_row_column_and_value() {
+    let ctx = new_context();
+    let source = Editable(Grid::new(10, 3));
+    let mut view = edit_view();
+    select(&ctx, &mut view, &source, "r2c1");
+    let _ = frame(&ctx, &mut view, &source, vec![key(egui::Key::F2, false)]);
+    assert!(view.is_editing());
+    let (_, intent) = frame(&ctx, &mut view, &source, vec![key(egui::Key::Enter, false)]);
+    let intent = intent.expect("Enter commits the edit");
+    assert_eq!(intent.command, "demo.table.edit");
+    assert_eq!(intent.params["row"], 2);
+    assert_eq!(intent.params["column"], 1);
+    assert_eq!(intent.params["value"], "r2c1");
+    assert!(!view.is_editing());
+}
+
+#[test]
+fn escape_cancels_an_edit_without_an_intent() {
+    let ctx = new_context();
+    let source = Editable(Grid::new(10, 3));
+    let mut view = edit_view();
+    select(&ctx, &mut view, &source, "r0c0");
+    let _ = frame(&ctx, &mut view, &source, vec![key(egui::Key::F2, false)]);
+    let (_, intent) = frame(
+        &ctx,
+        &mut view,
+        &source,
+        vec![key(egui::Key::Escape, false)],
+    );
+    assert!(intent.is_none());
+    assert!(!view.is_editing());
+}
+
+#[test]
+fn a_double_click_starts_an_edit_and_cells_the_source_refuses_do_not_edit() {
+    let ctx = new_context();
+    let source = Editable(Grid::new(10, 3));
+    let mut view = edit_view();
+    let (first, _) = frame_at(&ctx, 0.0, &mut view, &source, vec![]);
+    let target = center(&cell(&first, "r1c2").unwrap());
+    let _ = frame_at(&ctx, 1.0, &mut view, &source, click(target));
+    let _ = frame_at(&ctx, 1.1, &mut view, &source, click(target));
+    assert!(view.is_editing(), "the double click opens the editor");
+    let (_, intent) = frame_at(
+        &ctx,
+        1.2,
+        &mut view,
+        &source,
+        vec![key(egui::Key::Enter, false)],
+    );
+    assert_eq!(intent.expect("edit").params["value"], "r1c2");
+
+    // A source that marks nothing editable never opens the editor, even with F2.
+    let fixed = Grid::new(10, 3);
+    let mut view = edit_view();
+    select(&ctx, &mut view, &fixed, "r0c0");
+    let _ = frame(&ctx, &mut view, &fixed, vec![key(egui::Key::F2, false)]);
+    assert!(!view.is_editing());
+}
+
+#[test]
+fn enter_on_an_editable_cell_edits_instead_of_sorting() {
+    let ctx = new_context();
+    let source = Editable(Grid::new(10, 3));
+    let mut view = edit_view();
+    select(&ctx, &mut view, &source, "r0c0");
+    let (_, intent) = frame(&ctx, &mut view, &source, vec![key(egui::Key::Enter, false)]);
+    assert!(view.is_editing());
+    assert!(intent.is_none());
+}
+
+#[test]
+fn horizontal_wheel_and_shift_wheel_scroll_the_scrolling_columns() {
+    let ctx = new_context();
+    let source = Grid::new(3, 12);
+    let mut view = TableView::default();
+    select(&ctx, &mut view, &source, "r0c0");
+    let at = center(&cell(&frame(&ctx, &mut view, &source, vec![]).0, "r0c0").unwrap());
+    let wheel = |delta: egui::Vec2, modifiers: egui::Modifiers| egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
+        modifiers,
+    };
+    let (pass, _) = frame(
+        &ctx,
+        &mut view,
+        &source,
+        vec![
+            egui::Event::PointerMoved(at),
+            wheel(egui::vec2(-300.0, 0.0), egui::Modifiers::NONE),
+        ],
+    );
+    assert!(cell(&pass, "r0c9").is_some(), "the wheel scrolled right");
+    assert!(cell(&pass, "r0c2").is_none());
+
+    let mut view = TableView::default();
+    select(&ctx, &mut view, &source, "r0c0");
+    let (pass, _) = frame(
+        &ctx,
+        &mut view,
+        &source,
+        vec![
+            egui::Event::PointerMoved(at),
+            wheel(egui::vec2(0.0, -300.0), egui::Modifiers::SHIFT),
+        ],
+    );
+    assert!(
+        cell(&pass, "r0c9").is_some(),
+        "Shift with the wheel scrolls right"
+    );
+}
+
+#[test]
+fn the_horizontal_scroll_bar_moves_the_columns_when_clicked() {
+    let ctx = new_context();
+    let source = Grid::new(3, 12);
+    let mut view = TableView::default();
+    select(&ctx, &mut view, &source, "r0c0");
+    let (pass, _) = frame(&ctx, &mut view, &source, vec![]);
+    let bar = pass
+        .nodes
+        .iter()
+        .find(|n| {
+            n.role() == accesskit::Role::ScrollBar
+                && n.label() == Some("ui-table-scroll-horizontal")
+        })
+        .cloned()
+        .expect("the horizontal scroll bar is named");
+    let b = bar.bounds().unwrap();
+    let at = egui::pos2((b.x1 - 3.0) as f32, ((b.y0 + b.y1) / 2.0) as f32);
+    let _ = frame(&ctx, &mut view, &source, click(at));
+    let (pass, _) = frame(&ctx, &mut view, &source, vec![]);
+    assert!(cell(&pass, "r0c11").is_some(), "the last column is in view");
+}
+
+#[test]
+fn row_50_000_000_is_positioned_exactly_at_the_bottom_of_the_body() {
+    let ctx = new_context();
+    let source = Grid::new(50_000_000, 2);
+    let mut view = TableView::default();
+    select(&ctx, &mut view, &source, "r0c0");
+    let _ = frame(&ctx, &mut view, &source, vec![key(egui::Key::End, false)]);
+    let (pass, _) = frame(&ctx, &mut view, &source, vec![]);
+    assert_eq!(view.cursor().map(|c| c.row), Some(49_999_999));
+    let last = cell(&pass, "r49999999c0").expect("the last row is drawn");
+    let bounds = last.bounds().unwrap();
+    let body_bottom = table_node(&pass).bounds().unwrap().y1 - BAR;
+    assert!(
+        (bounds.y1 - body_bottom).abs() < 1e-3,
+        "last row ends at the body bottom: {} vs {body_bottom}",
+        bounds.y1
+    );
+    assert!(cell(&pass, "r0c0").is_none());
+}
+
+#[test]
+fn right_to_left_puts_the_first_and_frozen_columns_at_the_right_edge() {
+    let ctx = new_context();
+    let source = Grid::new(4, 3);
+    let mut view = TableView::default();
+    view.frozen = 1;
+    view.language = "ar".into();
+    let (pass, _) = frame(&ctx, &mut view, &source, vec![]);
+    let table = table_node(&pass).bounds().unwrap();
+    let frozen = cell(&pass, "r0c0").unwrap().bounds().unwrap();
+    let next = cell(&pass, "r0c1").unwrap().bounds().unwrap();
+    assert!(frozen.x0 > next.x0, "the frozen column is at the right");
+    assert!((frozen.x1 - (table.x1 - BAR)).abs() < 1e-3);
+
+    let mut view = TableView::default();
+    view.frozen = 1;
+    view.language = "en".into();
+    let (pass, _) = frame(&ctx, &mut view, &source, vec![]);
+    let frozen = cell(&pass, "r0c0").unwrap().bounds().unwrap();
+    let next = cell(&pass, "r0c1").unwrap().bounds().unwrap();
+    assert!(
+        frozen.x0 < next.x0,
+        "left to right keeps the frozen column left"
+    );
+}
+
+/// The painted text of cell `text`, with the x coordinate where its galley starts and ends.
+fn painted_text_span(full: &egui::FullOutput, text: &str) -> (f32, f32) {
+    full.shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(shape) if shape.galley.text() == text => {
+                Some((shape.pos.x, shape.pos.x + shape.galley.size().x))
+            }
+            _ => None,
+        })
+        .expect("the cell text is painted")
+}
+
+#[test]
+fn cell_text_starts_at_the_logical_start_of_its_cell() {
+    for (language, rtl) in [("ar", true), ("en", false)] {
+        let ctx = new_context();
+        let source = Grid::new(2, 2);
+        let mut view = TableView::default();
+        view.language = language.into();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut full = ctx.run_ui(input, |ui| {
+            let _ = view.show(ui, &source, &commands(), &English);
+        });
+        full.textures_delta.clear();
+        let nodes: Vec<accesskit::Node> = full
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .map(|u| u.nodes.iter().map(|(_, n)| n.clone()).collect())
+            .unwrap_or_default();
+        let pass = Pass {
+            nodes,
+            commands: Vec::new(),
+        };
+        let bounds = cell(&pass, "r0c1").unwrap().bounds().unwrap();
+        let (start, end) = painted_text_span(&full, "r0c1");
+        if rtl {
+            assert!(
+                (f64::from(end) - (bounds.x1 - 6.0)).abs() < 0.5,
+                "right to left: the text ends at the cell's right edge"
+            );
+        } else {
+            assert!(
+                (f64::from(start) - (bounds.x0 + 6.0)).abs() < 0.5,
+                "left to right: the text starts at the cell's left edge"
+            );
+        }
+    }
+}

@@ -246,6 +246,9 @@ Objects are listed as hyphenated identifier texts.
   normalized (empty groups removed, a split with one part replaced by that part) and checked, so
   a failed operation leaves the layout unchanged. Floating trees are data only; native windows
   for them come with the application shell.
+- `DockArea::direction` set to right to left puts the first part of a horizontal split at the
+  right, orders the tabs of a group from the right and reverses the separator's drag and arrow
+  keys; the split fraction stays the first part's share. Vertical splits do not change.
 - `DockArea` draws the main tree: a tab bar per group with a close button per tab, the active
   panel's content, and separators that pointer drag or, when focused, the arrow keys along the
   split (5 % per press) move. A tab dragged onto a group's outer quarter on a side splits the
@@ -273,6 +276,8 @@ Objects are listed as hyphenated identifier texts.
   prompt, else (idle) emits the clear-selection intent when the selection is not empty. Enter
   applies the highlighted completion; otherwise it submits the text (an empty text accepts the
   prompt's default), and on an idle empty line it repeats the last command.
+- `CommandLineView::language` and `direction` set the layout direction (CORE-UI-025): the keyword
+  buttons run from the logical start, the label and the field text start there too.
 - Undo (Ctrl+Z, Cmd+Z on macOS) steps back one answer inside the active command, cancels it at its
   first prompt, and otherwise emits the document undo intent. Redo (Ctrl+Y or Ctrl+Shift+Z)
   emits the redo intent; with an active command it cancels the command first, because its
@@ -345,12 +350,15 @@ Objects are listed as hyphenated identifier texts.
   columns and the columns in the horizontal viewport plus one on each side. A frame therefore
   asks for the same amount of data for one million rows as for a hundred. At most 256 columns
   are drawn (`MAX_COLUMNS`); cell text is cut to 256 characters.
-- Rows are placed at a fixed height (the spacing's interact height) and the body is a vertical
-  scroll area; the header and the horizontal position are drawn by the view. Positions above
-  2^24 points (about 800,000 rows at 20 points) are rounded to about two points.
-- Leading columns named by the public field `frozen` stay at the left edge; the others scroll
-  horizontally only when the cursor moves into a column that is out of view. Wheel and scroll-bar
-  input for horizontal scrolling are not implemented yet.
+- Rows are placed at a fixed height (the spacing's interact height). The vertical position is an
+  integer index of the first visible row and an offset below it, below 1 row height; rows are
+  placed relative to that row, so a row of a table with 50,000,000 rows is placed exactly. The
+  view draws its own vertical and horizontal scroll bars along the right and bottom edges, 10
+  points thick, and the wheel scrolls rows; horizontal wheel input, and the Shift key with the
+  vertical wheel, scroll the scrolling columns.
+- Leading columns named by the public field `frozen` stay at the logical start: the left edge, or
+  the right edge in a right-to-left layout. The others scroll horizontally with the cursor, the
+  wheel and the horizontal scroll bar.
 - Column widths are view state, clamped to 24 to 2,000 points. Dragging the grip at a header's
   right edge resizes the column; Alt with Left or Right resizes the cursor column by 8 points.
 - Selection is a rectangle of cells held by the view (`selection()`, `cursor()`). Arrows move the
@@ -393,9 +401,33 @@ Objects are listed as hyphenated identifier texts.
     external program should not fail on a stray quote.
   - Home and End move by row, not to the first or last cell: row selection is the primary
     operation.
-- Open items in this unit: in-place cell editing as commands (the paste is the only cell write
-  path so far), column reordering, wheel and scroll-bar input for horizontal scrolling, and sorting
-  by several columns.
+  - Vertical position as an integer row and an offset, rather than one absolute offset: an
+    absolute `f32` offset loses the position of rows far down a long table (above 2^24 points the
+    step is several points). This also replaces the scroll area of egui, whose offset has the same
+    limit, so the view draws its own bars.
+  - Scroll bars are always reserved (10 points at the right and bottom edges) and drawn when the
+    content is larger than the body: showing them only when needed would move the content as
+    they appear.
+  - Wheel input is read from the wheel events, not from the smoothed scroll delta: egui 0.37
+    spreads smoothed deltas over frames, and the view must place rows in the frame it receives the
+    input.
+  - In-place editing needs an edit command and a `TableSource::editable` method with a default of
+    false. The command name lives in `TableView`, not in `TableCommands`: a field added to
+    `TableCommands` would break every literal of that struct.
+  - Enter on an editable cell edits; a sortable column sorts on Enter only when the cell is not
+    editable. Focus leaving the editor cancels the edit rather than committing it: a value must be
+    committed by an explicit Enter.
+- In-place editing: Enter, F2 or a double click on a cell that `TableSource::editable` reports
+  opens a text field over the cell with the cell's text. Enter emits one intent of the edit
+  command, `TableView::edit`, with `row`, `column` and `value`; Escape cancels, and so does moving
+  focus elsewhere. Enter on an editable cell edits instead of sorting. The view changes no data:
+  the command validates the value and the source's `accepts` is not checked before the intent.
+  With `TableView::edit` unset, cells do not open an editor.
+- Right-to-left layout: the first column is at the right edge, the frozen columns stay at the
+  right, cell and header text starts at the right, the resize grip is at the left edge of a
+  column, and Left and Right move the cursor in the visual direction. The direction is
+  `TableView::layout_direction`, from `TableView::language` unless `TableView::direction` is set.
+- Open items in this unit: column reordering and sorting by several columns.
 
 ### Style pickers (CORE-UI-015)
 
@@ -404,6 +436,7 @@ Objects are listed as hyphenated identifier texts.
   identifier, a display name and a `Preview`: `Color` (a swatch), `Dash` (alternating dash and gap
   lengths in points), `Weight` (a lineweight in millimeters) or `None`. The caller maps its own
   styles to entries; the module depends on no document or drafting type.
+- The rows of the picker run from the logical start of its `language`'s direction (CORE-UI-025).
 - Typing in the filter keeps the entries whose name or identifier matches, using the case rule of
   `StylePicker::language` (`text::matches_filter`). Up and Down move the highlight, Enter returns
   the highlighted identifier, Escape closes the list without a choice. A click returns the clicked
@@ -425,6 +458,105 @@ Objects are listed as hyphenated identifier texts.
   - The pickers share one type with a kind parameter rather than five types: they differ only in
     the message for their name and in the true-color offer.
 - Open items: a floating popup with keyboard focus trapping, and grouping of entries by category.
+
+### Tool option bar (CORE-UI-008)
+
+- `PromptControls` is the plain description of the active prompt that the application fills from
+  `arc_command`: `options` (the keyword options of the current `Prompt`, each with its identifier,
+  label message identifier and shortcut letter) and `parameters` (each with its name, label
+  message identifier, current value as text and `editable`). For a parameter the value is the
+  preset or the latest answer; `editable` is set only for the parameter the current prompt asks
+  for. Empty controls draw nothing and need no prompt.
+- `OptionBar::show` draws a button per option, its label followed by the shortcut in brackets as
+  the command line shows it, and a labeled field per parameter. Parameters other than the one
+  the prompt asks for show their value as text. A click on a button returns the option's
+  identifier. Enter in an editable field returns the field's trimmed text. The returned text is
+  the input the command line would receive, so the application feeds it to `CommandLine::submit`
+  and the two paths give the same answer. The widget runs no command.
+- The bar is one row from the logical start that wraps (`Direction::row`) and is a toolbar named
+  by `ui-option-bar`. Buttons and the field take focus with Tab in visual order, and Enter
+  activates a focused button.
+- Decisions with the rejected alternatives:
+  - A plain description rather than a `&PromptSession` argument: the widget then depends on no
+    more of `arc-command` than before, and the application decides which parameters appear.
+  - Only the current prompt's parameter is editable: editing an earlier answer would need the
+    session to step back to that prompt, which the public session API does not expose as one
+    operation. The other parameters are labels.
+  - The returned value is text, not an intent: the command line already defines what a keyword
+    or a typed value means, so the bar does not repeat that interpretation.
+  - Enter is read before the field draws, because the text field gives up focus on Enter while it
+    draws and the value would be lost.
+- Open items: editing earlier answers through the bar, and a choice list for keyword parameters.
+
+### Dynamic input (CORE-UI-009)
+
+- `DynamicInput::show` draws a floating panel (an `Area` in the foreground) with the prompt
+  (a message identifier), a distance field in meters and an angle field in degrees, measured from
+  the last point. The caller passes the viewport, the pointer and the pointer-derived values
+  (`Relative`: distance in meters, angle in radians).
+- Typing into a field locks it: a locked field emits its typed value. An unlocked field shows the
+  pointer-derived value and emits that exact value, not its displayed text. Clearing a field
+  unlocks it. Enter emits `Relative` (the point input relative to the last point), or nothing when
+  a needed value is missing or not a number; the widget computes no geometry.
+- The distance field takes focus when the input starts. Tab moves between the two fields through
+  egui's focus order, so from the angle field focus moves on to the next widget of the window.
+- Placement: right and below the pointer, flipped to the left or above when the panel would leave
+  the viewport, then clamped into it (`dynamic_input::place`). The size is the one measured in the
+  previous frame; the first frame uses an estimate.
+- Decisions with the rejected alternatives:
+  - Degrees in the angle field, radians in the output: degrees are what people type; the output is
+    the SI unit of the prompt machines. Rejected: radians in the field.
+  - Fields are in meters and degrees: the display unit system of `quantity` would need expression
+    parsing, which this widget does not offer. Rejected: parsing with `arc_solve`, which accepts
+    expressions a point entry does not need.
+  - A field locks on any non-empty edit, not only when the text is a number: a typed non-number
+    would otherwise be overwritten by the pointer value on the next frame.
+  - Unlocked fields emit the exact values: the displayed text has three and two decimals, and
+    parsing it back would change the point.
+  - Tab order from egui rather than the panel moving focus by hand: egui takes the Tab direction
+    from the stored event filter of the focused widget, which a focus request does not set. A
+    request made in the frame of a Tab press therefore conflicts with egui's own move, and the
+    focus was lost in that frame.
+- Open items: display units with a conversion from the document's unit settings, and grid or
+  orthogonal constraints of the derived values (the caller computes them).
+
+### Snapping feedback (CORE-UI-030)
+
+- `snap::paint` draws the feedback of a snap the caller found: a `Snap` (a `SnapKind` and a
+  screen position), a marker, a label with the kind's localized name, and up to 16 tracking
+  segments in screen coordinates. With no snap, nothing is drawn, tracking lines included.
+- Kinds and markers: endpoint (square), midpoint (triangle), center (circle), node (filled
+  circle), intersection (cross), perpendicular (right-angle corner), tangent (half circle),
+  nearest (hourglass) and quadrant (diamond). Each shape is distinct; each kind has a message in
+  both catalogs.
+- The label is a box drawn by the painter beside the marker. An egui tooltip is not used: it is
+  shown on hover of a response, and the snap comes from the caller.
+- Decisions with the rejected alternatives:
+  - Nine kinds, the common set of point snaps. The specification lists no kinds. Rejected: a longer
+    list (insertion, apparent intersection), since each kind needs its own marker and name and no
+    part of the specification states them yet.
+  - Painter labels rather than egui tooltips (see above).
+- Open items: the snapping computation (caller), fading of tracking lines, and a status strip
+  for hover-free devices (CORE-UI-040).
+
+### Layout direction (CORE-UI-025)
+
+- `text::Direction` is left to right or right to left. `Direction::of_language` reads a BCP 47
+  tag: the primary subtags of Arabic, Central Kurdish, Dhivehi, Persian, Hebrew, Pashto, Sindhi,
+  Uyghur, Urdu and Yiddish (and the older Hebrew tag `iw`), or a script subtag of Arab, Hebr, Thaa or Syrc, give right to left
+  unless the tag names the Latin script. `Direction::resolve` applies an explicit override first.
+- Widgets take the direction from their language: `TableView`, `CommandLineView` and `OptionBar`
+  have a `language` and an optional `direction`; `StylePicker` uses its `language`; `DockArea` has a
+  `direction` the application sets.
+- `Direction::row` lays out one row that takes the parent's width and one line of height, like
+  `Ui::horizontal`; `Direction::start_align` gives the text alignment at the logical start. A
+  `Ui::with_layout` call would take the whole remaining area of the parent, so it is not used.
+- Decisions with the rejected alternatives:
+  - A list of right-to-left primary subtags and scripts rather than a bidirectional algorithm or a
+    locale database: no new dependency, and the crate lays out labels and rows, not running text.
+    Rejected: a locale data dependency.
+  - Direction per widget through its language, rather than a global setting in the egui context:
+    the direction is then an input of each widget and the tests can set it without shared state.
 
 ### Keyboard operation (CORE-UI-026, in part)
 
