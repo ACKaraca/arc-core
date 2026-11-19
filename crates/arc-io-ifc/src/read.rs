@@ -5,7 +5,7 @@ use arc_io_common::ReadOptions as ArchiveOptions;
 use arc_io_common::zip::ZipArchive;
 
 use crate::error::{codes, reasons};
-use crate::loss::{LossHeader, LossLog, LossReport};
+use crate::loss::{Direction, LossHeader, LossLog, LossReport, Source};
 use crate::model::{IfcFile, Parameter, Record, Schema};
 use crate::options::{ReadOptions, ReadOutput};
 use crate::step::{self, Notes};
@@ -148,7 +148,7 @@ fn report_of(file: &IfcFile, limits: Limits, notes: &Notes, cancel: &Cancel) -> 
                 log.add(
                     reasons::ENTITY_PRESERVED,
                     &record.type_name,
-                    Some(instance.name),
+                    Some(Source::Decimal(instance.name)),
                     1,
                 );
             }
@@ -167,10 +167,15 @@ fn report_of(file: &IfcFile, limits: Limits, notes: &Notes, cancel: &Cancel) -> 
             log.add(
                 reasons::REFERENCE_UNRESOLVED,
                 &record.type_name,
-                Some(instance.name),
+                Some(Source::Decimal(instance.name)),
                 unresolved,
             );
         }
     }
-    Ok(log.finish(LossHeader::import(file.schema.identifier(), limits)))
+    Ok(log.finish(LossHeader::new(
+        "ifc",
+        file.schema.identifier(),
+        Direction::Import,
+        Some(limits),
+    )))
 }

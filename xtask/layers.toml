@@ -160,3 +160,22 @@ to = "arc-io-common"
 [[same_layer]]
 from = "arc-io-dwg"
 to = "arc-io-dxf"
+
+# The loss report types and their aggregator are shared by the format crates (ADR-0001, amendment
+# "Shared bounded ZIP and XML readers", paragraph "Loss report types"). Each format crate that
+# re-exports them records its edge to arc-io-common here.
+[[same_layer]]
+from = "arc-io-dxf"
+to = "arc-io-common"
+
+[[same_layer]]
+from = "arc-io-mesh"
+to = "arc-io-common"
+
+[[same_layer]]
+from = "arc-io-pdf"
+to = "arc-io-common"
+
+[[same_layer]]
+from = "arc-io-dwg"
+to = "arc-io-common"

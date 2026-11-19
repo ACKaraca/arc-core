@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 arc-base = { workspace = true }
 arc-command = { workspace = true }
+arc-io-common = { workspace = true }
 arc-draft = { workspace = true }
 arc-geom = { workspace = true }
 schemars = { workspace = true }

@@ -11,8 +11,8 @@
 //! [`LossReport`] that says what the format could not keep.
 //!
 //! The formats are implemented here from their published descriptions; the one third-party
-//! dependencies are `serde`, which serializes the loss report as the rest of the family does, and
-//! `serde_json`, which parses the glTF JSON.
+//! dependency is `serde_json`, which parses the glTF JSON; the loss report types are shared through
+//! `arc-io-common`.
 //!
 //! ```
 //! use arc_base::{Limits, math::Point3};

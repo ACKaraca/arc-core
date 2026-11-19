@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use crate::error::reasons;
+use crate::loss::Source;
 use crate::model::Record;
 
 use super::attr::{self, skip};
@@ -46,8 +47,12 @@ impl Evaluator<'_> {
         )?;
         let (operator, approximated) = self.operator(target)?;
         if approximated {
-            self.log
-                .add(reasons::GEOMETRY_APPROXIMATED, kind, Some(name), 1);
+            self.log.add(
+                reasons::GEOMETRY_APPROXIMATED,
+                kind,
+                Some(Source::Decimal(name)),
+                1,
+            );
         }
         let placement = operator * origin;
         let mut out = Vec::new();

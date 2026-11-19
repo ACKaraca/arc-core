@@ -12,9 +12,11 @@ publish.workspace = true
 arc-base = { workspace = true }
 miniz_oxide = { workspace = true }
 quick-xml = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

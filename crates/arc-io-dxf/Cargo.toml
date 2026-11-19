@@ -10,7 +10,7 @@ publish.workspace = true
 
 [dependencies]
 arc-base = { workspace = true }
-serde = { workspace = true }
+arc-io-common = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

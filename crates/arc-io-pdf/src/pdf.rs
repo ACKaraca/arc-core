@@ -13,7 +13,7 @@ use crate::common::{
     Gate, Output, WriteOptions, check_count, check_stream, pdf_date_of, push_num, srgb,
 };
 use crate::error::reasons;
-use crate::loss::{Argument, LossLog};
+use crate::loss::{Argument, Direction, LossHeader, LossLog, Source};
 use crate::path::{
     ArcSeg, Counts, Cx, FillRule, Seg, SubPath, polyline_path, range, region_loops, stroke_paths,
     stroke_width,
@@ -237,7 +237,7 @@ pub fn write_pdf(streams: &[&PlotStream], options: &mut WriteOptions<'_>) -> Res
     let index: BTreeMap<ObjectId, usize> = layers.iter().copied().zip(0..).collect();
 
     let mut gate = Gate::new(options, total);
-    let mut loss = LossLog::default();
+    let mut loss = LossLog::unbounded();
     let mut pages = Vec::with_capacity(streams.len());
     let mut written = 0usize;
     for stream in streams {
@@ -251,7 +251,7 @@ pub fn write_pdf(streams: &[&PlotStream], options: &mut WriteOptions<'_>) -> Res
     loss.add(
         reasons::SOURCES_FAILED,
         "entity",
-        first.map(ToString::to_string),
+        first.map(ToString::to_string).as_deref().map(Source::Text),
         failed,
     );
     if pages.iter().any(|(c, _)| c.bad) {
@@ -302,7 +302,7 @@ pub fn write_pdf(streams: &[&PlotStream], options: &mut WriteOptions<'_>) -> Res
     gate.finish(file.out.len())?;
     Ok(Output {
         bytes: file.out,
-        report: loss.finish("pdf", "1.7"),
+        report: loss.finish(LossHeader::new("pdf", "1.7", Direction::Export, None)),
     })
 }
 
@@ -473,7 +473,7 @@ fn close_run(c: &mut Content, open: Option<(Option<usize>, Option<usize>)>) {
 }
 
 fn item_out(c: &mut Content, item: &Item, paper: Color, cx: &Cx, loss: &mut LossLog) -> Result<()> {
-    let source = || Some(item.source.to_string());
+    let source = || item.source.to_string();
     let name = kind(item);
     let mut counts = Counts::default();
     let arcs_before = c.arcs;
@@ -492,7 +492,12 @@ fn item_out(c: &mut Content, item: &Item, paper: Color, cx: &Cx, loss: &mut Loss
                     }
                 }
                 None => {
-                    loss.add(reasons::ITEMS_FAILED, name, source(), 1);
+                    loss.add(
+                        reasons::ITEMS_FAILED,
+                        name,
+                        Some(Source::Text(&source())),
+                        1,
+                    );
                     return Ok(());
                 }
             }
@@ -504,7 +509,12 @@ fn item_out(c: &mut Content, item: &Item, paper: Color, cx: &Cx, loss: &mut Loss
         ItemKind::RegionFill { region, pen } => match region_loops(region, cx, &mut counts)? {
             Some(loops) => c.fill(&loops, pen.color, FillRule::EvenOdd),
             None => {
-                loss.add(reasons::ITEMS_FAILED, name, source(), 1);
+                loss.add(
+                    reasons::ITEMS_FAILED,
+                    name,
+                    Some(Source::Text(&source())),
+                    1,
+                );
                 return Ok(());
             }
         },
@@ -513,7 +523,12 @@ fn item_out(c: &mut Content, item: &Item, paper: Color, cx: &Cx, loss: &mut Loss
             c.fill(&[path], paper, FillRule::NonZero);
         }
         ItemKind::Glyphs { .. } => {
-            loss.add(reasons::GLYPHS_DROPPED, name, source(), 1);
+            loss.add(
+                reasons::GLYPHS_DROPPED,
+                name,
+                Some(Source::Text(&source())),
+                1,
+            );
             return Ok(());
         }
     }
@@ -522,25 +537,30 @@ fn item_out(c: &mut Content, item: &Item, paper: Color, cx: &Cx, loss: &mut Loss
     loss.add_with(
         reasons::NURBS_FLATTENED,
         name,
-        source(),
+        Some(Source::Text(&source())),
         counts.nurbs,
         argument(cx.chord),
     );
     loss.add_with(
         reasons::ARCS_APPROXIMATED,
         name,
-        source(),
+        Some(Source::Text(&source())),
         arcs,
         argument(cx.chord),
     );
     loss.add(
         reasons::POLYLINE_WIDTH_APPROXIMATED,
         name,
-        source(),
+        Some(Source::Text(&source())),
         counts.widths,
     );
     if counts.nurbs + counts.widths + arcs == 0 {
-        loss.add(reasons::ITEMS_WRITTEN, name, source(), 1);
+        loss.add(
+            reasons::ITEMS_WRITTEN,
+            name,
+            Some(Source::Text(&source())),
+            1,
+        );
     }
     Ok(())
 }

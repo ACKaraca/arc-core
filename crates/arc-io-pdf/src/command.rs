@@ -21,7 +21,10 @@ use crate::error::codes;
 use crate::loss::LossReport;
 use crate::{WriteOptions, write_pdf, write_svg};
 #[cfg(feature = "raster")]
-use crate::{error::reasons, loss::LossLog};
+use crate::{
+    error::reasons,
+    loss::{LossLog, Source},
+};
 
 /// A message identifier of this crate that is not an error code or a loss reason.
 pub struct Message {
@@ -328,17 +331,30 @@ fn png(stream: &PlotStream, dpi: Option<f64>) -> Result<(Vec<u8>, LossReport)> {
     }
     let raster = arc_draft::raster::render(stream, &options)?;
     let bytes = raster.png()?;
-    let mut log = LossLog::default();
+    let mut log = LossLog::unbounded();
     let drawn = stream.items.len().saturating_sub(raster.skipped);
     log.add(reasons::ITEMS_WRITTEN, "item", None, drawn as u64);
     log.add(reasons::ITEMS_SKIPPED, "item", None, raster.skipped as u64);
     log.add(
         reasons::SOURCES_FAILED,
         "entity",
-        stream.failed.first().map(ToString::to_string),
+        stream
+            .failed
+            .first()
+            .map(ToString::to_string)
+            .as_deref()
+            .map(Source::Text),
         stream.failed.len() as u64,
     );
-    Ok((bytes, log.finish("png", "1.2")))
+    Ok((
+        bytes,
+        log.finish(crate::loss::LossHeader::new(
+            "png",
+            "1.2",
+            crate::loss::Direction::Export,
+            None,
+        )),
+    ))
 }
 
 #[cfg(not(feature = "raster"))]

@@ -12,7 +12,8 @@ architecture, library choices and limits are specified in
 - Readers and writers for each format, with limits profiles, cancellation and progress.
 - The neutral model of each format, including source identifiers and preserved records.
 - Loss-report items for format-level losses (unsupported versions, unknown records, approximations).
-- The loss-report schema and the shared bounded readers for ZIP and XML used by the family.
+- The loss-report schema, the loss report types and their aggregator (`arc-io-common`, module `loss`),
+  and the shared bounded readers for ZIP and XML used by the family.
 - Fuzz targets, hostile-input tests and corpus runners for each format.
 - Shared core mappings: drafting plot streams to PDF and SVG (`arc-io-pdf`).
 - The Arc exchange package: container, schemas, validator, neutral model and fixtures
@@ -38,26 +39,33 @@ product could not map).
 | `LossItem` | Outcome, severity, source identifier, record kind, reason code, message |
 | `LossReport` | Header, summary counts and items, serializable to the published schema |
 
+The loss report types and the aggregator are defined once, in the `loss` module of `arc-io-common`.
+The format crates re-export them under their own paths (`arc_io_dxf::loss`, `arc_io_mesh::loss`,
+`arc_io_ifc::loss`, `arc_io_pdf::loss`) and keep their reason codes and catalogs there. The aggregator
+keeps one item per reason and record kind, with exact counts. `arc-io-mesh` and `arc-io-ifc` cap the
+distinct items at 1,024 and fold the rest into one overflow item per reason; `arc-io-dxf`, `arc-io-dwg`
+and `arc-io-pdf` keep every record kind, as they did before the types were shared.
+
 ## Dependencies
 
 | Crate | Arc | Third-party |
 |---|---|---|
-| `arc-io-dxf` | `arc-base`, `arc-geom` | none |
-| `arc-io-dwg` | `arc-base`, `arc-io-dxf` (neutral drawing model, reading options and loss report) | `acadrust` (MPL-2.0, wrapped behind the byte-level reader; see below) |
-| `arc-io-ifc` | `arc-base`, `arc-mesh`, `arc-io-common` | `serde` (loss report only); the STEP physical file reader and the typed views are implemented in the crate from ISO 10303-21 and the published IFC schemas, so no third-party parser is used; the ZIP archive reader is `arc-io-common` |
+| `arc-io-dxf` | `arc-base`, `arc-io-common` (loss report types) | none |
+| `arc-io-dwg` | `arc-base`, `arc-io-dxf` (neutral drawing model and reading options), `arc-io-common` (loss log) | `acadrust` (MPL-2.0, wrapped behind the byte-level reader; see below) |
+| `arc-io-ifc` | `arc-base`, `arc-mesh`, `arc-io-common` (loss report types) | the STEP physical file reader and the typed views are implemented in the crate from ISO 10303-21 and the published IFC schemas, so no third-party parser is used; the ZIP archive reader is `arc-io-common` |
 | `arc-io-step` | `arc-base`, `arc-brep`, `arc-command` (worker jobs) | none beyond the kernel tier |
-| `arc-io-mesh` | `arc-base`, `arc-mesh` | `serde` (loss report only); OBJ with MTL, STL and PLY are implemented in the crate; `gltf`, `threemf`, `image` and `exr` are for the formats that follow |
+| `arc-io-mesh` | `arc-base`, `arc-mesh`, `arc-io-common` (loss report types) | OBJ with MTL, STL and PLY are implemented in the crate; `gltf`, `threemf`, `image` and `exr` are for the formats that follow |
 | `arc-io-usd` | `arc-base`, `arc-geom`, `arc-mesh` | `openusd` |
 | `arc-io-pointcloud` | `arc-base`, `arc-geom`, `arc-doc` (asset storage of octrees) | `las`, `laz`, `e57` |
 | `arc-io-geo` | `arc-base`, `arc-geom` | `proj`, `geo`, `geozero`, `shapefile`, `flatgeobuf`, `rusqlite`, `quick-xml` |
-| `arc-io-pdf` | `arc-base`, `arc-geom`, `arc-draft`, `arc-command` (worker jobs), `arc-pdfium` (in `arc-worker` only) | `krilla`, `lopdf` |
+| `arc-io-pdf` | `arc-base`, `arc-geom`, `arc-draft`, `arc-command` (worker jobs), `arc-io-common` (loss report types), `arc-pdfium` (in `arc-worker` only) | `krilla`, `lopdf` |
 | `arc-io-bcf` | `arc-base` | `quick-xml`, `zip`, `image` |
 | `arc-io-exchange` | `arc-base`, `arc-geom`, `arc-mesh` | `zip`, `serde_json`, `jsonschema`, `blake3` |
 | `arc-io-3dm` | `arc-base`, `arc-geom`, `arc-mesh`, `arc-command` (worker jobs), `arc-opennurbs` (in `arc-worker` only) | none beyond openNURBS |
 | `arc-io-fbx` | `arc-base`, `arc-geom`, `arc-mesh` | `fbxcel`, `fbxcel-dom` |
 | `arc-io-dgn` | `arc-base`, `arc-geom` | none |
 | `arc-io-bridge` | `arc-base`, `arc-command` (worker jobs) | none |
-| `arc-io-common` | `arc-base` | `miniz_oxide` (inflate), `quick-xml` (XML parsing) |
+| `arc-io-common` | `arc-base` | `miniz_oxide` (inflate), `quick-xml` (XML parsing), `serde` (loss report types) |
 
 ## Test strategy
 

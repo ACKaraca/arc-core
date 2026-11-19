@@ -37,7 +37,7 @@ use arc_base::{Cancel, Error, Limits, Result, Tolerance};
 use arc_mesh::TriMesh;
 
 use crate::error::reasons;
-use crate::loss::{LossHeader, LossLog, LossReport, Reason};
+use crate::loss::{Direction, LossHeader, LossLog, LossReport, Reason, Source};
 use crate::model::{IfcFile, Parameter, Record};
 use crate::step::MAX_NESTING;
 
@@ -221,7 +221,8 @@ impl<'f> Evaluator<'f> {
         match step {
             Ok(value) => Ok(Some(value)),
             Err(Flow::Skip(skip)) => {
-                self.log.add(skip.reason, &skip.kind, Some(source), 1);
+                self.log
+                    .add(skip.reason, &skip.kind, Some(Source::Decimal(source)), 1);
                 Ok(None)
             }
             Err(Flow::Hard(error)) => Err(error),
@@ -237,8 +238,12 @@ impl<'f> Evaluator<'f> {
             return Ok(cached.clone());
         }
         if self.stack.contains(&name) {
-            self.log
-                .add(reasons::CYCLE_CUT, "IFCMAPPEDITEM", Some(name), 1);
+            self.log.add(
+                reasons::CYCLE_CUT,
+                "IFCMAPPEDITEM",
+                Some(Source::Decimal(name)),
+                1,
+            );
             self.cuts = self.cuts.saturating_add(1);
             return Ok(None);
         }
@@ -385,7 +390,7 @@ impl<'f> Evaluator<'f> {
                 self.log.add(
                     reasons::TARGET_MISSING,
                     "IFCSHAPEREPRESENTATION",
-                    Some(shape),
+                    Some(Source::Decimal(shape)),
                     1,
                 );
                 continue;
@@ -394,7 +399,7 @@ impl<'f> Evaluator<'f> {
                 self.log.add(
                     reasons::GEOMETRY_NOT_EVALUATED,
                     &rep.type_name,
-                    Some(representation),
+                    Some(Source::Decimal(representation)),
                     1,
                 );
                 continue;
@@ -412,7 +417,7 @@ impl<'f> Evaluator<'f> {
             self.log.add(
                 reasons::DUPLICATE_PLACEMENT,
                 &rep.type_name,
-                Some(representation),
+                Some(Source::Decimal(representation)),
                 repeats,
             );
             for item in items {
@@ -502,9 +507,12 @@ fn run(file: &IfcFile, limits: &Limits, tol: &Tolerance, cancel: &Cancel) -> Res
         };
         evaluator.product_items(product, shape, world, &mut items)?;
     }
-    let report = evaluator
-        .log
-        .finish(LossHeader::import(file.schema.identifier(), *limits));
+    let report = evaluator.log.finish(LossHeader::new(
+        "ifc",
+        file.schema.identifier(),
+        Direction::Import,
+        Some(*limits),
+    ));
     Ok(Geometry {
         items,
         units,

@@ -8,12 +8,15 @@
 //! `io.limit_exceeded` error, a [`arc_base::Cancel`] token is checked at a fixed interval, and
 //! nothing panics.
 //!
+//! The loss report types ([`loss`]) are shared by the format crates in the same way.
+//!
 //! The crate has no product type and makes no operating-system call. It builds for
 //! `wasm32-unknown-unknown`.
 
 mod bytes;
 pub mod crc32;
 pub mod error;
+pub mod loss;
 mod options;
 pub mod xml;
 pub mod zip;

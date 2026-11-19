@@ -19,7 +19,7 @@ use std::sync::Arc;
 use arc_base::{Cancel, Error, Limits, Result};
 
 use crate::error::{codes, limit, reasons};
-use crate::loss::{LossHeader, LossLog, LossReport, Reason};
+use crate::loss::{Direction, LossHeader, LossLog, LossReport, Reason, Source};
 use crate::model::{IfcFile, Instance, Parameter, Record};
 use crate::step::MAX_NESTING;
 
@@ -340,9 +340,12 @@ impl IfcFile {
         let types = reader.type_assignments()?;
         let property_sets = reader.property_sets()?;
         let quantity_sets = reader.quantity_sets()?;
-        let report = reader
-            .log
-            .finish(LossHeader::import(self.schema.identifier(), *limits));
+        let report = reader.log.finish(LossHeader::new(
+            "ifc",
+            self.schema.identifier(),
+            Direction::Import,
+            Some(*limits),
+        ));
         Ok(TypedViews {
             spatial,
             types,
@@ -446,7 +449,8 @@ impl<'f> Reader<'f> {
     }
 
     fn lose(&mut self, reason: Reason, kind: &str, source: u64, count: u64) {
-        self.log.add(reason, kind, Some(source), count);
+        self.log
+            .add(reason, kind, Some(Source::Decimal(source)), count);
     }
 
     fn bad(&mut self, source: u64, kind: &str) {

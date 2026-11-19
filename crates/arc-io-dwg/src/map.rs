@@ -47,7 +47,7 @@ impl<'a, 'q> Mapper<'a, 'q> {
             progress,
             total,
             records: 0,
-            loss: LossLog::default(),
+            loss: LossLog::unbounded(),
         }
     }
 
@@ -72,9 +72,10 @@ impl<'a, 'q> Mapper<'a, 'q> {
 
     /// Adds the loss item of a value the model does not accept, which is skipped.
     fn skipped(&mut self, kind: &str, what: &str) {
-        self.loss.add(
+        self.loss.add_with(
             reasons::VALUE_SKIPPED,
             kind,
+            None,
             1,
             vec![("name".to_owned(), Argument::Text(what.to_owned()))],
         );
@@ -85,7 +86,7 @@ impl<'a, 'q> Mapper<'a, 'q> {
     fn header(&mut self, doc: &CadDocument) -> Result<Vec<HeaderVariable>> {
         let h = &doc.header;
         let layer = text(&h.current_layer_name, self.limits)?;
-        self.loss.add(reasons::HEADER_DROPPED, "", 1, Vec::new());
+        self.loss.add(reasons::HEADER_DROPPED, "", None, 1);
         let mut variables = vec![HeaderVariable {
             name: "$INSUNITS".to_owned(),
             values: vec![Group::int(70, i64::from(h.insertion_units))],
@@ -120,7 +121,7 @@ impl<'a, 'q> Mapper<'a, 'q> {
         partial: &[&'static str],
     ) -> Result<TableEntry<T>> {
         self.record()?;
-        self.loss.mapped += 1;
+        self.loss.add_mapped(1);
         self.loss
             .add_partial(reasons::TABLE_ENTRY_PARTIAL, kind, partial);
         Ok(TableEntry {
@@ -167,10 +168,9 @@ impl<'a, 'q> Mapper<'a, 'q> {
             ("VX", doc.vx_table.len()),
         ] {
             let count = u64::try_from(count).unwrap_or(u64::MAX);
-            self.loss
-                .add(reasons::TABLE_DROPPED, kind, count, Vec::new());
+            self.loss.add(reasons::TABLE_DROPPED, kind, None, count);
         }
-        self.loss.mapped = self.loss.mapped.saturating_add(CARRIED_TABLES);
+        self.loss.add_mapped(CARRIED_TABLES);
         Ok(Tables {
             layers: Some(table(layers)),
             linetypes: Some(table(linetypes)),
@@ -378,13 +378,13 @@ impl<'a, 'q> Mapper<'a, 'q> {
         let mut budget = RecordBudget::new(&mut self.records, self.limits.record_count);
         match entity::map(entity, paper_space, self.limits, &mut budget)? {
             Outcome::Mapped { entity, partial } => {
-                self.loss.mapped += 1;
+                self.loss.add_mapped(1);
                 self.loss
                     .add_partial(reasons::ENTITY_PARTIAL, kind, &partial);
                 out.push(*entity);
             }
-            Outcome::Unsupported => self.loss.add(reasons::ENTITY_DROPPED, kind, 1, Vec::new()),
-            Outcome::Invalid => self.loss.add(reasons::VALUE_SKIPPED, kind, 1, Vec::new()),
+            Outcome::Unsupported => self.loss.add(reasons::ENTITY_DROPPED, kind, None, 1),
+            Outcome::Invalid => self.loss.add(reasons::VALUE_SKIPPED, kind, None, 1),
         }
         Ok(())
     }
@@ -454,7 +454,7 @@ impl<'a, 'q> Mapper<'a, 'q> {
             let mut end = Entity::new(EntityKind::BlockEnd(m::SeqEnd::default()));
             end.head = convert::head(record.block_end_handle, acadrust::types::Handle::new(0));
             // The BLOCK and ENDBLK records are kept records, as they are in the DXF reader.
-            self.loss.mapped = self.loss.mapped.saturating_add(2);
+            self.loss.add_mapped(2);
             blocks.push(Block {
                 begin,
                 entities: members,
@@ -462,18 +462,15 @@ impl<'a, 'q> Mapper<'a, 'q> {
             });
         }
         if unresolved > 0 {
-            self.loss.add(
-                reasons::HANDLE_UNRESOLVED,
-                "BLOCK_RECORD",
-                unresolved,
-                Vec::new(),
-            );
+            self.loss
+                .add(reasons::HANDLE_UNRESOLVED, "BLOCK_RECORD", None, unresolved);
         }
         for entity in doc.entities() {
             if !owned.contains(&entity.common().handle.value()) {
-                self.loss.add(
+                self.loss.add_with(
                     reasons::ENTITY_DROPPED,
                     entity::type_name(entity),
+                    None,
                     1,
                     vec![("reason".to_owned(), Argument::Text("unowned".to_owned()))],
                 );
@@ -488,18 +485,13 @@ impl<'a, 'q> Mapper<'a, 'q> {
         let tables = self.tables(doc)?;
         let (blocks, entities) = self.blocks_and_entities(doc)?;
         let objects = u64::try_from(doc.objects.len()).unwrap_or(u64::MAX);
-        self.loss
-            .add(reasons::OBJECT_DROPPED, "", objects, Vec::new());
+        self.loss.add(reasons::OBJECT_DROPPED, "", None, objects);
         let classes = u64::try_from(doc.classes.len()).unwrap_or(u64::MAX);
         self.loss
-            .add(reasons::OBJECT_DROPPED, "CLASS", classes, Vec::new());
+            .add(reasons::OBJECT_DROPPED, "CLASS", None, classes);
         let notifications = u64::try_from(doc.notifications.len()).unwrap_or(u64::MAX);
-        self.loss.add(
-            reasons::OBJECT_DROPPED,
-            "NOTIFICATION",
-            notifications,
-            Vec::new(),
-        );
+        self.loss
+            .add(reasons::OBJECT_DROPPED, "NOTIFICATION", None, notifications);
         if let Some(report) = self.progress.as_mut() {
             report(Progress {
                 done: self.records,

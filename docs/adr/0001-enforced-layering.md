@@ -111,6 +111,21 @@ foundation that every crate depends on, although only the format family needs th
 `arc-io-exchange` was rejected for the same reason as a format-to-format edge. Every format crate
 that needs the readers keeps the same behavior and the same error codes by using one crate.
 
+### Loss report types
+
+`arc-io-common` also holds the loss report types and their aggregator (module `loss`), which the
+format crates used to copy. The types are those of `schemas/loss-report.schema.json`. Each format
+crate re-exports them under its own path and keeps its reason codes and catalog, so public paths do
+not change. The shared crate depends on no format crate.
+
+Each format crate that re-exports the types takes one same-layer edge to `arc-io-common`, recorded in
+the table. `arc-io-dxf` to `arc-io-common` lets the DXF reader and writer, and through them the DWG
+reader's report, use the shared types; its log stays unbounded, so its output does not change.
+`arc-io-mesh` to `arc-io-common` lets the mesh readers and writers use the shared bounded log.
+`arc-io-pdf` to `arc-io-common` lets the SVG and PDF writers use the shared unbounded log. `arc-io-dwg`
+to `arc-io-common` lets the DWG reader merge the property names of partial records with the shared log.
+`arc-io-ifc` to `arc-io-common` was recorded above.
+
 ## Amendment: DWG reader over a wrapped library
 
 `arc-io-dwg` is classed `layer(4)` and has one same-layer edge, `arc-io-dwg` to `arc-io-dxf`, in

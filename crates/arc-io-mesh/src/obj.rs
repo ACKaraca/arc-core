@@ -23,7 +23,7 @@ use arc_base::{Error, Limits, Result};
 use arc_mesh::{AttributeKey, Channel};
 
 use crate::error::{at_line, codes, limit, reasons};
-use crate::loss::{Direction, LossHeader, LossLog};
+use crate::loss::{Direction, LossHeader, LossLog, Source};
 use crate::model::{
     Material, MeshPart, MeshScene, Preserved, TextureMap, attribute_name, build_mesh,
 };
@@ -190,8 +190,12 @@ impl Reader {
             "usemtl" => Err(at_line(codes::MESH_STRUCTURE_INVALID, number)),
             "mtllib" | "s" => Ok(()),
             other => {
-                self.loss
-                    .add(reasons::ELEMENT_SKIPPED, other, Some(number), 1);
+                self.loss.add(
+                    reasons::ELEMENT_SKIPPED,
+                    other,
+                    Some(Source::Decimal(number)),
+                    1,
+                );
                 Ok(())
             }
         }
@@ -211,8 +215,12 @@ impl Reader {
             [] => {}
             [weight] => {
                 text::float64(number, weight)?;
-                self.loss
-                    .add(reasons::PROPERTY_SKIPPED, "vertex_w", Some(number), 1);
+                self.loss.add(
+                    reasons::PROPERTY_SKIPPED,
+                    "vertex_w",
+                    Some(Source::Decimal(number)),
+                    1,
+                );
             }
             [r, g, b] => {
                 check_numbers(number, &[*r, *g, *b])?;
@@ -220,8 +228,12 @@ impl Reader {
             }
             [weight, r, g, b] => {
                 check_numbers(number, &[*weight, *r, *g, *b])?;
-                self.loss
-                    .add(reasons::PROPERTY_SKIPPED, "vertex_w", Some(number), 1);
+                self.loss.add(
+                    reasons::PROPERTY_SKIPPED,
+                    "vertex_w",
+                    Some(Source::Decimal(number)),
+                    1,
+                );
                 self.loss.attribute(reasons::ATTRIBUTE_DROPPED, "color", 1);
             }
             _ => return Err(at_line(codes::MESH_STRUCTURE_INVALID, number)),
@@ -240,8 +252,12 @@ impl Reader {
         };
         if let Some(w) = w {
             text::float32(number, w)?;
-            self.loss
-                .add(reasons::PROPERTY_SKIPPED, "texture_w", Some(number), 1);
+            self.loss.add(
+                reasons::PROPERTY_SKIPPED,
+                "texture_w",
+                Some(Source::Decimal(number)),
+                1,
+            );
         }
         self.uvs
             .push([text::float32(number, u)?, text::float32(number, v)?]);
@@ -275,8 +291,12 @@ impl Reader {
             corners.push(self.corner(number, token)?);
         }
         if corners.len() > 3 {
-            self.loss
-                .add(reasons::POLYGON_TRIANGULATED, "face", Some(number), 1);
+            self.loss.add(
+                reasons::POLYGON_TRIANGULATED,
+                "face",
+                Some(Source::Decimal(number)),
+                1,
+            );
         }
         if let Some((first, others)) = corners.split_first() {
             for pair in others.windows(2) {
@@ -520,12 +540,22 @@ fn apply_mtl_statement(
                 "Kd" => material.diffuse = Some(value),
                 _ => material.specular = Some(value),
             },
-            None => loss.add(reasons::ELEMENT_SKIPPED, keyword, Some(number), 1),
+            None => loss.add(
+                reasons::ELEMENT_SKIPPED,
+                keyword,
+                Some(Source::Decimal(number)),
+                1,
+            ),
         },
         "d" => material.opacity = Some(last_number(number, rest)?),
         "Tr" => material.opacity = Some(1.0 - last_number(number, rest)?),
         slot if is_texture_slot(slot) => push_texture(material, number, keyword, rest)?,
-        other => loss.add(reasons::ELEMENT_SKIPPED, other, Some(number), 1),
+        other => loss.add(
+            reasons::ELEMENT_SKIPPED,
+            other,
+            Some(Source::Decimal(number)),
+            1,
+        ),
     }
     Ok(())
 }
@@ -782,7 +812,7 @@ mod tests {
     use arc_base::error::Value;
 
     use super::*;
-    use crate::loss::MAX_LOSS_ITEMS;
+    use arc_io_common::loss::MAX_LOSS_ITEMS;
 
     fn limit_name(error: &Error) -> Option<String> {
         match error.arguments().get("limit") {

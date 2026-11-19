@@ -16,6 +16,7 @@ use std::f64::consts::TAU;
 use arc_base::math::{Point3, Transform3};
 
 use crate::error::reasons;
+use crate::loss::Source;
 use crate::model::Record;
 
 use super::attr::{self, skip};
@@ -129,8 +130,12 @@ impl Evaluator<'_> {
         let radius = positive(record.parameters.get(3), self.scale, kind)?;
         let (count, limited) = circle_segments(radius, self.tol.tessellation_chord);
         if limited {
-            self.log
-                .add(reasons::GEOMETRY_APPROXIMATED, kind, Some(name), 1);
+            self.log.add(
+                reasons::GEOMETRY_APPROXIMATED,
+                kind,
+                Some(Source::Decimal(name)),
+                1,
+            );
         }
         self.budget.array(count)?;
         self.budget.charge(

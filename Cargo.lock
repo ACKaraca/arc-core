@@ -253,6 +253,8 @@ dependencies = [
  "miniz_oxide 0.9.1",
  "proptest",
  "quick-xml",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -261,8 +263,10 @@ version = "0.1.0"
 dependencies = [
  "acadrust",
  "arc-base",
+ "arc-io-common",
  "arc-io-dxf",
  "proptest",
+ "serde_json",
 ]
 
 [[package]]
@@ -270,8 +274,8 @@ name = "arc-io-dxf"
 version = "0.1.0"
 dependencies = [
  "arc-base",
+ "arc-io-common",
  "proptest",
- "serde",
  "serde_json",
 ]
 
@@ -283,7 +287,7 @@ dependencies = [
  "arc-io-common",
  "arc-mesh",
  "proptest",
- "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -291,9 +295,9 @@ name = "arc-io-mesh"
 version = "0.1.0"
 dependencies = [
  "arc-base",
+ "arc-io-common",
  "arc-mesh",
  "proptest",
- "serde",
  "serde_json",
 ]
 
@@ -307,6 +311,7 @@ dependencies = [
  "arc-draft",
  "arc-draft-dxf",
  "arc-geom",
+ "arc-io-common",
  "image",
  "proptest",
  "resvg",

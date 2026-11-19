@@ -26,6 +26,7 @@ use std::collections::BTreeSet;
 use arc_base::math::{Matrix4, Point3, Transform3, Vector3};
 
 use crate::error::{limit, reasons};
+use crate::loss::Source;
 use crate::model::Record;
 
 use super::attr::{self, skip};
@@ -223,7 +224,8 @@ impl Evaluator<'_> {
                 break;
             }
             if !seen.insert(node) {
-                self.log.add(reasons::CYCLE_CUT, kind, Some(node), 1);
+                self.log
+                    .add(reasons::CYCLE_CUT, kind, Some(Source::Decimal(node)), 1);
                 break;
             }
             if chain.len() >= limit_depth {

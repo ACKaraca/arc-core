@@ -30,6 +30,7 @@ use arc_base::math::{Point3, Vector3};
 use arc_mesh::TriMeshBuilder;
 
 use crate::error::reasons;
+use crate::loss::Source;
 use crate::model::{Parameter, Record};
 
 use super::attr::{self, skip};
@@ -165,8 +166,12 @@ impl Evaluator<'_> {
             return Err(skip(reasons::GEOMETRY_DEGENERATE, kind));
         }
         if deviation > self.tol.linear {
-            self.log
-                .add(reasons::GEOMETRY_APPROXIMATED, kind, Some(name), 1);
+            self.log.add(
+                reasons::GEOMETRY_APPROXIMATED,
+                kind,
+                Some(Source::Decimal(name)),
+                1,
+            );
         }
         self.charge_shape()?;
         let mesh = welder.finish(&self.limits)?;

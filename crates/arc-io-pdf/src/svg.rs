@@ -13,7 +13,7 @@ use crate::common::{
     Gate, HAIRLINE_MM, Output, WriteOptions, check_count, check_stream, push_num, srgb,
 };
 use crate::error::reasons;
-use crate::loss::{Argument, LossLog};
+use crate::loss::{Argument, Direction, LossHeader, LossLog, Source};
 use crate::path::{
     ArcSeg, Counts, Cx, FillRule, Seg, SubPath, polyline_path, range, region_loops, stroke_paths,
     stroke_width,
@@ -194,7 +194,7 @@ pub fn write_svg(stream: &PlotStream, options: &mut WriteOptions<'_>) -> Result<
     let cx = options.cx();
     let title = options.title.clone();
     let mut gate = Gate::new(options, total);
-    let mut loss = LossLog::default();
+    let mut loss = LossLog::unbounded();
     let mut svg = Svg {
         out: Vec::new(),
         bad: false,
@@ -263,7 +263,12 @@ pub fn write_svg(stream: &PlotStream, options: &mut WriteOptions<'_>) -> Result<
     loss.add(
         reasons::SOURCES_FAILED,
         "entity",
-        stream.failed.first().map(ToString::to_string),
+        stream
+            .failed
+            .first()
+            .map(ToString::to_string)
+            .as_deref()
+            .map(Source::Text),
         stream.failed.len() as u64,
     );
     if svg.bad {
@@ -272,13 +277,13 @@ pub fn write_svg(stream: &PlotStream, options: &mut WriteOptions<'_>) -> Result<
     gate.finish(svg.out.len())?;
     Ok(Output {
         bytes: svg.out,
-        report: loss.finish("svg", "1.1"),
+        report: loss.finish(LossHeader::new("svg", "1.1", Direction::Export, None)),
     })
 }
 
 /// Writes one item and records what happened to it.
 fn item_out(svg: &mut Svg, item: &Item, paper: Color, cx: &Cx, loss: &mut LossLog) -> Result<()> {
-    let source = || Some(item.source.to_string());
+    let source = || item.source.to_string();
     let mut counts = Counts::default();
     let drawn = match &item.kind {
         ItemKind::Point { at, pen } => {
@@ -319,19 +324,29 @@ fn item_out(svg: &mut Svg, item: &Item, paper: Color, cx: &Cx, loss: &mut LossLo
             true
         }
         ItemKind::Glyphs { .. } => {
-            loss.add(reasons::GLYPHS_DROPPED, kind(item), source(), 1);
+            loss.add(
+                reasons::GLYPHS_DROPPED,
+                kind(item),
+                Some(Source::Text(&source())),
+                1,
+            );
             return Ok(());
         }
     };
     let name = kind(item);
     if !drawn {
-        loss.add(reasons::ITEMS_FAILED, name, source(), 1);
+        loss.add(
+            reasons::ITEMS_FAILED,
+            name,
+            Some(Source::Text(&source())),
+            1,
+        );
         return Ok(());
     }
     loss.add_with(
         reasons::NURBS_FLATTENED,
         name,
-        source(),
+        Some(Source::Text(&source())),
         counts.nurbs,
         vec![(
             "tolerance_mm".to_owned(),
@@ -341,11 +356,16 @@ fn item_out(svg: &mut Svg, item: &Item, paper: Color, cx: &Cx, loss: &mut LossLo
     loss.add(
         reasons::POLYLINE_WIDTH_APPROXIMATED,
         name,
-        source(),
+        Some(Source::Text(&source())),
         counts.widths,
     );
     if counts.nurbs == 0 && counts.widths == 0 {
-        loss.add(reasons::ITEMS_WRITTEN, name, source(), 1);
+        loss.add(
+            reasons::ITEMS_WRITTEN,
+            name,
+            Some(Source::Text(&source())),
+            1,
+        );
     }
     Ok(())
 }

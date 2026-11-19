@@ -7,7 +7,7 @@ use crate::encoding::{Decoder, is_supported};
 use crate::error::{Position, codes, limit, reasons};
 use crate::fields::{Body, Cursor, Cx, Fields};
 use crate::group::{Group, Value, Version};
-use crate::loss::{Argument, Direction, LossHeader, LossLog, LossReport};
+use crate::loss::{Argument, Direction, LossHeader, LossLog, LossReport, Source};
 use crate::model::{
     Block, Class, Drawing, Entity, EntityKind, EntityProps, Head, HeaderVariable, Object,
     ObjectKind, PreservedRecord, PreservedSection, PreservedTable, Table, TableEntry, Tables,
@@ -96,7 +96,7 @@ pub fn read(data: &[u8], options: &mut ReadOptions<'_>) -> Result<ReadOutput> {
         records: 0,
         last: Position::Line(0),
         version,
-        loss: LossLog::default(),
+        loss: LossLog::unbounded(),
         cancel: options.cancel.clone(),
         progress: options.progress.as_deref_mut(),
         total: size,
@@ -443,7 +443,7 @@ impl Reader<'_, '_, '_> {
             self.loss.add(
                 reasons::RECORD_PRESERVED,
                 &rec.kind,
-                record.handle().map(|h| h.0),
+                record.handle().map(|h| Source::Hex(h.0)),
                 1,
             );
             return Ok(Entity {
@@ -490,10 +490,14 @@ impl Reader<'_, '_, '_> {
     }
 
     fn note(&mut self, kind: &str, handle: Option<crate::group::Handle>, extras: &[Group]) {
-        self.loss.mapped += 1;
+        self.loss.add_mapped(1);
         let n = u64::try_from(extras.len()).unwrap_or(u64::MAX);
-        self.loss
-            .add(reasons::GROUPS_PRESERVED, kind, handle.map(|h| h.0), n);
+        self.loss.add(
+            reasons::GROUPS_PRESERVED,
+            kind,
+            handle.map(|h| Source::Hex(h.0)),
+            n,
+        );
     }
 
     fn object(&mut self, rec: &Record) -> Result<Object> {
@@ -502,7 +506,7 @@ impl Reader<'_, '_, '_> {
             self.loss.add(
                 reasons::RECORD_PRESERVED,
                 &rec.kind,
-                record.handle().map(|h| h.0),
+                record.handle().map(|h| Source::Hex(h.0)),
                 1,
             );
             return Ok(Object::new(ObjectKind::Preserved(record)));

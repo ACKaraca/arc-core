@@ -1,235 +1,84 @@
-//! Loss reports (CORE-IO-004): every write returns one, also when nothing was lost.
+//! Loss reports (CORE-IO-004) of the SVG and PDF writers.
 //!
-//! The shape is that of `arc-io-dxf::loss`, written against the same published schema
-//! `schemas/loss-report.schema.json`; the types are duplicated because the layer table does not
-//! let one format crate depend on another. Items are aggregated per reason and record kind: the
-//! argument `count` says how many occurrences an item stands for.
+//! The types and the aggregator are shared through `arc_io_common::loss`; this module re-exports
+//! them under the crate's own path. The reason codes stay in [`crate::error`]. The PDF log is
+//! unbounded, so every distinct plot item kind of a stream keeps its own item.
 
-use std::collections::BTreeMap;
+pub use arc_io_common::loss::{
+    Argument, Direction, LossHeader, LossItem, LossReport, LossSummary, Outcome, Reason, Severity,
+};
+pub(crate) use arc_io_common::loss::{LossLog, Source};
 
-use arc_base::Limits;
-use serde::Serialize;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// What happened to a piece of data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Outcome {
-    /// Represented in the target without change.
-    Mapped,
-    /// Represented with a stated approximation.
-    Approximated,
-    /// Kept as preserved data that the same crate writes back.
-    Preserved,
-    /// Not represented.
-    Dropped,
-    /// Could not be processed.
-    Failed,
-}
+    const MAPPED: Reason = Reason {
+        code: "t.mapped",
+        outcome: Outcome::Mapped,
+        severity: Severity::Info,
+        message_id: "m",
+    };
+    const DROPPED: Reason = Reason {
+        code: "t.drop",
+        outcome: Outcome::Dropped,
+        severity: Severity::Error,
+        message_id: "m",
+    };
+    const PRESERVED: Reason = Reason {
+        code: "t.pres",
+        outcome: Outcome::Preserved,
+        severity: Severity::Info,
+        message_id: "m",
+    };
+    const FAILED: Reason = Reason {
+        code: "t.fail",
+        outcome: Outcome::Failed,
+        severity: Severity::Error,
+        message_id: "m",
+    };
 
-/// How important an item is to a user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Severity {
-    /// For information.
-    Info,
-    /// Data changed or may not be what the user expects.
-    Warning,
-    /// Data is missing.
-    Error,
-}
-
-/// The direction of the transfer a report describes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Direction {
-    /// Reading a file into the neutral model.
-    Import,
-    /// Writing the neutral model into a file.
-    Export,
-}
-
-/// A registered loss reason: its stable code, outcome, severity and message identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Reason {
-    /// The stable dotted reason code.
-    pub code: &'static str,
-    /// The outcome of every item with this reason.
-    pub outcome: Outcome,
-    /// The severity of every item with this reason.
-    pub severity: Severity,
-    /// The Fluent message identifier that describes the item.
-    pub message_id: &'static str,
-}
-
-/// A message argument of a loss item.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(untagged)]
-pub enum Argument {
-    /// A whole number.
-    Int(i64),
-    /// A text.
-    Text(String),
-}
-
-/// One loss item.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LossItem {
-    /// What happened.
-    pub outcome: Outcome,
-    /// How important it is.
-    pub severity: Severity,
-    /// The source identifier of the first occurrence: the plot item's source object.
-    pub source_id: Option<String>,
-    /// The record kind: the plot item kind (`stroke`, `fill`, `glyphs`, ...).
-    pub record_kind: Option<String>,
-    /// The Arc object identifier; format crates leave it empty and products fill it.
-    pub object_id: Option<String>,
-    /// The stable reason code.
-    pub reason: String,
-    /// The Fluent message identifier.
-    pub message_id: String,
-    /// The message arguments; `count` is always present.
-    pub arguments: BTreeMap<String, Argument>,
-}
-
-/// Counts by outcome.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub struct LossSummary {
-    /// Occurrences represented without change.
-    pub mapped: u64,
-    /// Occurrences represented with an approximation.
-    pub approximated: u64,
-    /// Occurrences kept as preserved data.
-    pub preserved: u64,
-    /// Occurrences not represented.
-    pub dropped: u64,
-    /// Occurrences that could not be processed.
-    pub failed: u64,
-}
-
-/// The header of a report. The crate fills the format, version, direction and limits; the
-/// caller fills file name, hash, application and time, which a format crate does not know.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LossHeader {
-    /// The format name, `svg` or `pdf`.
-    pub format: String,
-    /// The format version written: `1.1` for SVG, `1.7` for PDF.
-    pub version: String,
-    /// Import or export.
-    pub direction: Direction,
-    /// The file name, if the caller sets it.
-    pub file_name: Option<String>,
-    /// The file hash, if the caller sets it.
-    pub file_hash: Option<String>,
-    /// The application name, if the caller sets it.
-    pub application: Option<String>,
-    /// The application version, if the caller sets it.
-    pub application_version: Option<String>,
-    /// The time of the transfer, if the caller sets it.
-    pub time: Option<String>,
-    /// The limits profile of an import; empty for an export.
-    pub limits: Option<Limits>,
-}
-
-/// A loss report.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LossReport {
-    /// What was transferred.
-    pub header: LossHeader,
-    /// Counts by outcome.
-    pub summary: LossSummary,
-    /// The items, ordered by reason code and record kind.
-    pub items: Vec<LossItem>,
-}
-
-impl LossReport {
-    /// Whether any item says data was dropped or failed.
-    #[must_use]
-    pub fn has_loss(&self) -> bool {
-        self.summary.dropped > 0 || self.summary.failed > 0
-    }
-}
-
-/// One aggregated item: reason, count, first source and arguments.
-type Entry = (Reason, u64, Option<String>, Vec<(String, Argument)>);
-
-/// Collects items while writing.
-#[derive(Debug, Default)]
-pub(crate) struct LossLog {
-    items: BTreeMap<(&'static str, String), Entry>,
-}
-
-impl LossLog {
-    pub(crate) fn add(&mut self, reason: Reason, kind: &str, source: Option<String>, count: u64) {
-        self.add_with(reason, kind, source, count, Vec::new());
+    /// The report of the PDF log before the types moved to `arc_io_common`, with the same records,
+    /// so the serialized form is pinned to the one the crate produced then.
+    #[test]
+    fn serialized_report_keeps_the_pre_move_shape() {
+        let mut log = LossLog::unbounded();
+        log.add(MAPPED, "stroke", Some(Source::Text("42")), 3);
+        log.add(DROPPED, "glyphs", None, 1);
+        log.add_with(
+            DROPPED,
+            "glyphs",
+            Some(Source::Text("obj-7")),
+            2,
+            vec![
+                ("name".to_owned(), Argument::Text("x".to_owned())),
+                ("n".to_owned(), Argument::Int(7)),
+            ],
+        );
+        log.add(PRESERVED, "", None, 2);
+        log.add(FAILED, "bad", Some(Source::Text("z")), 1);
+        log.add(DROPPED, "none", None, 0);
+        let report = log.finish(LossHeader::new("pdf", "1.7", Direction::Export, None));
+        assert_eq!(
+            serde_json::to_string(&report).ok().as_deref(),
+            Some(PRE_MOVE_JSON)
+        );
     }
 
-    pub(crate) fn add_with(
-        &mut self,
-        reason: Reason,
-        kind: &str,
-        source: Option<String>,
-        count: u64,
-        arguments: Vec<(String, Argument)>,
-    ) {
-        if count == 0 {
-            return;
+    #[test]
+    fn unbounded_log_keeps_every_record_kind() {
+        let mut log = LossLog::unbounded();
+        for i in 0..1100u64 {
+            log.add(
+                DROPPED,
+                &format!("K{i:04}"),
+                Some(Source::Text(&i.to_string())),
+                1,
+            );
         }
-        let entry = self
-            .items
-            .entry((reason.code, kind.to_owned()))
-            .or_insert((reason, 0, None, arguments));
-        entry.1 = entry.1.saturating_add(count);
-        if entry.2.is_none() {
-            entry.2 = source;
-        }
+        let report = log.finish(LossHeader::new("pdf", "1.7", Direction::Export, None));
+        assert_eq!((report.items.len(), report.summary.dropped), (1100, 1100));
     }
 
-    pub(crate) fn finish(self, format: &str, version: &str) -> LossReport {
-        let mut summary = LossSummary::default();
-        let items = self
-            .items
-            .into_iter()
-            .map(|((_, kind), (reason, count, source, arguments))| {
-                let slot = match reason.outcome {
-                    Outcome::Mapped => &mut summary.mapped,
-                    Outcome::Approximated => &mut summary.approximated,
-                    Outcome::Preserved => &mut summary.preserved,
-                    Outcome::Dropped => &mut summary.dropped,
-                    Outcome::Failed => &mut summary.failed,
-                };
-                *slot = slot.saturating_add(count);
-                let mut arguments: BTreeMap<String, Argument> = arguments.into_iter().collect();
-                arguments.insert(
-                    "count".to_owned(),
-                    Argument::Int(i64::try_from(count).unwrap_or(i64::MAX)),
-                );
-                LossItem {
-                    outcome: reason.outcome,
-                    severity: reason.severity,
-                    source_id: source,
-                    record_kind: (!kind.is_empty()).then_some(kind),
-                    object_id: None,
-                    reason: reason.code.to_owned(),
-                    message_id: reason.message_id.to_owned(),
-                    arguments,
-                }
-            })
-            .collect();
-        LossReport {
-            header: LossHeader {
-                format: format.to_owned(),
-                version: version.to_owned(),
-                direction: Direction::Export,
-                file_name: None,
-                file_hash: None,
-                application: None,
-                application_version: None,
-                time: None,
-                limits: None,
-            },
-            summary,
-            items,
-        }
-    }
+    const PRE_MOVE_JSON: &str = r#"{"header":{"format":"pdf","version":"1.7","direction":"export","file_name":null,"file_hash":null,"application":null,"application_version":null,"time":null,"limits":null},"summary":{"mapped":3,"approximated":0,"preserved":2,"dropped":3,"failed":1},"items":[{"outcome":"dropped","severity":"error","source_id":"obj-7","record_kind":"glyphs","object_id":null,"reason":"t.drop","message_id":"m","arguments":{"count":3}},{"outcome":"failed","severity":"error","source_id":"z","record_kind":"bad","object_id":null,"reason":"t.fail","message_id":"m","arguments":{"count":1}},{"outcome":"mapped","severity":"info","source_id":"42","record_kind":"stroke","object_id":null,"reason":"t.mapped","message_id":"m","arguments":{"count":3}},{"outcome":"preserved","severity":"info","source_id":null,"record_kind":null,"object_id":null,"reason":"t.pres","message_id":"m","arguments":{"count":2}}]}"#;
 }

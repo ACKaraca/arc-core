@@ -10,11 +10,13 @@ publish.workspace = true
 
 [dependencies]
 arc-base = { workspace = true }
+arc-io-common = { workspace = true }
 arc-io-dxf = { workspace = true }
 acadrust = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
