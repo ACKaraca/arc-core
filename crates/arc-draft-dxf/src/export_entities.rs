@@ -2,7 +2,6 @@
 
 use std::f64::consts::TAU;
 
-use arc_base::id::Identifier;
 use arc_base::math::{Point2, Vector2};
 use arc_base::{Limits, ObjectId, Result};
 use arc_doc::relationship::ReferenceField;
@@ -24,7 +23,7 @@ use crate::color::to_true;
 use crate::error::reasons;
 use crate::export::{Exporter, alpha_of, invalid, lineweight_code, note_what};
 use crate::fields::Reader;
-use crate::plan::{FOREIGN_ENTITY, FOREIGN_FORMAT, decode_record};
+use crate::plan::{FOREIGN_ENTITY, decode_record};
 
 fn p3(p: Point2, z: f64) -> [f64; 3] {
     [p.x, p.y, z]
@@ -75,13 +74,14 @@ impl Exporter<'_> {
             };
             let object = snapshot.get(handle)?;
             let reader = Reader::new(snapshot.registry(), key.as_str(), &object.values);
-            if let Some(entity) = self.entity(key.as_str(), &reader, owner)? {
+            if let Some(entity) = self.entity(key.as_str(), &reader, owner, id)? {
                 self.count += 1;
                 self.rep.mapped(1);
                 out.push(entity);
             }
         }
         for mut record in self.preserved_records(container, FOREIGN_ENTITY) {
+            self.claim_record(&mut record);
             // The record's owner is the container it is written to now.
             let first_marker = record.groups.iter().position(|g| g.code == 100);
             let owned = record
@@ -103,17 +103,15 @@ impl Exporter<'_> {
     pub(crate) fn preserved_records(
         &mut self,
         container: ObjectId,
-        kind: &str,
+        kind: &'static str,
     ) -> Vec<PreservedRecord> {
-        let owner = container.as_u128().to_be_bytes();
+        let rows = self
+            .foreign
+            .get(&(container, kind))
+            .cloned()
+            .unwrap_or_default();
         let mut out = Vec::new();
-        for row in self.snapshot.foreign_rows() {
-            if row.source_format != FOREIGN_FORMAT
-                || row.record_kind != kind
-                || row.object.as_deref() != Some(owner.as_slice())
-            {
-                continue;
-            }
+        for row in rows {
             if let Some(record) = decode_record(&row.data) {
                 self.rep.mapped(1);
                 out.push(record);
@@ -125,8 +123,18 @@ impl Exporter<'_> {
         out
     }
 
-    fn entity(&mut self, key: &str, r: &Reader<'_>, owner: Handle) -> Result<Option<Entity>> {
-        let handle = self.handle();
+    fn entity(
+        &mut self,
+        key: &str,
+        r: &Reader<'_>,
+        owner: Handle,
+        object: ObjectId,
+    ) -> Result<Option<Entity>> {
+        // The bound handle is claimed only when the entity is written.
+        let fresh = self.handle();
+        let wanted = self.bound.get(&object).copied();
+        let claimable = wanted.filter(|w| !self.taken.contains(&w.0));
+        let handle = claimable.unwrap_or(fresh);
         let z = r.f64_or("elevation", 0.0);
         let kind = match key {
             POINT => point_of(r.get("position")).map(|p| {
@@ -162,6 +170,16 @@ impl Exporter<'_> {
             return Ok(None);
         };
         let props = self.props(r, matches!(kind, EntityKind::LwPolyline(_)));
+        match wanted {
+            Some(w) if claimable.is_some() => {
+                self.taken.insert(w.0);
+            }
+            Some(w) => self
+                .rep
+                .note(reasons::HANDLE_REASSIGNED, "ENTITY", Some(w.to_hex()), &[]),
+            None => {}
+        }
+        self.written.push((object, handle));
         Ok(Some(Entity {
             head: arc_io_dxf::model::Head {
                 handle: Some(handle),

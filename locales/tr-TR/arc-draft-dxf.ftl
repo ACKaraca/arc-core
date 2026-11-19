@@ -4,6 +4,7 @@
 
 draft-dxf-space-invalid = Hedef bir model alanı olmalıdır.
 draft-dxf-document-invalid = Saklanan bir çizim nesnesi, türünün bildirdiği biçimde değil.
+draft-dxf-handle-space-exhausted = Dışa aktarma, kullanılan tutamaçların üstünde kalan tutamaçlardan fazlasını gerektiriyor.
 draft-dxf-loss-entity-unmapped = { $count } { $kind } kaydının çizimde karşılığı yok ve içe aktarılmadı.
 draft-dxf-loss-record-preserved = { $count } { $kind } kaydının çizimde karşılığı yok; belgede yabancı veri olarak saklandı ve dışa aktarmada geri yazılır.
 draft-dxf-loss-foreign-overflow = { $count } { $kind } kaydı yabancı veri olarak saklanamadı; içe aktarma sınırlı sayıda kayıt saklar ya da kayıtlar çok büyük.
@@ -29,6 +30,9 @@ draft-dxf-loss-linetype-invalid = { $count } çizgi tipi, deseninde pozitif uzun
 draft-dxf-loss-name-adjusted = { $count } { $kind } adı düzeltildi: { $what }.
 draft-dxf-loss-export-unmapped = { $count } { $kind } nesnesinin DXF karşılığı yok ve yazılmadı.
 draft-dxf-loss-export-approximated = { $count } { $kind } nesnesi sahip olduğundan daha az bilgiyle yazıldı: { $what }.
+draft-dxf-loss-handle-duplicate = Dosyada önceki bir nesnenin tutamacını yineleyen { $count } { $kind } nesnesi kaynak tutamacı olmadan oluşturuldu.
+draft-dxf-loss-binding-moved = { $count } kaynak tutamacı, aynı dosyanın önceki içe aktarımındaki nesnelerden bu içe aktarmanın nesnelerine taşındı; o nesneler bağlantısını yitirdi.
+draft-dxf-loss-handle-reassigned = Tutamacını başka bir kayıt kullandığı için { $count } { $kind } kaydına yeni bir tutamaç verildi.
 draft-dxf-command-import = DXF içe aktar
 draft-dxf-command-import-description = Bir DXF dosyasını, katmanları, çizgi tiplerini, stilleri, blokları ve nesneleri ile geri alınabilir tek adımda bir model alanına okur.
 draft-dxf-command-export = DXF dışa aktar

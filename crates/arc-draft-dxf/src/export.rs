@@ -5,10 +5,11 @@
 //! records, the layout dictionary and the two layouts) around the content. Every record gets a
 //! handle and an owner here, so the writer assigns none.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use arc_base::id::Identifier;
 use arc_base::{Error, ObjectId, Result};
-use arc_doc::{Snapshot, Value};
+use arc_doc::{Snapshot, StoredForeign, Value};
 use arc_draft::style::{DIM_STYLE, TEXT_STYLE};
 use arc_draft::types::{BLOCK, LAYER, LINETYPE, SpaceUnit};
 use arc_io_dxf::loss::{Argument, Direction};
@@ -18,16 +19,51 @@ use arc_io_dxf::model::{
 };
 use arc_io_dxf::model::{EntityProps, Head, HeaderVariable, SeqEnd};
 use arc_io_dxf::{
-    Drawing, Entity, EntityKind, Group, Handle, LossReport, Object, ObjectKind, Version,
+    Drawing, Entity, EntityKind, Group, Handle, LossReport, Object, ObjectKind, PreservedRecord,
+    Version,
 };
 
-use crate::apply::model_space_unit;
+use crate::apply::{bound_handles, model_space_unit};
 use crate::color::to_true;
-use crate::error::codes;
+use crate::error::{codes, reasons};
 use crate::fields::Reader;
-use crate::plan::{FOREIGN_FORMAT, FOREIGN_OBJECT};
+use crate::plan::{FOREIGN_ENTITY, FOREIGN_FORMAT, FOREIGN_OBJECT};
 use crate::report::Reporter;
 use crate::units::code_of_unit;
+
+/// The handle of the root dictionary the export writes unless a bound handle takes it.
+const ROOT_HANDLE: u64 = 0xC;
+
+/// The lowest handle the export assigns; the structure around the content takes the first ones.
+const FIRST_ASSIGNED: u64 = 0x20;
+
+/// The handles that must remain above the first assigned one: an export with fewer than 2^32
+/// handles to assign above its start is refused, so that no handle wraps.
+const HANDLE_ROOM: u64 = 1 << 32;
+
+fn exhausted() -> Error {
+    Error::new(codes::HANDLE_SPACE_EXHAUSTED)
+}
+
+/// How the export chooses the handles of the records it writes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum HandlePolicy {
+    /// Every record gets a new handle above the handles of the preserved records. The default,
+    /// and the handles the export wrote before the policies existed.
+    #[default]
+    Assign,
+    /// An object bound to the source document `document` (see [`crate::apply`]) is written with
+    /// its bound handle; every other record gets a new handle above all bound handles, the
+    /// handles of the preserved records and `floor`. A bound handle that another record of the
+    /// file already has is given to the first one written; the other gets a new handle and is
+    /// reported (`draft.dxf.handle_reassigned`).
+    KeepSources {
+        /// The label of the source document the bindings were made with.
+        document: String,
+        /// Assigned handles are above this one.
+        floor: u64,
+    },
+}
 
 /// The result of an export.
 #[derive(Debug, Clone)]
@@ -38,6 +74,9 @@ pub struct Exported {
     pub report: LossReport,
     /// The entities written, in the model space and in blocks.
     pub entities: u64,
+    /// The handle each exported object is written with, in writing order: the objects of the
+    /// document (entities, layers, linetypes, styles, block records) and not the structure.
+    pub handles: Vec<(ObjectId, Handle)>,
 }
 
 pub(crate) struct Exporter<'a> {
@@ -51,6 +90,21 @@ pub(crate) struct Exporter<'a> {
     pub(crate) blocks: BTreeMap<ObjectId, String>,
     pub(crate) count: u64,
     style_handles: BTreeMap<String, Handle>,
+    /// Whether bound handles are kept ([`HandlePolicy::KeepSources`]).
+    keep: bool,
+    /// The bound handle of each object written with one.
+    pub(crate) bound: BTreeMap<ObjectId, Handle>,
+    /// Every handle a record of the output holds, so that no two records share one.
+    pub(crate) taken: BTreeSet<u64>,
+    /// The handles of the preserved records and the bound handles: the ones a new handle avoids.
+    used: BTreeSet<u64>,
+    /// The handle each object was written with.
+    pub(crate) written: Vec<(ObjectId, Handle)>,
+    /// The foreign rows of the kinds `entity` and `object` by the object they are attached to,
+    /// in row order; built once per export.
+    pub(crate) foreign: BTreeMap<(ObjectId, &'static str), Vec<&'a StoredForeign>>,
+    /// Set when a handle could not be given without wrapping; the export then fails.
+    exhausted: bool,
 }
 
 pub(crate) fn invalid(what: &str) -> Error {
@@ -75,6 +129,16 @@ fn named(snapshot: &Snapshot, key: &str) -> Vec<(ObjectId, String)> {
     out
 }
 
+/// The objects by lowercase name, the first object of each name in identifier order: the name
+/// merge of the tables compares names without regard to case, so the lookups do too.
+fn by_lowercase(names: &BTreeMap<ObjectId, String>) -> BTreeMap<String, ObjectId> {
+    let mut out = BTreeMap::new();
+    for (id, name) in names {
+        out.entry(name.to_lowercase()).or_insert(*id);
+    }
+    out
+}
+
 /// The entry names of a standard table first, then the document's names that are not among
 /// them (compared without regard to case), each name once.
 fn names_with_standard(
@@ -93,10 +157,63 @@ fn names_with_standard(
 }
 
 impl Exporter<'_> {
+    /// A new handle, above every handle the export has taken or was given.
     pub(crate) fn handle(&mut self) -> Handle {
-        let h = Handle(self.next);
-        self.next += 1;
-        h
+        loop {
+            let h = self.next;
+            let Some(next) = h.checked_add(1) else {
+                self.exhausted = true;
+                return Handle(h);
+            };
+            self.next = next;
+            if self.taken.insert(h) {
+                return Handle(h);
+            }
+        }
+    }
+
+    /// The handle of a record of `object` (`None` for structure): its bound handle when the
+    /// policy keeps sources and no other record has it, else `fresh`. The caller lists the
+    /// object as written when it writes the record.
+    pub(crate) fn handle_for(
+        &mut self,
+        fresh: Handle,
+        object: Option<ObjectId>,
+        kind: &str,
+    ) -> Handle {
+        let Some(wanted) = object.and_then(|id| self.bound.get(&id).copied()) else {
+            return fresh;
+        };
+        if self.taken.insert(wanted.0) {
+            return wanted;
+        }
+        self.rep
+            .note(reasons::HANDLE_REASSIGNED, kind, Some(wanted.to_hex()), &[]);
+        fresh
+    }
+
+    /// Claims the handle of a preserved record in a keeping export; a handle that another record
+    /// has is replaced by a new one, which is reported.
+    pub(crate) fn claim_record(&mut self, record: &mut PreservedRecord) {
+        if !self.keep {
+            return;
+        }
+        let Some(wanted) = record.handle() else {
+            return;
+        };
+        if self.taken.insert(wanted.0) {
+            return;
+        }
+        let fresh = self.handle();
+        if let Some(group) = record.groups.iter_mut().find(|g| g.code == 5) {
+            group.value = arc_io_dxf::Value::Text(fresh.to_hex());
+        }
+        self.rep.note(
+            reasons::HANDLE_REASSIGNED,
+            &record.kind,
+            Some(wanted.to_hex()),
+            &[],
+        );
     }
 
     pub(crate) fn head(&mut self, owner: Handle) -> Head {
@@ -126,28 +243,108 @@ impl Exporter<'_> {
             xdata: Vec::new(),
         }
     }
+
+    /// An entry of `object`, with its bound handle when the policy keeps it.
+    fn object_entry<T>(
+        &mut self,
+        table: Handle,
+        name: &str,
+        flags: i16,
+        data: T,
+        object: Option<ObjectId>,
+        kind: &str,
+    ) -> TableEntry<T> {
+        let mut entry = self.entry(table, name, flags, data);
+        let fresh = entry.head.handle.unwrap_or_default();
+        let handle = self.handle_for(fresh, object, kind);
+        entry.head.handle = Some(handle);
+        if let Some(id) = object {
+            self.written.push((id, handle));
+        }
+        entry
+    }
 }
 
-/// Exports the model space `space` with every layer, linetype, style and block of the document.
+/// Exports the model space `space` with every layer, linetype, style and block of the document,
+/// with every handle assigned by the export ([`HandlePolicy::Assign`]).
 ///
 /// # Errors
 ///
 /// `draft.dxf.space_invalid` unless `space` is a model space; `draft.dxf.document_invalid` when
 /// a stored object does not have the shape of its type.
 pub fn export_drawing(snapshot: &Snapshot, space: ObjectId) -> Result<Exported> {
+    export_drawing_with(snapshot, space, &HandlePolicy::Assign)
+}
+
+/// Exports the model space `space` as [`export_drawing`] does, choosing the handles by `policy`.
+///
+/// # Errors
+///
+/// As [`export_drawing`].
+pub fn export_drawing_with(
+    snapshot: &Snapshot,
+    space: ObjectId,
+    policy: &HandlePolicy,
+) -> Result<Exported> {
     let unit = model_space_unit(snapshot, space)?;
     let (_, layers) = names_with_standard(&["0"], named(snapshot, LAYER));
     let (_, linetypes) = names_with_standard(&[], named(snapshot, LINETYPE));
+    // The handles of the preserved records, which keep theirs.
+    let mut used: BTreeSet<u64> = snapshot
+        .foreign_rows()
+        .filter(|row| {
+            row.source_format == FOREIGN_FORMAT
+                && matches!(row.record_kind.as_str(), FOREIGN_ENTITY | FOREIGN_OBJECT)
+        })
+        .filter_map(|row| u64::from_str_radix(row.source_id.as_deref()?, 16).ok())
+        .collect();
+    let (keep, bound, floor) = match policy {
+        HandlePolicy::Assign => (false, BTreeMap::new(), None),
+        HandlePolicy::KeepSources { document, floor } => {
+            let bound = bound_handles(snapshot, document);
+            used.extend(bound.values().map(|h| h.0));
+            (true, bound, Some(*floor))
+        }
+    };
+    // Above every handle in use, the floor and the first assigned handle.
+    let above_used = match used.last() {
+        Some(top) => top.checked_add(1).ok_or_else(exhausted)?,
+        None => FIRST_ASSIGNED,
+    };
+    let above_floor = match floor {
+        Some(f) => f.checked_add(1).ok_or_else(exhausted)?,
+        None => FIRST_ASSIGNED,
+    };
+    let next = above_used.max(above_floor).max(FIRST_ASSIGNED);
+    if u64::MAX - next < HANDLE_ROOM {
+        return Err(exhausted());
+    }
+    let mut foreign: BTreeMap<(ObjectId, &'static str), Vec<&StoredForeign>> = BTreeMap::new();
+    for row in snapshot.foreign_rows() {
+        if row.source_format != FOREIGN_FORMAT {
+            continue;
+        }
+        let kind = match row.record_kind.as_str() {
+            FOREIGN_ENTITY => FOREIGN_ENTITY,
+            FOREIGN_OBJECT => FOREIGN_OBJECT,
+            _ => continue,
+        };
+        let Some(bytes) = row
+            .object
+            .as_deref()
+            .and_then(|b| <[u8; 16]>::try_from(b).ok())
+        else {
+            continue;
+        };
+        foreign
+            .entry((ObjectId::from_u128(u128::from_be_bytes(bytes)), kind))
+            .or_default()
+            .push(row);
+    }
     let mut ex = Exporter {
         snapshot,
         rep: Reporter::new(),
-        // Above the handles of the preserved records, which keep theirs.
-        next: snapshot
-            .foreign_rows()
-            .filter(|row| row.source_format == FOREIGN_FORMAT)
-            .filter_map(|row| u64::from_str_radix(row.source_id.as_deref()?, 16).ok())
-            .max()
-            .map_or(0x20, |top| top.saturating_add(1).max(0x20)),
+        next,
         layers,
         linetypes,
         text_styles: BTreeMap::new(),
@@ -155,23 +352,48 @@ pub fn export_drawing(snapshot: &Snapshot, space: ObjectId) -> Result<Exported> 
         blocks: BTreeMap::new(),
         count: 0,
         style_handles: BTreeMap::new(),
+        keep,
+        bound,
+        taken: BTreeSet::new(),
+        used,
+        written: Vec::new(),
+        foreign,
+        exhausted: false,
     };
     ex.text_styles = named(snapshot, TEXT_STYLE).into_iter().collect();
     ex.dim_styles = named(snapshot, DIM_STYLE).into_iter().collect();
     ex.blocks = named(snapshot, BLOCK).into_iter().collect();
     let drawing = ex.build(space, unit)?;
+    if ex.exhausted {
+        return Err(exhausted());
+    }
     let entities = ex.count;
+    let handles = std::mem::take(&mut ex.written);
     let report = ex.rep.finish("2018", Direction::Export);
     Ok(Exported {
         drawing,
         report,
         entities,
+        handles,
     })
 }
 
 impl Exporter<'_> {
     fn build(&mut self, space: ObjectId, unit: SpaceUnit) -> Result<Drawing> {
-        let root = Handle(0xC);
+        // A bound handle takes the root's place: the file does not fix it.
+        let root = if self.keep && self.used.contains(&ROOT_HANDLE) {
+            let fresh = self.handle();
+            self.rep.note(
+                reasons::HANDLE_REASSIGNED,
+                "DICTIONARY",
+                Some(Handle(ROOT_HANDLE).to_hex()),
+                &[],
+            );
+            fresh
+        } else {
+            self.taken.insert(ROOT_HANDLE);
+            Handle(ROOT_HANDLE)
+        };
         let model_record = self.handle();
         let paper_record = self.handle();
         let (tables, block_handles) = self.tables(model_record, paper_record)?;
@@ -186,11 +408,10 @@ impl Exporter<'_> {
         }
         let entities = self.container_entities(space, model_record)?;
         let mut objects = self.layout_objects(root, model_record, paper_record);
-        objects.extend(
-            self.preserved_records(space, FOREIGN_OBJECT)
-                .into_iter()
-                .map(|record| Object::new(ObjectKind::Preserved(record))),
-        );
+        for mut record in self.preserved_records(space, FOREIGN_OBJECT) {
+            self.claim_record(&mut record);
+            objects.push(Object::new(ObjectKind::Preserved(record)));
+        }
         Ok(Drawing {
             version: Version::R2018,
             header: vec![
@@ -353,7 +574,9 @@ impl Exporter<'_> {
         let ids: Vec<(ObjectId, String)> =
             self.blocks.iter().map(|(i, n)| (*i, n.clone())).collect();
         for (id, name) in ids {
-            let handle = self.handle();
+            let fresh = self.handle();
+            let handle = self.handle_for(fresh, Some(id), "BLOCK_RECORD");
+            self.written.push((id, handle));
             let object = self.snapshot.get(self.snapshot.resolve(id)?)?;
             let units = Reader::new(self.snapshot.registry(), BLOCK, &object.values)
                 .enum_code("unit")
@@ -374,10 +597,9 @@ impl Exporter<'_> {
         let mut table: Table<Layer> = self.table(Handle(0));
         let owner = table.head.handle.unwrap_or_default();
         let (names, _) = names_with_standard(&["0"], named(self.snapshot, LAYER));
-        let by_name: BTreeMap<String, ObjectId> =
-            self.layers.iter().map(|(i, n)| (n.clone(), *i)).collect();
+        let by_name = by_lowercase(&self.layers);
         for name in names {
-            let entry = match by_name.get(&name) {
+            let entry = match by_name.get(&name.to_lowercase()) {
                 Some(id) => self.layer_entry(owner, *id, &name)?,
                 None => self.entry(owner, &name, 0, plain_layer()),
             };
@@ -417,7 +639,7 @@ impl Exporter<'_> {
         };
         let flags =
             i16::from(r.bool_or("frozen", false)) | (i16::from(r.bool_or("locked", false)) << 2);
-        let mut entry = self.entry(owner, name, flags, data);
+        let mut entry = self.object_entry(owner, name, flags, data, Some(id), "LAYER");
         let transparency = r.f64_or("transparency", 0.0);
         if transparency > 0.0 {
             entry.extras.push(Group::int(
@@ -431,7 +653,9 @@ impl Exporter<'_> {
     fn linetype_table(&mut self) -> Result<Table<Linetype>> {
         let mut table: Table<Linetype> = self.table(Handle(0));
         let owner = table.head.handle.unwrap_or_default();
+        let by_name = by_lowercase(&self.linetypes);
         for name in ["ByBlock", "ByLayer", "Continuous"] {
+            let object = by_name.get(&name.to_lowercase()).copied();
             let data = Linetype {
                 description: if name == "Continuous" {
                     "Solid line".to_owned()
@@ -441,7 +665,9 @@ impl Exporter<'_> {
                 alignment: 65,
                 ..Linetype::default()
             };
-            table.entries.push(self.entry(owner, name, 0, data));
+            table
+                .entries
+                .push(self.object_entry(owner, name, 0, data, object, "LTYPE"));
         }
         let ids: Vec<(ObjectId, String)> = self
             .linetypes
@@ -455,7 +681,9 @@ impl Exporter<'_> {
                 continue;
             }
             let data = self.linetype_data(id)?;
-            table.entries.push(self.entry(owner, &name, 0, data));
+            table
+                .entries
+                .push(self.object_entry(owner, &name, 0, data, Some(id), "LTYPE"));
         }
         Ok(table)
     }
@@ -523,13 +751,9 @@ impl Exporter<'_> {
         let mut table: Table<TextStyle> = self.table(Handle(0));
         let owner = table.head.handle.unwrap_or_default();
         let (names, _) = names_with_standard(&["Standard"], named(self.snapshot, TEXT_STYLE));
-        let by_name: BTreeMap<String, ObjectId> = self
-            .text_styles
-            .iter()
-            .map(|(i, n)| (n.clone(), *i))
-            .collect();
+        let by_name = by_lowercase(&self.text_styles);
         for name in names {
-            let (data, flags) = match by_name.get(&name) {
+            let (data, flags) = match by_name.get(&name.to_lowercase()) {
                 Some(id) => self.text_style_data(*id)?,
                 None => (
                     TextStyle {
@@ -540,7 +764,8 @@ impl Exporter<'_> {
                     0,
                 ),
             };
-            let entry = self.entry(owner, &name, flags, data);
+            let object = by_name.get(&name.to_lowercase()).copied();
+            let entry = self.object_entry(owner, &name, flags, data, object, "STYLE");
             if let Some(h) = entry.head.handle {
                 self.style_handles.insert(name.to_lowercase(), h);
             }
@@ -575,14 +800,12 @@ impl Exporter<'_> {
         let mut table: Table<DimStyle> = self.table(Handle(0));
         let owner = table.head.handle.unwrap_or_default();
         let (names, _) = names_with_standard(&["Standard"], named(self.snapshot, DIM_STYLE));
-        let by_name: BTreeMap<String, ObjectId> = self
-            .dim_styles
-            .iter()
-            .map(|(i, n)| (n.clone(), *i))
-            .collect();
+        let by_name = by_lowercase(&self.dim_styles);
         for name in names {
-            let mut entry = self.entry(owner, &name, 0, DimStyle::default());
-            if let Some(id) = by_name.get(&name) {
+            let object = by_name.get(&name.to_lowercase()).copied();
+            let mut entry =
+                self.object_entry(owner, &name, 0, DimStyle::default(), object, "DIMSTYLE");
+            if let Some(id) = by_name.get(&name.to_lowercase()) {
                 let object = self.snapshot.get(self.snapshot.resolve(*id)?)?;
                 let r = Reader::new(self.snapshot.registry(), DIM_STYLE, &object.values);
                 for (code, field) in [

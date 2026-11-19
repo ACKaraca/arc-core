@@ -10,13 +10,16 @@ use std::path::Path;
 
 use arc_base::{Error, Result};
 use arc_command::{CommandSpec, Context, IdParam, Permission, Registry, UndoBehavior};
-use arc_io_dxf::{Progress, ReadOptions, Version, WriteOptions};
+use arc_io_dxf::loss::Direction;
+use arc_io_dxf::{Handle, Progress, ReadOptions, Version, WriteOptions};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::apply::{Applied, apply, model_space_unit};
-use crate::export::export_drawing;
+use crate::apply::{apply, model_space_unit};
+use crate::error::reasons;
+use crate::export::{HandlePolicy, export_drawing_with};
 use crate::plan::{ImportOptions, plan_with_report};
+use crate::report::Reporter;
 
 /// A message identifier of this crate that is not an error code or a loss reason.
 pub struct Message {
@@ -68,6 +71,10 @@ pub struct ImportParams {
     pub path: String,
     /// The model space that receives the content.
     pub space: IdParam,
+    /// Whether the result lists every created object (`created`). Off by default: a large file
+    /// creates many objects, and each one is also a source binding.
+    #[serde(default)]
+    pub list_created: bool,
 }
 
 /// The DXF version an export writes.
@@ -124,6 +131,43 @@ pub struct ExportParams {
     /// Whether to write the binary form instead of ASCII.
     #[serde(default)]
     pub binary: bool,
+    /// Keeps the handles of the objects that an import bound to this file: omitted, every handle
+    /// is assigned by the export; given, the bound handles are written as they were read.
+    #[serde(default)]
+    pub keep_sources: Option<KeepSources>,
+}
+
+/// The policy of `keep_sources` in `core.draft.export.dxf`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct KeepSources {
+    /// The label of the source document: the file name the import read (see
+    /// `core.draft.import.dxf`).
+    #[schemars(length(min = 1, max = 4095))]
+    pub document: String,
+    /// New handles are above this one, for a product's handle high-water mark.
+    #[serde(default)]
+    pub floor: u64,
+}
+
+/// An object an import created.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CreatedObject {
+    /// The identifier of the object.
+    pub object: String,
+    /// The type of the object (`LAYER`, `LINETYPE`, `STYLE`, `DIMSTYLE`, `BLOCK`, or the entity type).
+    pub kind: String,
+    /// The DXF handle of the object in the file, in hexadecimal, when the object is bound to it.
+    pub source: Option<String>,
+}
+
+/// An object an export wrote, with the handle it was written with.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WrittenHandle {
+    /// The identifier of the object.
+    pub object: String,
+    /// The handle written, in hexadecimal.
+    pub handle: String,
 }
 
 /// What `core.draft.import.dxf` returns.
@@ -141,6 +185,9 @@ pub struct ImportResult {
     pub blocks: u64,
     /// Entities created.
     pub entities: u64,
+    /// Every object created, in creation order; present when `list_created` was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created: Option<Vec<CreatedObject>>,
     /// The loss report, in the form of `schemas/loss-report.schema.json`.
     pub report: serde_json::Value,
 }
@@ -152,6 +199,8 @@ pub struct ExportResult {
     pub bytes: u64,
     /// The entities written, in the space and in blocks.
     pub entities: u64,
+    /// The handle each object of the document was written with, in writing order.
+    pub handles: Vec<WrittenHandle>,
     /// The loss report, in the form of `schemas/loss-report.schema.json`.
     pub report: serde_json::Value,
 }
@@ -183,32 +232,62 @@ fn import(ctx: &mut Context<'_>, p: ImportParams) -> Result<ImportResult> {
         &ImportOptions {
             target_unit,
             limits: *ctx.limits(),
+            source_document: source_document(&p.path),
             ..ImportOptions::default()
         },
         &output.report,
     );
-    let Applied {
-        linetypes,
-        layers,
-        text_styles,
-        dim_styles,
-        blocks,
-        entities,
-    } = apply(ctx, space, &plan)?;
+    let applied = apply(ctx, space, &plan)?;
+    let report = if applied.rebound > 0 {
+        let mut rep = Reporter::new();
+        rep.note_n(reasons::BINDING_MOVED, "", None, applied.rebound, &[]);
+        rep.absorb(&plan.report);
+        rep.finish(&plan.version, Direction::Import)
+    } else {
+        plan.report.clone()
+    };
+    let created = p.list_created.then(|| {
+        applied
+            .created
+            .iter()
+            .map(|c| CreatedObject {
+                object: c.id.to_string(),
+                kind: c.type_key.to_owned(),
+                source: c.source.map(Handle::to_hex),
+            })
+            .collect()
+    });
     Ok(ImportResult {
-        linetypes,
-        layers,
-        text_styles,
-        dim_styles,
-        blocks,
-        entities,
-        report: report_json(&plan.report)?,
+        linetypes: applied.linetypes,
+        layers: applied.layers,
+        text_styles: applied.text_styles,
+        dim_styles: applied.dim_styles,
+        blocks: applied.blocks,
+        entities: applied.entities,
+        created,
+        report: report_json(&report)?,
     })
+}
+
+/// The source document label of an import of `path`: its file name, or the path as given.
+fn source_document(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+        .to_owned()
 }
 
 /// Builds the drawing of the space, writes it and stores the bytes in the file.
 fn export(ctx: &mut Context<'_>, p: ExportParams) -> Result<ExportResult> {
-    let exported = export_drawing(ctx.snapshot(), p.space.0)?;
+    let policy = match p.keep_sources {
+        Some(keep) => HandlePolicy::KeepSources {
+            document: keep.document,
+            floor: keep.floor,
+        },
+        None => HandlePolicy::Assign,
+    };
+    let exported = export_drawing_with(ctx.snapshot(), p.space.0, &policy)?;
     ctx.progress(0.5, EXPORT_PROGRESS.message_id);
     let mut options = WriteOptions::for_version(p.version.version());
     options.binary = p.binary;
@@ -239,6 +318,14 @@ fn export(ctx: &mut Context<'_>, p: ExportParams) -> Result<ExportResult> {
     Ok(ExportResult {
         bytes: u64::try_from(output.bytes.len()).unwrap_or(u64::MAX),
         entities: exported.entities,
+        handles: exported
+            .handles
+            .iter()
+            .map(|(id, h)| WrittenHandle {
+                object: id.to_string(),
+                handle: h.to_hex(),
+            })
+            .collect(),
         report: report_json(&report)?,
     })
 }

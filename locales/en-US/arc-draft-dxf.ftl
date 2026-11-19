@@ -3,6 +3,7 @@
 
 draft-dxf-space-invalid = The target must be a model space.
 draft-dxf-document-invalid = A stored drawing object does not have the shape its type declares.
+draft-dxf-handle-space-exhausted = The export needs more handles than remain above the handles in use.
 draft-dxf-loss-entity-unmapped = { $count } { $kind } records have no drafting counterpart and were not imported.
 draft-dxf-loss-record-preserved = { $count } { $kind } records have no drafting counterpart; they were kept in the document as foreign data and are written back by the export.
 draft-dxf-loss-foreign-overflow = { $count } { $kind } records could not be kept as foreign data because the import keeps a limited number of them, or they are too large.
@@ -28,6 +29,9 @@ draft-dxf-loss-linetype-invalid = { $count } linetypes were not imported because
 draft-dxf-loss-name-adjusted = { $count } { $kind } names were adjusted: { $what }.
 draft-dxf-loss-export-unmapped = { $count } { $kind } objects have no DXF counterpart and were not written.
 draft-dxf-loss-export-approximated = { $count } { $kind } objects were written with less information than they hold: { $what }.
+draft-dxf-loss-handle-duplicate = { $count } { $kind } objects repeat a handle that an earlier object of the file has, so they were created without a source handle.
+draft-dxf-loss-binding-moved = { $count } source handles moved from objects of an earlier import of the same file to objects of this import, so those objects lost their binding.
+draft-dxf-loss-handle-reassigned = { $count } { $kind } records were written with a new handle because the handle they keep is held by another record.
 draft-dxf-command-import = Import DXF
 draft-dxf-command-import-description = Reads a DXF file into a model space as layers, linetypes, styles, blocks and entities in one undoable step.
 draft-dxf-command-export = Export DXF

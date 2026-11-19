@@ -114,7 +114,15 @@ to the path given; `--fail-on-loss` turns `dropped` and `failed` items into a no
 | DGN V7 | The published ISFF specification | Reads 2D and 3D elements (lines, shapes, arcs, ellipses, B-spline curves and surfaces, text, cells, complex chains and shapes), levels, color tables and reference attachments. DGN V8 has no published specification and is not read natively. |
 
 Each neutral model keeps source identifiers (3DM object ids, FBX node ids, DGN element offsets and
-levels) and preserved records, and produces a loss report like every other reader.
+levels) and preserved records, and produces a loss report like every other reader. For DXF the source
+identifier is the record's handle. The drafting import (`arc-draft-dxf`) binds each object it creates
+from a file record to that handle, and binds an existing object of the same name when the object has no
+binding yet; an export can write the bound handles back. Bound: layers, linetypes, text and dimension
+styles, block records, and the entities of the model space and of blocks. Not bound: records without a
+handle, records whose handle a preserved record of the file also holds, repeated handles after the
+first, paper-space entities, the `BLOCK` and `ENDBLK` records of a block, attribute definitions and
+attribute values, and records kept as preserved data. The rules, the reasons and the limits are in
+the crate specification.
 
 ## The Arc exchange package
 

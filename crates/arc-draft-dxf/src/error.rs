@@ -20,8 +20,16 @@ pub mod codes {
         message_id: "draft-dxf-document-invalid",
     };
 
+    /// An export would need a handle above the highest one in use, and fewer than 2^32 handles
+    /// remain above the start of the assignment.
+    pub const HANDLE_SPACE_EXHAUSTED: ErrorCode = ErrorCode {
+        code: "draft.dxf.handle_space_exhausted",
+        category: Category::InvalidInput,
+        message_id: "draft-dxf-handle-space-exhausted",
+    };
+
     /// Every code of this crate, for the registry check.
-    pub const ALL: &[ErrorCode] = &[SPACE_INVALID, DOCUMENT_INVALID];
+    pub const ALL: &[ErrorCode] = &[SPACE_INVALID, DOCUMENT_INVALID, HANDLE_SPACE_EXHAUSTED];
 }
 
 /// The stable reason codes of the loss-report items this crate adds to those of `arc-io-dxf`.
@@ -235,6 +243,34 @@ pub mod reasons {
         message_id: "draft-dxf-loss-export-approximated",
     };
 
+    /// Two objects of an import carry the same handle in the file: the first keeps it, the
+    /// later one is created without a source handle and is not bound.
+    pub const HANDLE_DUPLICATE: Reason = Reason {
+        code: "draft.dxf.handle_duplicate",
+        outcome: Outcome::Approximated,
+        severity: Severity::Warning,
+        message_id: "draft-dxf-loss-handle-duplicate",
+    };
+
+    /// A record of an export was written with a new handle because the handle it keeps is held
+    /// by another record of the output, or by the root dictionary. The item's source identifier
+    /// is the handle that was replaced.
+    pub const HANDLE_REASSIGNED: Reason = Reason {
+        code: "draft.dxf.handle_reassigned",
+        outcome: Outcome::Approximated,
+        severity: Severity::Warning,
+        message_id: "draft-dxf-loss-handle-reassigned",
+    };
+
+    /// Source handles moved from objects of an earlier import of the same file to the objects of
+    /// this import: the earlier objects lost their binding. Counted, never silent.
+    pub const BINDING_MOVED: Reason = Reason {
+        code: "draft.dxf.binding_moved",
+        outcome: Outcome::Approximated,
+        severity: Severity::Warning,
+        message_id: "draft-dxf-loss-binding-moved",
+    };
+
     /// Every reason of this crate, for the registry check.
     pub const ALL: &[Reason] = &[
         ENTITY_UNMAPPED,
@@ -262,6 +298,9 @@ pub mod reasons {
         NAME_ADJUSTED,
         EXPORT_UNMAPPED,
         EXPORT_APPROXIMATED,
+        HANDLE_DUPLICATE,
+        HANDLE_REASSIGNED,
+        BINDING_MOVED,
     ];
 }
 

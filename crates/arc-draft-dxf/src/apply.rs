@@ -1,14 +1,15 @@
 //! Applying a plan to a document: every object is created through the transaction of the
 //! running command, so one undo removes the whole import.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use arc_base::id::Identifier;
 use arc_base::math::{Point2, Vector3};
 use arc_base::{Error, ObjectId, Result};
 use arc_command::Context;
 use arc_doc::relationship::ReferenceField;
-use arc_doc::{ColorValue, GeometryBytes, Header, Snapshot, StoredForeign, Value};
+use arc_doc::source_map::RECORD_KIND as SOURCE_RECORD_KIND;
+use arc_doc::{ColorValue, GeometryBytes, Header, Snapshot, SourceMap, StoredForeign, Value};
 use arc_draft::dimension::DefinitionPoint;
 use arc_draft::text::paragraphs_value;
 use arc_draft::types::{
@@ -18,7 +19,6 @@ use arc_draft::types::{
 use arc_geom::Curve2;
 use arc_geom::encoding::GeomCodec;
 use arc_io_dxf::Handle;
-use serde::Serialize;
 
 use crate::error::codes;
 use crate::fields::{Builder, Reader};
@@ -28,9 +28,28 @@ use crate::plan::{
     TextStyleSpec,
 };
 
-/// How many objects of each kind an import created.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+/// An object an import created, in creation order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Created {
+    /// The identifier of the object.
+    pub id: ObjectId,
+    /// The type key of the object: `LAYER`, `LINETYPE`, `STYLE`, `DIMSTYLE`, `BLOCK`, or the
+    /// drafting type of the entity.
+    pub type_key: &'static str,
+    /// The DXF handle the object is bound to in the source map (format `dxf`, document the
+    /// plan's `source_document`), `None` when the file gave none or the handle occurs earlier.
+    pub source: Option<Handle>,
+}
+
+/// What an import created: how many objects of each kind, and every created object in order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Applied {
+    /// Existing objects of the document that the import bound to the file's handle, because they
+    /// had no binding under the source document label yet (not counted in the object counts).
+    pub adopted: u64,
+    /// Source handles that moved from an object of an earlier import to an object of this one
+    /// (the same label and handle). The earlier object loses its binding.
+    pub rebound: u64,
     /// Linetypes.
     pub linetypes: u64,
     /// Layers.
@@ -43,6 +62,8 @@ pub struct Applied {
     pub blocks: u64,
     /// Entities, in the space and in blocks.
     pub entities: u64,
+    /// Every object created, in creation order (definitions first, then entities).
+    pub created: Vec<Created>,
 }
 
 fn invalid(what: &str) -> Error {
@@ -121,6 +142,40 @@ fn next_order(snapshot: &Snapshot, space: ObjectId) -> i64 {
     next
 }
 
+/// The handles of the objects of `snapshot` bound to `document` in the source map (format `dxf`),
+/// by object. A binding whose object is not live is ignored; a zero handle is no binding. Of
+/// several records for one identifier, the first in row order counts, as in
+/// [`arc_doc::SourceMap`].
+pub(crate) fn bound_handles(snapshot: &Snapshot, document: &str) -> BTreeMap<ObjectId, Handle> {
+    let mut identifiers = BTreeSet::new();
+    let mut out = BTreeMap::new();
+    for row in snapshot
+        .foreign_rows()
+        .filter(|r| r.source_format == FOREIGN_FORMAT && r.record_kind == SOURCE_RECORD_KIND)
+    {
+        let (Some(id), Some(bytes), Ok(label)) = (
+            row.source_id.as_deref(),
+            row.object
+                .as_deref()
+                .and_then(|b| <[u8; 16]>::try_from(b).ok()),
+            std::str::from_utf8(&row.data),
+        ) else {
+            continue;
+        };
+        if label != document || !identifiers.insert(id) {
+            continue;
+        }
+        let Ok(handle) = u64::from_str_radix(id, 16) else {
+            continue;
+        };
+        let object = ObjectId::from_u128(u128::from_be_bytes(bytes));
+        if handle != 0 && snapshot.resolve(object).is_ok() {
+            out.insert(object, Handle(handle));
+        }
+    }
+    out
+}
+
 struct Applier<'c, 'a> {
     ctx: &'c mut Context<'a>,
     snapshot: Snapshot,
@@ -128,12 +183,22 @@ struct Applier<'c, 'a> {
     order: BTreeMap<ObjectId, i64>,
     space: ObjectId,
     applied: Applied,
+    sources: SourceMap,
+    document: String,
+    /// The objects bound under the document label before the import.
+    bound_here: BTreeSet<ObjectId>,
 }
 
 /// Creates the objects of `plan` in the transaction of `ctx`: definitions first, then the
 /// entities of the blocks and of the model space `space`. Layers, linetypes, text styles and
 /// dimension styles that the document already has under the same name (compared without regard
 /// to case) are used as they are; a block whose name is taken receives a new one.
+///
+/// Every created object that the plan gives a source handle is bound to it in the document's
+/// source map (format `dxf`, document [`Plan::source_document`], identifier the handle in
+/// hexadecimal), in the same transaction: one undo removes the objects and the bindings.
+/// Binding a handle that another object of the document has moves the binding to the new
+/// object. The result lists every created object with its source handle, in creation order.
 ///
 /// # Errors
 ///
@@ -142,6 +207,11 @@ pub fn apply(ctx: &mut Context<'_>, space: ObjectId, plan: &Plan) -> Result<Appl
     let snapshot = ctx.txn()?.snapshot().clone();
     model_space_unit(&snapshot, space)?;
     let mut applier = Applier {
+        sources: SourceMap::of(&snapshot),
+        document: plan.source_document.clone(),
+        bound_here: bound_handles(&snapshot, &plan.source_document)
+            .into_keys()
+            .collect(),
         ids: Ids {
             layers: existing(&snapshot, LAYER),
             linetypes: existing(&snapshot, LINETYPE),
@@ -168,6 +238,12 @@ pub fn apply(ctx: &mut Context<'_>, space: ObjectId, plan: &Plan) -> Result<Appl
         }
         applier.op(op, &taken)?;
     }
+    for named in &plan.standard_linetypes {
+        let key = named.name.to_lowercase();
+        if let Some(id) = applier.ids.linetypes.get(&key).copied() {
+            applier.adopt(id, named.source)?;
+        }
+    }
     for (n, spec) in plan.foreign.iter().enumerate() {
         if n % 256 == 0 {
             applier.ctx.checkpoint()?;
@@ -178,6 +254,49 @@ pub fn apply(ctx: &mut Context<'_>, space: ObjectId, plan: &Plan) -> Result<Appl
 }
 
 impl Applier<'_, '_> {
+    /// Binds `handle` to `id` under the document label. A handle that a live object of an earlier
+    /// import holds moves to `id`, and is counted in `rebound`.
+    fn bind_source(&mut self, id: ObjectId, handle: Handle) -> Result<()> {
+        let hex = handle.to_hex();
+        if self
+            .sources
+            .resolve(FOREIGN_FORMAT, &self.document, &hex)
+            .is_some_and(|old| old != id)
+        {
+            self.applied.rebound += 1;
+        }
+        let txn = self.ctx.txn()?;
+        self.sources
+            .bind(txn, FOREIGN_FORMAT, &self.document, &hex, id)
+    }
+
+    /// Binds the existing object `id` to the file's `source` when it has no binding under the
+    /// document label yet; an existing object is not created and is not listed as created.
+    fn adopt(&mut self, id: ObjectId, source: Option<Handle>) -> Result<()> {
+        match source {
+            Some(handle) if !self.bound_here.contains(&id) => {
+                self.bind_source(id, handle)?;
+                self.applied.adopted += 1;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Records that `id` was created as an object of `type_key` from the file object `source`:
+    /// binds the handle in the source map and lists the object.
+    fn bind(&mut self, id: ObjectId, type_key: &'static str, source: Option<Handle>) -> Result<()> {
+        if let Some(handle) = source {
+            self.bind_source(id, handle)?;
+        }
+        self.applied.created.push(Created {
+            id,
+            type_key,
+            source,
+        });
+        Ok(())
+    }
+
     fn create(
         &mut self,
         key: &str,
@@ -233,8 +352,8 @@ impl Applier<'_, '_> {
 
     fn linetype(&mut self, s: &LinetypeSpec) -> Result<()> {
         let key = s.name.to_lowercase();
-        if self.ids.linetypes.contains_key(&key) {
-            return Ok(());
+        if let Some(id) = self.ids.linetypes.get(&key).copied() {
+            return self.adopt(id, s.source);
         }
         let mut b = self.builder(LINETYPE);
         b.set("name", Value::String(s.name.clone()))?
@@ -246,13 +365,13 @@ impl Applier<'_, '_> {
         let id = self.create(LINETYPE, None, b.values)?;
         self.ids.linetypes.insert(key, id);
         self.applied.linetypes += 1;
-        Ok(())
+        self.bind(id, LINETYPE, s.source)
     }
 
     fn layer(&mut self, s: &LayerSpec) -> Result<()> {
         let key = s.name.to_lowercase();
-        if self.ids.layers.contains_key(&key) {
-            return Ok(());
+        if let Some(id) = self.ids.layers.get(&key).copied() {
+            return self.adopt(id, s.source);
         }
         let linetype = s
             .linetype
@@ -272,13 +391,13 @@ impl Applier<'_, '_> {
         let id = self.create(LAYER, None, b.values)?;
         self.ids.layers.insert(key, id);
         self.applied.layers += 1;
-        Ok(())
+        self.bind(id, LAYER, s.source)
     }
 
     fn text_style(&mut self, s: &TextStyleSpec) -> Result<()> {
         let key = s.name.to_lowercase();
-        if self.ids.text_styles.contains_key(&key) {
-            return Ok(());
+        if let Some(id) = self.ids.text_styles.get(&key).copied() {
+            return self.adopt(id, s.source);
         }
         let mut b = self.builder(arc_draft::style::TEXT_STYLE);
         b.set("name", Value::String(s.name.clone()))?
@@ -292,13 +411,13 @@ impl Applier<'_, '_> {
         let id = self.create(arc_draft::style::TEXT_STYLE, None, b.values)?;
         self.ids.text_styles.insert(key, id);
         self.applied.text_styles += 1;
-        Ok(())
+        self.bind(id, arc_draft::style::TEXT_STYLE, s.source)
     }
 
     fn dim_style(&mut self, s: &DimStyleSpec) -> Result<()> {
         let key = s.name.to_lowercase();
-        if self.ids.dim_styles.contains_key(&key) {
-            return Ok(());
+        if let Some(id) = self.ids.dim_styles.get(&key).copied() {
+            return self.adopt(id, s.source);
         }
         let mut b = self.builder(arc_draft::style::DIM_STYLE);
         b.set("name", Value::String(s.name.clone()))?;
@@ -314,7 +433,7 @@ impl Applier<'_, '_> {
         let id = self.create(arc_draft::style::DIM_STYLE, None, b.values)?;
         self.ids.dim_styles.insert(key, id);
         self.applied.dim_styles += 1;
-        Ok(())
+        self.bind(id, arc_draft::style::DIM_STYLE, s.source)
     }
 
     fn block(&mut self, s: &BlockSpec, taken: &BTreeMap<String, ObjectId>) -> Result<()> {
@@ -336,7 +455,7 @@ impl Applier<'_, '_> {
         self.ids.blocks.insert(s.name.to_lowercase(), id);
         self.order.insert(id, 0);
         self.applied.blocks += 1;
-        Ok(())
+        self.bind(id, BLOCK, s.source)
     }
 
     fn entity(&mut self, container: &Container, spec: &EntitySpec) -> Result<()> {
@@ -353,9 +472,9 @@ impl Applier<'_, '_> {
         let order = self.order.entry(owner).or_insert(0);
         b.set("draw_order", Value::I64(*order))?;
         *order += 1;
-        self.create(key, Some(owner), b.values)?;
+        let id = self.create(key, Some(owner), b.values)?;
         self.applied.entities += 1;
-        Ok(())
+        self.bind(id, key, spec.source)
     }
 
     fn common(&mut self, b: &mut Builder, a: &Appearance) -> Result<()> {

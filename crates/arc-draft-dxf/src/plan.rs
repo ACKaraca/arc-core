@@ -27,6 +27,9 @@ pub struct ImportOptions {
     pub limits: Limits,
     /// The tolerance for closing hatch boundaries and interpolating fit points.
     pub tolerance: Tolerance,
+    /// The label of the source document the bindings of the import refer to (the file the
+    /// handles come from). Empty when the import has no label.
+    pub source_document: String,
 }
 
 impl Default for ImportOptions {
@@ -35,6 +38,7 @@ impl Default for ImportOptions {
             target_unit: SpaceUnit::Millimeter,
             limits: Limits::DEFAULT,
             tolerance: Tolerance::DEFAULT,
+            source_document: String::new(),
         }
     }
 }
@@ -211,7 +215,8 @@ pub struct EntitySpec {
     pub appearance: Appearance,
     /// The kind data.
     pub shape: Shape,
-    /// The DXF handle of the source record.
+    /// The DXF handle of the source record, `None` when the file gave none or the handle
+    /// occurs earlier in the file.
     pub source: Option<Handle>,
 }
 
@@ -236,6 +241,8 @@ pub struct LayerSpec {
     pub locked: bool,
     /// Whether the layer plots.
     pub plottable: bool,
+    /// The DXF handle of the layer's table entry, bound to the object on apply.
+    pub source: Option<Handle>,
 }
 
 /// An element of a linetype pattern.
@@ -266,6 +273,8 @@ pub struct LinetypeSpec {
     pub description: String,
     /// The elements.
     pub elements: Vec<ElementSpec>,
+    /// The DXF handle of the linetype's table entry.
+    pub source: Option<Handle>,
 }
 
 /// A text style to create.
@@ -287,6 +296,18 @@ pub struct TextStyleSpec {
     pub upside_down: bool,
     /// Whether the text runs vertically.
     pub vertical: bool,
+    /// The DXF handle of the style's table entry.
+    pub source: Option<Handle>,
+}
+
+/// A definition of the file that the import does not create, but that binds to an existing object
+/// of the same name: the standard linetypes `ByBlock`, `ByLayer` and `Continuous`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedSource {
+    /// The name as the file spells it.
+    pub name: String,
+    /// The DXF handle of the file's table entry.
+    pub source: Option<Handle>,
 }
 
 /// A dimension style to create: its name and the values of the fields the file's dimension
@@ -297,6 +318,8 @@ pub struct DimStyleSpec {
     pub name: String,
     /// `(field, value)` pairs; reals and integers.
     pub values: Vec<(&'static str, f64)>,
+    /// The DXF handle of the style's table entry.
+    pub source: Option<Handle>,
 }
 
 /// An attribute definition of a block.
@@ -329,6 +352,8 @@ pub struct BlockSpec {
     pub unit: SpaceUnit,
     /// The attribute definitions.
     pub attributes: Vec<AttributeSpec>,
+    /// The DXF handle of the block's block record, the record the block's entities are owned by.
+    pub source: Option<Handle>,
 }
 
 /// Where an entity goes.
@@ -408,6 +433,11 @@ pub struct Plan {
     /// The loss report of the mapping, including the report of the reader when given to
     /// [`plan_with_report`].
     pub report: LossReport,
+    /// The source document label of [`ImportOptions::source_document`].
+    pub source_document: String,
+    /// The standard linetypes of the file, bound by [`crate::apply`] to existing objects of the
+    /// same name (they are not created).
+    pub standard_linetypes: Vec<NamedSource>,
 }
 
 /// Plans the import of `drawing`.

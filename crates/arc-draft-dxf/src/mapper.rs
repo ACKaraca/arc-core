@@ -12,8 +12,8 @@ use crate::depth::too_deep;
 use crate::error::reasons;
 use crate::plan::{
     Appearance, BlockSpec, Container, DimStyleSpec, EntitySpec, FOREIGN_ENTITY, FOREIGN_OBJECT,
-    ForeignSpec, ImportOptions, LayerSpec, LinetypeSpec, MAX_FOREIGN_RECORDS, Op, Plan, Shape,
-    TextStyleSpec, encode_record,
+    ForeignSpec, ImportOptions, LayerSpec, LinetypeSpec, MAX_FOREIGN_RECORDS, NamedSource, Op,
+    Plan, Shape, TextStyleSpec, encode_record,
 };
 use crate::report::Reporter;
 use crate::units;
@@ -80,6 +80,7 @@ pub(crate) struct Mapper<'a> {
     pub(crate) entities: Vec<(Container, EntitySpec)>,
     pub(crate) foreign: Vec<ForeignSpec>,
     pub(crate) edges: BTreeMap<String, BTreeSet<String>>,
+    pub(crate) standard_linetypes: Vec<NamedSource>,
 }
 
 /// The node of a block definition in the reference graph, numbered from 1 in order of first use;
@@ -131,6 +132,7 @@ impl<'a> Mapper<'a> {
             entities: Vec::new(),
             foreign: Vec::new(),
             edges: BTreeMap::new(),
+            standard_linetypes: Vec::new(),
         }
     }
 
@@ -369,7 +371,9 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    pub(crate) fn finish(self, reader: Option<&LossReport>) -> Plan {
+    pub(crate) fn finish(mut self, reader: Option<&LossReport>) -> Plan {
+        self.first_sources();
+        let standard_linetypes = std::mem::take(&mut self.standard_linetypes);
         let mut ops = Vec::new();
         ops.extend(self.linetypes.items.into_iter().map(Op::Linetype));
         ops.extend(self.layers.items.into_iter().map(Op::Layer));
@@ -396,7 +400,64 @@ impl<'a> Mapper<'a> {
             source_unit: self.source_unit,
             factor: self.factor,
             report: rep.finish(self.d.version.name(), crate::plan::DIRECTION),
+            source_document: self.o.source_document.clone(),
+            standard_linetypes,
         }
+    }
+
+    /// Leaves a source handle on the first object that carries it, in file order of the
+    /// definitions and then of the entities; a zero handle means none. A later object with the
+    /// same handle is created without one and reported (`draft.dxf.handle_duplicate`).
+    fn first_sources(&mut self) {
+        // The preserved records keep their handles: an object with one of them is not bound.
+        let mut seen: BTreeSet<u64> = self
+            .foreign
+            .iter()
+            .filter_map(|f| f.source.map(|h| h.0))
+            .filter(|h| *h != 0)
+            .collect();
+        let rep = &mut self.rep;
+        let mut standard = std::mem::take(&mut self.standard_linetypes);
+        for named in &mut standard {
+            claim_source(&mut seen, rep, "LTYPE", &mut named.source);
+        }
+        standard.retain(|named| named.source.is_some());
+        self.standard_linetypes = standard;
+        for layer in &mut self.layers.items {
+            claim_source(&mut seen, rep, "LAYER", &mut layer.source);
+        }
+        for linetype in &mut self.linetypes.items {
+            claim_source(&mut seen, rep, "LTYPE", &mut linetype.source);
+        }
+        for style in &mut self.text_styles.items {
+            claim_source(&mut seen, rep, "STYLE", &mut style.source);
+        }
+        for style in &mut self.dim_styles.items {
+            claim_source(&mut seen, rep, "DIMSTYLE", &mut style.source);
+        }
+        for block in &mut self.blocks.items {
+            claim_source(&mut seen, rep, "BLOCK_RECORD", &mut block.source);
+        }
+        for (_, spec) in &mut self.entities {
+            claim_source(&mut seen, rep, "ENTITY", &mut spec.source);
+        }
+    }
+}
+
+/// Keeps `source` when no earlier object of the import carries the same handle.
+fn claim_source(
+    seen: &mut BTreeSet<u64>,
+    rep: &mut Reporter,
+    kind: &str,
+    source: &mut Option<Handle>,
+) {
+    let Some(handle) = source.filter(|h| h.0 != 0) else {
+        *source = None;
+        return;
+    };
+    if !seen.insert(handle.0) {
+        rep.note(reasons::HANDLE_DUPLICATE, kind, Some(handle.to_hex()), &[]);
+        *source = None;
     }
 }
 

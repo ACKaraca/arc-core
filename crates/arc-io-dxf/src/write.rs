@@ -60,12 +60,17 @@ pub struct WriteOutput {
     pub report: LossReport,
 }
 
+/// The values that must remain above the highest handle of a drawing for the writer to assign
+/// handles and compute the seed without wrapping.
+const HANDLE_ROOM: u64 = 1 << 32;
+
 /// Writes a drawing. The bytes depend only on the drawing and the version and form chosen.
 ///
 /// # Errors
 ///
 /// `io.unsupported_version` for a target before 2000, `io.dxf.write_value_invalid` for a value
-/// that cannot be written, and `base.cancelled`.
+/// that cannot be written (including a highest handle with fewer than 2^32 handles above it), and
+/// `base.cancelled`.
 pub fn write(drawing: &Drawing, options: &mut WriteOptions<'_>) -> Result<WriteOutput> {
     let version = options.version;
     if version < Version::R2000 {
@@ -79,13 +84,22 @@ pub fn write(drawing: &Drawing, options: &mut WriteOptions<'_>) -> Result<WriteO
             max = Some(max.map_or(h.0, |m| m.max(h.0)));
         }
     });
+    // The handles the writer assigns come above the highest one; at least `HANDLE_ROOM` values
+    // must remain above it, so that neither the assignment nor the seed wraps.
+    let next = match max {
+        None => 1,
+        Some(m) if u64::MAX - m >= HANDLE_ROOM => m + 1,
+        Some(_) => {
+            return Err(Error::new(codes::DXF_WRITE_VALUE_INVALID).with_detail("group_code", 5));
+        }
+    };
     let mut w = Writer {
         out: Vec::new(),
         version,
         binary: options.binary,
         legacy: (!version.is_unicode()).then(|| table(drawing.code_page())),
         emitted: BTreeSet::new(),
-        next: max.map_or(1, |m| m.wrapping_add(1)),
+        next,
         assigned: 0,
         raw_written: 0,
         loss: LossLog::bounded(),
@@ -237,10 +251,10 @@ impl Writer<'_, '_> {
             return h;
         }
         while !self.emitted.insert(self.next) {
-            self.next = self.next.wrapping_add(1);
+            self.next = self.next.saturating_add(1);
         }
         let h = Handle(self.next);
-        self.next = self.next.wrapping_add(1);
+        self.next = self.next.saturating_add(1);
         self.assigned += 1;
         h
     }

@@ -49,8 +49,11 @@ The crate is in the WebAssembly set: its file access goes only through `arc_comm
 |---|---|
 | `plan(&Drawing, &ImportOptions) -> Plan` | The creation operations (`Plan::ops`, in creation order) and the loss report of the mapping |
 | `plan_with_report(&Drawing, &ImportOptions, &LossReport) -> Plan` | The same, with the report of reading the drawing merged into the plan's report |
-| `apply(&mut Context, space, &Plan) -> Applied` | Creates the plan's objects in the transaction of the running command |
-| `export_drawing(&Snapshot, space) -> Exported` | The model space with the document's tables and blocks as a `Drawing`, with a report |
+| `apply(&mut Context, space, &Plan) -> Applied` | Creates the plan's objects in the transaction of the running command, binds each object that has a source handle to it in the source map, lists every created object in creation order (`Applied::created`, a `Created` with the identifier, the type key and the source handle), and counts the existing objects bound (`adopted`) and the handles moved from earlier imports (`rebound`) |
+| `ImportOptions::source_document`, `Plan::source_document` | The label of the source document the bindings refer to; empty by default |
+| `export_drawing(&Snapshot, space) -> Exported` | The model space with the document's tables and blocks as a `Drawing`, every handle assigned by the export (`HandlePolicy::Assign`), with a report and the handle written for each exported object (`Exported::handles`) |
+| `export_drawing_with(&Snapshot, space, &HandlePolicy) -> Exported` | The same, with the handles chosen by the policy |
+| `HandlePolicy` | `Assign` (the default) or `KeepSources { document, floor }`; see [Source identity](#source-identity) |
 | `register_commands(&mut Registry)` | Registers the two commands |
 | `Builder`, `Reader` (module `fields`) | Set and read the values of drafting objects by field name |
 | `color::aci_rgb`, `color::from_index`, `color::from_true`, `color::to_true` | The indexed color table and color conversions |
@@ -60,8 +63,8 @@ The crate is in the WebAssembly set: its file access goes only through `arc_comm
 
 | Command | Permission classes | Undo | Parameters |
 |---|---|---|---|
-| `core.draft.import.dxf` | `edit`, `file_read` | undoable | `path`, `space` (a model space) |
-| `core.draft.export.dxf` | `read`, `file_write` | not undoable | `path`, `space`, `version` (`2000`, `2004`, `2007`, `2010`, `2013`, `2018`; default `2018`), `binary` (default false) |
+| `core.draft.import.dxf` | `edit`, `file_read` | undoable | `path`, `space` (a model space), `list_created` (default `false`). The result holds the counts and the loss report; with `list_created` it also holds `created` (each object with `object`, `kind` as its type key and `source` as the handle in hexadecimal or null) |
+| `core.draft.export.dxf` | `read`, `file_write` | not undoable | `path`, `space`, `version` (`2000`, `2004`, `2007`, `2010`, `2013`, `2018`; default `2018`), `binary` (default false), `keep_sources` (optional: `document`, the label of the import's source document, and `floor`, default 0). The result holds the counts, `handles` (each exported object with the handle written) and the loss report |
 
 Both are exposed on every surface the command specification allows (user interface, command
 line, automation, MCP and plug-ins). Neither opens a dialog: a shell that lets a person pick a
@@ -78,6 +81,98 @@ objects and the loss report in the form of `schemas/loss-report.schema.json`.
 
 The export builds the drawing from the snapshot, writes it with the format crate, and only then
 creates the file, so a failed export leaves no file.
+
+## Source identity
+
+An import binds the objects it creates to the handles they have in the file, and an export with
+`keep_sources` writes those handles back. The bindings are the source map of `arc-doc` (CORE-DOC-052):
+one entry per object, format `dxf`, document the source document label, identifier the handle in
+hexadecimal. A binding is a foreign data row created in the transaction of the import, so one undo
+removes the objects and their bindings.
+
+### Import
+
+- Bound: each layer, linetype, text style, dimension style, block definition and entity the import
+  creates from a file object. A block definition is bound to its block record (the `BLOCK_RECORD`
+  entry that owns the entities of the block).
+- Existing definitions: a file layer, linetype, text style or dimension style whose name matches an
+  object of the document without regard to case is not created. The existing object is bound to the
+  file's handle when it has no binding under the label yet (adopted, counted in `Applied::adopted`,
+  not listed as created). The standard linetypes `ByBlock`, `ByLayer` and `Continuous` bind the same
+  way to an existing linetype of that name; the import creates none of them.
+- Not bound:
+  - an object without a handle in the file (absent or zero);
+  - an object whose handle a preserved record of the file also holds: the record keeps the handle and
+    the object is created unbound (`draft.dxf.handle_duplicate`);
+  - a repeated handle after the first occurrence (`draft.dxf.handle_duplicate`);
+  - an entity on paper space, which is not imported;
+  - the `BLOCK` and `ENDBLK` records of a block; only the block record is bound;
+  - the attribute definitions (`ATTDEF`) of a block, and the attribute values (`ATTRIB`) of a block
+    reference, whose values the reference holds;
+  - the records kept as foreign data rows, which keep their handle in their own row;
+  - the standard table entries the export writes by itself, when the document has no linetype of
+    that name.
+- Source document label: the command uses the final component of the path (the file name, without
+  its directories). When the path has no final component, such as a root or a path ending in `..`,
+  the path as given is the label. The label is part of the key `(dxf, label, handle)`. Two files
+  with one final component imported into one document share their keys. Products that need another
+  label call `plan` with `ImportOptions::source_document`.
+- Rebinding: when a key `(dxf, label, handle)` is held by a live object of an earlier import, the
+  key moves to the object of this import. Each move is counted and reported as
+  `draft.dxf.binding_moved` (the count is the number of moves). The earlier object loses its binding,
+  and an export writes its handle as a new one. A second import of the same file therefore moves the
+  bindings of the objects it creates, and reports them; existing objects bound by the first import keep
+  their bindings.
+- Repeated handles: of several objects of one file with the same handle, the first in plan order is
+  bound. Plan order is the definitions (layers, linetypes, text and dimension styles, block records),
+  then the entities of the blocks, then those of the model space, each in file order. The others are
+  created without a source and reported with `draft.dxf.handle_duplicate`.
+- Created identifiers: `Applied::created` lists every object the import created, in creation order,
+  including the unbound ones. The command returns this list in its `created` result only when the
+  parameter `list_created` is `true` (default `false`); the counts and the loss report are always
+  returned.
+- Limits: each binding is one more foreign data row and one more operation of the import's
+  transaction. Both count against the document limits (`record_count` and `operations`), so a large
+  file can exceed them; the import then fails in its transaction (`doc.txn.limit_exceeded`) and
+  changes nothing.
+
+### Export with `keep_sources`
+
+- `HandlePolicy::Assign` is the default. Every record gets a new handle above the handles of the
+  preserved records, and the bindings are ignored, so the output is the same as before the policy
+  existed.
+- `HandlePolicy::KeepSources { document, floor }` writes each object bound to `document` with its
+  bound handle. Every other record gets a new handle above the largest handle in use (bound handles of
+  the document and handles of the preserved records), above `floor`, and not below 0x20, the lowest
+  handle an export assigns.
+- Handle space: the export never wraps a handle. It is refused with `draft.dxf.handle_space_exhausted`
+  when the handle space above its start has fewer than 2^32 values, which covers a floor or a bound or
+  preserved handle near the top of the 64-bit range.
+- Collisions: the export never writes one handle twice. A record written first keeps a handle, in the
+  order the export writes the tables, the blocks and the model space. A bound object whose handle
+  another record already holds gets a new handle, reported with `draft.dxf.handle_reassigned`.
+  Preserved records follow the same rule: the first written keeps its handle, and the other is
+  renumbered (its handle group is replaced) and reported. A bound object is written only when it is
+  written, so an entity that the export skips does not hold its bound handle.
+- Preserved records renumbered by the export: pointers to them inside other preserved records (for
+  example owner or soft-pointer groups) are not rewritten. The renumbered record keeps its groups
+  otherwise.
+- Root dictionary: the format does not fix the handle of the root dictionary. The export keeps its
+  usual handle 0xC unless a bound or preserved record has that handle; then the bound object keeps it,
+  the root dictionary takes a new handle, and the report names the replaced handle (`DICTIONARY`).
+- `$HANDSEED`: the writer computes the seed as one above the largest handle it writes, so the seed is
+  above every written handle. A drawing whose largest handle leaves fewer than 2^32 values above it is
+  refused by the writer (`io.dxf.write_value_invalid`), so the seed never wraps. The export refuses
+  such a space before it builds the drawing, as above.
+- Result: `Exported::handles` (and the command's `handles`) names the handle written for every
+  exported object (entities, layers, linetypes, styles and block records), so a product records the
+  handles the export assigned. Structure records (the root, the layouts and the standard entries) are
+  not listed.
+- Name lookups: an existing table object is matched to a table entry by name without regard to case,
+  as the table merge does, so a style named `STANDARD` keeps its bound handle under the name `Standard`.
+- A product that writes a file back keeps its objects' handles by importing with the document label
+  it uses, editing in the document, and exporting with the same label and its own `floor` (its handle
+  high-water mark). Objects it adds take handles above the floor and above every bound handle.
 
 ## DXF mapping as implemented
 
@@ -242,6 +337,9 @@ reads DWG files.
 | `draft.dxf.name_adjusted` | `approximated` |
 | `draft.dxf.export_unmapped` | `dropped` |
 | `draft.dxf.export_approximated` | `approximated` |
+| `draft.dxf.handle_duplicate` | `approximated` |
+| `draft.dxf.handle_reassigned` | `approximated` |
+| `draft.dxf.binding_moved` | `approximated` |
 
 ### Error codes
 
@@ -249,6 +347,7 @@ reads DWG files.
 |---|---|---|
 | `draft.dxf.space_invalid` | `invalid_input` | The target of an import or export is not a model space |
 | `draft.dxf.document_invalid` | `corrupt_data` | A stored drafting object does not have the shape its type declares |
+| `draft.dxf.handle_space_exhausted` | `invalid_input` | The export needs a handle above the highest one in use, and fewer than 2^32 handles remain above the start of the assignment |
 
 The import and export also fail with the codes of `arc-io-dxf` (`io.limit_exceeded`,
 `io.unsupported_version`, `io.dxf.*`), of `arc-command` (`cmd.path.outside_roots`,
@@ -263,3 +362,10 @@ property test that exports random documents of the mapped kinds, imports the res
 space and compares the content, and its reverse for hand-built neutral drawings. The nesting limit
 is tested on chains of 64 and 65 references (the deepest one dropped, exactly one item), on a wide
 graph with shared sub-blocks, and through the import command, which must complete.
+
+The source identity tests (`tests/source_identity.rs`) import a drawing with bound layers, linetypes,
+styles, block records, block entities and model-space entities, export it with `keep_sources`, and
+read the written file back: every bound handle is written unchanged, the seed is above the written
+handles, and an object added afterwards takes a handle above the floor. They also cover a repeated
+handle, a preserved record that shares a bound handle, a bound handle on the root dictionary, and one
+undo removing the bindings.

@@ -17,7 +17,7 @@ use crate::geo::rad;
 use crate::mapper::{Mapper, extra_f64, extra_int, hex};
 use crate::plan::{
     AttributeSpec, BlockSpec, Container, DimStyleSpec, ElementSpec, LayerSpec, LinetypeSpec,
-    TextStyleSpec,
+    NamedSource, TextStyleSpec,
 };
 
 /// The oblique limit of a drafting text style, in degrees.
@@ -148,6 +148,7 @@ impl Mapper<'_> {
             DimStyleSpec {
                 name: name.clone(),
                 values: Vec::new(),
+                source: None,
             },
         );
         self.rep
@@ -187,6 +188,7 @@ impl Mapper<'_> {
             backwards: data.generation & 2 != 0,
             upside_down: data.generation & 4 != 0,
             vertical: entry.flags & 4 != 0,
+            source: handle,
         };
         if self.text_styles.add(&name, spec)
             && let Some(h) = handle
@@ -198,6 +200,10 @@ impl Mapper<'_> {
     fn map_linetype(&mut self, entry: &TableEntry<arc_io_dxf::model::Linetype>) {
         let handle = entry.head.handle;
         if is_builtin_linetype(&entry.name) {
+            self.standard_linetypes.push(NamedSource {
+                name: entry.name.clone(),
+                source: handle,
+            });
             return;
         }
         let bound = usize::try_from(MAX_PATTERN_ELEMENTS).unwrap_or(256);
@@ -226,6 +232,7 @@ impl Mapper<'_> {
             name: name.clone(),
             description: truncate(&entry.data.description, 4096),
             elements,
+            source: handle,
         };
         self.linetypes.add(&name, spec);
     }
@@ -301,6 +308,7 @@ impl Mapper<'_> {
             frozen: entry.flags & 1 != 0,
             locked: entry.flags & 4 != 0,
             plottable: data.plot.unwrap_or(true),
+            source: handle,
         };
         self.layers.add(&name, spec);
     }
@@ -329,8 +337,14 @@ impl Mapper<'_> {
             #[expect(clippy::cast_precision_loss, reason = "a value of 0 to 8")]
             values.push(("precision", p as f64));
         }
-        self.dim_styles
-            .add(&name.clone(), DimStyleSpec { name, values });
+        self.dim_styles.add(
+            &name.clone(),
+            DimStyleSpec {
+                name,
+                values,
+                source: handle,
+            },
+        );
     }
 
     pub(crate) fn map_blocks(&mut self) {
@@ -383,17 +397,13 @@ impl Mapper<'_> {
     ) -> BlockSpec {
         let handle = block.begin.source_id();
         let name = self.clip_name(&begin.name, "BLOCK", handle);
-        let record_units = self
-            .d
-            .tables
-            .block_records
-            .as_ref()
-            .and_then(|t| {
-                t.entries
-                    .iter()
-                    .find(|e| e.name.eq_ignore_ascii_case(&begin.name))
-            })
-            .and_then(|e| crate::units::unit_of_code(i64::from(e.flags)));
+        let record = self.d.tables.block_records.as_ref().and_then(|t| {
+            t.entries
+                .iter()
+                .find(|e| e.name.eq_ignore_ascii_case(&begin.name))
+        });
+        let record_units = record.and_then(|e| crate::units::unit_of_code(i64::from(e.flags)));
+        let source = record.and_then(|e| e.head.handle);
         let unit = record_units.unwrap_or_else(|| self.file_unit());
         let mut seen = BTreeSet::new();
         let mut attributes = Vec::new();
@@ -420,6 +430,7 @@ impl Mapper<'_> {
             base: arc_base::math::Point2::new(begin.base[0], begin.base[1]),
             unit,
             attributes,
+            source,
         }
     }
 
@@ -468,6 +479,7 @@ fn default_layer(name: &str) -> LayerSpec {
         frozen: false,
         locked: false,
         plottable: true,
+        source: None,
     }
 }
 
@@ -481,6 +493,7 @@ fn default_text_style(name: &str) -> TextStyleSpec {
         backwards: false,
         upside_down: false,
         vertical: false,
+        source: None,
     }
 }
 
