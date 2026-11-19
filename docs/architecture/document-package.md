@@ -32,7 +32,7 @@ prefix and must register them in `arc_meta` (`ext_table:<name>` keys) so tools k
 | `arc_object` | One row per object: id, type key, schema major and minor, owner, name, partition, flags, encoding, payload, payload hash, last modifying transaction | `id BLOB(16) PRIMARY KEY` |
 | `arc_property` | Indexed fields and property-set values for queries: object, key path, typed value, unit | `(object, key)` |
 | `arc_reference` | Every reference held by every object: source, field path, target, target link, rule | `(source, field, target)` |
-| `arc_source_map` | Source identifiers of imported objects: object, source format, source document, source identifier | `(source_format, source_document, source_id)` |
+| `arc_source_map` | Reserved for source identifiers of imported objects (object, source format, source document, source identifier); format 1.x holds them in `arc_foreign` rows of record kind `source_map` and leaves this table empty | `(source_format, source_document, source_id)` |
 | `arc_journal` | Retained transaction records, in commit order | `seq INTEGER PRIMARY KEY`, `txn_id` unique |
 | `arc_asset` | Content-addressed assets: hash, media type, byte length, chunked flag, encoding | `hash BLOB(32) PRIMARY KEY` |
 | `arc_asset_chunk` | Ordered chunk list of a chunked asset | `(asset, ordinal)` |

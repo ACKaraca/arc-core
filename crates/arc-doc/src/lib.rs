@@ -17,6 +17,7 @@
 //! these. No function in this crate panics.
 
 pub mod commit;
+pub mod compare;
 pub mod descriptor;
 pub mod diagnostic;
 pub mod diagnostics;
@@ -25,6 +26,7 @@ pub mod error;
 pub mod events;
 pub mod executor;
 pub mod graph;
+pub mod history;
 mod index;
 pub mod integrity;
 pub mod journal;
@@ -35,6 +37,7 @@ pub mod op;
 pub mod package;
 pub mod payload;
 pub mod preserved;
+pub mod propset;
 pub mod record;
 pub mod registry;
 pub mod relationship;
@@ -42,7 +45,9 @@ pub mod reverse_index;
 pub mod scheduler;
 pub mod schema;
 pub mod snapshot;
+pub mod source_map;
 mod store;
+pub mod subkey;
 pub mod txn;
 pub mod undo;
 pub mod validate;
@@ -52,6 +57,7 @@ pub mod version;
 mod testing;
 
 pub use commit::{CommitHooks, CommitOutcome, Committed, JournalSink, commit};
+pub use compare::{ChangeKind, Comparison, FieldChange, ObjectChange, compare, compare_ops};
 pub use descriptor::descriptor;
 pub use diagnostic::{CollectingSink, Diagnostic, DiagnosticSink, Origin};
 pub use diagnostics::{DiagnosticsList, DiagnosticsSnapshot};
@@ -62,6 +68,7 @@ pub use graph::{
     ChangeSet, Derived, DerivedKey, DerivedValue, EvalContext, Evaluators, Graph, NodeKey,
     NodeState, NodeView, StateKind,
 };
+pub use history::HistoryQuery;
 pub use integrity::{
     CascadeDelete, ClearedFields, DeleteReport, apply_delete_rules, check_references,
 };
@@ -86,7 +93,9 @@ pub use schema::{
 };
 pub use schema::{FieldPath, PathSegment};
 pub use snapshot::{Change, Flags, Header, Object, Savepoint, Snapshot, SnapshotCell, WorkingSet};
+pub use source_map::SourceMap;
 pub use store::Handle;
+pub use subkey::SubKey;
 pub use txn::{
     MAX_OPERATIONS, MAX_SAVEPOINTS, Txn, TxnKind, TxnLimits, TxnMeta, TxnParts, TxnSavepoint,
 };

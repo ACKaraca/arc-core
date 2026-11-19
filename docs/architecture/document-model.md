@@ -118,7 +118,8 @@ package stores each declaration as a field descriptor, whose contents are listed
 **Property sets** carry user-defined and standard data (IFC property sets, classification codes,
 cost data). A property set definition is itself an object: name, applicable types, and an ordered
 list of property definitions (name, value type, unit dimension, enum values, default, required). An
-object stores property set instances by definition `ObjectId`. Property values use the same value
+object holds property set instances by definition `ObjectId`: an instance is an object that
+references its target and its definition. Property values use the same value
 types as fields except `geometry` and `opaque`. Changing a definition (adding a property, renaming,
 changing a default) is a transaction like any other and migrates existing instances inside it.
 
@@ -255,9 +256,8 @@ as a whole.
 - **History** lists transaction records with author, time and label, filterable by object, type,
   author and time range. Selecting an object shows the transactions that touched it.
 - **Comparison** of two states produces a per-object result: created, deleted, modified (with the
-  changed field and property paths and both values), relinked. When both states lie on one journal
-  path, comparison folds the records between them. Otherwise it compares snapshots: chunks shared
-  by pointer are skipped, and remaining objects are compared by encoded value hash. Comparison
+  changed field and property paths and both values), relinked. It compares snapshots: chunks shared by
+  pointer are skipped, and the remaining objects are compared value by value. Comparison
   works between revisions of one session, between a document and its saved file, between two
   package files, and between a document and a change set.
 - Comparison output has a canonical JSON form, stable for the same inputs, suitable for text diffs

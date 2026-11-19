@@ -108,6 +108,11 @@ impl Store {
         }
     }
 
+    /// The number of chunks.
+    pub(crate) fn chunk_count(&self) -> u32 {
+        self.slots.div_ceil(CHUNK_SLOTS)
+    }
+
     fn slot(&self, slot: u32) -> Option<&Slot> {
         self.chunk(slot >> CHUNK_BITS)?.get(offset(slot))
     }

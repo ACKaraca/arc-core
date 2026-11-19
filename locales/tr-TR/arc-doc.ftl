@@ -83,3 +83,7 @@ doc-package-recovery-needed = { $path } paketi yarım kalmış bir kayıttan art
 doc-package-index-mismatch = { $id } nesnesinin saklanan { $table } dizini nesneyle uyuşmuyor.
 doc-foreign-invalid = { $row } numaralı yabancı veri satırı geçerli değil ({ $reason }).
 doc-foreign-not-found = { $row } numaralı yabancı veri satırı yok.
+doc-propset-invalid = Özellik kümesi verisi geçerli değil ({ $reason }).
+doc-propset-duplicate = { $target } nesnesinin { $definition } özellik kümesinden zaten bir örneği var.
+doc-part-not-found = { $object } nesnesinin { $field } alanında { $key } anahtarlı bir parça yok.
+doc-part-invalid = { $field } alanı geçerli bir anahtarlı liste değil ({ $reason }).

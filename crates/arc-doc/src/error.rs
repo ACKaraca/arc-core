@@ -499,6 +499,32 @@ pub mod codes {
         category: Category::NotFound,
         message_id: "doc-foreign-not-found",
     };
+    /// A property set definition or instance is malformed: the descriptor of its properties does
+    /// not parse, a property has a type property sets do not hold, or an instance does not fit
+    /// its definition or its target.
+    pub const PROPSET_INVALID: ErrorCode = ErrorCode {
+        code: "doc.propset.invalid",
+        category: Category::InvalidInput,
+        message_id: "doc-propset-invalid",
+    };
+    /// An object already has an instance of a property set definition.
+    pub const PROPSET_DUPLICATE: ErrorCode = ErrorCode {
+        code: "doc.propset.duplicate",
+        category: Category::Conflict,
+        message_id: "doc-propset-duplicate",
+    };
+    /// A keyed list holds no part with the sub-object key.
+    pub const PART_NOT_FOUND: ErrorCode = ErrorCode {
+        code: "doc.part.not_found",
+        category: Category::NotFound,
+        message_id: "doc-part-not-found",
+    };
+    /// A field is not a keyed list, or its parts do not carry valid, distinct keys.
+    pub const PART_INVALID: ErrorCode = ErrorCode {
+        code: "doc.part.invalid",
+        category: Category::InvalidInput,
+        message_id: "doc-part-invalid",
+    };
     /// A package has a hot rollback journal left by an interrupted save and was opened
     /// read-only, which cannot roll it back.
     pub const PACKAGE_RECOVERY_NEEDED: ErrorCode = ErrorCode {
@@ -597,6 +623,10 @@ pub mod codes {
         PACKAGE_INDEX_MISMATCH,
         FOREIGN_INVALID,
         FOREIGN_NOT_FOUND,
+        PROPSET_INVALID,
+        PROPSET_DUPLICATE,
+        PART_NOT_FOUND,
+        PART_INVALID,
     ];
 }
 

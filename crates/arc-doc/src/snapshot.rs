@@ -350,6 +350,41 @@ impl Snapshot {
         Ok(objects_of(store, index))
     }
 
+    /// Adds to `out` the identifiers of the objects of `self` that are in no chunk shared by
+    /// pointer with the store of the same type in `other`. An object in a shared chunk is in
+    /// the same slot of both and unchanged, so a comparison needs to look only at the
+    /// identifiers this finds in both directions.
+    pub(crate) fn unshared_ids(
+        &self,
+        other: &Self,
+        out: &mut std::collections::BTreeSet<ObjectId>,
+    ) {
+        if self.ptr_eq(other) {
+            return;
+        }
+        for (key, store) in self.0.keys.iter().zip(self.0.stores.iter()) {
+            let theirs = other
+                .store_index(key.as_str())
+                .ok()
+                .and_then(|index| other.0.stores.get(usize_of(index)));
+            for index in 0..store.chunk_count() {
+                let Some(chunk) = store.chunk(index) else {
+                    continue;
+                };
+                if theirs
+                    .and_then(|s| s.chunk(index))
+                    .is_some_and(|c| Arc::ptr_eq(c, chunk))
+                {
+                    continue;
+                }
+                out.extend(chunk.iter().filter_map(|slot| match slot {
+                    crate::store::Slot::Live { object, .. } => Some(object.id),
+                    crate::store::Slot::Free => None,
+                }));
+            }
+        }
+    }
+
     fn store_index(&self, key: &str) -> Result<u32> {
         self.0
             .keys

@@ -151,3 +151,13 @@ The schema of format 1.0 is unchanged, and so is the table; what changes is who 
 - the rows of a deleted object are kept until a transaction removes them.
 
 Existing fixtures stay valid; no fixture was regenerated.
+
+## Amendment: the source map in foreign data rows
+
+The source identifiers of imported objects are held as `arc_foreign` rows of the record kind
+`source_map` (`source_format`, `source_id`, `object`, and `data` holding the UTF-8 source
+document), so that they are document state that transactions change, journal records carry and
+saves write, without a new journal operation. The schema of format 1.0 is unchanged. The table
+`arc_source_map` stays in the schema, empty, and is not a derived index. A reader that does not
+know the record kind preserves the rows like any foreign data. Property sets, sub-object keys,
+history queries and state comparison change no versioned contract.

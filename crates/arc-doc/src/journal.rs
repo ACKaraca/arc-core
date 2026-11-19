@@ -151,6 +151,16 @@ impl Journal {
         self.entries.is_empty()
     }
 
+    /// The entries whose records match `query`, in commit order (CORE-DOC-025).
+    pub fn query<'a>(
+        &'a self,
+        query: &'a crate::history::HistoryQuery,
+    ) -> impl Iterator<Item = &'a JournalEntry> + 'a {
+        self.entries
+            .iter()
+            .filter(move |entry| query.matches(&entry.record))
+    }
+
     /// The parent chain from transaction `id`: its entry, the entry of its parent, and so on
     /// while the parent is in this journal. The first record of a session names as parent the
     /// last transaction of the document it opened, which is not in the session's journal.

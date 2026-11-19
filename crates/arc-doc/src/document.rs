@@ -28,9 +28,9 @@ use crate::executor::{
     Completed, Core, DryRun, Executor, Open, Pending, Report, SubmitOptions, lock, task_on,
 };
 use crate::graph::{Evaluators, Graph, NodeKey, NodeView};
+use crate::history::HistoryQuery;
 use crate::journal::Journal;
 use crate::load::{LoadCounts, Loaded, LoadedRows, StoredRecord};
-#[cfg(feature = "package")]
 use crate::record::TxnRecord;
 use crate::registry::TypeRegistry;
 use crate::scheduler::{Priority, Scheduler, default_workers};
@@ -652,6 +652,25 @@ impl Document {
     #[must_use]
     pub fn stored_journal(&self) -> Vec<StoredRecord> {
         lock(&self.stored).0.clone()
+    }
+
+    /// The records that match `query`, in commit order: the stored records that decode against
+    /// the document's registry (a record that does not decode is skipped), then the records of
+    /// this session's journal; a record held by both is listed once (CORE-DOC-025).
+    #[must_use]
+    pub fn history(&self, query: &HistoryQuery) -> Vec<TxnRecord> {
+        let registry = self.registry();
+        let limits = lock(&self.shared.history).limits;
+        let stored = self.stored_journal();
+        self.with_journal(|journal| {
+            stored
+                .iter()
+                .filter_map(|row| TxnRecord::decode(&row.record, &registry, &limits).ok())
+                .filter(|record| journal.get(record.txn_id).is_none())
+                .chain(journal.iter().map(|entry| entry.record().clone()))
+                .filter(|record| query.matches(record))
+                .collect()
+        })
     }
 
     /// The original rows of the load this document came from, which a save needs.

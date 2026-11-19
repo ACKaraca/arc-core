@@ -83,3 +83,7 @@ doc-package-recovery-needed = The package { $path } was left by an interrupted s
 doc-package-index-mismatch = The stored index { $table } of object { $id } does not match the object.
 doc-foreign-invalid = The foreign data row { $row } is not valid ({ $reason }).
 doc-foreign-not-found = The foreign data row { $row } does not exist.
+doc-propset-invalid = The property set data is not valid ({ $reason }).
+doc-propset-duplicate = Object { $target } already has an instance of the property set { $definition }.
+doc-part-not-found = Object { $object } has no part with the key { $key } in { $field }.
+doc-part-invalid = The field { $field } is not a valid keyed list ({ $reason }).

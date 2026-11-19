@@ -17,7 +17,8 @@ and the single-file document package with recovery. The architecture is specifie
 - Schema versions, migrations, preserved objects and quarantine.
 - The package format, the storage thread, the recovery journal, saving, locking, assets and
   inspection (feature `package`).
-- Core object types: `core.doc.link`, `core.doc.settings`, `core.doc.property_set_definition`.
+- Core object types: `core.doc.link`, `core.doc.settings`, `core.doc.property_set_definition`,
+  `core.doc.property_set`.
   Preserved and quarantined objects are not objects of a core type: they are held beside the
   typed stores and keep the type key of their stored row (see
   [loading](#loading-migration-and-held-objects-core-doc-037-core-doc-038-core-doc-039)).
@@ -338,8 +339,8 @@ An **object** (`Object`) is its `ObjectId`, the schema version of its values, a 
 name, partition key and the flags `hidden_from_ui`, `system` and `read_only`) and one optional
 `Value` per field of its schema in declared order. Its type key is the key of the store that holds
 it. Objects are dynamically typed: a store is the store of one registered type key, not a Rust
-type, so products and plug-ins add types at run time through the registry. Property sets join the
-object with CORE-DOC-005.
+type, so products and plug-ins add types at run time through the registry. Property sets attach to an object as
+objects of their own (CORE-DOC-005).
 
 - **Stores.** A snapshot has one store per registered type key, ordered by key. A store's slots
   live in chunks of 1,024 entries; an entry is a live object (generation and reference-counted
@@ -440,9 +441,10 @@ transaction is open per document at a time; the document executor enforces that,
   Every successful call appends an operation, also when it writes the value already there and
   when it changes the same field again; coalescing belongs to the journal. Values are kept
   decoded; the journal encodes them with the payload codec.
-- **Property operation.** The document model defines `modify_properties` on property sets
-  (CORE-DOC-005, phase 1). Until property sets exist, the operation carries the header fields
-  besides the owner: name, partition and flags. Property-set values join it with CORE-DOC-005.
+- **Property operation.** `set_properties` carries the header fields besides the owner: name,
+  partition and flags. Property set values are not part of it: instances are objects
+  ([property sets](#property-sets-sub-object-keys-history-comparison-and-the-source-map-core-doc-005-core-doc-006-core-doc-025-core-doc-026-core-doc-052))
+  changed by ordinary field operations.
 - **Paths.** `None` makes a field or record field absent or removes a map entry, and setting a
   missing map key adds the entry. A list changes length only as a whole: a list index must be
   within the list and cannot be set to `None`. A path that does not resolve against the object's
@@ -1010,8 +1012,8 @@ occurred when the thread was descheduled.
 - **Comparison.** `undo::differences(a, b)` lists the identifiers of the objects that differ
   between two snapshots (live in one only, or with another type key, schema version, header or
   values, compared bit for bit), walking both and skipping objects shared by pointer; an empty
-  list is the empty comparison the undo tests check. The comparison API with changed paths and
-  both values is CORE-DOC-026 (phase 1).
+  list is the empty comparison the undo tests check. The comparison with changed paths and both
+  values is `compare::compare` (CORE-DOC-026, see the subsection after the package sections).
 
 The `undo_steps` test `undo_of_a_thousand_modifications_stays_within_budget` (ignored by
 default; run it in a release build) undoes a step of 1,000 single-field modifications of 1,000
@@ -1462,6 +1464,115 @@ checks reopening against a reference model of retention and seeds corruptions fo
 `package_fixtures` opens a fixture written before the tables were filled and saves history
 into it.
 
+### Property sets, sub-object keys, history, comparison and the source map (CORE-DOC-005, CORE-DOC-006, CORE-DOC-025, CORE-DOC-026, CORE-DOC-052)
+
+None of these changes the package schema, the journal record format or the payload encoding: each
+is built from objects, field operations and foreign data rows.
+
+#### Property sets (CORE-DOC-005)
+
+`propset::register` registers two core types; a product's registry calls it once.
+
+- **Definition.** An object of `core.doc.property_set_definition` (version 1.0): the header name,
+  `applicable_types` (a list of type keys; empty applies to every type) and `properties`, the JSON
+  [field descriptor](#field-descriptors-core-doc-004) of a schema (type key `core.doc.property_set`,
+  version 1.0) whose fields are the properties. A property therefore has a name, a value type with
+  its unit dimension and enum variants, a default, a bound and optionality, and the descriptor
+  grammar validates them. Property values are not references, external references, assets,
+  geometry or opaque bytes (`doc.propset.invalid`): an instance holds its values encoded, so the
+  reverse reference index and the asset scan do not see inside them.
+- **Instance.** An object of `core.doc.property_set` with the fields `target` (a reference to any
+  object, associative, on-delete `cascade`), `definition` (a reference to a definition,
+  associative, on-delete `block`) and `values` (the payload encoding of the definition's schema,
+  in an opaque field). An instance is journaled, undone, saved, listed in history and compared like
+  any object; deleting the target deletes its instances, and a definition that instances use cannot
+  be deleted. An object has at most one instance of a definition.
+- **Operations** on a `Txn`: `define`, `attach` (a property without a value takes its default),
+  `detach`, `set_values` (`None` removes the value of an optional property) and `redefine`.
+  `definition`, `instance`, `instance_of` and `instances_of` read from a snapshot.
+- **Migration.** `redefine` replaces a definition's applicable types and properties and rewrites
+  every instance in the same transaction, so one undo restores both. A property keeps an
+  instance's value when the value still passes the new property's type check (type, enum codes,
+  dimension, bound); `renames` pairs an old name with the new name that continues it. Otherwise the
+  property takes the new default, or stays absent when it is optional and has none; a required
+  property with neither fails with `doc.value.missing`. A rename that names no property, or a new
+  applicable-type list that excludes an existing target, fails with `doc.propset.invalid`. A failed
+  `redefine` leaves the transaction as it was.
+- **Validator.** `propset::validator(limits)` is a document validator the product adds to its
+  document. At commit it checks every touched definition (it parses, and every instance of it
+  decodes under it) and every touched instance (it decodes under its definition, the definition
+  applies to its target type and no other instance of the definition is on the target). It catches
+  a definition written directly with `Txn::modify`, which migrates nothing.
+
+Decisions where the documents were open: instances are objects and not a slot of the object
+(the alternative changes the payload, the journal operations and the package); the property list
+is one descriptor text and not a record list (it reuses the descriptor grammar and its validation,
+so no second description of a type exists); renames are explicit (matching by name alone would
+drop a renamed property's values).
+
+#### Sub-object keys (CORE-DOC-006)
+
+`subkey::SubKey` is `(ObjectId, u32 key)`. A type keeps its parts in a **keyed list**:
+`subkey::keyed_list(name, part_fields)` declares a `list<record>` field whose first record field is
+`key`, a required `i64` in `0..=u32::MAX`. The key is part of the part's data, so it stays with the
+part through inserts and removals of other parts, reordering, edits of the part's other fields,
+undo and redo, saving and loading; only the index changes, and `path_of` resolves a key to the
+part's current path. `parts` lists the keys, `insert` assigns the key (one more than the highest
+key in the list, 0 for an empty list) and returns the `SubKey`, `remove` and `set` edit a part by
+key, and `list_keys` lets a type validator check that keys are valid and distinct. Failures are
+`doc.part.not_found` and `doc.part.invalid`. A key is reused after the part with the highest key is
+removed; a type that must not reuse keys (another object refers to a part by key and may outlive it)
+keeps its own counter field and inserts through `Txn::modify`. This is separate from the `SubObjectKey`
+of `arc-mesh`, which names a source optionally without its object.
+
+#### History queries (CORE-DOC-025)
+
+`HistoryQuery` holds optional filters that must all match: `object`, `type_key`, `author`,
+`from_millis` (inclusive) and `until_millis` (exclusive). An operation counts for the object and
+type filters when it creates, modifies, relinks or deletes the object, the operations added by the
+deletion rules included; both filters apply to the same operation. `HistoryQuery::touching(id)`
+is the records that touched an object. `Journal::query` filters the session's journal;
+`Document::history` returns the matching records of the stored journal that decode against the
+registry followed by the session's, each record once, in commit order. Records the package holds
+that do not decode are skipped.
+
+#### State comparison (CORE-DOC-026)
+
+`compare::compare(a, b)` compares two snapshots and `compare_ops(base, ops)` compares a snapshot
+with the state after applying operations, which is how a change set or a journal record is
+compared. Revisions, a document and its saved file, and two package files are all snapshots (a
+file is loaded first). The result lists, by ascending identifier, each object that is created,
+deleted, modified or relinked (its owner changed; its other changes are listed too) with its types
+before and after and its changed paths with both values. Header parts, the type and the schema
+version are reported at paths in parentheses (`(owner)`, `(name)`, `(partition)`,
+`(hidden_from_ui)`, `(system)`, `(read_only)`, `(type)`, `(version)`); with another type or
+version the values are not compared. Values are compared bit for bit, descending into records,
+lists of equal length and maps, and any other difference is one change at the path. A property
+set instance is compared by property (`values["name"]`). `Comparison::to_json` is the canonical
+form: two-space indentation, identifier order, declared key order, values as in `inspect`.
+Held objects and foreign data rows are not compared.
+
+The comparison always compares snapshots: the typed stores are walked by chunk and every chunk
+shared by pointer with the other snapshot's store of the same type is skipped, so the cost
+follows the changed objects. Folding the journal records between two states on one path would
+give the same answer, but only for that case, so it is not implemented.
+
+#### Source map (CORE-DOC-052)
+
+A source map record is a foreign data row of the record kind `source_map`: `source_format` and
+`source_id` of the source entity, `object` the object it was imported as and `data` the UTF-8
+bytes of the source document (a path or name chosen by the importer). The records are document
+state: transactions set them with the foreign data operations, undo and redo carry them with
+the objects, saves write them and a reader that does not know the kind preserves them. The package table
+`arc_source_map` stays empty in format 1.x. `SourceMap::of(snapshot)` reads the records once, in
+time proportional to the foreign data rows; `resolve(format, document, source_id)` returns the
+object when it is live in that snapshot; `sources_of(object)` lists the identifiers of an object;
+and `bind(txn, ...)` records an import, replacing an earlier record of the same entity. An importer
+builds the map once, resolves each entity (updating the object it finds) and creates and binds an
+object for the others. The record of a deleted object stays but does not resolve; the next import
+creates a new object, because an identifier is not reused after its object is deleted, and `bind`
+points the record at it.
+
 ### Error codes
 
 The codes `arc-doc` owns. A code is never reused for a different meaning; messages are in
@@ -1551,3 +1662,7 @@ The codes `arc-doc` owns. A code is never reused for a different meaning; messag
 | `doc.package.index_mismatch` | `corrupt_data` | A stored derived index row differs from the rows recomputed from the object rows, or names a missing object |
 | `doc.foreign.invalid` | `invalid_input` | A foreign data row written by a transaction is malformed: `object` is not 16 identifier bytes, `asset` not a 32-byte hash, a text column is empty, or the row's `id` differs from its key |
 | `doc.foreign.not_found` | `not_found` | A foreign data row to remove does not exist |
+| `doc.propset.invalid` | `invalid_input` | A property set definition or instance is malformed: its descriptor does not parse, a property has a type property sets do not hold, a rename names no property, an instance does not decode under its definition, or the target's type is not one the definition applies to |
+| `doc.propset.duplicate` | `conflict` | An object already has an instance of a property set definition |
+| `doc.part.not_found` | `not_found` | A keyed list holds no part with the sub-object key |
+| `doc.part.invalid` | `invalid_input` | A field is not a keyed list, or its parts do not carry valid, distinct keys, or the key space is exhausted |
