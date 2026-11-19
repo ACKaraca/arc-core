@@ -509,7 +509,7 @@ mod thumbnail_tests {
         std::fs::create_dir_all(&folder).unwrap();
         for name in [
             "0123456789abcdef.png",
-            "0123456789ABCDEF.png",
+            "FEDCBA9876543210.png",
             "short.png",
             "0123456789abcdef.png.bak",
             ".0123456789abcdef.png.tmp",
@@ -520,7 +520,7 @@ mod thumbnail_tests {
         assert!(!folder.join("0123456789abcdef.png").exists());
         assert!(!folder.join(".0123456789abcdef.png.tmp").exists());
         for kept in [
-            "0123456789ABCDEF.png",
+            "FEDCBA9876543210.png",
             "short.png",
             "0123456789abcdef.png.bak",
         ] {
