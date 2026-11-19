@@ -5,13 +5,29 @@
 
 #![allow(clippy::unwrap_used, clippy::panic, reason = "tests")]
 
+mod common;
+
+use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
-use arc_command::Roots;
+#[cfg(unix)]
+use std::io::BufReader;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+
+use arc_command::protocol::McpConfig;
+#[cfg(unix)]
+use arc_command::protocol::{LocalSocket, SocketConfig, SocketStop};
 use arc_command::roots::MAX_PATH_LEN;
+use arc_command::{
+    CommandSpec, NoLog, Permission, Registry, Roots, Server, ServerConfig, Surface, UndoBehavior,
+};
+use arc_doc::Document;
+use serde_json::{Value, json};
 
 const CANARY: &str = "CANARY";
 
@@ -452,5 +468,501 @@ fn a_directory_swapped_for_a_link_never_receives_new_files() {
             t.probe(&roots, &at.join("canary.txt"));
         },
     );
+    t.assert_no_escape();
+}
+
+// Every surface: the same escape cases through the stdio protocol, the Model Context Protocol
+// endpoint and the local socket, each reading and writing through a registered command.
+
+/// The refusal codes of the cases.
+const OUTSIDE: &str = "cmd.path.outside_roots";
+const REJECTED: &str = "cmd.path.rejected";
+const TOO_LONG: &str = "cmd.path.too_long";
+#[cfg(unix)]
+const NOT_FOUND: &str = "cmd.path.not_found";
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PathParam {
+    path: String,
+}
+
+/// The two file commands of the suite: one reads a file, one writes `written` to a file.
+fn registry() -> Registry {
+    let mut r = Registry::new();
+    r.register(
+        CommandSpec::new(
+            "test.file.read",
+            "test-read",
+            "test-read-description",
+            |ctx, p: PathParam| -> arc_base::Result<String> {
+                let mut text = String::new();
+                ctx.open_read(Path::new(&p.path))?
+                    .read_to_string(&mut text)
+                    .map_err(|_| arc_base::Error::new(arc_command::error::codes::PATH_IO))?;
+                Ok(text)
+            },
+        )
+        .with_undo(UndoBehavior::NotUndoable)
+        .with_permissions([Permission::Read, Permission::FileRead]),
+    )
+    .unwrap();
+    r.register(
+        CommandSpec::new(
+            "test.file.write",
+            "test-write",
+            "test-write-description",
+            |ctx, p: PathParam| -> arc_base::Result<()> {
+                ctx.create_write(Path::new(&p.path))?
+                    .write_all(b"written")
+                    .map_err(|_| arc_base::Error::new(arc_command::error::codes::PATH_IO))
+            },
+        )
+        .with_undo(UndoBehavior::NotUndoable)
+        .with_permissions([Permission::Edit, Permission::FileWrite]),
+    )
+    .unwrap();
+    r
+}
+
+/// What every surface serves: the commands, the document and a session granted file access.
+struct Fixture {
+    registry: Registry,
+    docs: BTreeMap<String, Document>,
+    config: ServerConfig,
+}
+
+fn fixture(root: &Path) -> Fixture {
+    let mut config = ServerConfig::new(
+        "arc-escape",
+        "0.1.0",
+        [
+            Permission::Read,
+            Permission::Edit,
+            Permission::FileRead,
+            Permission::FileWrite,
+        ],
+    );
+    config.roots = Roots::new([root], [root]).unwrap();
+    Fixture {
+        registry: registry(),
+        docs: BTreeMap::from([("main".to_owned(), common::document())]),
+        config,
+    }
+}
+
+/// The reply of request `id` among the lines of `output`.
+fn reply(output: &[u8], id: u64) -> Value {
+    String::from_utf8(output.to_vec())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|v| v["id"] == json!(id))
+        .unwrap()
+}
+
+/// The text of a protocol reply: the value, or the stable error code.
+fn outcome(reply: &Value) -> Result<String, String> {
+    if let Some(error) = reply.get("error") {
+        return Err(error["message"].as_str().unwrap_or("?").to_owned());
+    }
+    Ok(reply["result"]["value"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned())
+}
+
+fn request(id: u64, method: &str, params: Value) -> String {
+    json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string()
+}
+
+fn initialize() -> String {
+    request(
+        1,
+        "arc.initialize",
+        json!({"clientName": "escape", "protocolVersions": {"min": "1.0", "max": "1.0"},
+               "permissions": ["read", "edit", "file_read", "file_write"]}),
+    )
+}
+
+fn run(command: &str, path: &Path) -> String {
+    request(
+        2,
+        "command.run",
+        json!({"document": "main", "command": command,
+               "params": {"path": path.to_string_lossy()}}),
+    )
+}
+
+/// The reply of request `id` read from a session's output.
+fn read_reply(from: &mut impl BufRead, id: u64) -> Value {
+    loop {
+        let mut line = String::new();
+        assert!(from.read_line(&mut line).unwrap() > 0, "the session ended");
+        let message: Value = serde_json::from_str(&line).unwrap();
+        if message["id"] == json!(id) {
+            return message;
+        }
+    }
+}
+
+/// One command run in a stdio protocol session. The session is driven over the crate's pipe and
+/// its input is closed only after the answer: a stream that ends earlier cancels the run.
+fn stdio_run(fx: &Fixture, command: &str, path: &Path) -> Result<String, String> {
+    let server = Server::new(&fx.registry, &fx.docs, fx.config.clone(), &NoLog);
+    let (mut to_server, server_in) = arc_command::protocol::pipe();
+    let (server_out, from_server) = arc_command::protocol::pipe();
+    let mut from_server = from_server.with_timeout(Duration::from_secs(30));
+    std::thread::scope(|scope| {
+        let served = scope.spawn(|| server.serve(server_in, server_out));
+        writeln!(to_server, "{}", initialize()).unwrap();
+        let _ = read_reply(&mut from_server, 1);
+        writeln!(to_server, "{}", run(command, path)).unwrap();
+        let answer = read_reply(&mut from_server, 2);
+        drop(to_server);
+        served.join().unwrap().unwrap();
+        outcome(&answer)
+    })
+}
+
+/// One tool call in a Model Context Protocol session.
+fn mcp_run(fx: &Fixture, tool: &str, path: &Path) -> Result<String, String> {
+    let mut config = fx.config.clone();
+    config.surface = Surface::Mcp;
+    let server = Server::new(&fx.registry, &fx.docs, config, &NoLog);
+    let call = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                      "params": {"name": tool, "arguments": {"path": path.to_string_lossy()}}});
+    let input = format!(
+        "{}\n{}\n{call}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    );
+    let mut out = Vec::new();
+    server
+        .serve_mcp(
+            &McpConfig::new("main"),
+            Cursor::new(input.into_bytes()),
+            &mut out,
+        )
+        .unwrap();
+    let answer = reply(&out, 2);
+    if let Some(error) = answer.get("error") {
+        return Err(error["message"].as_str().unwrap_or("?").to_owned());
+    }
+    let result = &answer["result"];
+    let value: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    if result["isError"] == json!(true) {
+        Err(value["code"].as_str().unwrap_or("?").to_owned())
+    } else {
+        Ok(value.as_str().unwrap_or_default().to_owned())
+    }
+}
+
+/// A surface that reads and writes a path through the file commands.
+trait Gateway: Sync {
+    fn name(&self) -> &'static str;
+    fn read(&self, path: &Path) -> Result<String, String>;
+    fn write(&self, path: &Path) -> Result<(), String>;
+}
+
+struct Stdio<'a>(&'a Fixture);
+
+impl Gateway for Stdio<'_> {
+    fn name(&self) -> &'static str {
+        "stdio"
+    }
+    fn read(&self, path: &Path) -> Result<String, String> {
+        stdio_run(self.0, "test.file.read", path)
+    }
+    fn write(&self, path: &Path) -> Result<(), String> {
+        stdio_run(self.0, "test.file.write", path).map(drop)
+    }
+}
+
+struct Mcp<'a>(&'a Fixture);
+
+impl Gateway for Mcp<'_> {
+    fn name(&self) -> &'static str {
+        "mcp"
+    }
+    fn read(&self, path: &Path) -> Result<String, String> {
+        mcp_run(self.0, "test_file_read", path)
+    }
+    fn write(&self, path: &Path) -> Result<(), String> {
+        mcp_run(self.0, "test_file_write", path).map(drop)
+    }
+}
+
+/// A connection to the local socket, authenticated with its token, one session per call.
+#[cfg(unix)]
+struct Socket {
+    path: PathBuf,
+    token: String,
+}
+
+#[cfg(unix)]
+impl Socket {
+    fn run(&self, command: &str, path: &Path) -> Result<String, String> {
+        let mut stream = UnixStream::connect(&self.path).map_err(|_| "connect".to_owned())?;
+        let hello = json!({"jsonrpc": "2.0", "id": 0, "method": "arc.authenticate",
+                           "params": {"token": self.token}});
+        let input = format!("{hello}\n{}\n{}\n", initialize(), run(command, path));
+        stream
+            .write_all(input.as_bytes())
+            .map_err(|_| "write".to_owned())?;
+        let mut replies = Vec::new();
+        let mut lines = BufReader::new(stream);
+        loop {
+            let mut line = String::new();
+            if lines.read_line(&mut line).unwrap() == 0 {
+                break;
+            }
+            replies.extend_from_slice(line.as_bytes());
+            if serde_json::from_str::<Value>(&line).unwrap()["id"] == json!(2) {
+                break;
+            }
+        }
+        outcome(&reply(&replies, 2))
+    }
+}
+
+#[cfg(unix)]
+impl Gateway for Socket {
+    fn name(&self) -> &'static str {
+        "socket"
+    }
+    fn read(&self, path: &Path) -> Result<String, String> {
+        self.run("test.file.read", path)
+    }
+    fn write(&self, path: &Path) -> Result<(), String> {
+        self.run("test.file.write", path).map(drop)
+    }
+}
+
+/// Runs `body` with every surface. The socket serves the fixture for the duration of `body`.
+#[cfg(unix)]
+fn with_gateways(t: &Tree, fx: &Fixture, body: impl FnOnce(&[&dyn Gateway])) {
+    let config = SocketConfig {
+        enabled: true,
+        directory: t.base.join("run"),
+        name: "arc".into(),
+        handshake_timeout: Duration::from_secs(10),
+    };
+    let socket = LocalSocket::bind(&config).unwrap();
+    let socket_gateway = Socket {
+        path: socket.socket_path().to_owned(),
+        token: fs::read_to_string(socket.token_path()).unwrap(),
+    };
+    let server = Server::new(&fx.registry, &fx.docs, fx.config.clone(), &NoLog);
+    let stop = socket.stopper();
+    let (stdio, mcp) = (Stdio(fx), Mcp(fx));
+    std::thread::scope(|scope| {
+        let served = scope.spawn(|| socket.serve(&server));
+        // Stops the socket even when a case panics, so a failure is not a hang.
+        struct StopOnDrop(SocketStop);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.0.stop();
+            }
+        }
+        let guard = StopOnDrop(stop);
+        body(&[&stdio, &mcp, &socket_gateway]);
+        drop(guard);
+        served.join().unwrap().unwrap();
+    });
+}
+
+#[cfg(not(unix))]
+fn with_gateways(_: &Tree, fx: &Fixture, body: impl FnOnce(&[&dyn Gateway])) {
+    let (stdio, mcp) = (Stdio(fx), Mcp(fx));
+    body(&[&stdio, &mcp]);
+}
+
+/// Links the escape cases need inside the root: each points outside, or nowhere.
+fn plant_links(t: &Tree) {
+    #[cfg(unix)]
+    {
+        let canary = t.outside.join("canary.txt");
+        assert!(link(&canary, &t.root.join("abs_link")));
+        assert!(link(
+            Path::new("../outside/canary.txt"),
+            &t.root.join("rel_link")
+        ));
+        assert!(link(&t.outside, &t.root.join("dir_link")));
+        assert!(link(
+            &t.outside.join("dangling.txt"),
+            &t.root.join("dangling_link")
+        ));
+    }
+    #[cfg(not(unix))]
+    let _ = t;
+}
+
+/// One escape attempt and the code every surface must answer for reading and for writing.
+struct Case {
+    name: &'static str,
+    path: PathBuf,
+    read: &'static str,
+    write: &'static str,
+}
+
+fn case(name: &'static str, path: PathBuf, code: &'static str) -> Case {
+    Case {
+        name,
+        path,
+        read: code,
+        write: code,
+    }
+}
+
+fn cases(t: &Tree) -> Vec<Case> {
+    let mut deep = t.root.clone();
+    for _ in 0..40 {
+        deep.push("sub");
+        deep.push("..");
+    }
+    let long = t.root.join("a/".repeat(MAX_PATH_LEN / 2 + 1));
+    let mut cases = vec![
+        case(
+            "absolute path outside the roots",
+            t.outside.join("canary.txt"),
+            OUTSIDE,
+        ),
+        case(
+            "dot-dot out of the root",
+            t.root.join("..").join("outside").join("canary.txt"),
+            OUTSIDE,
+        ),
+        case(
+            "dot-dot chain past the root",
+            deep.join("..").join("outside").join("canary.txt"),
+            OUTSIDE,
+        ),
+        case(
+            "sibling root",
+            t.base.join("root2").join("canary.txt"),
+            OUTSIDE,
+        ),
+        case("relative path", PathBuf::from("inside.txt"), REJECTED),
+        case("NUL in the name", t.root.join("in\0side.txt"), REJECTED),
+        case("a directory", t.root.join("sub"), REJECTED),
+        case("over-long path", long, TOO_LONG),
+    ];
+    #[cfg(unix)]
+    {
+        cases.push(case("absolute link out", t.root.join("abs_link"), OUTSIDE));
+        cases.push(case("relative link out", t.root.join("rel_link"), OUTSIDE));
+        cases.push(case(
+            "file through a link to a directory out",
+            t.root.join("dir_link").join("canary.txt"),
+            OUTSIDE,
+        ));
+        cases.push(Case {
+            name: "dangling link out",
+            path: t.root.join("dangling_link"),
+            read: NOT_FOUND,
+            write: NOT_FOUND,
+        });
+        cases.push(case("device node", PathBuf::from("/dev/null"), OUTSIDE));
+    }
+    #[cfg(windows)]
+    {
+        cases.push(case("reserved device name", t.root.join("CON"), REJECTED));
+        cases.push(case(
+            "alternate data stream",
+            t.root.join("inside.txt:stream"),
+            REJECTED,
+        ));
+    }
+    cases
+}
+
+#[test]
+fn every_surface_refuses_every_escape_case_with_the_same_code() {
+    let t = Tree::new("surfaces");
+    plant_links(&t);
+    let fx = fixture(&t.root);
+    with_gateways(&t, &fx, |gateways| {
+        for case in cases(&t) {
+            for gateway in gateways {
+                let read = gateway.read(&case.path).err();
+                assert_eq!(
+                    read.as_deref(),
+                    Some(case.read),
+                    "read: {} via {}",
+                    case.name,
+                    gateway.name()
+                );
+                let write = gateway.write(&case.path).err();
+                assert_eq!(
+                    write.as_deref(),
+                    Some(case.write),
+                    "write: {} via {}",
+                    case.name,
+                    gateway.name()
+                );
+            }
+        }
+    });
+    t.assert_no_escape();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_swapped_for_a_link_is_never_read_on_any_surface() {
+    let t = Tree::new("surfaces-race-file");
+    let fx = fixture(&t.root);
+    let at = t.root.join("swap");
+    fs::write(&at, "inside").unwrap();
+    with_gateways(&t, &fx, |gateways| {
+        race(
+            &t,
+            &at,
+            &t.outside.join("canary.txt"),
+            |staged| {
+                let _ = fs::remove_dir_all(staged);
+                let _ = fs::write(staged, "inside");
+            },
+            || {
+                for gateway in gateways {
+                    if let Ok(text) = gateway.read(&at) {
+                        assert_ne!(text, CANARY, "{} read the canary", gateway.name());
+                    }
+                }
+            },
+        );
+    });
+    t.assert_no_escape();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_swapped_for_a_link_receives_no_file_on_any_surface() {
+    let t = Tree::new("surfaces-race-dir");
+    let fx = fixture(&t.root);
+    let at = t.root.join("d");
+    fs::create_dir(&at).unwrap();
+    let n = AtomicUsize::new(0);
+    with_gateways(&t, &fx, |gateways| {
+        race(
+            &t,
+            &at,
+            &t.outside,
+            |staged| {
+                let _ = fs::remove_file(staged);
+                let _ = fs::create_dir(staged);
+            },
+            || {
+                let i = n.fetch_add(1, Ordering::SeqCst);
+                for gateway in gateways {
+                    let _ = gateway.write(&at.join(format!("new{i}.txt")));
+                    if let Ok(text) = gateway.read(&at.join("canary.txt")) {
+                        assert_ne!(text, CANARY, "{} read the canary", gateway.name());
+                    }
+                }
+            },
+        );
+    });
     t.assert_no_escape();
 }

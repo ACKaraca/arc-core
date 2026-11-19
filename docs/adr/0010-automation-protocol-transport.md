@@ -48,6 +48,33 @@ changes.
 Alternative rejected: carrying the token in `arc.initialize`. It would let an unauthenticated
 peer reach the protocol parser and would put a secret in a method every transport shares.
 
+## Amendment: client table and connection events
+
+Additive; the protocol version stays 1.0 and no method, parameter or result of the protocol
+changes. A client that presents only a token keeps working unchanged.
+
+- The handshake may carry `params.clientName`: a string of 1 to 256 bytes. In single-token mode it
+  is optional and only reported to the host; in client-table mode it is required and selects the
+  client whose token is compared. A malformed name refuses the connection like any other error.
+- A socket may hold a table of clients. Each client has a name, its own token (in a file of its
+  own, written owner-only and exclusively) and its own permission ceiling. A connection runs with
+  the intersection of its client's ceiling and the server's ceiling. A presented token is compared
+  only against the named client's token; an unknown name is compared against a dummy token so the
+  answer takes the same time. Clients are added and removed while the socket serves; removing one
+  closes its open connections and refuses its next handshake.
+- The host may observe connections: a connection that passes its handshake is reported as opened,
+  with an identifier unique for the socket's life, and as closed when it ends for any reason. A
+  refused handshake reports nothing.
+
+Alternatives rejected:
+
+- A client name in `arc.initialize`. The protocol parser is reachable only after the handshake, so
+  a per-client token could not be checked before a session starts.
+- A separate listener or socket per client. It multiplies the directories and listeners the user
+  must keep private, and the handshake already gives one point of admission.
+- Per-client grants inside the protocol (a `permissions` argument at the handshake). A client would
+  then name its own ceiling, which the host must control.
+
 ## Alternatives considered
 
 - **Content-Length header framing.** Robust for embedded newlines, but JSON never contains raw

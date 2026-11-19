@@ -40,7 +40,8 @@ pub use framing::{PipeReader, PipeWriter, pipe};
 pub use mcp::{MCP_FIXED_TOOLS, MCP_VERSIONS, McpConfig, tool_name};
 pub use query::MAX_PAGE;
 pub use socket::{
-    HANDSHAKE_TIMEOUT, LocalSocket, MAX_CONNECTIONS, MAX_HANDSHAKE_BYTES, SocketConfig, SocketStop,
+    ConnectionObserver, HANDSHAKE_TIMEOUT, LocalSocket, MAX_CLIENT_NAME_BYTES, MAX_CONNECTIONS,
+    MAX_HANDSHAKE_BYTES, NoObserver, SocketConfig, SocketStop,
 };
 
 use crate::context::{Clock, FixedClock, Probe, ProgressSink, Session};
@@ -321,6 +322,25 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_default()
 }
 
+/// The most characters of a client's method name that reach the log.
+const LOGGED_METHOD_CHARS: usize = 64;
+
+/// A client's method name for the log: at most [`LOGGED_METHOD_CHARS`] characters, with control
+/// characters replaced, so a client cannot fill the log or start new lines in it.
+fn loggable_method(method: &str) -> String {
+    method
+        .chars()
+        .take(LOGGED_METHOD_CHARS)
+        .map(|c| {
+            if c.is_control() {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 fn empty_object() -> Value {
     Value::Object(Map::new())
 }
@@ -487,8 +507,15 @@ impl<'a> Server<'a> {
     ///
     /// A read or write error of the streams, or `Unsupported` when the session threads cannot
     /// be started (WebAssembly without threads).
-    pub fn serve<R: BufRead, W: Write + Send>(
+    pub fn serve<R: BufRead, W: Write + Send>(&self, input: R, output: W) -> io::Result<()> {
+        self.serve_with_ceiling(self.config.ceiling.clone(), input, output)
+    }
+
+    /// [`serve`](Self::serve) with the session granted at most `ceiling` instead of the
+    /// configured ceiling. The local socket uses it to give each client its own grant.
+    pub(super) fn serve_with_ceiling<R: BufRead, W: Write + Send>(
         &self,
+        ceiling: BTreeSet<Permission>,
         mut input: R,
         mut output: W,
     ) -> io::Result<()> {
@@ -532,6 +559,7 @@ impl<'a> Server<'a> {
                 jobs: Some(jobs),
                 pending: &pending,
                 closed,
+                ceiling,
                 session: None,
                 current: None,
             };
@@ -829,6 +857,8 @@ struct Reader<'s, 'a> {
     jobs: Option<std::sync::mpsc::Sender<Job<'a>>>,
     pending: &'s Pending,
     closed: &'s AtomicBool,
+    /// The most this session may be granted.
+    ceiling: BTreeSet<Permission>,
     session: Option<Session>,
     /// The id of a pending `arc.shutdown`.
     current: Option<Value>,
@@ -927,9 +957,11 @@ impl<'a> Reader<'_, 'a> {
             return fail(self, &to, invalid_request("method"));
         };
         let Some(request_id) = request_id else {
-            self.server
-                .log
-                .log(LogLevel::Debug, "protocol.notification_ignored", method);
+            self.server.log.log(
+                LogLevel::Debug,
+                "protocol.notification_ignored",
+                &loggable_method(method),
+            );
             return false;
         };
         let params = match message.get("params") {
@@ -1042,7 +1074,7 @@ impl<'a> Reader<'_, 'a> {
         }
         let config = &self.server.config;
         let granted: BTreeSet<Permission> =
-            requested.intersection(&config.ceiling).copied().collect();
+            requested.intersection(&self.ceiling).copied().collect();
         self.server
             .log
             .log(LogLevel::Info, "protocol.initialized", &p.client_name);
@@ -1157,6 +1189,19 @@ impl<'a> Reader<'_, 'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logged_method_names_are_bounded_and_plain() {
+        let long = "m".repeat(200);
+        assert_eq!(loggable_method(&long).chars().count(), LOGGED_METHOD_CHARS);
+        assert_eq!(
+            loggable_method("notifications/cancelled"),
+            "notifications/cancelled"
+        );
+        let hostile = loggable_method("a\nb\u{7}\u{1b}[2J");
+        assert!(!hostile.chars().any(char::is_control));
+        assert_eq!(hostile.chars().count(), 8);
+    }
 
     #[test]
     fn versions_parse_and_negotiate() {

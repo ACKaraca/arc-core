@@ -6,16 +6,19 @@
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use arc_command::protocol::{LocalSocket, MAX_HANDSHAKE_BYTES, SocketConfig};
+use arc_command::protocol::{
+    ConnectionObserver, LocalSocket, MAX_HANDSHAKE_BYTES, NoObserver, SocketConfig, SocketStop,
+};
 use arc_command::{NoLog, Permission, Server, ServerConfig};
 use arc_doc::Document;
 use common::{document, registry};
@@ -411,4 +414,225 @@ fn the_handshake_has_one_deadline_for_the_whole_line() {
             json!({})
         );
     });
+}
+
+/// Serves an already bound socket with `observer` while `client` runs, then stops it.
+fn serve_bound(
+    socket: &LocalSocket,
+    observer: &dyn ConnectionObserver,
+    client: impl FnOnce(&LocalSocket),
+) {
+    let config = ServerConfig::new("arc-test", "0.1.0", [Permission::Read, Permission::Edit]);
+    let registry = registry();
+    let docs = documents();
+    let server = Server::new(&registry, &docs, config, &NoLog);
+    let stop = socket.stopper();
+    std::thread::scope(|scope| {
+        let served = scope.spawn(|| socket.serve_observed(&server, observer));
+        // Stops the server even when the client panics, so a failure is not a hang.
+        struct StopOnDrop(SocketStop);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.0.stop();
+            }
+        }
+        let guard = StopOnDrop(stop);
+        client(socket);
+        drop(guard);
+        served.join().unwrap().unwrap();
+    });
+}
+
+/// Sends an `arc.authenticate` line naming `client` (when given) and presenting `token`.
+fn send_hello(conn: &mut Conn, client: Option<&str>, token: &str) {
+    let mut params = json!({"token": token});
+    if let Some(client) = client {
+        params["clientName"] = json!(client);
+    }
+    conn.send(
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "arc.authenticate", "params": params})
+            .to_string(),
+    );
+}
+
+/// Records every connection event, in the order the observer received them.
+#[derive(Default)]
+struct Events(Mutex<Vec<(&'static str, u64, String)>>);
+
+impl ConnectionObserver for Events {
+    fn opened(&self, connection: u64, client_name: String) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(("opened", connection, client_name));
+    }
+
+    fn closed(&self, connection: u64) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(("closed", connection, String::new()));
+    }
+}
+
+#[test]
+fn opened_and_closed_pair_once_per_connection_and_refusals_emit_nothing() {
+    let temp = Temp::new();
+    let socket = LocalSocket::bind(&temp.config(true)).unwrap();
+    let good = token(&socket);
+    let events = Events::default();
+    serve_bound(&socket, &events, |socket| {
+        let mut named = Conn::open(socket.socket_path());
+        send_hello(&mut named, Some("tester"), &good);
+        assert_eq!(named.read().unwrap()["result"], json!({}));
+        let mut wrong = Conn::open(socket.socket_path());
+        send_hello(&mut wrong, Some("tester"), &"0".repeat(64));
+        assert_refused_and_closed(&mut wrong);
+        // A client that never names itself is admitted in single-token mode.
+        let mut anonymous = Conn::open(socket.socket_path());
+        send_hello(&mut anonymous, None, &good);
+        assert_eq!(anonymous.read().unwrap()["result"], json!({}));
+        // The named client disconnects; the anonymous one is closed by the stop.
+        drop(named);
+    });
+    let events = events.0.lock().unwrap();
+    assert_eq!(events.len(), 4, "{events:?}");
+    let opened: Vec<&(&str, u64, String)> = events.iter().filter(|e| e.0 == "opened").collect();
+    let names: BTreeSet<&str> = opened.iter().map(|e| e.2.as_str()).collect();
+    assert_eq!(names, BTreeSet::from(["tester", ""]));
+    let ids: BTreeSet<u64> = opened.iter().map(|e| e.1).collect();
+    assert_eq!(ids.len(), 2);
+    for id in ids {
+        let at = |kind: &str| events.iter().position(|e| e.0 == kind && e.1 == id);
+        let closed: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.0 == "closed" && e.1 == id)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(closed.len(), 1, "connection {id} closed once");
+        assert!(at("opened").unwrap() < closed[0], "opened before closed");
+    }
+}
+
+#[test]
+fn concurrent_connections_get_different_identifiers() {
+    let temp = Temp::new();
+    let socket = LocalSocket::bind(&temp.config(true)).unwrap();
+    let good = token(&socket);
+    let events = Events::default();
+    serve_bound(&socket, &events, |socket| {
+        let mut first = Conn::open(socket.socket_path());
+        let mut second = Conn::open(socket.socket_path());
+        send_hello(&mut first, None, &good);
+        assert_eq!(first.read().unwrap()["result"], json!({}));
+        send_hello(&mut second, None, &good);
+        assert_eq!(second.read().unwrap()["result"], json!({}));
+    });
+    let events = events.0.lock().unwrap();
+    let ids: BTreeSet<u64> = events
+        .iter()
+        .filter(|e| e.0 == "opened")
+        .map(|e| e.1)
+        .collect();
+    assert_eq!(ids.len(), 2);
+}
+
+#[test]
+fn each_client_runs_with_its_own_ceiling_and_token() {
+    let temp = Temp::new();
+    let socket = LocalSocket::bind_clients(&temp.config(true)).unwrap();
+    let reader_file = socket
+        .add_client("reader", BTreeSet::from([Permission::Read]))
+        .unwrap();
+    let editor_file = socket
+        .add_client(
+            "editor",
+            BTreeSet::from([Permission::Read, Permission::Edit]),
+        )
+        .unwrap();
+    let reader_token = std::fs::read_to_string(&reader_file).unwrap();
+    let editor_token = std::fs::read_to_string(&editor_file).unwrap();
+    assert_eq!(mode(&reader_file), 0o600);
+    assert_ne!(reader_token, editor_token);
+    serve_bound(&socket, &NoObserver, |socket| {
+        let edit = json!({"document": "main", "command": "test.item.create",
+                          "params": {"name": "wall", "length": "2400 mm"}});
+        let mut reader = Conn::open(socket.socket_path());
+        send_hello(&mut reader, Some("reader"), &reader_token);
+        assert_eq!(reader.read().unwrap()["result"], json!({}));
+        let init = json!({"clientName": "r", "protocolVersions": {"min": "1.0", "max": "1.0"},
+                          "permissions": ["read", "edit"]});
+        assert_eq!(
+            reader.call(2, "arc.initialize", init)["result"]["permissions"],
+            json!(["read"])
+        );
+        let refused = reader.call(3, "command.run", edit.clone());
+        assert_eq!(refused["error"]["message"], "cmd.permission_denied");
+        assert_eq!(reader.call(4, "arc.ping", json!({}))["result"], json!({}));
+
+        let mut editor = Conn::open(socket.socket_path());
+        send_hello(&mut editor, Some("editor"), &editor_token);
+        assert_eq!(editor.read().unwrap()["result"], json!({}));
+        let init = json!({"clientName": "e", "protocolVersions": {"min": "1.0", "max": "1.0"},
+                          "permissions": ["read", "edit"]});
+        let granted = editor.call(2, "arc.initialize", init);
+        assert!(
+            granted["result"]["permissions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("edit"))
+        );
+        let run = editor.call(3, "command.run", edit);
+        assert_eq!(run["result"]["summary"]["counts"]["created"], 1);
+
+        // A client presenting another client's token, an unknown name and no name are refused.
+        let mut swapped = Conn::open(socket.socket_path());
+        send_hello(&mut swapped, Some("reader"), &editor_token);
+        assert_refused_and_closed(&mut swapped);
+        let mut stranger = Conn::open(socket.socket_path());
+        send_hello(&mut stranger, Some("nobody"), &reader_token);
+        assert_refused_and_closed(&mut stranger);
+        let mut nameless = Conn::open(socket.socket_path());
+        send_hello(&mut nameless, None, &reader_token);
+        assert_refused_and_closed(&mut nameless);
+
+        // Removing the editor closes its connection, deletes its token and refuses it again.
+        assert!(socket.remove_client("editor"));
+        assert!(
+            editor.read().is_none(),
+            "the removed client's connection closes"
+        );
+        assert!(!editor_file.exists());
+        let mut again = Conn::open(socket.socket_path());
+        send_hello(&mut again, Some("editor"), &editor_token);
+        assert_refused_and_closed(&mut again);
+        assert!(!socket.remove_client("editor"));
+    });
+}
+
+#[test]
+fn client_table_names_and_duplicates_are_refused() {
+    let temp = Temp::new();
+    let single = LocalSocket::bind(&temp.config(true)).unwrap();
+    assert_eq!(
+        single.add_client("x", BTreeSet::new()).unwrap_err().code(),
+        "cmd.socket.io"
+    );
+    drop(single);
+    let socket = LocalSocket::bind_clients(&temp.config(true)).unwrap();
+    for bad in ["", "../x", "Upper"] {
+        assert_eq!(
+            socket.add_client(bad, BTreeSet::new()).unwrap_err().code(),
+            "cmd.socket.io",
+            "{bad}"
+        );
+    }
+    let path = socket.add_client("ok", BTreeSet::new()).unwrap();
+    assert!(socket.add_client("ok", BTreeSet::new()).is_err());
+    drop(socket);
+    assert!(
+        !path.exists(),
+        "dropping the socket removes its client files"
+    );
 }

@@ -481,7 +481,8 @@ the process that owns stdin and stdout is the [headless runner](#headless-runner
   `jsonrpc` or no method is -32600 (`jsonrpc`, `method`) with its id; `params` that is an array
   is -32602 (`by_position`); another `params` type is -32600 (`params`). A message without
   `id` that is otherwise well formed is a notification: the client defines none, so it is
-  logged and ignored. Unknown members are ignored.
+  logged and ignored (the log record names the method, cut to 64 characters with control
+  characters replaced, under `protocol.notification_ignored`). Unknown members are ignored.
 - Every request with an id gets exactly one response. Responses and notifications are written
   with sorted object keys, so identical inputs and seeds give identical bytes.
 
@@ -638,7 +639,12 @@ validate every request they send and every message the server writes against the
   Unicode normalization and case variants, NUL, over-long paths, junctions on Windows (skipped
   with a message when the system refuses to create them) and races (a thread swapping a file
   or a directory for a link while another opens it repeatedly), asserting that the canary is
-  never read, written or joined by a new file.
+  never read, written or joined by a new file. The table of escape cases (absolute and
+  dot-dot paths, links out, a dangling link, a device node, over-long and relative paths, NUL,
+  a directory, and on Windows reserved names and alternate data streams) also runs through the
+  stdio protocol, the Model Context Protocol endpoint and the local socket, using two
+  registered file commands. Every surface must answer each case with the same error code for
+  reading and for writing; the swap races run on every surface as well.
 
 ## Headless runner as implemented
 
@@ -875,11 +881,31 @@ after [ADR-0010](../adr/0010-automation-protocol-transport.md).
   missing or mistyped token, another first message, an oversize or malformed line, no line in
   time) is answered with one error line, `cmd.socket.unauthorized` (-32004, id `null`, no
   details), and the connection is closed; a connection never reaches a method without it.
+  `params.clientName` is optional (1 to 256 bytes); in client-table mode it is required and names
+  the client whose token is compared. An unknown name is compared against a dummy token of the
+  same length, so the answer takes the same time as for a known name.
 - **Serving**: `serve` accepts until `SocketStop::stop` (from `stopper()`, which also wakes the
   accept), serves each authenticated connection as one session of the server on its own thread,
   allows 16 at once (`MAX_CONNECTIONS`; others are closed unanswered) and closes the open ones
   when stopped. The protocol, its limits and its framing are those of `Server::serve`
   unchanged.
+- **Client table**: `LocalSocket::bind_clients` binds in client-table mode, which creates no
+  `<name>.token` file. `add_client(name, ceiling)` writes `<name>.<client>.token` (owner-only,
+  exclusive creation, same owner check as the session token) and returns its path; the name
+  follows the socket name rules and is unique in the table. A connection authenticated as a
+  client runs with the intersection of that client's ceiling and the server's ceiling, so the
+  `permissions` a client requests are granted only within both. `remove_client(name)` closes the
+  client's open connections, refuses its next handshake and removes its token file; it returns
+  whether the client existed. Adding a client on a single-token socket is refused. A client file
+  left by a process that died blocks its name until someone removes it: the directory is not
+  swept, since that could delete the token of another socket with a similar name. Dropping the
+  socket removes the client files it wrote.
+- **Connection events**: `serve_observed(server, observer)` tells a `ConnectionObserver` when a
+  connection passes its handshake (`opened`, with a connection identifier unique for the life of
+  the socket and the client name the handshake carried, with control characters replaced, empty
+  when none) and when it ends for any reason (`closed`). Both calls run on the connection's own
+  thread and hold no lock of the socket. A refused handshake reports nothing. `serve` is
+  `serve_observed` with a `NoObserver`.
 - **Platforms**: Unix domain sockets on Linux and macOS. Named pipes for Windows are not
   provided: `bind` there is `cmd.socket.unsupported` (after the enabled check).
 

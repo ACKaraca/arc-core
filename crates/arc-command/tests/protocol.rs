@@ -858,6 +858,40 @@ fn a_fault_while_handling_a_request_is_contained() {
     });
 }
 
+/// Keeps the detail of every log record.
+#[derive(Default)]
+struct Recorded(std::sync::Mutex<Vec<(String, String)>>);
+
+impl Log for Recorded {
+    fn log(&self, _: LogLevel, event: &str, detail: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((event.to_owned(), detail.to_owned()));
+    }
+}
+
+#[test]
+fn an_ignored_notification_is_logged_with_a_bounded_method_name() {
+    let log = Recorded::default();
+    session_with(config(), &log, |c| {
+        c.call(&initialize(1, "1.0", "1.0", &["read"]));
+        let hostile = format!("{}\n\u{7}x", "m".repeat(300));
+        c.send(&json!({"jsonrpc": "2.0", "method": hostile}));
+        assert_eq!(
+            c.call(&request(2, "arc.ping", json!({})))["result"],
+            json!({})
+        );
+    });
+    let records = log.0.lock().unwrap();
+    let (_, detail) = records
+        .iter()
+        .find(|(event, _)| event == "protocol.notification_ignored")
+        .unwrap();
+    assert_eq!(detail.chars().count(), 64);
+    assert!(!detail.chars().any(char::is_control));
+}
+
 #[test]
 fn file_access_goes_through_the_roots() {
     let base = std::env::temp_dir().join(format!("arc-protocol-roots-{}", std::process::id()));
