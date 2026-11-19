@@ -46,13 +46,16 @@ const CHUNK_BIN: u32 = 0x004E_4942;
 const MODE_TRIANGLES: u64 = 4;
 const MODE_STRIP: u64 = 5;
 const MODE_FAN: u64 = 6;
+/// Elements gathered between two progress and cancellation steps inside one accessor.
+const GATHER_STEP: usize = 65_536;
 
 /// Reads a glTF JSON file or a GLB container.
 ///
 /// `resolver` is called with each URI that is neither a `data:` URI nor the GLB binary chunk, as
 /// the file writes it (percent-encoding is not decoded), and returns the bytes of the resource or
 /// `None` when it has none. The bytes of the resolver and the decoded data URIs count against
-/// `Limits::decompressed_bytes`.
+/// `Limits::decompressed_bytes`, and so does the primitive data read from accessors, which is
+/// charged before it is decoded.
 ///
 /// # Errors
 ///
@@ -202,14 +205,48 @@ pub(crate) enum HierarchyFault {
     Depth(u64),
 }
 
-/// Walks the hierarchy from the roots and fails when a node is reached twice or does not exist.
-/// Depth counts the roots as zero. The walk is iterative, so depth never drives recursion.
+/// Walks the hierarchy from the roots, then from every node that no node names as a child and the
+/// walk has not reached. Those extra roots are validated but are not roots of the scene. Fails
+/// when a node is reached twice, does not exist or is deeper than `max_depth`, or when a node is
+/// still unreached, which means it lies on a cycle. Depth counts the roots as zero.
 pub(crate) fn check_hierarchy(
     nodes: &[Node],
     roots: &[usize],
     max_depth: u64,
 ) -> std::result::Result<(), HierarchyFault> {
     let mut seen = vec![false; nodes.len()];
+    walk_hierarchy(nodes, roots, max_depth, &mut seen)?;
+    let mut named = vec![false; nodes.len()];
+    for node in nodes {
+        for &child in &node.children {
+            if let Some(flag) = named.get_mut(child) {
+                *flag = true;
+            }
+        }
+    }
+    let extra: Vec<usize> = seen
+        .iter()
+        .zip(&named)
+        .enumerate()
+        .filter(|(_, (reached, named))| !**reached && !**named)
+        .map(|(index, _)| index)
+        .collect();
+    walk_hierarchy(nodes, &extra, max_depth, &mut seen)?;
+    if seen.iter().all(|&reached| reached) {
+        Ok(())
+    } else {
+        Err(HierarchyFault::Reference)
+    }
+}
+
+/// Walks the nodes below `roots`, marking each in `seen`. The walk is iterative, so depth never
+/// drives recursion.
+fn walk_hierarchy(
+    nodes: &[Node],
+    roots: &[usize],
+    max_depth: u64,
+    seen: &mut [bool],
+) -> std::result::Result<(), HierarchyFault> {
     let mut stack: Vec<(usize, u64)> = roots.iter().rev().map(|&root| (root, 0)).collect();
     while let Some((index, depth)) = stack.pop() {
         let reached = seen.get_mut(index).ok_or(HierarchyFault::Reference)?;
@@ -275,10 +312,12 @@ fn check_text(text: &str, limits: &Limits) -> Result<()> {
     }
 }
 
+/// A number stored as `f32`: it must be finite after the narrowing, since a large `f64` becomes
+/// infinite.
 fn number_value(value: &Value) -> Result<f32> {
-    let number = value.as_f64().ok_or_else(value_invalid)?;
+    let number = narrow(value.as_f64().ok_or_else(value_invalid)?);
     if number.is_finite() {
-        Ok(narrow(number))
+        Ok(number)
     } else {
         Err(value_invalid())
     }
@@ -465,6 +504,8 @@ struct Reader<'a> {
     groups: Vec<MeshGroup>,
     records: u64,
     owned_bytes: u64,
+    /// The bytes of primitive data charged so far, against `Limits::decompressed_bytes`.
+    decoded: u64,
     loss: LossLog,
 }
 
@@ -481,7 +522,18 @@ impl<'a> Reader<'a> {
             groups: Vec::new(),
             records: 0,
             owned_bytes: 0,
+            decoded: 0,
             loss: LossLog::default(),
+        }
+    }
+
+    /// Charges the bytes a primitive will hold, before any of its data is decoded.
+    fn charge_decoded(&mut self, bytes: u64) -> Result<()> {
+        self.decoded = self.decoded.saturating_add(bytes);
+        if self.decoded > self.limits.decompressed_bytes {
+            Err(limit("decompressed_bytes", self.decoded))
+        } else {
+            Ok(())
         }
     }
 
@@ -592,7 +644,7 @@ impl<'a> Reader<'a> {
         self.materials = materials;
         for value in array_of(root, "meshes")? {
             control.step(len_u64(self.groups.len()), 0)?;
-            let group = self.read_mesh(object(value)?)?;
+            let group = self.read_mesh(object(value)?, control)?;
             self.groups.push(group);
         }
         let lights = self.read_lights(&root_lights)?;
@@ -640,14 +692,15 @@ impl<'a> Reader<'a> {
                 },
                 Some(uri) => {
                     let uri = uri.ok_or_else(invalid)?;
-                    check_text(uri, &self.limits)?;
                     if let Some(payload) = uri.strip_prefix("data:") {
+                        // Bounded by the decoder's remaining bytes, not by `string_bytes`.
                         let remaining = self
                             .limits
                             .decompressed_bytes
                             .saturating_sub(self.owned_bytes);
                         Cow::Owned(decode_data_uri(payload, remaining)?)
                     } else {
+                        check_text(uri, &self.limits)?;
                         let bytes = resolver(uri).ok_or_else(|| {
                             Error::new(codes::MESH_RESOURCE_UNAVAILABLE)
                                 .with_arg("uri", uri.to_owned())
@@ -898,13 +951,18 @@ impl<'a> Reader<'a> {
         Ok(ImageSource::BufferView(view))
     }
 
-    fn read_mesh(&mut self, obj: &Map<String, Value>) -> Result<MeshGroup> {
+    fn read_mesh(
+        &mut self,
+        obj: &Map<String, Value>,
+        control: &mut Control<'_>,
+    ) -> Result<MeshGroup> {
         self.record()?;
         let name = text_of(obj, "name", &self.limits)?;
         let (_, preserved) = self.extensions_of(obj, "mesh", &[], true)?;
+        let name_bytes = len_u64(name.len());
         let mut primitives = Vec::new();
         for value in array_of(obj, "primitives")? {
-            if let Some(part) = self.read_primitive(object(value)?)? {
+            if let Some(part) = self.read_primitive(object(value)?, name_bytes, control)? {
                 self.parts.push(part);
                 primitives.push(self.parts.len() - 1);
             }
@@ -916,8 +974,18 @@ impl<'a> Reader<'a> {
         })
     }
 
-    fn read_primitive(&mut self, obj: &Map<String, Value>) -> Result<Option<MeshPart>> {
+    /// Reads one primitive. Its size is worked out from the accessors and charged against
+    /// `Limits::decompressed_bytes` before any of its data is decoded, so a zero-filled accessor
+    /// shared by many primitives cannot exceed the limit. `group_name_bytes` is the length of the
+    /// name of the mesh that holds the primitive.
+    fn read_primitive(
+        &mut self,
+        obj: &Map<String, Value>,
+        group_name_bytes: u64,
+        control: &mut Control<'_>,
+    ) -> Result<Option<MeshPart>> {
         self.record()?;
+        control.step(self.decoded, self.limits.decompressed_bytes)?;
         let mode = index_of(obj.get("mode"))?.map_or(MODE_TRIANGLES, len_u64);
         if !matches!(mode, MODE_TRIANGLES | MODE_STRIP | MODE_FAN) {
             self.loss
@@ -937,53 +1005,30 @@ impl<'a> Reader<'a> {
         let position = self
             .attribute(attributes, "POSITION", &[Kind::Vec3])?
             .ok_or_else(invalid)?;
-        let vertices = position.count;
+        let vertices = self.accessor(position)?.count;
         let normal = self.attribute(attributes, "NORMAL", &[Kind::Vec3])?;
         let uv = self.attribute(attributes, "TEXCOORD_0", &[Kind::Vec2])?;
         let color = self.attribute(attributes, "COLOR_0", &[Kind::Vec3, Kind::Vec4])?;
-        for attribute in [&normal, &uv, &color].into_iter().flatten() {
-            if attribute.count != vertices {
+        for attribute in [normal, uv, color].into_iter().flatten() {
+            if self.accessor(attribute)?.count != vertices {
                 return Err(invalid());
             }
         }
-        let indices = match obj.get("indices") {
-            Some(index) => self.index_accessor(index_of(Some(index))?.ok_or_else(invalid)?)?,
+        let index_accessor = match obj.get("indices") {
+            Some(index) => Some(index_of(Some(index))?.ok_or_else(invalid)?),
+            None => None,
+        };
+        let index_count = match index_accessor {
+            Some(index) => self.index_accessor_count(index)?,
             None => {
-                let top = u32::try_from(vertices)
-                    .map_err(|_| limit("array_length", len_u64(vertices)))?;
-                (0..top).collect()
+                u32::try_from(vertices).map_err(|_| limit("array_length", len_u64(vertices)))?;
+                vertices
             }
         };
-        let triangles = triangles_of(mode, &indices, vertices)?;
-        let mut channels = Vec::new();
-        if let Some(values) = &normal {
-            channels.push((
-                AttributeKey::Normal,
-                Channel::Vec3(vectors::<3>(&values.values)?),
-            ));
-        }
-        if let Some(values) = &uv {
-            channels.push((
-                AttributeKey::Uv(0),
-                Channel::Vec2(vectors::<2>(&values.values)?),
-            ));
-        }
-        if let Some(values) = &color {
-            let colors = if values.components == 3 {
-                vectors::<3>(&values.values)?
-                    .into_iter()
-                    .map(|[r, g, b]| [r, g, b, 1.0])
-                    .collect()
-            } else {
-                vectors::<4>(&values.values)?
-            };
-            channels.push((AttributeKey::Color, Channel::Vec4(colors)));
-        }
-        let positions = vectors::<3>(&position.values)?
-            .into_iter()
-            .map(|[x, y, z]| Point3::new(f64::from(x), f64::from(y), f64::from(z)))
-            .collect();
-        let mesh = build_mesh(positions, triangles, channels, &self.limits)?;
+        let triangle_count = match mode {
+            MODE_TRIANGLES => index_count / 3,
+            _ => index_count.saturating_sub(2),
+        };
         let material = match index_of(obj.get("material"))? {
             None => None,
             Some(index) => Some(
@@ -994,6 +1039,43 @@ impl<'a> Reader<'a> {
                     .clone(),
             ),
         };
+        let names = group_name_bytes
+            .saturating_add(material.as_ref().map_or(0, |name| len_u64(name.len())));
+        let bytes = primitive_bytes(
+            vertices,
+            [normal.is_some(), uv.is_some(), color.is_some()],
+            index_count,
+            triangle_count,
+            names,
+        )
+        .ok_or_else(|| limit("decompressed_bytes", u64::MAX))?;
+        self.charge_decoded(bytes)?;
+
+        let position = self.accessor_floats(position, control)?;
+        let normal = normal
+            .map(|index| self.accessor_floats(index, control))
+            .transpose()?;
+        let uv = uv
+            .map(|index| self.accessor_floats(index, control))
+            .transpose()?;
+        let color = color
+            .map(|index| self.accessor_floats(index, control))
+            .transpose()?;
+        let indices = match index_accessor {
+            Some(index) => self.index_accessor(index, control)?,
+            None => {
+                let top = u32::try_from(vertices)
+                    .map_err(|_| limit("array_length", len_u64(vertices)))?;
+                (0..top).collect()
+            }
+        };
+        let triangles = triangles_of(mode, &indices, vertices)?;
+        let channels = channels_of(normal.as_ref(), uv.as_ref(), color.as_ref())?;
+        let positions = vectors::<3>(&position.values)?
+            .into_iter()
+            .map(|[x, y, z]| Point3::new(f64::from(x), f64::from(y), f64::from(z)))
+            .collect();
+        let mesh = build_mesh(positions, triangles, channels, &self.limits)?;
         Ok(Some(MeshPart {
             name: String::new(),
             mesh,
@@ -1002,32 +1084,95 @@ impl<'a> Reader<'a> {
         }))
     }
 
-    /// The floats of a named attribute, with its component count, or `None` when absent. The
-    /// kind must be one of `kinds` and the count must match the positions; the position call
-    /// passes no positions, so the count is checked by the caller through `vertices`.
+    /// The accessor index of a named attribute, or `None` when absent. Its kind must be one of
+    /// `kinds`; its count is checked against the positions by the caller.
     fn attribute(
         &self,
         attributes: &Map<String, Value>,
         name: &str,
         kinds: &[Kind],
-    ) -> Result<Option<Floats>> {
+    ) -> Result<Option<usize>> {
         let Some(index) = attributes.get(name) else {
             return Ok(None);
         };
         let index = index_of(Some(index))?.ok_or_else(invalid)?;
-        let kind = self.accessor(index)?.kind;
-        if !kinds.contains(&kind) {
+        if !kinds.contains(&self.accessor(index)?.kind) {
             return Err(invalid());
         }
-        Ok(Some(self.accessor_floats(index)?))
+        Ok(Some(index))
+    }
+
+    /// The count of an index accessor, which must be a scalar of an unsigned component type.
+    fn index_accessor_count(&self, index: usize) -> Result<usize> {
+        let accessor = self.accessor(index)?;
+        let unsigned = matches!(
+            accessor.component,
+            Component::U8 | Component::U16 | Component::U32
+        );
+        if accessor.kind != Kind::Scalar || !unsigned {
+            return Err(invalid());
+        }
+        Ok(accessor.count)
     }
 }
 
-/// The floats read from an accessor: `count` elements of `components` values each.
+/// The floats read from an accessor: its elements of `components` values each.
 struct Floats {
-    count: usize,
     components: usize,
     values: Vec<f32>,
+}
+
+/// The attribute channels of a primitive: normals, the first texture coordinates and colors. A
+/// color of three components gets alpha 1.
+fn channels_of(
+    normal: Option<&Floats>,
+    uv: Option<&Floats>,
+    color: Option<&Floats>,
+) -> Result<Vec<(AttributeKey, Channel)>> {
+    let mut channels = Vec::new();
+    if let Some(values) = normal {
+        channels.push((
+            AttributeKey::Normal,
+            Channel::Vec3(vectors::<3>(&values.values)?),
+        ));
+    }
+    if let Some(values) = uv {
+        channels.push((
+            AttributeKey::Uv(0),
+            Channel::Vec2(vectors::<2>(&values.values)?),
+        ));
+    }
+    if let Some(values) = color {
+        let colors = if values.components == 3 {
+            vectors::<3>(&values.values)?
+                .into_iter()
+                .map(|[r, g, b]| [r, g, b, 1.0])
+                .collect()
+        } else {
+            vectors::<4>(&values.values)?
+        };
+        channels.push((AttributeKey::Color, Channel::Vec4(colors)));
+    }
+    Ok(channels)
+}
+
+/// The bytes one primitive holds once decoded, or `None` on overflow: positions (24 bytes per
+/// vertex, `f64`), the channels that are present (normals 12 bytes, texture coordinates 8 and
+/// colors 16, stored as `Vec4`), 4 bytes per index, 12 bytes per triangle and the names.
+fn primitive_bytes(
+    vertices: usize,
+    channels: [bool; 3],
+    indices: usize,
+    triangles: usize,
+    names: u64,
+) -> Option<u64> {
+    let [normal, uv, color] = channels.map(u64::from);
+    let per_vertex = 24 + 12 * normal + 8 * uv + 16 * color;
+    len_u64(vertices)
+        .checked_mul(per_vertex)?
+        .checked_add(len_u64(indices).checked_mul(4)?)?
+        .checked_add(len_u64(triangles).checked_mul(12)?)?
+        .checked_add(names)
 }
 
 /// The vertex attributes and index lists of the `read_primitive` call.
@@ -1100,6 +1245,7 @@ impl Reader<'_> {
         component: Component,
         normalized: bool,
         components: usize,
+        control: &mut Control<'_>,
     ) -> Result<Vec<f32>> {
         if components == 0 {
             return Err(invalid());
@@ -1111,6 +1257,9 @@ impl Reader<'_> {
         let total = count.checked_mul(components).ok_or_else(truncated)?;
         let mut out = vec![0.0_f32; total];
         for (index, element_out) in out.chunks_exact_mut(components).enumerate() {
+            if index.is_multiple_of(GATHER_STEP) {
+                control.step(len_u64(index), len_u64(count))?;
+            }
             let at = index
                 .checked_mul(stride)
                 .and_then(|offset| first.checked_add(offset))
@@ -1134,11 +1283,15 @@ impl Reader<'_> {
         stride: usize,
         count: usize,
         component: Component,
+        control: &mut Control<'_>,
     ) -> Result<Vec<u32>> {
         let (buffer, first) = self.span(view, start, stride, count, component.size())?;
         let data = self.buffer(buffer)?;
         let mut out = Vec::with_capacity(count);
         for index in 0..count {
+            if index.is_multiple_of(GATHER_STEP) {
+                control.step(len_u64(index), len_u64(count))?;
+            }
             let at = index
                 .checked_mul(stride)
                 .and_then(|offset| first.checked_add(offset))
@@ -1149,7 +1302,7 @@ impl Reader<'_> {
     }
 
     /// The floats of an accessor, with its sparse part applied. Matrix accessors are not read.
-    fn accessor_floats(&self, index: usize) -> Result<Floats> {
+    fn accessor_floats(&self, index: usize, control: &mut Control<'_>) -> Result<Floats> {
         let accessor = *self.accessor(index)?;
         if accessor.kind.is_matrix() {
             return Err(invalid());
@@ -1168,6 +1321,7 @@ impl Reader<'_> {
                     accessor.component,
                     accessor.normalized,
                     components,
+                    control,
                 )?
             }
             None => {
@@ -1187,6 +1341,7 @@ impl Reader<'_> {
                 sparse.index_component.size(),
                 sparse.count,
                 sparse.index_component,
+                control,
             )?;
             let replacement = self.gather(
                 sparse.values.view,
@@ -1196,6 +1351,7 @@ impl Reader<'_> {
                 accessor.component,
                 accessor.normalized,
                 components,
+                control,
             )?;
             for (target, value) in targets.iter().zip(replacement.chunks_exact(components)) {
                 let target = usize::try_from(*target).map_err(|_| reference())?;
@@ -1211,23 +1367,13 @@ impl Reader<'_> {
                 }
             }
         }
-        Ok(Floats {
-            count: accessor.count,
-            components,
-            values,
-        })
+        Ok(Floats { components, values })
     }
 
     /// The indices of a scalar accessor of an unsigned component type, with sparse data applied.
-    fn index_accessor(&self, index: usize) -> Result<Vec<u32>> {
+    fn index_accessor(&self, index: usize, control: &mut Control<'_>) -> Result<Vec<u32>> {
         let accessor = *self.accessor(index)?;
-        let unsigned = matches!(
-            accessor.component,
-            Component::U8 | Component::U16 | Component::U32
-        );
-        if accessor.kind != Kind::Scalar || !unsigned {
-            return Err(invalid());
-        }
+        self.index_accessor_count(index)?;
         self.check_count(accessor.count)?;
         let mut values = match accessor.view {
             Some(view) => {
@@ -1238,6 +1384,7 @@ impl Reader<'_> {
                     stride,
                     accessor.count,
                     accessor.component,
+                    control,
                 )?
             }
             None => vec![0; accessor.count],
@@ -1249,6 +1396,7 @@ impl Reader<'_> {
                 sparse.index_component.size(),
                 sparse.count,
                 sparse.index_component,
+                control,
             )?;
             let replacement = self.gather_indices(
                 sparse.values.view,
@@ -1256,6 +1404,7 @@ impl Reader<'_> {
                 accessor.component.size(),
                 sparse.count,
                 accessor.component,
+                control,
             )?;
             for (target, value) in targets.iter().zip(replacement) {
                 let target = usize::try_from(*target).map_err(|_| reference())?;
@@ -1594,20 +1743,23 @@ fn base64_value(byte: u8) -> Option<u32> {
 }
 
 /// Decodes standard base64 with optional padding. The output may not exceed `max` bytes.
+///
+/// Padding is accepted only at the end of a complete quantum, and only as many `=` as the data
+/// leaves open: none after a whole quantum, one after three characters and two after two.
 fn base64_decode(input: &[u8], max: u64) -> Result<Vec<u8>> {
-    let padded = input.contains(&b'=');
-    if padded && !input.len().is_multiple_of(4) {
+    let pad = input.iter().rev().take_while(|&&byte| byte == b'=').count();
+    let data = input
+        .get(..input.len().saturating_sub(pad))
+        .unwrap_or_default();
+    let open = (4 - data.len() % 4) % 4;
+    let misplaced = pad > 0 && (!input.len().is_multiple_of(4) || pad != open);
+    if pad > 2 || data.contains(&b'=') || misplaced || data.len() % 4 == 1 {
         return Err(value_invalid());
     }
-    let mut end = input.len();
-    while input.get(end.wrapping_sub(1)) == Some(&b'=') {
-        end -= 1;
-    }
-    let data = input.get(..end).unwrap_or_default();
-    if data.len() % 4 == 1 {
-        return Err(value_invalid());
-    }
-    let mut out = Vec::with_capacity(data.len() / 4 * 3 + 2);
+    // The reserve is bounded by the output that may be produced, and by the input it comes from.
+    let allowed = usize::try_from(max).unwrap_or(usize::MAX);
+    let reserve = (data.len() / 4 * 3 + 2).min(input.len()).min(allowed);
+    let mut out = Vec::with_capacity(reserve);
     let mut bits: u32 = 0;
     let mut accumulator: u32 = 0;
     for &byte in data {
@@ -1650,7 +1802,7 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Component, Kind, base64_encode, check_nesting};
+    use super::{Component, Kind, base64_decode, base64_encode, check_nesting};
 
     #[test]
     fn matrix_columns_are_padded_to_four_bytes() {
@@ -1668,6 +1820,32 @@ mod tests {
         assert_eq!(base64_encode(b"M"), "TQ==");
         assert_eq!(base64_encode(b"Ma"), "TWE=");
         assert_eq!(base64_encode(b"Man"), "TWFu");
+    }
+
+    #[test]
+    fn base64_accepts_only_the_padding_its_quantum_needs() {
+        let refused: [&[u8]; 7] = [
+            b"AAAA====",
+            b"====",
+            b"AAAA=",
+            b"AAA==",
+            b"AA===",
+            b"AA=",
+            b"A===",
+        ];
+        for text in refused {
+            assert!(base64_decode(text, u64::MAX).is_err(), "{text:?}");
+        }
+        for text in [&b""[..], b"AAAA", b"AAA=", b"AA=="] {
+            assert!(base64_decode(text, u64::MAX).is_ok(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn base64_reserve_is_capped_by_the_allowed_output() {
+        let out = base64_decode(b"AAAA", 3).unwrap();
+        assert_eq!(out, vec![0, 0, 0]);
+        assert!(out.capacity() <= 3);
     }
 
     #[test]

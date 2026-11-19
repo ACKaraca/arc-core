@@ -6,7 +6,8 @@
 //! mesh of its own under a root node, and a group that no node names gets a root node, so every
 //! part is drawn. Positions are written as `f32` with their bounds; normals, the first texture
 //! coordinate set and colors follow when the mesh has them; indices are `u16` when the mesh has at
-//! most 65 536 vertices and `u32` otherwise. The output is deterministic.
+//! most 65 535 vertices, so that no index is 65 535, and `u32` otherwise. The output is
+//! deterministic.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -378,7 +379,8 @@ impl<'s> Writer<'s> {
         for triangle in mesh.triangles() {
             indices.extend_from_slice(triangle);
         }
-        let (component, bytes) = if vertices <= 65_536 {
+        // glTF does not allow 65 535 as an unsigned short index, so 16-bit indices need fewer.
+        let (component, bytes) = if vertices <= 65_535 {
             let narrow_indices: Vec<u16> = indices
                 .iter()
                 .map(|&index| u16::try_from(index).map_err(|_| write_invalid()))

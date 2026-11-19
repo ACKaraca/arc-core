@@ -576,3 +576,108 @@ fn material_names_stay_unique_and_generated_names_do_not_collide() {
         .collect();
     assert_eq!(names, vec!["a", "material-1", "material-2", "material-3"]);
 }
+
+#[test]
+fn primitives_sharing_one_zero_filled_accessor_are_bounded_by_decompressed_bytes() {
+    // One VEC3 accessor without a buffer view (zero-filled), shared by 10,000 primitives. Each
+    // primitive holds about 2.4 MB of positions, so the total passes 16 MiB after seven of them.
+    let primitives = vec![r#"{"attributes":{"POSITION":0}}"#; 10_000].join(",");
+    let json = format!(
+        r#"{{"asset":{{"version":"2.0"}},"accessors":[{{"componentType":5126,"count":99999,"type":"VEC3"}}],
+        "meshes":[{{"primitives":[{primitives}]}}],"nodes":[{{"mesh":0}}],"scenes":[{{"nodes":[0]}}]}}"#
+    );
+    let limits = Limits {
+        decompressed_bytes: 16 * 1024 * 1024,
+        ..Limits::CONSTRAINED
+    };
+    let error = gltf::read(
+        json.as_bytes(),
+        |_| None,
+        &mut ReadOptions::with_limits(limits),
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "io.limit_exceeded");
+    assert!(format!("{:?}", error.arguments()).contains("decompressed_bytes"));
+}
+
+#[test]
+fn an_embedded_buffer_longer_than_string_bytes_reads_back() {
+    let scene = triangle_scene(TRIANGLE_POSITIONS.to_vec(), None);
+    let written = gltf::write(&scene, &mut WriteOptions::default()).unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&written.bytes).unwrap();
+    let uri = document["buffers"][0]["uri"].as_str().unwrap();
+    let limits = Limits {
+        string_bytes: 64,
+        ..Limits::CONSTRAINED
+    };
+    assert!(uri.len() > 64);
+    let read = gltf::read(
+        &written.bytes,
+        |_| None,
+        &mut ReadOptions::with_limits(limits),
+    )
+    .unwrap();
+    assert_eq!(read.scene, scene);
+}
+
+/// The component type of the index accessor of a one-primitive scene of `vertices` vertices, whose
+/// last triangle refers to the last vertex.
+fn index_component_type(vertices: usize) -> u64 {
+    let points = (0..vertices)
+        .map(|i| Point3::new(i as f64, 0.0, 0.0))
+        .collect();
+    let last = u32::try_from(vertices - 1).unwrap();
+    let mesh = TriMeshBuilder::new(points, vec![[0, 1, last]])
+        .build(&Limits::DEFAULT)
+        .unwrap();
+    let scene = MeshScene {
+        meshes: vec![MeshPart {
+            name: String::new(),
+            mesh,
+            material: None,
+            preserved: Default::default(),
+        }],
+        mesh_groups: vec![MeshGroup {
+            name: String::new(),
+            primitives: vec![0],
+            preserved: Default::default(),
+        }],
+        nodes: vec![Node {
+            mesh: Some(0),
+            ..Node::default()
+        }],
+        roots: vec![0],
+        ..MeshScene::default()
+    };
+    let written = gltf::write(&scene, &mut WriteOptions::default()).unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&written.bytes).unwrap();
+    let index = document["meshes"][0]["primitives"][0]["indices"]
+        .as_u64()
+        .unwrap();
+    document["accessors"][index as usize]["componentType"]
+        .as_u64()
+        .unwrap()
+}
+
+#[test]
+fn indices_are_unsigned_shorts_only_when_no_index_is_65535() {
+    assert_eq!(index_component_type(65_535), 5123);
+    assert_eq!(index_component_type(65_536), 5125);
+}
+
+#[test]
+fn a_number_that_is_not_finite_as_f32_is_refused() {
+    let json = r#"{"asset":{"version":"2.0"},"nodes":[{"translation":[1e39,0,0]}],"scenes":[{"nodes":[0]}]}"#;
+    assert_eq!(code(read(json.as_bytes())), "io.mesh.value_invalid");
+}
+
+#[test]
+fn a_cycle_outside_the_default_scene_is_refused_and_an_unreached_tree_is_kept() {
+    let cycle = r#"{"asset":{"version":"2.0"},"nodes":[{},{"children":[2]},{"children":[1]}],"scenes":[{"nodes":[0]}]}"#;
+    assert_eq!(code(read(cycle.as_bytes())), "io.mesh.reference_invalid");
+    let tree =
+        r#"{"asset":{"version":"2.0"},"nodes":[{},{"children":[2]},{}],"scenes":[{"nodes":[0]}]}"#;
+    let read = read_ok(tree.as_bytes());
+    assert_eq!(read.scene.roots, vec![0]);
+    assert_eq!(read.scene.nodes.len(), 3);
+}

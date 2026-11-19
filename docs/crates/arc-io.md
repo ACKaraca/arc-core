@@ -600,7 +600,8 @@ only on the scene and the options; a writer never writes a timestamp or an ident
   of the JSON is checked before it is parsed.
 - Buffers come from the binary chunk, from `data:` URIs in base64 (decoded by a bounded decoder in
   the crate), or from the resolver. Decoded and resolved bytes count against
-  `Limits::decompressed_bytes`.
+  `Limits::decompressed_bytes`. The decoder accepts padding only at the end of the data, and only
+  as many `=` as the length of the data requires.
 - Accessors read every component type (5120 to 5126) and element type (`SCALAR` to `MAT4`).
   `byteStride` may not be shorter than an element. `normalized` applies to integer components.
   Sparse accessors replace the listed elements; `min` and `max` are not read. Matrix layouts pad
@@ -616,8 +617,11 @@ only on the scene and the options; a writer never writes a timestamp or an ident
   and scale, where a missing component takes its glTF default; giving both forms is an error. A node
   names a mesh group, a camera and a light, and lists its children. The roots are the nodes of the
   default scene (the scene named by `scene`, or the first one). A node reached twice, a cycle, or a
-  node deeper than `Limits::nesting_depth` is an error. Nodes that name one mesh group share its
-  parts; the parts are stored once.
+  node deeper than `Limits::nesting_depth` is an error. A node outside the default scene that no
+  node names as a child is validated as a root of its own, but it is not a root of the scene; a
+  cycle that nothing outside it reaches is an error. Nodes that name one mesh group share its
+  parts; the parts are stored once. Every number stored as `f32`, such as a transform, camera,
+  light or material value, must be finite after conversion to `f32`; `1e39` is refused.
 - Materials keep the `pbrMetallicRoughness` factors, the base color texture as
   `ImageSource::Uri` or `ImageSource::BufferView` (images are not decoded), `alphaMode`,
   `alphaCutoff` and `doubleSided`. A material keeps its name when the name is present and unused;
@@ -630,10 +634,16 @@ only on the scene and the options; a writer never writes a timestamp or an ident
   preserved. An entry of `extensionsRequired` other than `KHR_lights_punctual` is an error.
 - Limits: `record_count` counts every node, mesh, primitive, accessor, buffer view, material,
   camera and light; `array_length` bounds accessor counts and vertex and index counts;
-  `input_bytes` bounds the file; `string_bytes` bounds each name and URI; `nesting_depth` bounds the
-  JSON and the node hierarchy; `decompressed_bytes` bounds the decoded and resolved buffers. A view
-  or accessor is checked against its buffer before any element is read, so a declared count cannot
-  drive an allocation. An accessor without a view is zero-filled up to `array_length`.
+  `input_bytes` bounds the file; `string_bytes` bounds each name and each URI given to the resolver
+  (a `data:` URI is bounded by `decompressed_bytes` instead); `nesting_depth` bounds the JSON and
+  the node hierarchy; `decompressed_bytes` bounds the decoded and resolved buffers and the primitive
+  data. Each primitive is charged before any of its data is decoded: 24 bytes per vertex for the
+  positions, 12 for normals, 8 for texture coordinates and 16 for colors (kept as `Vec4`), 4 bytes
+  per index, 12 per triangle, and the lengths of the mesh group name and the material name. The
+  charges of all primitives are added, so an accessor shared by many primitives counts for each of
+  them. The limit that refuses is `decompressed_bytes`. A view or accessor is checked against its
+  buffer before any element is read, so a declared count cannot drive an allocation. An accessor
+  without a view is zero-filled up to `array_length`, and its zeros are charged the same way.
 
 ### glTF writing
 
@@ -650,8 +660,8 @@ only on the scene and the options; a writer never writes a timestamp or an ident
   reported.
 - A primitive writes `POSITION` as `f32` `VEC3` with its minimum and maximum; `NORMAL`, `TEXCOORD_0`
   and `COLOR_0` as `f32` when the mesh has them; and `indices` as `u16` when the mesh has at most
-  65 536 vertices, and as `u32` otherwise. Each buffer view starts on a four-byte boundary and is
-  padded with zeros. A GLB pads its JSON chunk with spaces.
+  65 535 vertices, so that no index is 65 535, and as `u32` otherwise. Each buffer view starts on a
+  four-byte boundary and is padded with zeros. A GLB pads its JSON chunk with spaces.
 - Positions are rounded to single precision, and each value that changes is reported as
   approximated. Tangents, texture coordinate sets after the first, and user channels are dropped
   and reported.
@@ -661,8 +671,8 @@ only on the scene and the options; a writer never writes a timestamp or an ident
   `d` and the texture maps) are dropped and reported.
 - Cameras and lights are written from their fields. Preserved extension objects and extras are
   written back. `extensionsUsed` lists every extension the output contains.
-- A reference to a missing mesh group, material, camera, light or child, a node reached twice, and
-  a value that is not finite fail with `io.mesh.write_value_invalid`.
+- A reference to a missing mesh group, material, camera, light or child, a node reached twice or on
+  a cycle, and a value that is not finite fail with `io.mesh.write_value_invalid`.
 - Not written: quantized attributes, image bytes (images are referenced only), sparse accessors,
   morph targets, skins and animations (the reader skips them and reports them), and the run of an
   external glTF validator.
