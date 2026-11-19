@@ -15,12 +15,14 @@ use std::collections::HashMap;
 use arc_base::math::{Point3, Vector3};
 use arc_base::{Color, Error, ObjectId, Result};
 use arc_mesh::TriMesh;
+use arc_mesh::lod::{LodChain, ViewParams};
 
 use crate::adapter::Gpu;
 use crate::camera::relative_translation;
 use crate::curve::{CurveItem, CurveState, Flattened};
 use crate::error::codes;
 use crate::pool::{AllocId, Pool, PoolUsage};
+use crate::tile::{TILE_SIZE, TiledGeometry, split_mesh};
 
 /// Bytes per vertex: position and normal, `f32` each.
 pub const VERTEX_STRIDE: u64 = 24;
@@ -54,6 +56,10 @@ pub struct SceneLimits {
     pub max_line_width_px: f32,
     /// The largest side of a rendered image in pixels.
     pub max_image_side: u32,
+    /// Whether geometries added from now on also get silhouette edge data (72 bytes of the
+    /// vertex pool per smooth interior edge), which
+    /// [`RenderSettings::silhouette_edges`](crate::RenderSettings::silhouette_edges) draws.
+    pub silhouette_edges: bool,
 }
 
 impl SceneLimits {
@@ -68,6 +74,7 @@ impl SceneLimits {
         max_pool_bytes: 1 << 30,
         max_line_width_px: 256.0,
         max_image_side: 8192,
+        silhouette_edges: false,
     };
 }
 
@@ -113,7 +120,9 @@ pub struct MeshInstance {
     pub color: Color,
     /// The material slot.
     pub material: u32,
-    /// Display flags, reserved for overrides.
+    /// Display flags: bit 4 is [`crate::display::FLAG_SOLID`], bits 24 to 27 are the category of
+    /// display overrides ([`crate::category_flags`]); bits 0 to 3 are the paint and depth flags of
+    /// drawings.
     pub flags: u32,
 }
 
@@ -298,8 +307,18 @@ struct GeometryEntry {
     index_count: u32,
     /// The feature edges as index pairs in the index pool, when there are any.
     edges: Option<(AllocId, u32)>,
+    /// The silhouette records in the vertex pool and the edge count, when derived.
+    silhouettes: Option<(AllocId, u32)>,
     radius: f64,
     users: u32,
+}
+
+/// The levels of a geometry with levels of detail: the chain and the uploaded geometry of
+/// each level (level 0 is the group's own handle).
+#[derive(Debug)]
+struct LodGroup {
+    chain: LodChain,
+    levels: Vec<GeometryId>,
 }
 
 /// Faces meeting at an angle above this (radians) make their shared edge a feature edge.
@@ -325,21 +344,48 @@ pub(crate) fn length(v: &Vector3) -> f64 {
     }
 }
 
-/// The feature edges of `mesh` as pairs of vertex indices: boundary edges (one face),
-/// non-manifold edges (more than two faces) and edges whose two faces meet at more than
-/// [`FEATURE_EDGE_ANGLE`]. Vertices at exactly equal positions are one vertex, so meshes with
-/// split normals give the same edges as welded ones. Faces whose normal is zero or not finite
-/// are skipped. The result is sorted, so it is deterministic.
-pub(crate) fn feature_edges(mesh: &TriMesh) -> Vec<[u32; 2]> {
+/// The feature edges of `mesh` as pairs of vertex indices (boundary, sharp and non-manifold
+/// edges of [`arc_mesh::features::feature_edges`] at [`FEATURE_EDGE_ANGLE`]), sorted so the
+/// result is deterministic.
+pub(crate) fn feature_edge_pairs(mesh: &TriMesh) -> Result<Vec<[u32; 2]>> {
+    // The scene bounds the size of a geometry itself.
+    let limits = arc_base::Limits {
+        array_length: u64::from(u32::MAX),
+        memory_bytes: None,
+        ..arc_base::Limits::DEFAULT
+    };
+    let found = arc_mesh::features::feature_edges(
+        mesh,
+        FEATURE_EDGE_ANGLE,
+        &arc_base::Tolerance::DEFAULT,
+        &limits,
+    )
+    .map_err(|_| Error::new(codes::LIMIT_EXCEEDED))?;
+    let mut pairs: Vec<[u32; 2]> = found
+        .boundary
+        .iter()
+        .chain(&found.sharp)
+        .chain(&found.non_manifold)
+        .map(|e| e.vertices)
+        .collect();
+    pairs.sort_unstable();
+    Ok(pairs)
+}
+
+/// The silhouette records of `mesh`: for every smooth edge of exactly two faces (creases are
+/// feature edges and boundaries have one face), two records of nine `f32` (an end point as
+/// relative to the geometry origin, then the unit normals of the two faces), one for each end.
+/// Vertices at exactly equal positions are one vertex. `positions` are the uploaded vertex
+/// positions. Returns the bytes and the edge count.
+pub(crate) fn silhouette_records(mesh: &TriMesh, positions: &[[f32; 3]]) -> (Vec<u8>, u32) {
     struct Edge {
         ends: [u32; 2],
         faces: u32,
-        normal: Vector3,
-        crease: bool,
+        normals: [Vector3; 2],
     }
-    let positions = mesh.positions();
+    let source = mesh.positions();
     let mut welded: HashMap<[u64; 3], u32> = HashMap::new();
-    let canonical: Vec<u32> = positions
+    let canonical: Vec<u32> = source
         .iter()
         .zip(0_u32..)
         // Adding zero turns −0 into +0 so both weld.
@@ -352,7 +398,7 @@ pub(crate) fn feature_edges(mesh: &TriMesh) -> Vec<[u32; 2]> {
     let cos_limit = FEATURE_EDGE_ANGLE.cos();
     let mut edges: HashMap<(u32, u32), Edge> = HashMap::new();
     for t in mesh.triangles() {
-        let corner = |k: usize| t.get(k).and_then(|i| positions.get(*i as usize));
+        let corner = |k: usize| t.get(k).and_then(|i| source.get(*i as usize));
         let (Some(a), Some(b), Some(c)) = (corner(0), corner(1), corner(2)) else {
             continue;
         };
@@ -370,22 +416,47 @@ pub(crate) fn feature_edges(mesh: &TriMesh) -> Vec<[u32; 2]> {
             let edge = edges.entry((ci.min(cj), ci.max(cj))).or_insert(Edge {
                 ends: [i, j],
                 faces: 0,
-                normal,
-                crease: false,
+                normals: [normal; 2],
             });
             edge.faces += 1;
             if edge.faces == 2 {
-                edge.crease = edge.normal.dot(&normal) < cos_limit;
+                edge.normals[1] = normal;
             }
         }
     }
-    let mut result: Vec<((u32, u32), [u32; 2])> = edges
+    type Smooth = ((u32, u32), [u32; 2], [Vector3; 2]);
+    let mut smooth: Vec<Smooth> = edges
         .into_iter()
-        .filter(|(_, e)| e.faces != 2 || e.crease)
-        .map(|(key, e)| (key, e.ends))
+        .filter(|(_, e)| e.faces == 2 && e.normals[0].dot(&e.normals[1]) >= cos_limit)
+        .map(|(key, e)| (key, e.ends, e.normals))
         .collect();
-    result.sort_unstable();
-    result.into_iter().map(|(_, ends)| ends).collect()
+    smooth.sort_unstable_by_key(|(key, _, _)| *key);
+    let mut bytes = Vec::with_capacity(smooth.len() * SILHOUETTE_EDGE_BYTES);
+    let mut count = 0_u32;
+    for (_, ends, normals) in &smooth {
+        let [Some(a), Some(b)] = ends.map(|i| positions.get(i as usize)) else {
+            continue;
+        };
+        let narrowed = normals.map(|n| [narrow(n.x), narrow(n.y), narrow(n.z)]);
+        for end in [a, b] {
+            put_f32(&mut bytes, end);
+            put_f32(&mut bytes, &narrowed[0]);
+            put_f32(&mut bytes, &narrowed[1]);
+        }
+        count += 1;
+    }
+    (bytes, count)
+}
+
+/// Bytes of the two records of one silhouette edge: three vertex units of the pool.
+pub(crate) const SILHOUETTE_EDGE_BYTES: usize = 72;
+/// Bytes of one silhouette record.
+pub(crate) const SILHOUETTE_STRIDE: u64 = 36;
+
+fn narrow(v: f64) -> f32 {
+    #[allow(clippy::cast_possible_truncation)] // Narrowing to the GPU's precision is the intent.
+    let narrowed = v as f32;
+    narrowed
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,6 +477,10 @@ pub(crate) struct ItemEntry {
     pub(crate) gpu: ItemGpu,
     pub(crate) origin: Point3,
     pub(crate) radius: f64,
+    /// The largest scale factor of the item's instance transforms (1 for lines).
+    scale: f64,
+    /// The level of detail drawn this frame, when the item's geometry has levels.
+    pub(crate) shown: Option<GeometryId>,
     translation_dirty: bool,
     /// The cumulative segment count at the end of each path of a line or curve item.
     path_ends: Vec<u32>,
@@ -429,6 +504,8 @@ pub struct Scene {
     mesh_instances: Pool,
     segments: Pool,
     geometries: HashMap<GeometryId, GeometryEntry>,
+    /// Geometries with levels of detail, by their level 0 handle.
+    lods: HashMap<GeometryId, LodGroup>,
     next_geometry: u64,
     objects: HashMap<ObjectId, ObjectEntry>,
     free_slots: Vec<u32>,
@@ -779,6 +856,7 @@ impl Scene {
                     max_bytes,
                 ),
                 geometries: HashMap::new(),
+                lods: HashMap::new(),
                 next_geometry: 0,
                 objects: HashMap::new(),
                 free_slots: Vec::new(),
@@ -815,6 +893,7 @@ impl Scene {
     /// `gpu.geometry.invalid` for a mesh without triangles; `gpu.limit.exceeded` beyond the
     /// limits; `gpu.value.not_finite` and `gpu.precision.insufficient` for an origin that is
     /// not finite or too far from the positions; device errors.
+    #[allow(clippy::too_many_lines)] // One upload: validate, build the bytes, allocate the ranges.
     pub fn add_geometry(&mut self, mesh: &TriMesh, origin: &Point3) -> Result<GeometryId> {
         finite_point(origin)?;
         if mesh.triangle_count() == 0 {
@@ -846,15 +925,21 @@ impl Scene {
         }
         let index_count = triangle_count * 3;
         let mut edge_bytes = Vec::new();
-        for pair in feature_edges(mesh) {
+        for pair in feature_edge_pairs(mesh)? {
             put_u32(&mut edge_bytes, &pair);
         }
+        let (silhouette_bytes, silhouette_count) = if self.limits.silhouette_edges {
+            let uploaded: Vec<[f32; 3]> = positions.iter().map(|p| p.to_array()).collect();
+            silhouette_records(mesh, &uploaded)
+        } else {
+            (Vec::new(), 0)
+        };
         // At most three edges per triangle, so this fits in u32.
         let edge_index_count =
             u32::try_from(edge_bytes.len() / 4).map_err(|_| limit("max_geometry_triangles"))?;
         let (device, queue) = (self.gpu.device().clone(), self.gpu.queue().clone());
         let gpu = self.gpu.clone();
-        let (vertices, indices, edges) = gpu.scoped(|| {
+        let (vertices, indices, edges, silhouettes) = gpu.scoped(|| {
             let (vertices, _) =
                 self.vertices
                     .insert(&device, &queue, u64::from(vertex_count), &vertex_bytes)?;
@@ -869,22 +954,43 @@ impl Scene {
                         return Err(e);
                     }
                 };
-            if edge_index_count == 0 {
-                return Ok((vertices, indices, None));
-            }
-            match self
-                .indices
-                .insert(&device, &queue, u64::from(edge_index_count), &edge_bytes)
-            {
-                Ok((edges, _)) => Ok((vertices, indices, Some((edges, edge_index_count)))),
-                Err(e) => {
-                    self.vertices.free(vertices);
-                    self.indices.free(indices);
-                    Err(e)
+            let mut edges = None;
+            if edge_index_count > 0 {
+                match self
+                    .indices
+                    .insert(&device, &queue, u64::from(edge_index_count), &edge_bytes)
+                {
+                    Ok((id, _)) => edges = Some((id, edge_index_count)),
+                    Err(e) => {
+                        self.vertices.free(vertices);
+                        self.indices.free(indices);
+                        return Err(e);
+                    }
                 }
             }
+            let mut silhouettes = None;
+            if silhouette_count > 0 {
+                // Three 24-byte vertex units hold the two records of an edge.
+                match self.vertices.insert(
+                    &device,
+                    &queue,
+                    u64::from(silhouette_count) * 3,
+                    &silhouette_bytes,
+                ) {
+                    Ok((id, _)) => silhouettes = Some((id, silhouette_count)),
+                    Err(e) => {
+                        self.vertices.free(vertices);
+                        self.indices.free(indices);
+                        if let Some((id, _)) = edges {
+                            self.indices.free(id);
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+            Ok((vertices, indices, edges, silhouettes))
         })?;
-        self.pending.vertex += vertex_bytes.len() as u64;
+        self.pending.vertex += (vertex_bytes.len() + silhouette_bytes.len()) as u64;
         self.pending.index += (index_bytes.len() + edge_bytes.len()) as u64;
         // Cannot reach `GeometryId::LOCAL`: one geometry per call, 2^63 calls.
         let id = GeometryId(self.next_geometry);
@@ -896,6 +1002,7 @@ impl Scene {
                 indices,
                 index_count,
                 edges,
+                silhouettes,
                 radius,
                 users: 0,
             },
@@ -912,15 +1019,135 @@ impl Scene {
         match self.geometries.get(&id) {
             None => Err(Error::new(codes::GEOMETRY_NOT_FOUND)),
             Some(g) if g.users > 0 => Err(Error::new(codes::GEOMETRY_IN_USE)),
+            // A level of detail goes with the geometry that owns it.
+            Some(_)
+                if self
+                    .lods
+                    .values()
+                    .any(|l| l.levels.iter().skip(1).any(|v| *v == id)) =>
+            {
+                Err(Error::new(codes::GEOMETRY_IN_USE))
+            }
             Some(_) => {
-                if let Some(g) = self.geometries.remove(&id) {
-                    self.vertices.free(g.vertices);
-                    self.indices.free(g.indices);
-                    if let Some((edges, _)) = g.edges {
-                        self.indices.free(edges);
-                    }
+                let group = self.lods.remove(&id);
+                for level in group.iter().flat_map(|g| g.levels.iter().skip(1)) {
+                    self.free_geometry(*level);
                 }
+                self.free_geometry(id);
                 Ok(())
+            }
+        }
+    }
+
+    fn free_geometry(&mut self, id: GeometryId) {
+        if let Some(g) = self.geometries.remove(&id) {
+            self.vertices.free(g.vertices);
+            self.indices.free(g.indices);
+            if let Some((edges, _)) = g.edges {
+                self.indices.free(edges);
+            }
+            if let Some((silhouettes, _)) = g.silhouettes {
+                self.vertices.free(silhouettes);
+            }
+        }
+    }
+
+    /// Uploads `mesh` as tiles of at most [`crate::tile::TILE_SIZE`] on every axis, each with
+    /// its own origin (CORE-GPU-005; see [`crate::tile`]). A mesh within the bound is one tile.
+    /// The tiles are in model coordinates: an item per tile with the tile's origin and identity
+    /// instance transforms draws the mesh where it was authored.
+    ///
+    /// # Errors
+    ///
+    /// As [`Scene::add_geometry`] and [`crate::tile::split_mesh`]; tiles uploaded before a
+    /// failure are removed.
+    pub fn add_tiled_geometry(&mut self, mesh: &TriMesh) -> Result<Vec<TiledGeometry>> {
+        let mut added: Vec<TiledGeometry> = Vec::new();
+        for tile in split_mesh(mesh, TILE_SIZE)? {
+            match self.add_geometry(&tile.mesh, &tile.origin) {
+                Ok(geometry) => added.push(TiledGeometry {
+                    geometry,
+                    origin: tile.origin,
+                }),
+                Err(error) => {
+                    for t in added {
+                        self.free_geometry(t.geometry);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(added)
+    }
+
+    /// Uploads every level of `chain` relative to `origin` and returns the handle of level 0,
+    /// which items use. Every frame draws, for each item of the handle, the level
+    /// [`LodChain::select`] chooses from the item's projected screen error with
+    /// [`crate::RenderSettings::lod_budget_px`] (CORE-GPU-019). The chain is kept by the scene.
+    /// Removing the handle removes all levels.
+    ///
+    /// # Errors
+    ///
+    /// As [`Scene::add_geometry`]; levels uploaded before a failure are removed.
+    pub fn add_lod_geometry(&mut self, chain: &LodChain, origin: &Point3) -> Result<GeometryId> {
+        let mut levels: Vec<GeometryId> = Vec::new();
+        for level in chain.levels() {
+            match self.add_geometry(&level.mesh, origin) {
+                Ok(id) => levels.push(id),
+                Err(error) => {
+                    for id in levels {
+                        self.free_geometry(id);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        self.register_lod(levels, chain)
+    }
+
+    /// Records uploaded geometries as the levels of one geometry, level 0 first.
+    pub(crate) fn register_lod(
+        &mut self,
+        levels: Vec<GeometryId>,
+        chain: &LodChain,
+    ) -> Result<GeometryId> {
+        let base = levels
+            .first()
+            .copied()
+            .ok_or_else(|| Error::new(codes::GEOMETRY_INVALID))?;
+        self.lods.insert(
+            base,
+            LodGroup {
+                chain: chain.clone(),
+                levels,
+            },
+        );
+        Ok(base)
+    }
+
+    /// Chooses the level of detail every item with levels draws: the coarsest level whose
+    /// projected error is at most `budget_px`. `distance` gives the viewing distance of an item
+    /// from its origin and radius; `pixels_per_unit` is the size in pixels of one unit at unit
+    /// distance. A budget of 0 draws level 0.
+    pub(crate) fn select_levels(
+        &mut self,
+        distance: impl Fn(&Point3, f64) -> f64,
+        pixels_per_unit: f64,
+        budget_px: f64,
+    ) {
+        for entry in self.objects.values_mut() {
+            for item in &mut entry.items {
+                let ItemGpu::Mesh { geometry, .. } = item.gpu else {
+                    continue;
+                };
+                item.shown = self.lods.get(&geometry).and_then(|group| {
+                    let view = ViewParams {
+                        distance: distance(&item.origin, item.radius),
+                        pixels_per_unit: pixels_per_unit * item.scale,
+                    };
+                    let level = group.chain.select(budget_px, &view).unwrap_or(0);
+                    group.levels.get(level).copied()
+                });
             }
         }
     }
@@ -1058,6 +1285,7 @@ impl Scene {
                         .map_or(0.0, |g| g.radius);
                     let mut bytes = Vec::with_capacity(mesh.instances.len() * 80);
                     let mut radius: f64 = 0.0;
+                    let mut largest_scale: f64 = 0.0;
                     for i in &mesh.instances {
                         put_f32(&mut bytes, i.transform.as_flattened());
                         put_f32(&mut bytes, &color_array(i.color));
@@ -1070,6 +1298,7 @@ impl Scene {
                             )
                         };
                         let scale = column(0).max(column(1)).max(column(2));
+                        largest_scale = largest_scale.max(scale);
                         radius = radius.max(column(3) + scale * geometry_radius);
                     }
                     let count = u32::try_from(mesh.instances.len())
@@ -1090,6 +1319,8 @@ impl Scene {
                         },
                         origin: mesh.origin,
                         radius,
+                        scale: largest_scale,
+                        shown: None,
                         translation_dirty: true,
                         path_ends: Vec::new(),
                         curve: None,
@@ -1139,6 +1370,8 @@ impl Scene {
             },
             origin,
             radius: encoded.radius,
+            scale: 1.0,
+            shown: None,
             translation_dirty: true,
             path_ends: encoded.path_ends,
             curve,
@@ -1213,6 +1446,19 @@ impl Scene {
                 (at < entry.path_ends.len()).then(|| u32::try_from(at).unwrap_or(u32::MAX))
             }
         }
+    }
+
+    /// The level of detail the last frame drew for an item whose geometry has levels (0 is
+    /// the finest), or `None` for an unknown key or an item without levels.
+    #[must_use]
+    pub fn lod_level(&self, key: ItemKey) -> Option<usize> {
+        let entry = self.object_items(&key.object).get(key.sub as usize)?;
+        let ItemGpu::Mesh { geometry, .. } = entry.gpu else {
+            return None;
+        };
+        let group = self.lods.get(&geometry)?;
+        let shown = entry.shown.unwrap_or(geometry);
+        group.levels.iter().position(|l| *l == shown)
     }
 
     /// The pixels per unit and chord tolerance a curve item is currently flattened for, or
@@ -1354,6 +1600,19 @@ impl Scene {
         Some((self.indices.range(edges)?.start, count))
     }
 
+    /// The silhouette records of a geometry: `(first vertex unit, edge count)`.
+    pub(crate) fn silhouette_range(&self, id: GeometryId) -> Option<(u64, u32)> {
+        let (records, count) = self.geometries.get(&id)?.silhouettes?;
+        Some((self.vertices.range(records)?.start, count))
+    }
+
+    /// The items with the object they belong to.
+    pub(crate) fn items_with_object(&self) -> impl Iterator<Item = (&ObjectId, &ItemEntry)> {
+        self.objects
+            .iter()
+            .flat_map(|(id, o)| o.items.iter().map(move |i| (id, i)))
+    }
+
     /// The items of one object, if it has any.
     pub(crate) fn object_items(&self, object: &ObjectId) -> &[ItemEntry] {
         self.objects.get(object).map_or(&[], |o| o.items.as_slice())
@@ -1444,6 +1703,10 @@ pub(crate) struct SceneBuffers<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn feature_edges(mesh: &TriMesh) -> Vec<[u32; 2]> {
+        feature_edge_pairs(mesh).unwrap()
+    }
 
     fn item(paths: Vec<LinePath>) -> LineItem {
         LineItem {

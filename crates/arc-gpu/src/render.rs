@@ -22,8 +22,13 @@ use arc_geom::view::{Projection, ViewFrame};
 
 use crate::adapter::Gpu;
 use crate::camera::{camera_data, depth_origin, region_window, sphere_depth};
+use crate::display::{
+    DisplayOverrides, GpuStyle, Resolved as ResolvedOverrides, Section, SectionUniform,
+};
 use crate::error::codes;
+use crate::manipulator::Manipulator;
 use crate::overlay::{FILL_VERTEX_STRIDE, Overlay, Resolved};
+use crate::scene::SILHOUETTE_STRIDE;
 use crate::scene::{
     ItemEntry, ItemGpu, ItemKey, MESH_INSTANCE_STRIDE, SEGMENT_STRIDE, Scene, TRANSLATION_STRIDE,
     VERTEX_STRIDE,
@@ -157,6 +162,13 @@ pub struct RenderSettings {
     /// The chord tolerance of curve flattening in pixels, in `[MIN_CURVE_TOLERANCE_PX,
     /// MAX_CURVE_TOLERANCE_PX]`.
     pub curve_tolerance_px: f32,
+    /// Whether silhouette edges are drawn with the feature edges in the modes that draw edges
+    /// over faces (hidden line, shaded with edges and X-ray). Needs
+    /// [`crate::SceneLimits::silhouette_edges`] when the geometry was added.
+    pub silhouette_edges: bool,
+    /// The largest projected error in pixels a level of detail may have; 0 always draws the
+    /// finest level.
+    pub lod_budget_px: f32,
 }
 
 /// The smallest chord tolerance of curve flattening, in pixels.
@@ -183,6 +195,8 @@ impl RenderSettings {
         lineweights: true,
         paper: Color::WHITE,
         curve_tolerance_px: 0.5,
+        silhouette_edges: false,
+        lod_budget_px: 1.0,
     };
 
     pub(crate) fn validate(&self) -> Result<()> {
@@ -202,6 +216,8 @@ impl RenderSettings {
             && self.plot_scale > 0.0
             && self.plot_scale.is_finite()
             && (MIN_CURVE_TOLERANCE_PX..=MAX_CURVE_TOLERANCE_PX).contains(&self.curve_tolerance_px)
+            && self.lod_budget_px.is_finite()
+            && self.lod_budget_px >= 0.0
             && colors
                 .iter()
                 .all(|c| [c.r, c.g, c.b, c.a].iter().all(|v| v.is_finite()));
@@ -229,6 +245,12 @@ pub struct FrameExtras<'a> {
     pub selected: &'a [ObjectId],
     /// The overlay, drawn above everything.
     pub overlay: Option<&'a Overlay>,
+    /// The display overrides of the view (CORE-GPU-016).
+    pub overrides: Option<&'a DisplayOverrides>,
+    /// The section planes and box of the view (CORE-GPU-024).
+    pub section: Option<&'a Section>,
+    /// The manipulator, drawn in the overlay (CORE-GPU-026).
+    pub manipulator: Option<&'a Manipulator>,
 }
 
 /// The region of an identifier pass, in pixels of the image (x right, y down).
@@ -301,11 +323,13 @@ impl Image {
 enum Kind {
     Mesh,
     MeshDepth,
+    MeshFade,
     MeshXray,
     MeshTint,
     MeshMask,
     MeshPick,
     Edge,
+    Silhouette,
     EdgeTint,
     Line,
     LineTint,
@@ -365,7 +389,7 @@ fn color4(c: Color) -> [f32; 4] {
     [c.r, c.g, c.b, c.a]
 }
 
-/// The view uniform shared by all scene shaders (208 bytes).
+/// The view uniform shared by all scene shaders (928 bytes).
 #[derive(Debug, Clone, Copy)]
 struct ViewUniform {
     view_proj: [f32; 16],
@@ -377,13 +401,19 @@ struct ViewUniform {
     codes: [u32; 4],
     background: [f32; 4],
     paper: [f32; 4],
-    /// x: lineweight display; y: pixels per item unit at clip w = 1.
+    /// x: lineweight display; y: pixels per item unit at clip w = 1; z: perspective.
     draft: [f32; 4],
+    section: SectionUniform,
+    /// x: two-pass transparency; y: identifier pass; z: the object style is in use.
+    over: [f32; 4],
+    object_style: GpuStyle,
+    /// Category styles: per category a color and `(opacity, hidden, ghost, 0)`.
+    styles: [GpuStyle; crate::display::CATEGORIES],
 }
 
 impl ViewUniform {
     fn bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(208);
+        let mut out = Vec::with_capacity(928);
         for v in self
             .view_proj
             .iter()
@@ -398,10 +428,51 @@ impl ViewUniform {
         for v in self.codes {
             out.extend_from_slice(&v.to_le_bytes());
         }
-        for v in self.background.iter().chain(&self.paper).chain(&self.draft) {
+        let section = &self.section;
+        for v in self
+            .background
+            .iter()
+            .chain(&self.paper)
+            .chain(&self.draft)
+            .chain(&section.counts)
+            .chain(&section.cap_color)
+            .chain(section.planes.iter().flatten())
+            .chain(&section.box_min)
+            .chain(&section.box_max)
+            .chain(&self.over)
+            .chain(self.object_style.iter().flatten())
+            .chain(self.styles.iter().flatten().flatten())
+        {
             out.extend_from_slice(&v.to_le_bytes());
         }
         out
+    }
+
+    /// Sets the per-view state: category styles, section, and the passes it needs.
+    fn with_view_state(
+        mut self,
+        eye: &arc_base::math::Point3,
+        resolved: &ResolvedOverrides,
+        section: Option<&Section>,
+        picking: bool,
+    ) -> Result<Self> {
+        self.styles = resolved.table;
+        self.section = section.map_or(Ok(SectionUniform::NONE), |s| s.resolve(eye))?;
+        // Faces of these modes have colors that caps and translucency apply to.
+        let colored = self.shading[1] >= 1.0;
+        if !colored || picking {
+            self.section.counts[2] = 0.0;
+        }
+        self.over[0] = f32::from(u8::from(resolved.translucent && colored && !picking));
+        self.over[1] = f32::from(u8::from(picking));
+        Ok(self)
+    }
+
+    /// This uniform for the draws of one object style.
+    fn with_object_style(mut self, style: GpuStyle) -> Self {
+        self.object_style = style;
+        self.over[2] = 1.0;
+        self
     }
 
     /// This uniform for a highlight draw: tint color and mask code.
@@ -422,6 +493,7 @@ struct ColorFrame<'a> {
     selected: Vec<ObjectId>,
     hovered: Option<ObjectId>,
     overlay: Option<Resolved>,
+    resolved: ResolvedOverrides,
 }
 
 impl Renderer {
@@ -561,9 +633,16 @@ impl Renderer {
             draft: [
                 if settings.lineweights { 1.0 } else { 0.0 },
                 narrow(unit_px),
-                0.0,
+                f32::from(u8::from(matches!(
+                    frame.projection(),
+                    Projection::Perspective { .. }
+                ))),
                 0.0,
             ],
+            section: SectionUniform::NONE,
+            over: [0.0; 4],
+            object_style: [[0.0; 4]; 2],
+            styles: [[[0.0; 4]; 2]; crate::display::CATEGORIES],
         };
         Ok((eye, uniform, unit_px))
     }
@@ -641,14 +720,25 @@ impl Renderer {
             &Matrix4::identity(),
             (width, height),
         )?;
-        let overlay = extras
-            .overlay
+        let resolved = ResolvedOverrides::new(extras.overrides, scene.limits().max_objects)?;
+        let base = base.with_view_state(&eye, &resolved, extras.section, false)?;
+        let manipulated;
+        let overlay = match extras.manipulator {
+            Some(m) => {
+                let mut o = extras.overlay.cloned().unwrap_or_default();
+                m.append_to(&mut o, frame, (width, height))?;
+                manipulated = o;
+                Some(&manipulated)
+            }
+            None => extras.overlay,
+        };
+        let overlay = overlay
             .map(|o| o.resolve(frame, width, height, scene.limits()))
             .transpose()?;
         let mut selected: Vec<ObjectId> = extras
             .selected
             .iter()
-            .filter(|id| !scene.object_items(id).is_empty())
+            .filter(|id| !scene.object_items(id).is_empty() && resolved.visible(id))
             .copied()
             .collect();
         selected.sort_unstable();
@@ -662,9 +752,13 @@ impl Renderer {
             selected,
             hovered: extras
                 .hovered
-                .filter(|id| !scene.object_items(id).is_empty()),
+                .filter(|id| !scene.object_items(id).is_empty() && resolved.visible(id)),
             overlay,
+            resolved,
         };
+        let capping = extras
+            .section
+            .is_some_and(|s| s.cap_color.is_some() && !s.is_empty());
         let clips = Clips {
             frame,
             image: (width, height),
@@ -673,12 +767,19 @@ impl Renderer {
         let gpu = self.gpu.clone();
         gpu.scoped(|| {
             refresh_curves(scene, frame, unit_px, settings)?;
+            refresh_levels(scene, frame, unit_px, settings);
             scene.prepare_frame(&eye)?;
             let faces = settings.mode.faces();
             let mut kinds = vec![Kind::Line];
             kinds.extend(faces);
+            if plan.base.over[0] > 0.5 {
+                kinds.push(Kind::MeshFade);
+            }
             if settings.mode.passes().contains(&Pass::Edges) {
                 kinds.push(Kind::Edge);
+                if settings.silhouette_edges && faces.is_some() {
+                    kinds.push(Kind::Silhouette);
+                }
             }
             if !plan.selected.is_empty() || plan.hovered.is_some() {
                 let tint = if faces.is_some() {
@@ -694,7 +795,8 @@ impl Renderer {
             if plan.overlay.is_some() {
                 kinds.extend([Kind::OverlayLine, Kind::OverlayFill]);
             }
-            self.ensure(samples, settings.cull_back_faces, &kinds);
+            // Caps are the back faces that show through a cut, so they must not be culled.
+            self.ensure(samples, settings.cull_back_faces && !capping, &kinds);
             let (texture, encoder) = self.encode_color(scene, &plan, &clips)?;
             if readback {
                 let rgba8 = read_texture(&self.gpu, encoder, &texture, width, height)?;
@@ -728,6 +830,20 @@ impl Renderer {
             MASK_HOVERED,
         ))?;
         let highlighted = !plan.selected.is_empty() || plan.hovered.is_some();
+        // The visible items by object style; each style has its own bind group.
+        let styled = plan.resolved.groups(scene, false);
+        let style_binds = styled
+            .iter()
+            .map(|(style, _)| {
+                style
+                    .map(|s| self.view_bind_group(&plan.base.with_object_style(s)))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let visible: Vec<&ItemEntry> = styled
+            .iter()
+            .flat_map(|(_, items)| items.iter().copied())
+            .collect();
         let groups: [(&[ObjectId], &wgpu::BindGroup); 2] = [
             (&plan.selected, &selection),
             (plan.hovered.as_slice(), &hover),
@@ -830,16 +946,37 @@ impl Renderer {
                     Pass::Meshes => {
                         if let Some(kind) = faces {
                             pass.set_pipeline(self.pipeline(kind)?);
-                            draw_meshes(&mut pass, scene, scene.items(), false)?;
+                            draw_styled(&mut pass, &styled, &style_binds, &base, |p, items| {
+                                draw_meshes(p, scene, items.iter().copied(), false)
+                            })?;
+                            // Faces with an override opacity below 1 blend over the opaque ones.
+                            if plan.base.over[0] > 0.5 {
+                                pass.set_pipeline(self.pipeline(Kind::MeshFade)?);
+                                draw_styled(
+                                    &mut pass,
+                                    &styled,
+                                    &style_binds,
+                                    &base,
+                                    |p, items| draw_meshes(p, scene, items.iter().copied(), false),
+                                )?;
+                            }
                         }
                     }
                     Pass::Edges => {
                         pass.set_pipeline(self.pipeline(Kind::Edge)?);
-                        draw_meshes(&mut pass, scene, scene.items(), true)?;
+                        draw_styled(&mut pass, &styled, &style_binds, &base, |p, items| {
+                            draw_meshes(p, scene, items.iter().copied(), true)
+                        })?;
+                        if settings.silhouette_edges && faces.is_some() {
+                            pass.set_pipeline(self.pipeline(Kind::Silhouette)?);
+                            draw_styled(&mut pass, &styled, &style_binds, &base, |p, items| {
+                                draw_silhouettes(p, scene, items.iter().copied())
+                            })?;
+                        }
                     }
                     Pass::Lines => {
                         pass.set_pipeline(self.pipeline(Kind::Line)?);
-                        draw_lines(&mut pass, scene, scene.items(), clips)?;
+                        draw_lines(&mut pass, scene, visible.iter().copied(), clips)?;
                     }
                     Pass::Tint => {
                         if !highlighted {
@@ -959,6 +1096,31 @@ impl Renderer {
         settings: &RenderSettings,
         region: &PickRegion,
     ) -> Result<Vec<PickHit>> {
+        self.pick_with(
+            scene,
+            frame,
+            (width, height),
+            settings,
+            region,
+            &FrameExtras::default(),
+        )
+    }
+
+    /// As [`Renderer::pick`] for a view with the display overrides and section of `extras`:
+    /// hidden, isolated-out and ghosted objects and clipped parts are not picked.
+    ///
+    /// # Errors
+    ///
+    /// As [`Renderer::pick`].
+    pub fn pick_with(
+        &mut self,
+        scene: &mut Scene,
+        frame: &ViewFrame,
+        (width, height): (u32, u32),
+        settings: &RenderSettings,
+        region: &PickRegion,
+        extras: &FrameExtras<'_>,
+    ) -> Result<Vec<PickHit>> {
         let samples = self.check(scene, width, height, settings)?;
         let inside = |start: u32, size: u32, side: u32| {
             size > 0 && start.checked_add(size).is_some_and(|end| end <= side)
@@ -991,6 +1153,11 @@ impl Renderer {
             (region.width, region.height),
         )?;
         uniform.shading[3] = tolerance;
+        let resolved = ResolvedOverrides::new(extras.overrides, scene.limits().max_objects)?;
+        let uniform = uniform.with_view_state(&eye, &resolved, extras.section, true)?;
+        let capping = extras
+            .section
+            .is_some_and(|s| s.cap_color.is_some() && !s.is_empty());
         let clips = Clips {
             frame,
             image: (width, height),
@@ -999,13 +1166,14 @@ impl Renderer {
         let gpu = self.gpu.clone();
         let values = gpu.scoped(|| {
             refresh_curves(scene, frame, unit_px, settings)?;
+            refresh_levels(scene, frame, unit_px, settings);
             scene.prepare_frame(&eye)?;
             self.ensure(
                 samples,
-                settings.cull_back_faces,
+                settings.cull_back_faces && !capping,
                 &[Kind::MeshPick, Kind::LinePick],
             );
-            self.encode_pick(scene, &uniform, region, &clips)
+            self.encode_pick(scene, &uniform, region, &clips, &resolved)
         })?;
         let mut found: Vec<u32> = values
             .chunks_exact(4)
@@ -1039,6 +1207,7 @@ impl Renderer {
         uniform: &ViewUniform,
         region: &PickRegion,
         clips: &Clips<'_>,
+        resolved: &ResolvedOverrides,
     ) -> Result<Vec<u8>> {
         let device = self.gpu.device();
         let size = (region.width, region.height);
@@ -1074,10 +1243,12 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &group, &[]);
+            let pickable = resolved.groups(scene, true);
+            let items = || pickable.iter().flat_map(|(_, i)| i.iter().copied());
             pass.set_pipeline(self.pipeline(Kind::MeshPick)?);
-            draw_meshes(&mut pass, scene, scene.items(), false)?;
+            draw_meshes(&mut pass, scene, items(), false)?;
             pass.set_pipeline(self.pipeline(Kind::LinePick)?);
-            draw_lines(&mut pass, scene, scene.items(), clips)?;
+            draw_lines(&mut pass, scene, items(), clips)?;
         }
         read_texture(&self.gpu, encoder, &target, region.width, region.height)
     }
@@ -1173,6 +1344,8 @@ fn draw_meshes<'a>(
         let ItemGpu::Mesh { geometry, .. } = item.gpu else {
             continue;
         };
+        // The level of detail chosen for this frame, if the geometry has levels.
+        let geometry = item.shown.unwrap_or(geometry);
         let (Some((first_vertex, first_index, count)), Some(instances)) = (
             scene.geometry_ranges(geometry),
             scene.instance_range(item.gpu),
@@ -1191,6 +1364,55 @@ fn draw_meshes<'a>(
         let base = i32::try_from(first_vertex).map_err(|_| Error::new(codes::LIMIT_EXCEEDED))?;
         pass.draw_indexed(indices, base, to_u32(instances)?);
     }
+    Ok(())
+}
+
+/// Draws the silhouette edges of the mesh items in `items`: every edge has two records, drawn as
+/// a line list instanced over the item's instances. The pipeline and bind group are set by the
+/// caller.
+fn draw_silhouettes<'a>(
+    pass: &mut wgpu::RenderPass<'_>,
+    scene: &Scene,
+    items: impl Iterator<Item = &'a ItemEntry>,
+) -> Result<()> {
+    let buffers = scene.buffers();
+    let Some(translations) = buffers.mesh_translations else {
+        return Ok(());
+    };
+    pass.set_vertex_buffer(1, buffers.mesh_instances.slice(..));
+    pass.set_vertex_buffer(2, translations.slice(..));
+    for item in items {
+        let ItemGpu::Mesh { geometry, .. } = item.gpu else {
+            continue;
+        };
+        let geometry = item.shown.unwrap_or(geometry);
+        let (Some((first_unit, edges)), Some(instances)) = (
+            scene.silhouette_range(geometry),
+            scene.instance_range(item.gpu),
+        ) else {
+            continue;
+        };
+        // The records start at their vertex unit of the pool and are read with their own stride.
+        pass.set_vertex_buffer(0, buffers.vertices.slice(first_unit * VERTEX_STRIDE..));
+        pass.draw(0..edges * 2, to_u32(instances)?);
+    }
+    Ok(())
+}
+
+/// Runs `draw` for each group of items with the bind group of its object style (the base one
+/// for items without a style), then restores the base bind group.
+fn draw_styled<'a>(
+    pass: &mut wgpu::RenderPass<'_>,
+    groups: &[(Option<GpuStyle>, Vec<&'a ItemEntry>)],
+    binds: &[Option<wgpu::BindGroup>],
+    base: &wgpu::BindGroup,
+    mut draw: impl FnMut(&mut wgpu::RenderPass<'_>, &[&'a ItemEntry]) -> Result<()>,
+) -> Result<()> {
+    for ((_, items), bind) in groups.iter().zip(binds) {
+        pass.set_bind_group(0, bind.as_ref().unwrap_or(base), &[]);
+        draw(pass, items)?;
+    }
+    pass.set_bind_group(0, base, &[]);
     Ok(())
 }
 
@@ -1258,6 +1480,22 @@ fn refresh_curves(
     };
     let hint = (!perspective).then_some(unit_px);
     scene.refresh_curves(scale, settings.curve_tolerance_px, hint)
+}
+
+/// Chooses the level of detail of every item with levels (CORE-GPU-019). `unit_px` is the
+/// pixels per unit at view distance 1 (per unit for orthographic views).
+fn refresh_levels(scene: &mut Scene, frame: &ViewFrame, unit_px: f64, settings: &RenderSettings) {
+    let perspective = matches!(frame.projection(), Projection::Perspective { .. });
+    let (eye, forward, near) = (frame.eye(), frame.forward(), frame.near());
+    let distance = |origin: &arc_base::math::Point3, radius: f64| {
+        if perspective {
+            // The nearest depth of the item in front of the near plane.
+            ((origin - eye).dot(&forward) - radius).max(near)
+        } else {
+            1.0
+        }
+    };
+    scene.select_levels(distance, unit_px, f64::from(settings.lod_budget_px));
 }
 
 /// The scissor of an item in a target.
@@ -1418,6 +1656,7 @@ enum Target {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Input {
     Mesh,
+    Silhouette,
     Segment,
     Fill,
     None,
@@ -1462,6 +1701,16 @@ fn build_pipeline(
             true,
             Some((true, Greater)),
             Target::Color(None, wgpu::ColorWrites::empty()),
+        ),
+        Kind::MeshFade => (
+            &shared.mesh,
+            "vs_main",
+            "fs_fade",
+            Input::Mesh,
+            TriangleList,
+            true,
+            Some((false, Greater)),
+            alpha,
         ),
         Kind::MeshXray => (
             &shared.mesh,
@@ -1508,6 +1757,16 @@ fn build_pipeline(
             "vs_edge",
             "fs_edge",
             Input::Mesh,
+            LineList,
+            false,
+            Some((false, GreaterEqual)),
+            alpha,
+        ),
+        Kind::Silhouette => (
+            &shared.mesh,
+            "vs_silhouette",
+            "fs_silhouette",
+            Input::Silhouette,
             LineList,
             false,
             Some((false, GreaterEqual)),
@@ -1614,6 +1873,13 @@ fn build_pipeline(
             }),
     );
     let fill = attributes(0, &[Float32x2, Float32x4]);
+    // A silhouette record: position, the normals of the two faces (the second at location 8).
+    let mut silhouette = attributes(0, &[Float32x3, Float32x3]);
+    silhouette.push(wgpu::VertexAttribute {
+        format: Float32x3,
+        offset: 24,
+        shader_location: 8,
+    });
     let layout = |stride, step_mode, attributes| {
         Some(wgpu::VertexBufferLayout {
             array_stride: stride,
@@ -1625,6 +1891,11 @@ fn build_pipeline(
     let buffers: Vec<Option<wgpu::VertexBufferLayout<'_>>> = match input {
         Input::Mesh => vec![
             layout(VERTEX_STRIDE, PerVertex, &vertex),
+            layout(MESH_INSTANCE_STRIDE, PerInstance, &instance),
+            layout(TRANSLATION_STRIDE, PerInstance, &translation),
+        ],
+        Input::Silhouette => vec![
+            layout(SILHOUETTE_STRIDE, PerVertex, &silhouette),
             layout(MESH_INSTANCE_STRIDE, PerInstance, &instance),
             layout(TRANSLATION_STRIDE, PerInstance, &translation),
         ],

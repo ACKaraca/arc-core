@@ -23,6 +23,10 @@
 //! extracts `arc-draft` display lists of spaces, entities and sheets (CORE-GPU-013), with hatches
 //! (CORE-GPU-011) and outline text from glyph meshes (CORE-GPU-012).
 //!
+//! The sixth part adds tiled large items (CORE-GPU-005), display overrides (CORE-GPU-016),
+//! silhouette edges (CORE-GPU-017), levels of detail chosen by projected error (CORE-GPU-019),
+//! section planes and box with caps (CORE-GPU-024) and manipulators (CORE-GPU-026).
+//!
 //! Typical use: create a [`Gpu`] from [`GpuSettings`], a [`Scene`] on it, upload geometry with
 //! [`Scene::add_geometry`], set items with [`Scene::update`], and render with
 //! [`Renderer::render_to_image`].
@@ -36,25 +40,33 @@ mod block;
 pub mod adapter;
 pub mod camera;
 pub mod curve;
+pub mod display;
 #[cfg(feature = "draft")]
 pub mod draft;
 pub mod error;
 pub mod extract;
 #[cfg(feature = "draft")]
 pub mod glyph;
+pub mod manipulator;
 pub mod navigation;
 pub mod overlay;
 pub mod pool;
 pub mod render;
 pub mod scene;
+pub mod tile;
 pub mod viewport;
 
 pub use adapter::{AdapterKind, AdapterReport, BackendKind, Gpu, GpuSettings, ReducedFeature};
 pub use curve::{CurveItem, CurvePath, CurveShape, DashPattern, MAX_DASH_INTERVALS};
+pub use display::{
+    DisplayOverrides, Isolation, Others, OverrideStyle, Section, SectionBox, SectionPlane,
+    category_flags,
+};
 pub use extract::{
     ApplyReport, Extraction, ExtractionDriver, ExtractionResult, Extractor, ExtractorRegistry,
     Outcome,
 };
+pub use manipulator::{Axis, Manipulator, ManipulatorKind};
 pub use overlay::{Anchor, Grid, MarkerShape, Overlay, OverlayPrimitive};
 pub use pool::PoolUsage;
 pub use render::{
@@ -64,6 +76,7 @@ pub use scene::{
     FEATURE_EDGE_ANGLE, GeometryId, ItemKey, LineCap, LineItem, LineJoin, LinePath, LineStyle,
     LineWidth, MemoryReport, MeshInstance, MeshItem, RenderItem, Scene, SceneLimits, WriteCounters,
 };
+pub use tile::{LineTile, MeshTile, TILE_SIZE, TiledGeometry, split_lines, split_mesh};
 pub use viewport::{DirtyReasons, Frame, Viewport, ViewportConfig};
 /// The pinned `wgpu` version, re-exported for products that add their own passes.
 pub use wgpu;

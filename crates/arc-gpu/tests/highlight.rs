@@ -95,7 +95,7 @@ fn draw(
             &FrameExtras {
                 hovered,
                 selected,
-                overlay: None,
+                ..FrameExtras::default()
             },
         )
         .unwrap()

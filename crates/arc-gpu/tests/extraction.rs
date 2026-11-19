@@ -88,6 +88,7 @@ fn make(object: u128, revision: u64, sequence: u64, kind: Kind) -> ExtractionRes
     let outcome = match kind {
         Kind::Line => Outcome::Items(Extraction {
             geometries: Vec::new(),
+            lods: Vec::new(),
             items: vec![dot(x)],
         }),
         Kind::Mesh => {
@@ -104,6 +105,7 @@ fn make(object: u128, revision: u64, sequence: u64, kind: Kind) -> ExtractionRes
         Kind::Failed => Outcome::Failed(Error::new(arc_gpu::error::codes::ITEM_INVALID)),
         Kind::Invalid => Outcome::Items(Extraction {
             geometries: Vec::new(),
+            lods: Vec::new(),
             items: vec![dot(f64::NAN)],
         }),
     };
@@ -221,6 +223,7 @@ fn dots() -> ExtractorRegistry {
         }
         Ok(Extraction {
             geometries: Vec::new(),
+            lods: Vec::new(),
             items: vec![dot(x as f64)],
         })
     });
@@ -313,6 +316,7 @@ fn superseded_running_work_is_cancelled_and_never_delivered() {
             }
             Ok(Extraction {
                 geometries: Vec::new(),
+                lods: Vec::new(),
                 items: vec![dot(x as f64)],
             })
         },

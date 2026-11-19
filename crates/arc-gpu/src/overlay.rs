@@ -142,7 +142,7 @@ const SCREEN_BITS: u32 = 64;
 /// Sides of an outlined circle marker.
 const CIRCLE_SIDES: u32 = 32;
 
-struct Projector {
+pub(crate) struct Projector {
     frame: ViewFrame,
     width: f64,
     height: f64,
@@ -152,6 +152,16 @@ struct Projector {
 type Pixel = [f64; 2];
 
 impl Projector {
+    /// A projector for an image of `width × height` pixels.
+    pub(crate) fn new(frame: &ViewFrame, width: u32, height: u32) -> Self {
+        Self {
+            frame: *frame,
+            width: f64::from(width),
+            height: f64::from(height),
+            aspect: f64::from(width) / f64::from(height),
+        }
+    }
+
     fn pixel(&self, v: &Point3) -> Pixel {
         let (x, y) = match self.frame.projection() {
             Projection::Perspective { vertical_fov } => {
@@ -176,7 +186,7 @@ impl Projector {
         !self.perspective() || -v.z >= self.frame.near()
     }
 
-    fn point(&self, a: &Anchor) -> Option<Pixel> {
+    pub(crate) fn point(&self, a: &Anchor) -> Option<Pixel> {
         match a {
             Anchor::Screen(p) => Some(*p),
             Anchor::World(w) => {
@@ -187,7 +197,7 @@ impl Projector {
     }
 
     /// A segment in pixels, clipped at the near plane and to the guard band.
-    fn segment(&self, a: &Anchor, b: &Anchor) -> Option<(Pixel, Pixel)> {
+    pub(crate) fn segment(&self, a: &Anchor, b: &Anchor) -> Option<(Pixel, Pixel)> {
         let (pa, pb) = match (a, b) {
             (Anchor::World(wa), Anchor::World(wb)) => {
                 let (mut va, mut vb) = (
@@ -447,12 +457,7 @@ impl Overlay {
         height: u32,
         limits: &SceneLimits,
     ) -> Result<Resolved> {
-        let projector = Projector {
-            frame: *frame,
-            width: f64::from(width),
-            height: f64::from(height),
-            aspect: f64::from(width) / f64::from(height),
-        };
+        let projector = Projector::new(frame, width, height);
         let mut b = Builder {
             limits,
             out: Resolved::default(),

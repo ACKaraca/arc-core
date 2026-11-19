@@ -34,9 +34,11 @@ use arc_base::{Cancel, Error, ObjectId, Result};
 use arc_doc::events::Changes;
 use arc_doc::{Object, Snapshot, TypeKey};
 use arc_mesh::TriMesh;
+use arc_mesh::lod::LodChain;
 
 use crate::error::codes;
 use crate::scene::{GeometryId, RenderItem, Scene};
+use crate::tile::TiledGeometry;
 
 /// The most worker threads an [`ExtractionDriver`] starts.
 pub const MAX_WORKERS: usize = 16;
@@ -88,6 +90,18 @@ pub struct Extraction {
     pub geometries: Vec<(TriMesh, Point3)>,
     /// The items of the object, in sub-item order.
     pub items: Vec<RenderItem>,
+    /// Groups of `geometries` that are the levels of one geometry (CORE-GPU-019).
+    pub lods: Vec<LodGroup>,
+}
+
+/// The levels of detail of one geometry in an [`Extraction`]: the geometries from `first` on,
+/// one per level of `chain`, level 0 first. Items use the handle of level 0.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LodGroup {
+    /// The index in [`Extraction::geometries`] of level 0.
+    pub first: usize,
+    /// The chain; the scene keeps it to choose levels.
+    pub chain: LodChain,
 }
 
 impl Extraction {
@@ -97,6 +111,37 @@ impl Extraction {
         let local = self.geometries.len() as u64;
         self.geometries.push((mesh, origin));
         GeometryId::from_raw(GeometryId::LOCAL | local)
+    }
+
+    /// Adds the levels of `chain` as one geometry with levels of detail and returns the handle
+    /// of level 0 for a [`crate::MeshItem`] of this extraction (see [`Scene::add_lod_geometry`]).
+    pub fn add_lod_geometry(&mut self, chain: &LodChain, origin: Point3) -> GeometryId {
+        let first = self.geometries.len();
+        for level in chain.levels() {
+            self.geometries.push((level.mesh.clone(), origin));
+        }
+        self.lods.push(LodGroup {
+            first,
+            chain: chain.clone(),
+        });
+        GeometryId::from_raw(GeometryId::LOCAL | first as u64)
+    }
+
+    /// Adds `mesh` as tiles of at most [`crate::tile::TILE_SIZE`] (see
+    /// [`crate::tile::split_mesh`]); the handles are valid only in this extraction.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::tile::split_mesh`].
+    pub fn add_tiled_geometry(&mut self, mesh: &TriMesh) -> Result<Vec<TiledGeometry>> {
+        let tiles = crate::tile::split_mesh(mesh, crate::tile::TILE_SIZE)?;
+        Ok(tiles
+            .into_iter()
+            .map(|tile| TiledGeometry {
+                geometry: self.add_geometry(tile.mesh, tile.origin),
+                origin: tile.origin,
+            })
+            .collect())
     }
 }
 
@@ -206,6 +251,17 @@ impl Scene {
                     self.release(&added);
                     return Err(error);
                 }
+            }
+        }
+        for group in &extraction.lods {
+            let end = group.first + group.chain.levels().len();
+            let registered = added
+                .get(group.first..end)
+                .ok_or_else(|| Error::new(codes::GEOMETRY_NOT_FOUND))
+                .and_then(|levels| self.register_lod(levels.to_vec(), &group.chain));
+            if let Err(error) = registered {
+                self.release(&added);
+                return Err(error);
             }
         }
         let items = extraction

@@ -29,8 +29,10 @@ use arc_base::{Error, ErrorCode, ObjectId, Result};
 use arc_geom::view::ViewFrame;
 
 use crate::adapter::Gpu;
+use crate::display::{DisplayOverrides, Section};
 use crate::error::codes;
 use crate::extract::ExtractionResult;
+use crate::manipulator::Manipulator;
 use crate::overlay::Overlay;
 use crate::render::{FrameExtras, Image, RenderSettings, Renderer};
 use crate::scene::{Scene, SceneLimits};
@@ -87,6 +89,12 @@ pub struct DirtyReasons {
     pub highlight: bool,
     /// The overlay changed.
     pub overlay: bool,
+    /// The display overrides changed.
+    pub overrides: bool,
+    /// The section changed.
+    pub section: bool,
+    /// The manipulator changed.
+    pub manipulator: bool,
     /// A progressive frame was requested.
     pub progressive: bool,
 }
@@ -101,6 +109,9 @@ impl DirtyReasons {
             || self.settings
             || self.highlight
             || self.overlay
+            || self.overrides
+            || self.section
+            || self.manipulator
             || self.progressive
     }
 }
@@ -147,6 +158,9 @@ struct Inputs {
     hovered: Option<ObjectId>,
     selected: Vec<ObjectId>,
     overlay: Option<Overlay>,
+    overrides: Option<DisplayOverrides>,
+    section: Option<Section>,
+    manipulator: Option<Manipulator>,
 }
 
 /// Work run on the render thread with its scene, renderer and settings.
@@ -205,6 +219,9 @@ impl Viewport {
                     hovered: None,
                     selected: Vec::new(),
                     overlay: None,
+                    overrides: None,
+                    section: None,
+                    manipulator: None,
                 },
                 dirty: DirtyReasons {
                     camera: true,
@@ -338,6 +355,54 @@ impl Viewport {
             let changed = s.inputs.overlay != overlay;
             s.inputs.overlay = overlay;
             s.dirty.overlay |= changed;
+            changed
+        })
+    }
+
+    /// Sets or clears the display overrides of the view.
+    ///
+    /// # Errors
+    ///
+    /// `gpu.settings.invalid` and `gpu.limit.exceeded` for invalid overrides (nothing is
+    /// recorded); otherwise an earlier error of the render thread.
+    pub fn set_overrides(&self, overrides: Option<DisplayOverrides>) -> Result<()> {
+        if let Some(o) = &overrides {
+            o.validate(self.limits.max_objects)?;
+        }
+        self.send(|s| {
+            let changed = s.inputs.overrides != overrides;
+            s.inputs.overrides = overrides;
+            s.dirty.overrides |= changed;
+            changed
+        })
+    }
+
+    /// Sets or clears the section of the view. An invalid section surfaces from the frame that
+    /// resolves it.
+    ///
+    /// # Errors
+    ///
+    /// An earlier error of the render thread.
+    pub fn set_section(&self, section: Option<Section>) -> Result<()> {
+        self.send(|s| {
+            let changed = s.inputs.section != section;
+            s.inputs.section = section;
+            s.dirty.section |= changed;
+            changed
+        })
+    }
+
+    /// Sets or clears the manipulator. An invalid manipulator surfaces from the frame that
+    /// draws it.
+    ///
+    /// # Errors
+    ///
+    /// An earlier error of the render thread.
+    pub fn set_manipulator(&self, manipulator: Option<Manipulator>) -> Result<()> {
+        self.send(|s| {
+            let changed = s.inputs.manipulator != manipulator;
+            s.inputs.manipulator = manipulator;
+            s.dirty.manipulator |= changed;
             changed
         })
     }
@@ -545,6 +610,7 @@ impl Drop for ExitGuard {
     }
 }
 
+#[allow(clippy::too_many_lines)] // The loop: wait, take the inputs, apply, draw, publish.
 fn render_loop(shared: &Shared, mut scene: Scene, mut renderer: Renderer, readback: bool) {
     loop {
         let (inputs, mut reasons, results, jobs, generation) = {
@@ -571,6 +637,9 @@ fn render_loop(shared: &Shared, mut scene: Scene, mut renderer: Renderer, readba
                 hovered: i.hovered,
                 selected: i.selected.clone(),
                 overlay: i.overlay.clone(),
+                overrides: i.overrides.clone(),
+                section: i.section.clone(),
+                manipulator: i.manipulator,
             };
             let reasons = std::mem::take(&mut state.dirty);
             let results: Vec<_> = std::mem::take(&mut state.scene).into_values().collect();
@@ -599,6 +668,9 @@ fn render_loop(shared: &Shared, mut scene: Scene, mut renderer: Renderer, readba
                 hovered: inputs.hovered,
                 selected: &inputs.selected,
                 overlay: inputs.overlay.as_ref(),
+                overrides: inputs.overrides.as_ref(),
+                section: inputs.section.as_ref(),
+                manipulator: inputs.manipulator.as_ref(),
             };
             match renderer.draw(
                 &mut scene,
@@ -687,6 +759,7 @@ mod tests {
             sequence: 0,
             outcome: Outcome::Items(Extraction {
                 geometries: Vec::new(),
+                lods: Vec::new(),
                 items: vec![RenderItem::Lines(LineItem {
                     origin: Point3::new(x, 0.0, 0.0),
                     paths: vec![LinePath {
@@ -760,6 +833,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One case per kind of input.
     fn an_idle_viewport_draws_nothing_and_each_change_draws_one_frame() {
         let viewport = viewport(false);
         let only = |f: fn(&mut DirtyReasons)| {
@@ -816,6 +890,48 @@ mod tests {
         expect(
             &move |v| v.set_overlay(Some(overlay.clone())).unwrap(),
             only(|r| r.overlay = true),
+        );
+        expect(
+            &|v| {
+                v.set_overrides(Some(DisplayOverrides {
+                    categories: vec![(1, crate::OverrideStyle::hidden())],
+                    ..DisplayOverrides::default()
+                }))
+                .unwrap();
+            },
+            only(|r| r.overrides = true),
+        );
+        expect(
+            &|v| {
+                v.set_section(Some(Section {
+                    planes: vec![crate::SectionPlane {
+                        point: Point3::origin(),
+                        normal: Vector3::z(),
+                    }],
+                    ..Section::default()
+                }))
+                .unwrap();
+            },
+            only(|r| r.section = true),
+        );
+        expect(
+            &|v| {
+                v.set_manipulator(Some(Manipulator::new(
+                    crate::ManipulatorKind::Move,
+                    Point3::origin(),
+                )))
+                .unwrap();
+            },
+            only(|r| r.manipulator = true),
+        );
+        assert!(
+            viewport
+                .set_overrides(Some(DisplayOverrides {
+                    categories: vec![(16, crate::OverrideStyle::hidden())],
+                    ..DisplayOverrides::default()
+                }))
+                .is_err(),
+            "invalid overrides are rejected at the call"
         );
         let before = viewport.frames();
         viewport.request_progressive_frame().unwrap();

@@ -202,8 +202,9 @@ error-scope results are awaited for at most 30 seconds, image readback for at mo
   vertices and triangles, bytes per pool, the screen line width and the image side.
 
 Instance layouts are little-endian: a mesh instance is the three transform rows (12 `f32`), the
-color (4 `f32`), then material, flags, the object's identifier slot (kept for the picking pass)
-and a reserved `u32`. A line segment is its start, end, previous and next points (3 `f32` each;
+color (4 `f32`), then material, flags (bits 0 to 3 paint and depth flags of drawings, bit 4
+the closed-solid flag of sections, bits 24 to 27 the category of display overrides), the
+object's identifier slot (kept for the picking pass) and a reserved `u32`. A line segment is its start, end, previous and next points (3 `f32` each;
 the neighbors equal the ends when absent), the color, the width at the start and the miter limit
 (`f32`), the style bits (bit 0 square cap; bits 1–2 join: 0 round, 1 miter, 2 bevel; bit 3 has a
 previous segment; bit 4 has a next segment; bit 5 paper width; bit 6 pixel positions, for
@@ -278,7 +279,9 @@ The shading mode is a render setting (`RenderSettings::mode`, default `Shaded`).
 and overlays are uploaded per frame in a uniform buffer and buffers created for the frame, never in
 the scene's pools: switching mode writes no scene buffer and needs no re-extraction. A frame draws
 faces and edges as the mode says, then lines (the same in every mode), the highlight tint, the
-highlight outline and the overlay; a pass with nothing to draw is skipped.
+highlight outline and the overlay; a pass with nothing to draw is skipped. The per-frame
+view state of overrides, sections and manipulators is described in
+[Overrides, sections, levels of detail, tiles and manipulators](#overrides-sections-levels-of-detail-tiles-and-manipulators).
 
 | Mode | Faces | Edges |
 |---|---|---|
@@ -294,7 +297,8 @@ Edges are the feature edges of each geometry, extracted once when it is added: b
 `FEATURE_EDGE_ANGLE` (30 degrees). Vertices at exactly equal positions are welded first, so meshes
 with split normals give the same edges; faces whose normal is zero or not finite are skipped.
 Edges are drawn for every instance from the mesh's own vertex and instance data, as one-pixel
-lines (wider and silhouette edges are CORE-GPU-017). Edge depth is moved toward the eye by a
+lines. Silhouette edges are described in [Edge display](#edge-display-core-gpu-017). Feature
+edges come from `arc_mesh::features::feature_edges`. Edge depth is moved toward the eye by a
 relative 2⁻¹² of its reversed-Z value, never past the near plane, so edges are not hidden by the
 faces they bound.
 
@@ -343,7 +347,7 @@ hovered object, the selected objects and an overlay. Unknown objects are ignored
 An `Overlay` is a list of primitives passed in `FrameExtras`; it is not part of the scene. Every
 primitive is resolved on the CPU in `f64` to pixel positions (x right, y down) and drawn after the
 outline without depth testing, so it is above the scene regardless of depth and is not clipped by
-the far plane or (later) section planes.
+the far plane or by section planes.
 
 - Points are `Anchor::World` (projected through the view; perspective segments are clipped at the
   near plane, and a marker or fill with a point behind it is skipped) or `Anchor::Screen` pixels.
@@ -459,7 +463,7 @@ The codes `arc-gpu` owns. A code is never reused for a different meaning; messag
 | Code | Category | Raised when |
 |---|---|---|
 | `gpu.adapter.not_found` | `not_found` | No adapter matches the settings, or none is available |
-| `gpu.settings.invalid` | `invalid_input` | A settings value is out of range: a sample count other than 1 or 4, a negative or non-finite ambient term or plot scale, an X-ray opacity or tint outside [0, 1], an outline wider than 8 pixels, a curve tolerance outside [0.01, 16] pixels, a non-finite color, or a limit of zero |
+| `gpu.settings.invalid` | `invalid_input` | A settings value is out of range: a sample count other than 1 or 4, a negative or non-finite ambient term or plot scale, an X-ray opacity or tint outside [0, 1], an outline wider than 8 pixels, a curve tolerance outside [0.01, 16] pixels, a negative or non-finite level-of-detail budget, a non-finite color, or a limit of zero; display overrides with an opacity outside [0, 1] or a category above 15; a section with more than six planes, a zero plane normal or an inverted box; a manipulator with a zero axis, a size outside (0, 4096] pixels or a width that is not positive; a tile bound that is not positive |
 | `gpu.device.request_failed` | `failed_operation` | The adapter refused to create a device with the required features and limits |
 | `gpu.device.lost` | `failed_operation` | The device was lost or destroyed; the scene and renderer must be recreated on a new device |
 | `gpu.out_of_memory` | `limit_exceeded` | The device ran out of memory while creating a resource or executing work |
@@ -477,6 +481,125 @@ The codes `arc-gpu` owns. A code is never reused for a different meaning; messag
 | `gpu.navigation.invalid` | `invalid_input` | A navigation parameter is out of range: a non-finite value, a zero or negative zoom factor or image size, a negative radius, or a pan anchor at or behind the eye |
 | `gpu.extractor.panicked` | `internal` | A product extractor panicked; the object keeps its previous items |
 | `gpu.thread.failed` | `failed_operation` | A worker or render thread could not be started, or the render thread stopped unexpectedly |
+
+## Overrides, sections, levels of detail, tiles and manipulators
+
+The sixth part implements CORE-GPU-005, 016, 017, 019, 024 and 026. Overrides, sections and
+manipulators are per-frame inputs (`FrameExtras::overrides`, `section` and `manipulator`, and
+`Viewport::set_overrides`, `set_section` and `set_manipulator`, each a dirty reason of the
+viewport); they are uploaded in the view uniform (928 bytes) and per-frame bind groups and write
+no scene buffer. `Renderer::pick_with` takes the same extras, so picks follow what is drawn.
+CORE-GPU-018, 020 and 021 are not part of this step.
+
+### Tiled large items (CORE-GPU-005)
+
+- `tile::split_mesh(mesh, max_extent)` partitions the triangles by recursive median bisection of
+  their centroids along the longest axis of the bounds, until the bounds of a set are at most
+  `max_extent` on every axis (`TILE_SIZE`, 1,000 m). Each tile is a mesh with exactly copied
+  vertices (normals kept) and an origin at the center of its bounds, so every vertex is within
+  500 m of its origin and the `f32` error stays below 0.1 mm, also 10^7 m from the model origin.
+  The tiles hold every input triangle exactly once. A triangle is never cut: a triangle larger
+  than the bound is a tile of its own and exceeds the bound; this is the one exception.
+- `Scene::add_tiled_geometry(mesh)` and `Extraction::add_tiled_geometry(&mesh)` upload the tiles
+  and return `TiledGeometry { geometry, origin }`; `TiledGeometry::item(instances)` makes the
+  mesh item of a tile. Instance transforms are relative to the tile origin, so the identity
+  places the mesh where it was authored. A mesh within the bound is one tile.
+- `tile::split_lines(paths, max_extent)` splits polylines into runs with their own origins. A
+  segment longer than half the bound is divided into equal parts first; the runs of a polyline
+  share their end points. A join at a run boundary is two caps, so miter and bevel joins are
+  not exact at a boundary vertex.
+- Tiling is explicit: `Scene::add_geometry` and `Scene::update` do not split what they are
+  given. A producer calls the functions above for items larger than the bound.
+
+### Display overrides (CORE-GPU-016)
+
+- `DisplayOverrides` holds styles by object and by category, an optional isolation and the
+  ghost opacity (0.15 by default). `OverrideStyle` has an optional color, an opacity, and the
+  flags `ghost` and `hidden`.
+- **Objects** are resolved on the CPU: the draws of hidden objects (and of objects an isolation
+  hides) are skipped in every pass, so they are not shaded, tinted, outlined or picked, and
+  items are drawn grouped by their object style with one bind group each.
+- **Categories** are resolved on the GPU: an instance carries a category 0 to 15 in the bits 24
+  to 27 of its flags (`category_flags`); the vertex shader looks the style up in a table of 16
+  entries in the view uniform. One draw can therefore mix categories. An object's own style
+  replaces the style of its instances' categories.
+- **Rules** (by property, layer or type) are evaluated by the caller into object lists or a
+  category; the renderer has no access to document properties.
+- **Isolation** shows the listed objects; the others are hidden or ghosted (`Others`).
+  **Ghosts** are drawn at the ghost opacity and are not picked.
+- **Effects.** A color replaces the instance color of faces and of edges drawn in the instance
+  color; the alpha is kept. An opacity below 1 blends faces: in the modes with colored opaque
+  faces (shaded, shaded with edges, consistent colors) such faces are discarded from the opaque
+  pass and drawn again in a blended pass without depth writes, after the opaque faces and in
+  item order; the X-ray mode multiplies its own opacity; in the hidden-line mode a translucent
+  face does not hide lines. Edges blend by the same opacity. Hiding and isolation apply to line
+  items as well; color, opacity and ghosting do not.
+- Overlays are not affected by overrides.
+
+### Edge display (CORE-GPU-017)
+
+- **Feature edges** are boundary, sharp (more than `FEATURE_EDGE_ANGLE`) and non-manifold edges
+  from `arc_mesh::features::feature_edges`, one pixel wide.
+- **Silhouette edges** are enabled by `SceneLimits::silhouette_edges` (derive the data when a
+  geometry is added) and `RenderSettings::silhouette_edges` (draw it, in the modes that draw
+  edges over faces: hidden line, shaded with edges and X-ray). The data is, for every smooth
+  edge between exactly two faces (creases and boundaries are feature edges), two records of an
+  end point and the unit normals of both faces, kept in the vertex pool: 72 bytes, three vertex
+  units, per edge. It is counted as vertex memory and is off by default.
+- An edge is drawn where its two faces face opposite ways as seen from the eye, tested for each
+  fragment against the eye direction (the view direction for orthographic views, the direction
+  to the fragment for perspective views), so perspective contours are exact. Faces are assumed
+  consistently wound; a mesh with flipped faces can miss contours. Silhouette edges use the edge
+  color of the mode, the depth allowance of feature edges and the instance transform.
+- Edges are one pixel wide; wider edges are a later step.
+
+### Levels of detail (CORE-GPU-019)
+
+- `Scene::add_lod_geometry(&chain, origin)` and `Extraction::add_lod_geometry(&chain, origin)`
+  upload every level of an `arc_mesh::lod::LodChain` (each with its feature and silhouette
+  data) and return the handle of level 0, which items use. The scene keeps its own copy of the
+  chain. Removing the handle removes all levels; a level cannot be removed alone.
+- Before each frame and pick the scene calls `LodChain::select` for every item whose geometry
+  has levels, with the budget `RenderSettings::lod_budget_px` (1 pixel by default; 0 always
+  draws level 0) and the `ViewParams` of the item. The distance is the item's nearest depth in
+  front of the near plane (its origin depth minus its radius, at least the near distance), and
+  one for orthographic views. The projection scale is the view's pixels per unit at unit
+  distance times the largest scale of the item's instance transforms. One level is chosen for
+  all instances of an item. `Scene::lod_level(key)` reports the level of the last frame.
+- Selection is monotonic: `LodChain::select` never returns a finer level for a smaller
+  projected size, and the projected size only decreases with distance.
+
+### Section planes and box (CORE-GPU-024)
+
+- A `Section` has up to six `SectionPlane`s (a point and a normal; the side the normal points to
+  is removed), one axis-aligned `SectionBox` (everything outside is removed) and an optional
+  cap color. Planes and box are converted in `f64` to offsets from the frame's translation
+  origin, so they hold 10^7 m from the model origin.
+- Clipping is a `discard` in the fragment shaders of faces, edges, tint, mask and identifier
+  passes, never a clip distance. Picking respects the section. Line items are not clipped;
+  overlays and manipulators are never clipped.
+- **Caps.** An instance with the flag `FLAG_SOLID` is a closed solid. While the section has a cap
+  color, the back faces of such an instance that remain visible after clipping are drawn unlit
+  in the cap color, which fills the cut. Back-face culling is off while a section has a cap
+  color. Caps are drawn in the modes with colored opaque faces. The cap has the depth of the
+  back face behind the cut, not of the cutting plane, so objects inside a cut solid show
+  through it, and a mirrored instance transform inverts front and back faces. A stencil cap on
+  the cutting plane needs a stencil format outside the default features and was not built.
+  Hatch caps are a later step; a cap is one flat color.
+
+### Manipulators (CORE-GPU-026)
+
+- A `Manipulator` (move, rotate or scale; origin; three axis directions; size, width and colors
+  in pixels; an active axis) is resolved on the CPU in `f64` and drawn through the overlay, so
+  it is above the scene and not clipped by sections. The pixel size is converted to model units
+  at the depth of the origin (`manipulator::world_per_pixel`), so handles keep their size on the
+  screen at any camera distance and in both projections.
+- Move and scale draw a line per axis with an arrowhead or a square at the tip; rotate draws a
+  48-segment ring per axis in the plane of the other two axes.
+- `Manipulator::hit_test(frame, size, pixel, tolerance_px)` returns the nearest axis whose
+  projected line or ring is within the tolerance of the pixel (the lower axis on a tie). Parts
+  behind the near plane are not drawn and not hit. Plane handles and a uniform scale handle
+  are not provided.
 
 ## Drafting display as implemented
 

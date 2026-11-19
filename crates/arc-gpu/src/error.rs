@@ -12,7 +12,7 @@ pub mod codes {
         category: Category::NotFound,
         message_id: "gpu-adapter-not-found",
     };
-    /// A settings value is out of range: a sample count other than 1 or 4, a negative or non-finite ambient term or plot scale, an X-ray opacity or tint outside [0, 1], an outline wider than 8 pixels, a curve tolerance outside [0.01, 16] pixels, a non-finite color, or a limit of zero.
+    /// A settings value is out of range: a sample count other than 1 or 4, a negative or non-finite ambient term or plot scale, an X-ray opacity or tint outside [0, 1], an outline wider than 8 pixels, a curve tolerance outside [0.01, 16] pixels, a negative or non-finite level-of-detail budget, a non-finite color, or a limit of zero; display overrides with an opacity outside [0, 1] or a category above 15; a section with more than six planes, a zero plane normal or an inverted box; a manipulator with a zero axis, a size outside (0, 4096] pixels or a width that is not positive; a tile bound that is not positive.
     pub const SETTINGS_INVALID: ErrorCode = ErrorCode {
         code: "gpu.settings.invalid",
         category: Category::InvalidInput,

@@ -94,6 +94,7 @@ pub fn extract_sample(snapshot: &Snapshot, object: &Object, _: &Cancel) -> Resul
     };
     Ok(Extraction {
         geometries: Vec::new(),
+        lods: Vec::new(),
         items,
     })
 }
