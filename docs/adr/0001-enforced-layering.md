@@ -93,3 +93,19 @@ drafting mapping into the format crate.
 dependency: the scenario test that imports a DXF file and plots it to PDF, SVG and PNG. The layer
 tool does not distinguish development dependencies on same-layer crates, so the edge is recorded in
 the table. No production code of `arc-io-pdf` may use `arc-draft-dxf`.
+
+## Amendment: Shared bounded ZIP and XML readers
+
+`arc-io-common` is added at layer 4. It holds the bounded ZIP archive reader and the bounded XML
+pull reader that the ZIP- and XML-based format crates share (capability CORE-IO-007). It depends on
+`arc-base` and on the third-party crates `miniz_oxide` and `quick-xml`, and it is in the
+WebAssembly set. It has no same-layer edge yet: each format crate that reads ZIP or XML adds a
+same-layer edge from itself to `arc-io-common` in the table when it starts using the crate.
+
+The crate is needed because the format crates may not depend on each other (the family's crates
+are peers, and a format crate that read another format's container would inherit that crate's
+model and limits), and the specification assigns the bounded readers to the family as a whole.
+Placing the readers in `arc-base` was rejected: it would move two third-party parsers into the
+foundation that every crate depends on, although only the format family needs them. Placing them in
+`arc-io-exchange` was rejected for the same reason as a format-to-format edge. Every format crate
+that needs the readers keeps the same behavior and the same error codes by using one crate.

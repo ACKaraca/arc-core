@@ -216,6 +216,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-io-common"
+version = "0.1.0"
+dependencies = [
+ "arc-base",
+ "miniz_oxide 0.9.1",
+ "proptest",
+ "quick-xml",
+]
+
+[[package]]
 name = "arc-io-dxf"
 version = "0.1.0"
 dependencies = [

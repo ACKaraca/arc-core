@@ -1,0 +1,20 @@
+[package]
+name = "arc-io-common"
+description = "Shared bounded readers over byte buffers for the ZIP- and XML-based interchange formats: a ZIP archive reader and an XML pull reader, with limits, cancellation and stable error codes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+arc-base = { workspace = true }
+miniz_oxide = { workspace = true }
+quick-xml = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

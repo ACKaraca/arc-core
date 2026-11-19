@@ -65,6 +65,7 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `jsonschema` | Not in use: its dependency chain includes a crate under MIT-0, which is outside the license allowlist; `arc-command` validates the JSON Schema subset its generated schemas use with its own bounded validator | MIT |
 | `schemars` | Schema generation from parameter types | MIT |
 | `quick-xml` | Bounded XML reading and writing (IFC-ZIP manifests, BCF, LandXML, IDS) | MIT |
+| `miniz_oxide` | Raw deflate inflation of ZIP entries in `arc-io-common`, through the streaming API that caps the output; `with-alloc` only (no default features) | MIT OR Zlib OR Apache-2.0 |
 | `zip` | Bounded ZIP reading and writing | MIT |
 | `lyon` | Fill tessellation | MIT or Apache-2.0 |
 | `resvg` | Icon and SVG rasterization | Apache-2.0 or MIT |
