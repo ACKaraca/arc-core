@@ -149,14 +149,15 @@ pub(crate) fn set_clip_spec() -> CommandSpec {
 /// The command runs in one transaction, so one undo restores the placed reference and removes
 /// everything it created. It copies the linked space into a new block definition, named after the
 /// space (or `<file name>-<space name>`, with a counter, when the name is taken), and replaces the
-/// placed reference with a block reference that has its insertion transform and common fields.
-/// The link object is deleted when no other placed reference uses it.
+/// placed reference with a block reference that has its insertion transform, its common fields and
+/// its header. The link object is deleted when no other placed reference uses it.
 ///
-/// Every entity type of the space is copied with its values. The definitions an entity refers to
-/// (layers, linetypes, text, dimension, leader and table styles, hatch patterns) and the blocks it
-/// places are copied once each, recursively; a name the host holds is taken under the
-/// `<file name>-<name>` prefix. Each reference of a copy names its host copy; a reference to an
-/// object that is not copied is cleared and reported. A clip boundary cuts curves and keeps the
+/// Every entity type of the space is copied with its values and header. The definitions an entity
+/// refers to (layers, linetypes, text, dimension, leader and table styles, hatch patterns) and the
+/// blocks it places are copied once each, recursively; a name the host holds is taken under the
+/// `<file name>-<name>` prefix. A linked default (the layer `0` and the `default` styles) maps to the
+/// host's own default of the same kind and is not copied. Each reference of a copy names its host
+/// copy; a reference to an object that is not copied is cleared and reported. A clip boundary cuts curves and keeps the
 /// other entities whose insertion or anchor point is inside it. Placed references nested in the
 /// space are not copied, and are reported. The copy is bounded by `budget` and the document's
 /// record limit; an over-large space is refused before anything is created.
@@ -226,9 +227,8 @@ fn bind(ctx: &mut Context<'_>, links: &Links, budget: WorkBudget, p: Bind) -> Re
         external::linked_space(linked, placed.get(external::SPACE).and_then(Option::as_ref))?;
     let link_values = values_of(&snapshot, link)?;
     let stem = stem_of(types::text_at(&link_values, 1).unwrap_or_default());
-    let placed_owner = snapshot
-        .get(snapshot.resolve(reference)?)?
-        .header
+    let placed_header = snapshot.get(snapshot.resolve(reference)?)?.header.clone();
+    let placed_owner = placed_header
         .owner
         .ok_or_else(|| Error::new(codes::EXTERNAL_LINK_INVALID))?;
     let space_values = values_of(linked, space)?;
@@ -294,7 +294,7 @@ fn bind(ctx: &mut Context<'_>, links: &Links, budget: WorkBudget, p: Bind) -> Re
         inserted,
         Header {
             owner: Some(placed_owner),
-            ..Header::default()
+            ..placed_header
         },
         block_ref,
     )?;

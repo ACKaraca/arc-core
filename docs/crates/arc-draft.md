@@ -1323,28 +1323,40 @@ planned, then written:
    a visited set and the display nesting limit), and the definitions they refer to. A definition is
    a layer, linetype, text style, dimension style, leader style, table style or hatch pattern. A
    dimension chain is copied when one of its members is. Placed external references nested in the
-   space are not copied (see decision 18).
+   space are not copied (see decision 18). A block is reached at the deepest level it is placed at:
+   when a later placement is deeper, the block is walked again from there, so the members below it
+   are checked at every level they reach (decision 23).
 2. **Budget.** The plan is refused before anything is created when it needs more objects than
    `WorkBudget::primitives`, more objects than the document's record limit, or more work than
    `WorkBudget::work` (one unit for each object, and the clip vertices for each curve cut). The
    refusal is `draft.external_ref.budget_exceeded`. `bind_command_with_budget` takes the bounds;
-   `bind_command` uses `WorkBudget::default()`.
+   `bind_command` uses `WorkBudget::default()`. The walk stops as soon as the objects it reaches,
+   counted before the clip, pass the smaller of the two object bounds, and the planning loop stops
+   as soon as the copies or the cut work pass a bound. The first excess ends the plan, so the work
+   after it is not done; the document is unchanged either way.
 3. **Names.** The block definition is named after the linked space: the space's name when free,
    else `<file name>-<space name>`, then with a counter. Each copied definition and block keeps its
    name when the host has no object of its type with that name; otherwise it is copied under
-   `<file name>-<name>`, with a counter if that is taken too.
+   `<file name>-<name>`, with a counter if that is taken too. The name stays within the name limit
+   of 255 bytes: the file name is shortened first, on a character boundary, and the name only when
+   the file name has no room left. A linked default object maps to the host's own default of the
+   same kind and creates no copy, whatever the properties of either object (decision 22).
 4. **Clip.** When the placed reference has a clip boundary, it applies to the entities of the space
    (not to the content of the blocks they place). A curve is cut with `clip::cut`, and each piece
    becomes an entity of the type of its curve. A point and every other kind is kept whole when its
    anchor is inside the boundary, and dropped otherwise. The anchor is the insertion point of a text,
    rich text, block reference, array and table, the position of a multileader, the line position of
    a dimension, the first point of a leader, the pick point of a hatch (otherwise the lower corner of
-   its first loop), and the lower corner of a wipeout. A kind with no anchor is kept.
+   its first loop), and the lower corner of a wipeout. A kind with no anchor is kept. A curve that
+   the clip returns unchanged, because it lies wholly inside, keeps its object and is counted as kept
+   whole, not as cut.
 5. **Write.** Every copy gets its host identifier before the first object is created, so a reference
    between two copies names the host copy whatever the order of creation. Each reference of a copy
-   is remapped: a reference to a copied object names its copy, and any other reference is cleared,
-   the field becomes absent, a list element or map entry is dropped, and a record whose references
-   were all cleared is dropped from its list. Each cleared reference is counted in one problem,
+   is remapped: a reference to a copied object names its copy, and any other reference is cleared.
+   A cleared field is absent and its record keeps its place in its list, so the members of a list of
+   records keep their positions (a dimension point path, a hatch boundary); a list element that is a
+   reference itself, such as a chain member, is dropped, as a deleted member is removed; a map entry
+   without a copy is dropped. Each cleared reference is counted in one problem,
    `draft.external_ref.bind_reference_cleared`, in the result. No copy keeps an identifier of the
    linked document.
 6. **Result.** It creates a block reference with the placed reference's common fields,
@@ -1352,7 +1364,8 @@ planned, then written:
    no other placed reference names it. The result reports the counts of copied entities, blocks,
    definitions and chains, the clip's kept, dropped and cut counts, the placed references not copied
    and the problems. The transaction commit runs the validators: a copy that fails them aborts the
-   whole bind with nothing changed.
+   whole bind with nothing changed. Each copy keeps the header name, partition and flags of its
+   source, with the host's owner; the block reference keeps the header of the placed reference.
 
 For an unclipped reference, the block reference draws the same geometry and colors as the reference
 had, so the display lists agree in shape and color. Identifiers and the list structure differ. A
@@ -1429,6 +1442,23 @@ Where the specification was silent:
 21. The bind of a space with a reference from a copy to a copied curve that the clip cut is cleared,
    because the pieces of a cut curve are new objects that no reference names. Rejected: pointing the
    reference at the first piece, which would pick one of several objects as the target.
+22. A linked default maps to the host's default of its kind. The crate's defaults are the styles
+   named `default` that `core.draft.style.defaults` creates (text, dimension, leader and table
+   styles), and the layer `0`, which the DXF bridge uses as its standard layer; the crate creates no
+   layer, and continuous is an absent linetype, so no linetype is a default object. A linked default
+   keeps no copy and its references name the host's object, whatever the properties of either.
+   Rejected: a copy under a prefix, which moves the entities of layer `0` to another layer, and a
+   mapping by property, which would replace the host's defaults with the linked ones.
+23. A block is reached at its deepest placement, not its first one. A copy holds every placement, so
+   the deepest one decides whether the drawing is too deep, and the result does not depend on the
+   order of the walk. Rejected: the shallowest placement, which can accept a drawing that has a
+   placement deeper than the limit, depending on the order in which the walk reads the placements.
+24. A curve the clip leaves unchanged keeps its object and its identifier, so references to it hold
+   (decision 21 applies only to pieces). Rejected: cutting every curve into pieces, which cleared
+   every reference to a curve inside the clip.
+25. A cleared reference inside a record keeps the record in its list, with the field absent. Rejected:
+   dropping the record, which shortens the list, shifts its later members, and hides the change from
+   the readers that test for absence (a hatch boundary, a dimension point path).
 
 ## Error codes
 

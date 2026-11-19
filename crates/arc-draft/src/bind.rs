@@ -31,6 +31,10 @@ use crate::{array, dimension, hatch, leader, style, table, text};
 /// The index of the name: the first field of every named type.
 const NAME: usize = 0;
 
+/// The name of the default layer. The crate creates no layer; `"0"` is the layer every drawing
+/// starts with in the interchange format, which the DXF bridge uses for its standard layer.
+const DEFAULT_LAYER: &str = "0";
+
 /// The types a bound entity refers to by reference: copied once, with their names made unique.
 const DEFINITIONS: [&str; 7] = [
     types::LAYER,
@@ -55,16 +59,47 @@ const CURVES: [&str; 9] = [
     types::SPLINE,
 ];
 
+/// The longest name a named object may hold, in bytes.
+fn name_limit() -> usize {
+    usize::try_from(types::NAME_BYTES).unwrap_or(usize::MAX)
+}
+
+/// The longest prefix of `text` that is at most `max` bytes and ends on a character boundary.
+fn truncate(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// `stem-name`, with the counter `-n` after it when given, and the whole within the name limit.
+/// The stem is shortened first; the name is shortened only when the stem has no room left.
+fn prefixed(stem: &str, name: &str, counter: Option<usize>) -> String {
+    let tail = counter.map(|n| format!("-{n}")).unwrap_or_default();
+    let room = name_limit().saturating_sub(tail.len());
+    let fixed = name.len() + 1;
+    let (stem, name) = if fixed <= room {
+        (truncate(stem, room - fixed), name)
+    } else {
+        ("", truncate(name, room.saturating_sub(1)))
+    };
+    format!("{stem}-{name}{tail}")
+}
+
 /// The name of a copy for `name` that no object of its type holds. The first copy takes `name`,
 /// then `stem-name`, then `stem-name-2`, and so on; the chosen name is added to `taken`.
 pub(crate) fn unique_name(taken: &mut BTreeSet<String>, stem: &str, name: &str) -> String {
     let mut candidate = name.to_owned();
-    let mut n = 2;
     if taken.contains(&candidate) {
-        candidate = format!("{stem}-{name}");
+        candidate = prefixed(stem, name, None);
     }
+    let mut n = 2;
     while taken.contains(&candidate) {
-        candidate = format!("{stem}-{name}-{n}");
+        candidate = prefixed(stem, name, Some(n));
         n += 1;
     }
     taken.insert(candidate.clone());
@@ -104,6 +139,26 @@ impl Names<'_> {
     }
 }
 
+/// The host's own default object that a linked default maps to, when the linked object is a
+/// default of the crate: the default layer and the `default` styles of each kind. The mapping
+/// does not depend on the properties of either object, because defaults are the host's to define.
+fn host_default(host: &Snapshot, key: &str, name: &str) -> Option<ObjectId> {
+    let is_default = match key {
+        types::LAYER => name == DEFAULT_LAYER,
+        style::TEXT_STYLE | style::DIM_STYLE | style::LEADER_STYLE | style::TABLE_STYLE => {
+            name == style::DEFAULT_NAME
+        }
+        _ => false,
+    };
+    if !is_default {
+        return None;
+    }
+    host.iter_type(key)
+        .ok()?
+        .find(|(_, object)| types::text_at(&object.values, NAME) == Some(name))
+        .map(|(_, object)| object.id)
+}
+
 /// One object the copy creates in the host.
 #[derive(Debug)]
 pub(crate) struct Object {
@@ -114,6 +169,8 @@ pub(crate) struct Object {
     pub(crate) key: String,
     /// The linked owner: the linked space or block of an entity, the linked owner of a chain.
     pub(crate) owner: Option<ObjectId>,
+    /// The header: the source's name, partition and flags. The write sets the owner to the host's.
+    pub(crate) header: Header,
     /// The values, in the linked identifiers; the write remaps them.
     pub(crate) values: Vec<Option<Value>>,
 }
@@ -121,7 +178,8 @@ pub(crate) struct Object {
 /// What a clip did to the entities of the space.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Counts {
-    /// Entities kept whole: points and kinds that cannot be cut, inside the boundary.
+    /// Entities kept whole: points and kinds that cannot be cut, inside the boundary, and curves
+    /// that lie wholly inside it.
     pub(crate) kept_whole: u64,
     /// Entities left out: outside the boundary, or without any part inside it.
     pub(crate) dropped: u64,
@@ -155,6 +213,8 @@ pub(crate) struct Plan {
     pub(crate) counts: Counts,
     /// Placed references nested in the space that are not copied.
     pub(crate) external: u64,
+    /// Linked defaults and the host's own defaults they map to: no object is created for them.
+    pub(crate) mapped: Vec<(ObjectId, ObjectId)>,
 }
 
 impl Plan {
@@ -235,46 +295,77 @@ fn references(values: &[Option<Value>]) -> Vec<ObjectId> {
     found
 }
 
+/// Records a reached object, refusing the one that passes `max_objects`.
+fn admit(reach: &mut Reach, id: ObjectId, key: String, max_objects: u64) -> Result<()> {
+    if reach.keys.len() as u64 >= max_objects {
+        return Err(Error::new(codes::EXTERNAL_BUDGET_EXCEEDED));
+    }
+    reach.keys.insert(id, key);
+    Ok(())
+}
+
 /// Reaches the members of `space`, the blocks they place and the definitions they use. A
-/// worklist holds the visits, so no nesting of blocks recurses on the call stack, and a visited
-/// set makes each object reached once.
-fn reach(linked: &Snapshot, space: ObjectId, max_nesting: u32) -> Result<Reach> {
+/// worklist holds the visits, so no nesting of blocks recurses on the call stack.
+///
+/// A block is reached at the deepest nesting it is placed at, because a copy holds every
+/// placement: a block placed at a deep level and again at a shallow one is visited again from its
+/// deeper placement, so the members below it are checked at the depth they reach. Each block is
+/// visited at most `max_nesting` times, since each visit is deeper than the last. The walk refuses
+/// as soon as a placement is deeper than `max_nesting`, or the reached objects pass `max_objects`.
+fn reach(linked: &Snapshot, space: ObjectId, max_nesting: u32, max_objects: u64) -> Result<Reach> {
     let mut reach = Reach::default();
+    let mut deepest: BTreeMap<ObjectId, u32> = BTreeMap::new();
     let mut stack = vec![Visit::Container(space, 0)];
     while let Some(visit) = stack.pop() {
         match visit {
             Visit::Container(container, depth) => {
-                let mut kept = Vec::new();
-                for member in members(linked, container) {
-                    let Some(key) = key_of(linked, member) else {
-                        continue;
-                    };
-                    if key == types::EXTERNAL_REF {
-                        reach.external.push(member);
-                        continue;
+                if !reach.containers.contains_key(&container) {
+                    let mut kept = Vec::new();
+                    for member in members(linked, container) {
+                        let Some(key) = key_of(linked, member) else {
+                            continue;
+                        };
+                        if key == types::EXTERNAL_REF {
+                            reach.external.push(member);
+                            continue;
+                        }
+                        admit(&mut reach, member, key, max_objects)?;
+                        kept.push(member);
                     }
-                    reach.keys.insert(member, key);
-                    kept.push(member);
-                    stack.push(Visit::Object(member, depth));
+                    reach.containers.insert(container, kept);
                 }
-                reach.containers.insert(container, kept);
+                let kept = reach
+                    .containers
+                    .get(&container)
+                    .cloned()
+                    .unwrap_or_default();
+                stack.extend(kept.into_iter().map(|member| Visit::Object(member, depth)));
             }
             Visit::Object(object, depth) => {
                 for target in references(&values_of(linked, object)?) {
-                    if reach.keys.contains_key(&target) {
-                        continue;
-                    }
                     let Some(key) = key_of(linked, target) else {
                         continue;
                     };
                     if key == BLOCK {
-                        if depth >= max_nesting {
+                        let placed_at = depth + 1;
+                        if placed_at > max_nesting {
                             return Err(Error::new(codes::BLOCK_NESTING_TOO_DEEP));
                         }
-                        reach.keys.insert(target, key);
-                        stack.push(Visit::Container(target, depth + 1));
-                    } else if DEFINITIONS.contains(&key.as_str()) {
-                        reach.keys.insert(target, key);
+                        if deepest
+                            .get(&target)
+                            .is_some_and(|known| *known >= placed_at)
+                        {
+                            continue;
+                        }
+                        deepest.insert(target, placed_at);
+                        if !reach.keys.contains_key(&target) {
+                            admit(&mut reach, target, key, max_objects)?;
+                        }
+                        stack.push(Visit::Container(target, placed_at));
+                    } else if DEFINITIONS.contains(&key.as_str())
+                        && !reach.keys.contains_key(&target)
+                    {
+                        admit(&mut reach, target, key, max_objects)?;
                         stack.push(Visit::Object(target, depth));
                     }
                     // Other targets are entities (copied only as members of a copied container,
@@ -299,9 +390,19 @@ fn reach(linked: &Snapshot, space: ObjectId, max_nesting: u32) -> Result<Reach> 
     Ok(reach)
 }
 
+/// The header of a linked object.
+fn header_of(snapshot: &Snapshot, id: ObjectId) -> Result<Header> {
+    Ok(snapshot.get(snapshot.resolve(id)?)?.header.clone())
+}
+
 /// The entity values of a clipped curve piece: the common fields of `values`, the kind values of
 /// the piece's own type.
-fn piece(values: &[Option<Value>], curve: &Curve2, registry: &TypeRegistry) -> Object {
+fn piece(
+    values: &[Option<Value>],
+    curve: &Curve2,
+    registry: &TypeRegistry,
+    header: Header,
+) -> Object {
     let (key, kind) = curve_entity(curve);
     let mut out = types::defaults(registry, key);
     for (i, value) in values.iter().enumerate().take(entity::KIND) {
@@ -320,6 +421,7 @@ fn piece(values: &[Option<Value>], curve: &Curve2, registry: &TypeRegistry) -> O
         source: None,
         key: key.to_owned(),
         owner: None,
+        header,
         values: out,
     }
 }
@@ -396,7 +498,7 @@ fn anchor(key: &str, values: &[Option<Value>]) -> Result<Option<Point2>> {
 /// `draft.block.nesting_too_deep` for block nesting above the display limit,
 /// `draft.external_ref.clip_invalid` for a clip that is not a closed polyline of the crate's
 /// clip kind, and `draft.external_ref.budget_exceeded` when the plan needs more objects or work
-/// than the budget or the limits allow.
+/// than the budget or the limits allow. The walk and the planning loop stop at the first excess.
 #[expect(
     clippy::too_many_lines,
     reason = "the entities of each container, the definitions and chains, then the budget"
@@ -408,7 +510,11 @@ pub(crate) fn plan(
     input: Input<'_>,
 ) -> Result<Plan> {
     let options = DisplayOptions::default();
-    let reach = reach(linked, space, options.max_nesting)?;
+    let work_bound = u64::try_from(input.budget.work).unwrap_or(u64::MAX);
+    let object_bound = input
+        .max_objects
+        .min(u64::try_from(input.budget.primitives).unwrap_or(u64::MAX));
+    let reach = reach(linked, space, options.max_nesting, object_bound)?;
     let boundary = match &input.clip {
         Some(polyline) => Some(
             boundary_loop(polyline, &options.tolerance)
@@ -424,6 +530,12 @@ pub(crate) fn plan(
     };
     let mut counts = Counts::default();
     let mut cut_work = 0_u64;
+    let mut mapped = Vec::new();
+    // Whether the copies so far, and the cut work so far, are over a bound.
+    let over = |objects: usize, work: u64| {
+        (objects as u64) > object_bound || (objects as u64).saturating_add(work) > work_bound
+    };
+    let refused = || Error::new(codes::EXTERNAL_BUDGET_EXCEEDED);
 
     let mut block = input.block;
     let space_name = crate::types::text_at(&block, NAME)
@@ -434,6 +546,7 @@ pub(crate) fn plan(
         source: None,
         key: BLOCK.to_owned(),
         owner: None,
+        header: Header::default(),
         values: block,
     }];
     let top = 0;
@@ -452,11 +565,16 @@ pub(crate) fn plan(
         }
         sorted.sort_by_key(|(order, id, _, _)| (*order, *id));
         for (_, source, key, values) in sorted {
+            if over(objects.len(), cut_work) {
+                return Err(refused());
+            }
+            let header = header_of(linked, source)?;
             let Some(clip) = boundary.as_ref().filter(|_| *container == space) else {
                 objects.push(Object {
                     source: Some(source),
                     key,
                     owner: Some(*container),
+                    header,
                     values,
                 });
                 continue;
@@ -472,6 +590,7 @@ pub(crate) fn plan(
                         source: Some(source),
                         key,
                         owner: Some(*container),
+                        header,
                         values,
                     });
                 } else {
@@ -479,13 +598,29 @@ pub(crate) fn plan(
                 }
             } else if CURVES.contains(&key.as_str()) {
                 let curve = decode_curve(values.get(entity::KIND))?;
+                if over(objects.len(), cut_work.saturating_add(clip_vertices)) {
+                    return Err(refused());
+                }
                 let pieces = cut(&curve, clip, true, &options.tolerance)?;
+                cut_work = cut_work.saturating_add(clip_vertices);
+                // A curve the clip returns unchanged keeps its object, so references to it hold.
+                let unchanged = matches!(pieces.as_slice(), [Piece::Curve(c)] if *c == curve);
+                if unchanged {
+                    counts.kept_whole += 1;
+                    objects.push(Object {
+                        source: Some(source),
+                        key,
+                        owner: Some(*container),
+                        header,
+                        values,
+                    });
+                    continue;
+                }
                 counts.cut += 1;
-                cut_work += clip_vertices;
                 let before = objects.len();
                 for piece_of in pieces {
                     if let Piece::Curve(c) = piece_of {
-                        let mut copy = piece(&values, &c, &registry);
+                        let mut copy = piece(&values, &c, &registry, header.clone());
                         copy.owner = Some(*container);
                         objects.push(copy);
                     }
@@ -504,6 +639,7 @@ pub(crate) fn plan(
                         source: Some(source),
                         key,
                         owner: Some(*container),
+                        header,
                         values,
                     });
                 } else {
@@ -515,6 +651,9 @@ pub(crate) fn plan(
 
     // The blocks the space places, the definitions they use, and the chains of copied members.
     for (id, key) in &reach.keys {
+        if over(objects.len(), cut_work) {
+            return Err(refused());
+        }
         let is_block = key == BLOCK;
         let is_definition = DEFINITIONS.contains(&key.as_str());
         if !is_block && !is_definition && key != dimension::CHAIN {
@@ -537,23 +676,25 @@ pub(crate) fn plan(
             let name = types::text_at(&values, NAME)
                 .ok_or_else(|| Error::new(codes::FIELD_INVALID).with_arg("field", "name"))?
                 .to_owned();
+            if is_definition && let Some(host_default) = host_default(host, key, &name) {
+                mapped.push((*id, host_default));
+                continue;
+            }
             values[NAME] = Some(Value::String(names.unique(key, input.stem, &name)));
         }
         objects.push(Object {
             source: Some(*id),
             key: key.clone(),
             owner,
+            header: header_of(linked, *id)?,
             values,
         });
     }
 
     let total = objects.len() as u64;
-    let work_bound = u64::try_from(input.budget.work).unwrap_or(u64::MAX);
-    let budget_exceeded = total > input.max_objects
-        || objects.len() > input.budget.primitives
-        || total.saturating_add(cut_work) > work_bound;
+    let budget_exceeded = total > object_bound || total.saturating_add(cut_work) > work_bound;
     if budget_exceeded {
-        return Err(Error::new(codes::EXTERNAL_BUDGET_EXCEEDED));
+        return Err(refused());
     }
     Ok(Plan {
         space,
@@ -561,6 +702,7 @@ pub(crate) fn plan(
         top,
         counts,
         external: reach.external.len() as u64,
+        mapped,
     })
 }
 
@@ -574,8 +716,10 @@ pub(crate) struct Written {
 }
 
 /// The value with every reference remapped to its host copy. A reference without a copy is
-/// cleared: an absent field, a dropped list element or map entry, and a record whose fields are
-/// all cleared is dropped with its list element.
+/// cleared and counted. Its place is kept where a record holds it: the field is absent, the state
+/// a reader of the record treats as not associated, and the record keeps its position in its list.
+/// A list element that is itself a reference is dropped, as a deleted member is removed from the
+/// list that holds it.
 fn remap(value: &Value, map: &BTreeMap<ObjectId, ObjectId>, cleared: &mut u64) -> Option<Value> {
     Some(match value {
         Value::Reference(id) => match map.get(id) {
@@ -595,16 +739,12 @@ fn remap(value: &Value, map: &BTreeMap<ObjectId, ObjectId>, cleared: &mut u64) -
                 .filter_map(|item| remap(item, map, cleared))
                 .collect(),
         ),
-        Value::Record(fields) => {
-            let kept: Vec<Option<Value>> = fields
+        Value::Record(fields) => Value::Record(
+            fields
                 .iter()
                 .map(|field| field.as_ref().and_then(|v| remap(v, map, cleared)))
-                .collect();
-            if kept.iter().all(Option::is_none) && fields.iter().any(Option::is_some) {
-                return None;
-            }
-            Value::Record(kept)
-        }
+                .collect(),
+        ),
         Value::Map(entries) => Value::Map(
             entries
                 .iter()
@@ -623,12 +763,13 @@ fn remap(value: &Value, map: &BTreeMap<ObjectId, ObjectId>, cleared: &mut u64) -
 /// The transaction's errors: a value the type does not accept fails the bind before the commit.
 pub(crate) fn write(ctx: &mut Context<'_>, plan: &Plan) -> Result<Written> {
     let ids: Vec<ObjectId> = plan.objects.iter().map(|_| ctx.new_id()).collect();
-    let map: BTreeMap<ObjectId, ObjectId> = plan
+    let mut map: BTreeMap<ObjectId, ObjectId> = plan
         .objects
         .iter()
         .zip(&ids)
         .filter_map(|(object, host)| object.source.map(|source| (source, *host)))
         .collect();
+    map.extend(plan.mapped.iter().copied());
     let top_host = ids
         .get(plan.top)
         .copied()
@@ -645,15 +786,54 @@ pub(crate) fn write(ctx: &mut Context<'_>, plan: &Plan) -> Result<Written> {
             Some(owner) if owner == plan.space => Some(top_host),
             Some(owner) => map.get(&owner).copied(),
         };
-        ctx.txn()?.create(
-            &object.key,
-            *host,
-            Header {
-                owner,
-                ..Header::default()
-            },
-            values,
-        )?;
+        let mut header = object.header.clone();
+        header.owner = owner;
+        ctx.txn()?.create(&object.key, *host, header, values)?;
     }
     Ok(Written { ids, cleared })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arc_base::id::Identifier;
+
+    fn id(n: u128) -> ObjectId {
+        ObjectId::from_u128(n)
+    }
+
+    #[test]
+    fn a_record_whose_reference_is_not_copied_keeps_its_place_in_a_list() {
+        // The path of a dimension point is a list of one-field records: a cleared member keeps its
+        // position, so the members after it do not shift.
+        let map = BTreeMap::from([(id(1), id(3)), (id(4), id(6))]);
+        let mut cleared = 0;
+        let path = Value::List(vec![
+            Value::Record(vec![Some(Value::Reference(id(1)))]),
+            Value::Record(vec![Some(Value::Reference(id(2)))]),
+            Value::Record(vec![Some(Value::Reference(id(4)))]),
+        ]);
+        let out = remap(&path, &map, &mut cleared);
+        assert_eq!(cleared, 1);
+        assert_eq!(
+            out,
+            Some(Value::List(vec![
+                Value::Record(vec![Some(Value::Reference(id(3)))]),
+                Value::Record(vec![None]),
+                Value::Record(vec![Some(Value::Reference(id(6)))]),
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_reference_list_drops_a_member_without_a_copy() {
+        let map = BTreeMap::from([(id(1), id(3))]);
+        let mut cleared = 0;
+        let members = Value::List(vec![Value::Reference(id(1)), Value::Reference(id(2))]);
+        assert_eq!(
+            remap(&members, &map, &mut cleared),
+            Some(Value::List(vec![Value::Reference(id(3))]))
+        );
+        assert_eq!(cleared, 1);
+    }
 }

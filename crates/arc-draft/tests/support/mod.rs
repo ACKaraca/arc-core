@@ -70,11 +70,53 @@ impl Fixture {
         )
     }
 
+    /// As [`Fixture::drafting_with_links`], with identifiers from `seed`.
+    pub fn drafting_with_links_seeded(seed: u64) -> Self {
+        let mut registry = TypeRegistry::new();
+        arc_draft::register_types(&mut registry).unwrap();
+        arc_doc::link::register(&mut registry).unwrap();
+        let mut evaluators = Evaluators::new();
+        arc_draft::register_evaluators(&mut evaluators, DisplayOptions::default()).unwrap();
+        Self::build_seeded(
+            Arc::new(registry),
+            arc_draft::validate::DEFAULT_MAX_NESTING,
+            evaluators,
+            seed,
+        )
+    }
+
+    /// A drafting document whose identifiers come from `seed`: a document built with another seed
+    /// names none of the identifiers of this one.
+    pub fn drafting_seeded(seed: u64) -> Self {
+        let mut evaluators = Evaluators::new();
+        arc_draft::register_evaluators(&mut evaluators, DisplayOptions::default()).unwrap();
+        Self::build_seeded(
+            types(),
+            arc_draft::validate::DEFAULT_MAX_NESTING,
+            evaluators,
+            seed,
+        )
+    }
+
+    /// A document that accepts block nesting up to `limit` and whose identifiers come from `seed`.
+    pub fn nesting_seeded(limit: u32, seed: u64) -> Self {
+        Self::build_seeded(types(), limit, Evaluators::new(), seed)
+    }
+
     fn build(limit: u32, evaluators: Evaluators) -> Self {
         Self::build_with(types(), limit, evaluators)
     }
 
     fn build_with(types: Arc<TypeRegistry>, limit: u32, evaluators: Evaluators) -> Self {
+        Self::build_seeded(types, limit, evaluators, 1)
+    }
+
+    fn build_seeded(
+        types: Arc<TypeRegistry>,
+        limit: u32,
+        evaluators: Evaluators,
+        seed: u64,
+    ) -> Self {
         let config = DocumentConfig {
             workers: 0,
             ..DocumentConfig::default()
@@ -90,7 +132,7 @@ impl Fixture {
             document,
             commands,
             session: Session::new(Surface::Automation, [Permission::Edit, Permission::Read]),
-            seed: 1,
+            seed,
         }
     }
 
