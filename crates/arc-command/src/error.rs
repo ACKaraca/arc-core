@@ -369,6 +369,57 @@ pub mod codes {
         message_id: "cmd-macro-limit-exceeded",
     };
 
+    /// The local socket cannot be served because the user has not enabled automation.
+    pub const SOCKET_DISABLED: ErrorCode = ErrorCode {
+        code: "cmd.socket.disabled",
+        category: Category::PermissionDenied,
+        message_id: "cmd-socket-disabled",
+    };
+    /// A connection to the local socket did not present the session token.
+    pub const SOCKET_UNAUTHORIZED: ErrorCode = ErrorCode {
+        code: "cmd.socket.unauthorized",
+        category: Category::PermissionDenied,
+        message_id: "cmd-socket-unauthorized",
+    };
+    /// Local sockets are not available on this platform yet.
+    pub const SOCKET_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "cmd.socket.unsupported",
+        category: Category::Unsupported,
+        message_id: "cmd-socket-unsupported",
+    };
+    /// The directory of the local socket is not a private directory of the user; the detail
+    /// `reason` says why.
+    pub const SOCKET_DIRECTORY: ErrorCode = ErrorCode {
+        code: "cmd.socket.directory",
+        category: Category::InvalidInput,
+        message_id: "cmd-socket-directory",
+    };
+    /// The system refused an operation on the local socket or its token; the detail `reason`
+    /// says which.
+    pub const SOCKET_IO: ErrorCode = ErrorCode {
+        code: "cmd.socket.io",
+        category: Category::Io,
+        message_id: "cmd-socket-io",
+    };
+    /// No renderer is attached, so a view cannot be rendered.
+    pub const RENDER_UNAVAILABLE: ErrorCode = ErrorCode {
+        code: "cmd.render.unavailable",
+        category: Category::Unsupported,
+        message_id: "cmd-render-unavailable",
+    };
+    /// A transparent command cannot run now; the detail `reason` says why.
+    pub const TRANSPARENT_REFUSED: ErrorCode = ErrorCode {
+        code: "cmd.transparent.refused",
+        category: Category::Conflict,
+        message_id: "cmd-transparent-refused",
+    };
+    /// A macro input has no value at playback; the detail `input` names it.
+    pub const MACRO_INPUT_MISSING: ErrorCode = ErrorCode {
+        code: "cmd.macro.input_missing",
+        category: Category::InvalidInput,
+        message_id: "cmd-macro-input-missing",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         UNKNOWN,
@@ -430,6 +481,14 @@ pub mod codes {
         MACRO_MALFORMED,
         MACRO_VERSION_UNSUPPORTED,
         MACRO_LIMIT_EXCEEDED,
+        SOCKET_DISABLED,
+        SOCKET_UNAUTHORIZED,
+        SOCKET_UNSUPPORTED,
+        SOCKET_DIRECTORY,
+        SOCKET_IO,
+        RENDER_UNAVAILABLE,
+        TRANSPARENT_REFUSED,
+        MACRO_INPUT_MISSING,
     ];
 }
 

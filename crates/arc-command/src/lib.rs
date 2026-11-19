@@ -71,16 +71,21 @@ pub mod roots;
 pub mod schema;
 pub mod spec;
 
-pub use command_line::{CommandLine, LastCommand, LineStep, Runner, Submitted, Target};
+pub use command_line::{
+    CommandLine, LastCommand, LineStep, Runner, Submitted, TRANSPARENT_PREFIX, Target,
+};
 pub use context::{
     Clock, Context, FixedClock, IdParam, PROGRESS_DELAY_MILLIS, Probe, ProgressSink, QuantityParam,
     Session,
 };
 pub use invoke::{Invocation, Invoker, Outcome, Preview};
 pub use line::{
-    Candidate, CandidateKind, Completion, ParsedLine, Span, complete, format_line, parse_line,
+    Candidate, CandidateKind, Completion, ParsedLine, Span, complete, complete_in, format_line,
+    parse_line,
 };
-pub use macros::{Macro, MacroHeader, MacroStep, Recorder, parse_macro, play};
+pub use macros::{
+    Macro, MacroHeader, MacroInput, MacroStep, Recorder, parse_macro, play, play_with,
+};
 pub use prompt::{
     Accept, Answer, Feedback, KeywordOption, Message, Point, PointDims, Prompt, PromptInput,
     PromptMachine, PromptSequence, PromptSession, PromptState, PromptStep, Step,

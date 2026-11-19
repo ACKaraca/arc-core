@@ -7,7 +7,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use arc_base::{Error, Result};
+use arc_base::{Dimension, Error, Result, Unit};
+use arc_doc::Snapshot;
 use serde_json::{Map, Value};
 
 use crate::error::codes;
@@ -30,6 +31,9 @@ pub const MAX_GROUP_DEPTH: usize = 128;
 
 /// The most completion candidates returned.
 pub const MAX_CANDIDATES: usize = 100;
+
+/// The most objects of a snapshot that completion looks at.
+pub const MAX_COMPLETION_SCAN: usize = 100_000;
 
 /// A byte range of the line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -758,6 +762,11 @@ pub enum CandidateKind {
     Parameter,
     /// A value of a parameter with a closed list of values (keyword options).
     Keyword,
+    /// An object whose name starts with the typed text; the text is its identifier and the
+    /// candidate's label its name.
+    Object,
+    /// A unit symbol completing the unit typed after a number.
+    Unit,
 }
 
 /// One completion candidate.
@@ -767,6 +776,8 @@ pub struct Candidate {
     pub text: String,
     /// What it is.
     pub kind: CandidateKind,
+    /// A name to show beside the text: the name of an object candidate.
+    pub label: Option<String>,
 }
 
 /// Completion data: the byte range to replace and the candidates, sorted.
@@ -790,7 +801,11 @@ fn candidates(
         .collect();
     set.into_iter()
         .take(MAX_CANDIDATES)
-        .map(|text| Candidate { text, kind })
+        .map(|text| Candidate {
+            text,
+            kind,
+            label: None,
+        })
         .collect()
 }
 
@@ -805,15 +820,125 @@ fn enum_words(kind: &Kind) -> Vec<String> {
     }
 }
 
+/// Live objects whose name starts with `partial` (ignoring case), of the listed type keys (any
+/// when empty), sorted by name; the text of a candidate is the identifier.
+pub(crate) fn object_candidates(
+    snapshot: Option<&Snapshot>,
+    partial: &str,
+    types: &[String],
+) -> Vec<Candidate> {
+    let Some(snapshot) = snapshot else {
+        return Vec::new();
+    };
+    let partial = partial.to_lowercase();
+    let mut found: Vec<(String, String)> = snapshot
+        .iter()
+        .take(MAX_COMPLETION_SCAN)
+        .filter(|(handle, _)| {
+            types.is_empty()
+                || snapshot
+                    .type_key(*handle)
+                    .is_some_and(|key| types.iter().any(|t| t == key.as_str()))
+        })
+        .filter_map(|(_, object)| {
+            let name = object.header.name.as_ref()?;
+            name.to_lowercase()
+                .starts_with(&partial)
+                .then(|| (name.clone(), object.id.to_string()))
+        })
+        .collect();
+    found.sort();
+    found
+        .into_iter()
+        .take(MAX_CANDIDATES)
+        .map(|(name, id)| Candidate {
+            text: id,
+            kind: CandidateKind::Object,
+            label: Some(name),
+        })
+        .collect()
+}
+
+fn is_unit_char(c: char) -> bool {
+    c.is_alphabetic() || matches!(c, '°' | '²' | '³' | '_')
+}
+
+/// Unit symbols completing the letters at the end of `value` when a digit precedes them
+/// (`1200m`); of `dimension` when given. Returns the byte offset in `value` where the
+/// replaced letters start, and the candidates.
+pub(crate) fn unit_candidates(
+    value: &str,
+    dimension: Option<Dimension>,
+) -> (usize, Vec<Candidate>) {
+    let letters: usize = value
+        .chars()
+        .rev()
+        .take_while(|c| is_unit_char(*c))
+        .map(char::len_utf8)
+        .sum();
+    let start = value.len() - letters;
+    let (before, run) = value.split_at(start);
+    if run.is_empty() || !before.ends_with(|c: char| c.is_ascii_digit()) {
+        return (0, Vec::new());
+    }
+    let symbols = Unit::all()
+        .iter()
+        .filter(|u| dimension.is_none_or(|d| u.dimension == d))
+        .map(|u| u.symbol.to_owned());
+    (start, candidates(symbols, run, CandidateKind::Unit))
+}
+
+/// The candidates for the value typed so far of a parameter of `kind`, and the byte offset in
+/// `value` where the replaced text starts.
+fn value_candidates(
+    kind: &Kind,
+    value: &str,
+    snapshot: Option<&Snapshot>,
+) -> (usize, Vec<Candidate>) {
+    match kind {
+        Kind::Enum(_) | Kind::Boolean => (
+            0,
+            candidates(enum_words(kind), value, CandidateKind::Keyword),
+        ),
+        Kind::Id => (0, object_candidates(snapshot, value, &[])),
+        Kind::Array(inner) if matches!(**inner, Kind::Id) => {
+            let start = value.rfind([',', '[']).map_or(0, |i| i + 1);
+            (
+                start,
+                object_candidates(snapshot, value.get(start..).unwrap_or(""), &[]),
+            )
+        }
+        Kind::Quantity => unit_candidates(value, None),
+        _ => (0, Vec::new()),
+    }
+}
+
+/// [`complete_in`] without a document: object names are not completed.
+#[must_use]
+pub fn complete(
+    registry: &Registry,
+    localized: &BTreeMap<String, String>,
+    text: &str,
+    cursor: usize,
+) -> Completion {
+    complete_in(registry, localized, None, text, cursor)
+}
+
 /// Completion for a partial line with the cursor at byte `cursor` (clamped to the line and
 /// moved back to a character boundary): command names exposed on the command line in the first
 /// word; after it, the names of parameters not yet given (as `name=`) and the values of the
 /// parameter being typed when it has a closed list of values. The text before the cursor is
 /// split at whitespace, so quoted text with spaces is not completed. Data only.
+///
+/// A parameter that takes an object identifier completes the names of the objects of `snapshot`
+/// (the candidate text is the identifier, the label the name); a quantity parameter completes
+/// the unit symbol typed after a number (`1200m`). Both need no more than the text before the
+/// cursor.
 #[must_use]
-pub fn complete(
+pub fn complete_in(
     registry: &Registry,
     localized: &BTreeMap<String, String>,
+    snapshot: Option<&Snapshot>,
     text: &str,
     cursor: usize,
 ) -> Completion {
@@ -871,13 +996,13 @@ pub fn complete(
     let spec: &CommandSpec = &resolved.spec;
     let root = spec.params_schema();
     if let Some((param, value)) = partial.split_once('=') {
-        let words = enum_words(&param_kind(root, param));
+        let (offset, found) = value_candidates(&param_kind(root, param), value, snapshot);
         return Completion {
             span: Some(Span {
-                start: cursor - value.len(),
+                start: cursor - value.len() + offset,
                 end: cursor,
             }),
-            candidates: candidates(words, value, CandidateKind::Keyword),
+            candidates: found,
         };
     }
     let earlier = words
@@ -892,11 +1017,17 @@ pub fn complete(
     if given.is_empty()
         && let Some(param) = spec.positional().get(positional_count)
     {
-        out = candidates(
-            enum_words(&param_kind(root, param)),
-            partial,
-            CandidateKind::Keyword,
-        );
+        let (offset, found) = value_candidates(&param_kind(root, param), partial, snapshot);
+        if offset > 0 {
+            return Completion {
+                span: Some(Span {
+                    start: start + offset,
+                    end: cursor,
+                }),
+                candidates: found,
+            };
+        }
+        out = found;
     }
     let names = root
         .get("properties")

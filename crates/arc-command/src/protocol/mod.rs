@@ -16,8 +16,10 @@ mod encode;
 pub mod errors;
 mod events;
 mod framing;
+mod mcp;
 mod query;
 mod run;
+mod socket;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
@@ -35,7 +37,9 @@ use serde_json::{Map, Value, json};
 
 pub use events::{EVENT_QUEUE, EVENTS, MAX_SELECTED};
 pub use framing::{PipeReader, PipeWriter, pipe};
+pub use mcp::{MCP_FIXED_TOOLS, MCP_VERSIONS, McpConfig, tool_name};
 pub use query::MAX_PAGE;
+pub use socket::{LocalSocket, MAX_CONNECTIONS, MAX_HANDSHAKE_BYTES, SocketConfig, SocketStop};
 
 use crate::context::{Clock, FixedClock, Probe, ProgressSink, Session};
 use crate::error::codes;
@@ -156,6 +160,10 @@ pub struct ServerConfig {
     pub clock: Arc<dyn Clock>,
     /// The context units of quantity parameters.
     pub units: Vec<Unit>,
+    /// The surface the sessions run commands on: [`Surface::Automation`] for the protocol
+    /// server, [`Surface::Mcp`] for the Model Context Protocol endpoint. It decides which
+    /// commands `command.list`, `command.describe` and `command.run` reach.
+    pub surface: Surface,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -170,7 +178,7 @@ impl std::fmt::Debug for ServerConfig {
 
 impl ServerConfig {
     /// A configuration with the `ceiling`, no roots, the default limits, a 64 MiB message
-    /// limit, a clock standing at 0 and no context units.
+    /// limit, a clock standing at 0, no context units and the automation surface.
     #[must_use]
     pub fn new(
         product_name: impl Into<String>,
@@ -186,13 +194,14 @@ impl ServerConfig {
             max_message_bytes: MAX_MESSAGE_BYTES,
             clock: Arc::new(FixedClock(0)),
             units: Vec::new(),
+            surface: Surface::Automation,
         }
     }
 
     /// A command session of this configuration granted `permissions`.
     fn session(&self, permissions: BTreeSet<Permission>) -> Session {
         Session {
-            surface: Surface::Automation,
+            surface: self.surface,
             permissions,
             limits: self.limits,
             clock: Arc::clone(&self.clock),
@@ -667,7 +676,7 @@ impl<'a> Server<'a> {
                 let commands: Vec<Value> = self
                     .registry
                     .iter()
-                    .filter(|spec| spec.exposure().contains(&Surface::Automation))
+                    .filter(|spec| spec.exposure().contains(&self.config.surface))
                     .map(|spec| self.entry(spec, session, snapshot.as_ref()))
                     .collect();
                 Ok(json!({"commands": commands}))
@@ -757,10 +766,10 @@ impl<'a> Server<'a> {
         })
     }
 
-    /// The command named `name`, which must be exposed on the automation surface.
+    /// The command named `name`, which must be exposed on the configured surface.
     fn command(&self, name: &str) -> Result<Arc<CommandSpec>, Failure> {
         let spec = self.registry.resolve(name, &BTreeMap::new())?.spec;
-        if spec.exposure().contains(&Surface::Automation) {
+        if spec.exposure().contains(&self.config.surface) {
             Ok(spec)
         } else {
             Err(Error::new(codes::NOT_EXPOSED)

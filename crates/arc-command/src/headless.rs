@@ -25,7 +25,7 @@ use serde_json::{Map, Value, json};
 use crate::context::{Clock, Session};
 use crate::error::codes;
 use crate::macros::{self, MacroStep, Recorder, parse_macro};
-use crate::protocol::{Log, LogLevel, Server, ServerConfig, errors};
+use crate::protocol::{Log, LogLevel, McpConfig, Server, ServerConfig, errors};
 use crate::registry::Registry;
 use crate::roots::Roots;
 use crate::schema::parse_params;
@@ -152,6 +152,7 @@ usage: <product>-cli <subcommand> [flags]
   validate <file>                               check a package
   serve --stdio [<file>...] [--save] [--record M]
                                                 serve the automation protocol on stdin/stdout
+  mcp [<file>] [--save] [--record M]            serve the Model Context Protocol on stdin/stdout
   help                                          this text
 flags: --read-root <dir>, --write-root <dir> (repeatable), --allow-edit, --allow-network,
        --allow-process, --json (output is always JSON); P is JSON text or @<file>;
@@ -168,6 +169,7 @@ enum Sub {
     Inspect,
     Validate,
     Serve,
+    Mcp,
     Play,
     Batch,
     Help,
@@ -253,6 +255,7 @@ fn parse(args: Vec<OsString>) -> Result<Options, Failure> {
         Some("inspect") => Sub::Inspect,
         Some("validate") => Sub::Validate,
         Some("serve") => Sub::Serve,
+        Some("mcp") => Sub::Mcp,
         Some("play") => Sub::Play,
         Some("batch") => Sub::Batch,
         Some("help" | "--help" | "-h") => Sub::Help,
@@ -348,7 +351,7 @@ fn flag_into(
             o.macro_path = Some(PathBuf::from(value()?));
         }
         "--record" => {
-            allowed(&[Sub::Run, Sub::Serve])?;
+            allowed(&[Sub::Run, Sub::Serve, Sub::Mcp])?;
             once(o.record.is_some())?;
             o.record = Some(PathBuf::from(value()?));
         }
@@ -378,7 +381,7 @@ fn flag_into(
                 }
                 "--json" => {}
                 "--save" => {
-                    allowed(&[Sub::Run, Sub::Serve, Sub::Play, Sub::Batch])?;
+                    allowed(&[Sub::Run, Sub::Serve, Sub::Mcp, Sub::Play, Sub::Batch])?;
                     o.save = true;
                 }
                 "--check" => {
@@ -408,6 +411,7 @@ fn check_arity(o: &Options) -> Result<(), Failure> {
         | Sub::Validate
         | Sub::Play => count == 1,
         Sub::Batch => count >= 1,
+        Sub::Mcp => count <= 1,
         Sub::Serve | Sub::Help => true,
     };
     if !fits {
@@ -476,7 +480,7 @@ where
     let log = StderrLog(Mutex::new(stderr));
     let mut documents = BTreeMap::new();
     let mut packages = Vec::new();
-    if matches!(o.sub, Sub::Run | Sub::Serve | Sub::Play) {
+    if matches!(o.sub, Sub::Run | Sub::Serve | Sub::Mcp | Sub::Play) {
         for path in &o.positional {
             let path = Path::new(path);
             let key = path
@@ -547,8 +551,9 @@ where
             (result, Exit::Success)
         }
         Sub::Inspect | Sub::Validate => check(o.sub, o.check, file(), &limits)?,
-        Sub::Serve | Sub::Batch | Sub::Help => {
-            server.serve(stdin, &mut stdout).map_err(io_failure)?;
+        Sub::Serve | Sub::Mcp | Sub::Batch | Sub::Help => {
+            serve_stdio(&server, o.sub == Sub::Mcp, &documents, stdin, &mut stdout)
+                .map_err(io_failure)?;
             save_if(o.save, &mut packages, &documents)?;
             write_record(record_file, &recorder)?;
             return Ok(Exit::Success);
@@ -558,6 +563,23 @@ where
         .and_then(|()| stdout.flush())
         .map_err(io_failure)?;
     Ok(exit)
+}
+
+/// Serves the automation protocol, or the Model Context Protocol on the first document, over
+/// the streams.
+fn serve_stdio<R: BufRead, W: Write + Send>(
+    server: &Server<'_>,
+    mcp: bool,
+    documents: &BTreeMap<String, Document>,
+    stdin: R,
+    stdout: &mut W,
+) -> io::Result<()> {
+    if mcp {
+        let document = documents.keys().next().cloned().unwrap_or_default();
+        server.serve_mcp(&McpConfig::new(document), stdin, stdout)
+    } else {
+        server.serve(stdin, stdout)
+    }
 }
 
 /// The protocol configuration of the flags: the ceiling is `read`, the classes of the
@@ -574,6 +596,9 @@ fn config(o: &Options, product: &Product) -> Result<ServerConfig, Failure> {
     let mut config = ServerConfig::new(&product.name, &product.version, ceiling);
     config.roots = Roots::new(&o.read_roots, &o.write_roots)?;
     config.clock = Arc::clone(&product.clock);
+    if o.sub == Sub::Mcp {
+        config.surface = Surface::Mcp;
+    }
     Ok(config)
 }
 
@@ -864,6 +889,11 @@ mod tests {
         assert_eq!(reason(parse(args(&["commands", "x"]))), "arguments");
         assert_eq!(reason(parse(args(&["run", "a"]))), "missing_flag:--command");
         assert_eq!(reason(parse(args(&["serve"]))), "missing_flag:--stdio");
+        assert_eq!(reason(parse(args(&["mcp", "a", "b"]))), "arguments");
+        assert_eq!(
+            reason(parse(args(&["mcp", "--stdio"]))),
+            "flag_not_allowed:--stdio"
+        );
         assert_eq!(
             reason(parse(args(&["commands", "--save"]))),
             "flag_not_allowed:--save"

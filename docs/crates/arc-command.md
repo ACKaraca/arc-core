@@ -300,10 +300,24 @@ group      = "(" , { group | char - ( "(" | ")" ) } , ")" ;
   `name=value` in name order. A value is written bare when that reads back to the same JSON,
   else quoted, else as `$` and compact JSON, so parsing the canonical line gives the same command
   and parameters. Macros record this form.
-- **Completion** (`complete`, data only): in the first word, command identifiers, user aliases and
-  localized names exposed on the command line; after it, `name=` for parameters not yet given and
-  the values of a parameter with a closed list of values (`boolean`, `enum`); with an active
-  prompt, its keyword options. Matching is by prefix, ignoring case; at most 100 candidates.
+- **Completion** (`complete_in`, and `complete` without a document; data only): in the first
+  word, command identifiers, user aliases and localized names exposed on the command line; after
+  it, `name=` for parameters not yet given and the values of a parameter with a closed list of
+  values (`boolean`, `enum`); the names of live objects for a parameter that is an object
+  identifier or a list of them (CORE-CMD-014); the unit symbols after a number for a quantity
+  parameter. Matching is by prefix, ignoring case; at most 100 candidates. Candidates have a
+  `kind` (`command`, `parameter`, `keyword`, `object`, `unit`) and a `label`.
+  - An **object** candidate replaces the typed name with the object's identifier, the value the
+    parameter takes, and carries the name as its label. Only objects with a name are offered, at
+    most the first 100,000 of the snapshot are looked at, and a list is completed at its last
+    element.
+  - A **unit** candidate replaces the letters (including `°`, `²`, `³`, `_`) that end the value
+    after a digit (`12m`); letters without a number before them are not a unit. All built-in unit
+    symbols are offered; a prompt narrows them to the dimension it accepts. Text is split at
+    whitespace, so a value with spaces is completed only inside the last word.
+  - With an active prompt, `CommandLine::complete` offers its keyword options, and when there
+    are none, the names of objects of the types a pick or selection prompt accepts, or the units
+    of the dimension a distance, angle, number or expression prompt accepts.
 
 ### Command line and repeat
 
@@ -320,18 +334,25 @@ group      = "(" , { group | char - ( "(" | ")" ) } , ")" ;
   runs the same command with the same final parameters, again through `Invoker::invoke`;
   `last()` exposes the command and parameters for a surface that prefers to re-enter the prompts.
   `cmd.repeat.none` when nothing completed yet.
+- **Transparent commands** (CORE-CMD-012). `CommandLine::transparent(target, line)`, and
+  `submit` for a line starting with `'` (`TRANSPARENT_PREFIX`) while a prompt is active, run a
+  command marked transparent beside the prompt: the prompt session, its answers and the last
+  command are untouched, and the run goes through the same invoker (or `drive` runner). Without
+  an active prompt the prefix is not special. Refused with `cmd.transparent.refused` (detail
+  `reason`): `empty`, `not_transparent`, `missing_params` (a transparent command cannot prompt
+  while another prompt is active), and `group_open`, when the command is undoable and the
+  document has an open undo group, or controls undo. A `not_undoable` transparent command
+  runs inside a group.
 - **Drive.** `drive(target, step, runner)` takes one `LineStep` (start, submit, answer, back,
-  repeat) like the method of the same name, except that each completed invocation goes to the
+  repeat, transparent) like the method of the same name, except that each completed invocation goes to the
   caller's `runner` instead of `Invoker::invoke`; the runner's outcome or error is the run's.
   An application uses it to route command-line runs through its own entry point. The methods
   above are `drive` with the invoker as runner.
 
 ## Macros and batch as implemented
 
-The module `macros` covers CORE-CMD-016 and CORE-CMD-018 after
-[Macro recording](../architecture/commands-and-automation.md#macro-recording). Input
-placeholders (CORE-CMD-017) are not provided: a step's parameters are always its recorded
-values.
+The module `macros` covers CORE-CMD-016, CORE-CMD-017 and CORE-CMD-018 after
+[Macro recording](../architecture/commands-and-automation.md#macro-recording).
 
 ### Macro format
 
@@ -340,19 +361,21 @@ keys sorted. The first line is the header; every further line is one step.
 
 | Line | Members |
 |---|---|
-| Header | `format`: `"arc-macro"`; `version`: the format version, `1`; `protocol`: the automation protocol version of the recording crate (`"1.0"`); `product`: `{"name", "version"}` of the recording product |
-| Step | `line`: the command line in [canonical form](#command-line-grammar); `seed`: the invocation seed (default 0); `revision`: the revision of the snapshot the command ran on (optional); `selection`: identifier texts of the selection (optional, omitted when empty) |
+| Header | `format`: `"arc-macro"`; `version`: the format version, `2`; `protocol`: the automation protocol version of the recording crate (`"1.0"`); `product`: `{"name", "version"}` of the recording product |
+| Step | `line`: the command line in [canonical form](#command-line-grammar); `seed`: the invocation seed (default 0); `revision`: the revision of the snapshot the command ran on (optional); `selection`: identifier texts of the selection (optional, omitted when empty); `inputs`: parameter name to input name (optional, omitted when empty; [Inputs](#inputs)) |
 
 ```json
-{"format":"arc-macro","product":{"name":"arc-shell","version":"0.1.0"},"protocol":"1.0","version":1}
+{"format":"arc-macro","product":{"name":"arc-shell","version":"0.1.0"},"protocol":"1.0","version":2}
 {"line":"shell.layer.create name=walls","revision":0,"seed":1}
 ```
 
 - A step has no other members; an unknown member is `cmd.macro.malformed`. The header's
   product is informational: playback does not compare it with the running product, and a
   command the running registry does not have fails its line with `cmd.unknown`.
-- **Versioning.** The reader accepts only `version` 1 and reports any other version as
-  `cmd.macro.version_unsupported` (detail `version`). A change that a version 1 reader would
+- **Versioning.** The reader accepts `version` 1 and 2 and reports any other version as
+  `cmd.macro.version_unsupported` (detail `version`). Version 2 adds the step member
+  `inputs`; a version 1 file with that member is `cmd.macro.malformed` (reason `input`), as
+  its reader always read it. The writer writes version 2. A change that a version 1 reader would
   read differently, or reject (a new member, a new meaning of a member, a different line
   form), increments `version`, adds the new version to the reader while it keeps reading every
   earlier one, and adds fixtures of each version; the writer writes the newest version.
@@ -382,6 +405,29 @@ keys sorted. The first line is the header; every further line is one step.
   interactive only, so every successful invocation is recorded, transparent and read-only
   commands included. Prompt answers are never recorded; their resulting parameters are, as the
   canonical line.
+
+### Inputs
+
+CORE-CMD-017. A step can declare that a parameter takes its value from a named input instead
+of the recorded one.
+
+- `MacroStep::set_input(registry, param, name)` (and `Recorder::set_input(registry, index, param,
+  name)` for a recorded step) sets `inputs[param] = name`. The parameter must be in the step's
+  line, and the line keeps the recorded value, which is the default a surface offers when it
+  prompts. A parameter has one input; one input name may be used by many steps and parameters,
+  and all of them take the one value. Input names are 1 to 64 bytes: a lowercase ASCII letter,
+  then lowercase letters, digits and `_`. A step has at most 64 inputs. Anything else is
+  `cmd.macro.malformed` with reason `input`, also when a macro is read.
+- `Macro::inputs(registry)` lists the inputs once each in order of first use, as `MacroInput`
+  (`name`, the `command` and `param` of the first use, and the recorded `default`), which is
+  what a user interface needs to prompt: it builds the prompt from the command's parameter
+  schema, then passes the answers on. This layer never prompts, and the headless runner has no
+  flag for input values yet, so it plays only macros without inputs.
+- `play_with(registry, document, session, steps, group, values)` is `play` with a map from
+  input name to JSON value. Before anything changes, the first input without a value fails
+  with `cmd.macro.input_missing` (argument and details `input` and `line`); `play` gives no
+  values. A value replaces the parameter's recorded value and is checked by the invoker like
+  any parameter. Values for names no step declares are ignored.
 
 ### Playback
 
@@ -627,6 +673,7 @@ code. Arguments are parsed by hand: no argument-parsing crate is in the technolo
 | `inspect <file> [--check]` | `arc_doc::package::inspect`; with `--check` adds `findings`, exit 3 when there are any | Inspection JSON |
 | `validate <file>` | `arc_doc::package::check`; exit 3 when there are findings | `{"findings": [...]}` |
 | `serve --stdio [<file>...] [--save] [--record M]` | Serves the protocol on stdin and stdout; each package is a document named by its file stem (a stem twice, or one not UTF-8, is a usage error); with `--save` each is saved in place when the session ends; with `--record` the session's successful runs are written as a macro when it ends | Protocol messages |
+| `mcp [<file>] [--save] [--record M]` | Serves the [Model Context Protocol](#model-context-protocol-endpoint-and-local-socket-as-implemented) on stdin and stdout for the package (a document named by its file stem), or for no document; the surface is `mcp` and `--allow-edit` lifts read-only | MCP messages |
 | `help` (also `--help`) | Writes the usage text to standard error | Nothing |
 
 A finding is the protocol's error `data` (`code`, `category`, `messageId`, `arguments`,
@@ -663,7 +710,7 @@ conventions name `batch <file> <macro.jsonl>` for one package; here one package 
 `batch` takes several packages, so the macro is the flag `--macro`. `render` needs a renderer,
 which this layer does not have; the reference CLI adds it as a product subcommand
 ([Reference CLI](arc-app.md#reference-cli-core-app-026)). The
-conventions' `info`, `convert`, `render`, `upgrade` and `mcp` subcommands and the
+conventions' `info`, `convert`, `render` and `upgrade` subcommands and the
 `--log-level`, `--log-format`, `--locale`, `--limits` and `--output` flags are not provided;
 they are usage errors. The architecture names parameter validation as a protocol method only and
 gives `validate <file>` the package check, so parameter validation is the separate subcommand
@@ -732,6 +779,100 @@ gives `validate <file>` the package check, so parameter validation is the separa
 | `cmd.macro.malformed` | `invalid_input` | A macro or batch line is not well formed; the details `line` and `reason` say where and why |
 | `cmd.macro.version_unsupported` | `unsupported` | A macro header names a format version that is not read; the detail `version` names it |
 | `cmd.macro.limit_exceeded` | `limit_exceeded` | A macro, one of its lines or a recording exceeds a limit; the detail `limit` names it |
+| `cmd.macro.input_missing` | `invalid_input` | A macro input has no value at playback; the detail `input` names it |
+| `cmd.transparent.refused` | `conflict` | A transparent command cannot run beside the active prompt; the detail `reason` says why |
+| `cmd.socket.disabled` | `permission_denied` | The user has not enabled automation, so no socket is served |
+| `cmd.socket.unauthorized` | `permission_denied` | A connection did not present the session token |
+| `cmd.socket.unsupported` | `unsupported` | Local sockets are not available on this platform yet |
+| `cmd.socket.directory` | `invalid_input` | The socket directory is not a private directory of the user; the detail `reason` says why |
+| `cmd.socket.io` | `io` | The system refused an operation on the socket or its token; the detail `reason` says which |
+| `cmd.render.unavailable` | `unsupported` | No renderer is attached, so a view cannot be rendered |
+
+## Model Context Protocol endpoint and local socket as implemented
+
+The module `protocol::mcp` (CORE-CMD-029) and `protocol::socket` (CORE-CMD-020).
+
+### Model Context Protocol endpoint
+
+`Server::serve_mcp(&McpConfig, input, output)` serves one session over the framing of the
+automation protocol: one JSON-RPC 2.0 message per line, bounded like the protocol's messages
+(`cmd.protocol.limit_exceeded` with `limit` `message_bytes` or `nesting_depth`, id `null`, and
+the session goes on). It is a thin adapter: every tool call goes through `Server::call`, so
+exposure, permission classes, limits, schemas and predicates are those of the automation
+protocol. The server's `ServerConfig::surface` must be `mcp`, which makes
+`command.list`, `command.describe` and `command.run` reach the commands exposed on that
+surface; it defaults to `automation`, so nothing else changes.
+
+- **Messages**: `initialize` (answers the client's `protocolVersion` when it is one of
+  `MCP_VERSIONS`, `2025-06-18`, `2025-03-26`, `2024-11-05`, otherwise the first; capabilities
+  `tools` without list-change notifications; the product as `serverInfo`), `ping`,
+  `tools/list` and `tools/call`. Other requests are `cmd.protocol.method_unknown`; any
+  request but `ping` before `initialize` is `cmd.protocol.not_initialized`; notifications and
+  responses from the client are ignored (cancellation notifications included: requests are
+  answered one at a time). Resources and prompts are not provided.
+- **Tools**: the six fixed tools, then one per command exposed on `mcp` in identifier order,
+  named by the identifier with dots replaced by underscores, with the parameter schema as
+  `inputSchema`, the description and label (texts from `McpConfig::messages`, else the message
+  identifier) and the annotation `readOnlyHint` (every permission class is `read`). A name
+  taken by an earlier tool is not offered again.
+  Fixed names have one underscore and identifiers give at least two, so only two commands can
+  collide.
+
+| Fixed tool | Arguments | Same as |
+|---|---|---|
+| `list_commands` | none | `command.list` with the document |
+| `describe_command` | `command` | `command.describe` with the document |
+| `query_objects` | optional `types`, `ids`, `owner`, `fields`, `limit`, `cursor` | `query.objects` |
+| `get_object` | `id`, optional `fields` | the one object of `query.objects` for `id`, or `doc.object.not_found` |
+| `get_diagnostics` | optional `severity`, `limit`, `cursor` | `query.diagnostics` |
+| `render_view` | optional `view`, `width`, `height` | always `cmd.render.unavailable`: no renderer is attached to this layer (view rendering, CORE-CMD-026, is not provided) |
+
+- **Results**: a call answers `content` with one text item, the JSON text of the result, and
+  `isError`. A failure of the call, including `cmd.permission_denied` for an edit command, is
+  `isError: true` with the protocol's error data (`code`, `category`, `messageId`,
+  `arguments`, `details`) as the text, as MCP asks for errors of tools; an unknown tool or
+  malformed arguments are JSON-RPC errors (-32602).
+- **Read-only unless edit is allowed**: the server's ceiling decides. The headless `mcp`
+  subcommand has `read` unless `--allow-edit`; a read-only session lists the edit tools and
+  every call of one is refused with `cmd.permission_denied`. Tools work on the one document of
+  `McpConfig::document`; a `document` argument is replaced. Edits are applied directly. Running
+  edits as previews until a user approves them (CORE-CMD-030) is a later row, as are the `undo`
+  tool and the `--attach` mode.
+
+### Local socket
+
+`LocalSocket::bind(&SocketConfig)` and `LocalSocket::serve(&Server)` implement CORE-CMD-020
+after [ADR-0010](../adr/0010-automation-protocol-transport.md).
+
+- **Enabling**: `SocketConfig::enabled` is the user's choice, made by the application. Without
+  it `bind` is `cmd.socket.disabled` and nothing is created.
+- **Files**: `directory` is created with mode 0700 when missing (its parent must exist); an
+  existing one must be a directory, not a link, that group and others cannot access
+  (`cmd.socket.directory`, reasons `not_directory`, `not_private`, `create`, `name`). `bind`
+  writes `<name>.token`, created with mode 0600 and exclusive creation, then the socket
+  `<name>.sock`, set to mode 0600 before `serve` accepts anything; the directory already keeps
+  other users out in between. A socket file left by a dead process is replaced; one that
+  accepts a connection is `cmd.socket.io` with reason `in_use`. Dropping the `LocalSocket`
+  removes both files. The application chooses the directory (for example below the user's
+  runtime directory); this layer reads no environment.
+- **Token**: 32 bytes from the operating system's random source (`/dev/urandom`), as 64
+  hexadecimal digits. It is compared in constant time (equal lengths, every byte folded), and
+  never logged, sent or reported in an error.
+- **Handshake**: the first line of a connection, at most 1,024 bytes, within 10 seconds, must be
+  `{"jsonrpc":"2.0","id":<string or integer>,"method":"arc.authenticate","params":{"token":"<token>"}}`.
+  It belongs to the transport, not to the protocol methods: it is not in `METHODS` and not in the
+  published schemas. Success answers `{"jsonrpc":"2.0","id":<id>,"result":{}}`, after which the
+  connection is an ordinary session that starts with `arc.initialize`. Anything else (a wrong,
+  missing or mistyped token, another first message, an oversize or malformed line, no line in
+  time) is answered with one error line, `cmd.socket.unauthorized` (-32004, id `null`, no
+  details), and the connection is closed; a connection never reaches a method without it.
+- **Serving**: `serve` accepts until `SocketStop::stop` (from `stopper()`, which also wakes the
+  accept), serves each authenticated connection as one session of the server on its own thread,
+  allows 16 at once (`MAX_CONNECTIONS`; others are closed unanswered) and closes the open ones
+  when stopped. The protocol, its limits and its framing are those of `Server::serve`
+  unchanged.
+- **Platforms**: Unix domain sockets on Linux and macOS. Named pipes for Windows are not
+  provided: `bind` there is `cmd.socket.unsupported` (after the enabled check).
 
 ## Queries, events, selection and preview as implemented
 

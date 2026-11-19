@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use arc_base::{Error, ObjectId, Result};
+use arc_base::{Dimension, Error, ObjectId, Result};
 use arc_doc::Document;
 use serde_json::{Map, Value};
 
@@ -18,8 +18,9 @@ use crate::context::Session;
 use crate::error::codes;
 use crate::invoke::{Invocation, Invoker, Outcome};
 use crate::line::{self, Completion};
-use crate::prompt::{Feedback, Prompt, PromptInput, PromptSession};
+use crate::prompt::{Accept, Feedback, Prompt, PromptInput, PromptSession};
 use crate::registry::Registry;
+use crate::spec::UndoBehavior;
 
 /// What a command line acts on.
 #[derive(Debug, Clone, Copy)]
@@ -86,7 +87,12 @@ pub enum LineStep<'a> {
     Back,
     /// [`CommandLine::repeat_last`].
     Repeat,
+    /// [`CommandLine::transparent`]: a transparent command typed during a prompt.
+    Transparent(&'a str),
 }
+
+/// The prefix that marks a typed line as a transparent command while a prompt is active.
+pub const TRANSPARENT_PREFIX: char = '\'';
 
 /// Runs a completed invocation for [`CommandLine::drive`].
 pub type Runner<'r> = &'r mut dyn FnMut(Invocation) -> Result<Outcome>;
@@ -193,7 +199,13 @@ impl CommandLine {
                 self.active = Some(session);
                 self.follow(target, feedback, runner)
             }
+            LineStep::Transparent(text) => self.run_transparent(target, text, runner),
             LineStep::Submit(text) => {
+                if self.active.is_some()
+                    && let Some(rest) = text.trim_start().strip_prefix(TRANSPARENT_PREFIX)
+                {
+                    return self.run_transparent(target, rest, runner);
+                }
                 if let Some(active) = self.active.as_mut() {
                     let feedback = active.answer_text(text, &target.document.snapshot());
                     return self.follow(target, feedback, runner);
@@ -246,6 +258,47 @@ impl CommandLine {
         }
     }
 
+    /// Runs a transparent command line beside the active prompt: the prompt session and the
+    /// last command are not touched.
+    fn run_transparent(
+        &mut self,
+        target: &Target<'_>,
+        text: &str,
+        runner: Runner<'_>,
+    ) -> Result<Submitted> {
+        let refused = |reason: &'static str| {
+            Error::new(codes::TRANSPARENT_REFUSED).with_detail("reason", reason)
+        };
+        let Some(parsed) = line::parse_line(target.registry, target.localized, text)? else {
+            return Err(refused("empty"));
+        };
+        let spec = Arc::clone(
+            &target
+                .registry
+                .resolve(&parsed.command, target.localized)?
+                .spec,
+        );
+        if !spec.is_transparent() {
+            return Err(refused("not_transparent"));
+        }
+        if !parsed.missing.is_empty() {
+            return Err(refused("missing_params"));
+        }
+        // Only a command that opens no transaction may run inside the outer command's group.
+        let blocked = match spec.undo() {
+            UndoBehavior::NotUndoable => false,
+            UndoBehavior::Undoable => target.document.with_undo(|undo| undo.group().is_some()),
+            UndoBehavior::UndoControl => true,
+        };
+        if blocked {
+            return Err(refused("group_open"));
+        }
+        let mut invocation = Invocation::new(spec.id(), Value::Object(parsed.params));
+        invocation.selection = target.selection.to_vec();
+        invocation.seed = target.seed;
+        Ok(Submitted::Ran(runner(invocation)?))
+    }
+
     fn invoke(&mut self, target: &Target<'_>, step: LineStep<'_>) -> Result<Submitted> {
         let invoker = Invoker::new(target.registry);
         self.drive(target, step, &mut |invocation| {
@@ -277,6 +330,20 @@ impl CommandLine {
     /// Those of [`line::parse_line`], of the machine, and of the run.
     pub fn submit(&mut self, target: &Target<'_>, text: &str) -> Result<Submitted> {
         self.invoke(target, LineStep::Submit(text))
+    }
+
+    /// Runs the transparent command line `text` while a prompt is active, without cancelling
+    /// the prompt or changing the last command (CORE-CMD-012). A typed line reaches it through
+    /// [`submit`](Self::submit) when it starts with [`TRANSPARENT_PREFIX`].
+    ///
+    /// # Errors
+    ///
+    /// `cmd.transparent.refused` (detail `reason`: `empty`, `not_transparent`,
+    /// `missing_params`, `group_open` for an undoable command while the document has an open
+    /// undo group, `group_open` for an undo-control command); those of [`line::parse_line`]
+    /// and of the run.
+    pub fn transparent(&mut self, target: &Target<'_>, text: &str) -> Result<Submitted> {
+        self.invoke(target, LineStep::Transparent(text))
     }
 
     /// Answers the active prompt with a typed input from the UI.
@@ -315,30 +382,72 @@ impl CommandLine {
         self.invoke(target, LineStep::Repeat)
     }
 
-    /// Completion for a partial line: the keyword options of the active prompt, otherwise
-    /// [`line::complete`].
+    /// Completion for a partial line: with an active prompt, its keyword options, else the
+    /// names of objects (for a pick or selection prompt) or the units (for a distance, angle,
+    /// number or expression prompt) of the text typed so far; otherwise [`line::complete_in`]
+    /// on the document's snapshot.
     #[must_use]
     pub fn complete(&self, target: &Target<'_>, text: &str, cursor: usize) -> Completion {
-        match &self.active {
-            Some(active) => {
-                let partial = text.get(..cursor.min(text.len())).unwrap_or(text);
-                let start = partial.len() - partial.trim_start().len();
-                Completion {
-                    span: Some(line::Span {
-                        start,
-                        end: partial.len(),
-                    }),
-                    candidates: active
-                        .complete(partial)
-                        .into_iter()
-                        .map(|o| line::Candidate {
-                            text: o.id.clone(),
-                            kind: line::CandidateKind::Keyword,
-                        })
-                        .collect(),
+        let snapshot = target.document.snapshot();
+        let Some(active) = &self.active else {
+            return line::complete_in(
+                target.registry,
+                target.localized,
+                Some(&snapshot),
+                text,
+                cursor,
+            );
+        };
+        let partial = text.get(..cursor.min(text.len())).unwrap_or(text);
+        let lead = partial.len() - partial.trim_start().len();
+        let typed = partial.trim_start();
+        let at = |start: usize| line::Span {
+            start,
+            end: partial.len(),
+        };
+        let keywords: Vec<line::Candidate> = active
+            .complete(partial)
+            .into_iter()
+            .map(|o| line::Candidate {
+                text: o.id.clone(),
+                kind: line::CandidateKind::Keyword,
+                label: None,
+            })
+            .collect();
+        if !keywords.is_empty() {
+            return Completion {
+                span: Some(at(lead)),
+                candidates: keywords,
+            };
+        }
+        for accept in active.prompt().iter().flat_map(|p| &p.accepts) {
+            let (offset, candidates) = match accept {
+                Accept::Pick { types } => {
+                    (0, line::object_candidates(Some(&snapshot), typed, types))
                 }
+                Accept::Selection { types, .. } => {
+                    let start = typed.rfind([',', ' ']).map_or(0, |i| i + 1);
+                    let name = typed.get(start..).unwrap_or("");
+                    (start, line::object_candidates(Some(&snapshot), name, types))
+                }
+                Accept::Distance { .. } => line::unit_candidates(typed, Some(Dimension::LENGTH)),
+                Accept::Angle { .. } => line::unit_candidates(typed, Some(Dimension::ANGLE)),
+                Accept::Number { dimension, .. } if *dimension != Dimension::NONE => {
+                    line::unit_candidates(typed, Some(*dimension))
+                }
+                Accept::Expression => line::unit_candidates(typed, None),
+                _ => continue,
+            };
+            if !candidates.is_empty() {
+                return Completion {
+                    span: Some(at(lead + offset)),
+                    candidates,
+                };
             }
-            None => line::complete(target.registry, target.localized, text, cursor),
+        }
+        Completion {
+            span: Some(at(lead)),
+            candidates: Vec::new(),
         }
     }
 }

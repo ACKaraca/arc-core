@@ -1,4 +1,4 @@
-//! Macro recording and playback (CORE-CMD-016, CORE-CMD-018).
+//! Macro recording, inputs and playback (CORE-CMD-016, CORE-CMD-017, CORE-CMD-018).
 //!
 //! A macro is JSON Lines text: a header line, then one line per completed invocation holding
 //! the [canonical command line](crate::line::format_line), the invocation seed, the revision the
@@ -26,7 +26,11 @@ use crate::registry::Registry;
 /// The `format` of a macro header.
 pub const MACRO_FORMAT: &str = "arc-macro";
 /// The macro format version this crate writes and reads.
-pub const MACRO_VERSION: u32 = 1;
+pub const MACRO_VERSION: u32 = 2;
+/// The oldest macro format version this crate still reads.
+pub const MACRO_MIN_VERSION: u32 = 1;
+/// The most inputs one step declares.
+pub const MAX_STEP_INPUTS: usize = 64;
 
 /// The product a macro was recorded with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +46,7 @@ pub struct MacroProduct {
 pub struct MacroHeader {
     /// Always [`MACRO_FORMAT`].
     pub format: String,
-    /// The format version, [`MACRO_VERSION`].
+    /// The format version, [`MACRO_MIN_VERSION`] to [`MACRO_VERSION`].
     pub version: u32,
     /// The automation protocol version of the recording session's crate.
     pub protocol: String,
@@ -66,6 +70,11 @@ pub struct MacroStep {
     /// The selection the command saw.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selection: Vec<ObjectId>,
+    /// The inputs of the step (version 2): parameter name to input name. At playback the
+    /// parameter takes the value supplied for the input; the recorded value in `line` is the
+    /// default a surface offers when it prompts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, String>,
     /// The 1-based line number in the text the step was read from; not serialized.
     #[serde(skip)]
     pub line_number: usize,
@@ -96,6 +105,90 @@ fn limit(name: &'static str, line: usize) -> Error {
 
 fn as_u64(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
+}
+
+/// A parameter name: an ASCII letter or `_`, then letters, digits and `_`, at most 128 bytes.
+fn param_ok(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    name.len() <= 128
+        && bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// An input name: a lowercase ASCII letter, then lowercase letters, digits and `_`, at most 64
+/// bytes.
+fn input_ok(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    name.len() <= 64
+        && bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// An input of a macro, as a surface needs it to prompt for a value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroInput {
+    /// The input name.
+    pub name: String,
+    /// The command of the first step that uses the input.
+    pub command: String,
+    /// The parameter of that step the input replaces.
+    pub param: String,
+    /// The value recorded for that parameter.
+    pub default: Value,
+}
+
+impl MacroStep {
+    /// Makes the value of `param` an input called `name`: at playback the parameter takes the
+    /// value supplied for `name`. The recorded value stays in the line as the default.
+    ///
+    /// # Errors
+    ///
+    /// `cmd.macro.malformed` (reason `input`) when a name is not well formed, the step has
+    /// [`MAX_STEP_INPUTS`] inputs already, or the line gives no such parameter; the errors of
+    /// [`parse_line`] for the line.
+    pub fn set_input(&mut self, registry: &Registry, param: &str, name: &str) -> Result<()> {
+        let parsed = parse_line(registry, &BTreeMap::new(), &self.line)?;
+        let known = parsed.is_some_and(|p| p.params.contains_key(param));
+        let full = self.inputs.len() >= MAX_STEP_INPUTS && !self.inputs.contains_key(param);
+        if !known || full || !param_ok(param) || !input_ok(name) {
+            return Err(malformed(self.line_number, "input"));
+        }
+        self.inputs.insert(param.to_owned(), name.to_owned());
+        Ok(())
+    }
+}
+
+impl Macro {
+    /// The inputs of the macro, each name once, in the order of first use.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`parse_line`] for a step's line.
+    pub fn inputs(&self, registry: &Registry) -> Result<Vec<MacroInput>> {
+        let mut found: Vec<MacroInput> = Vec::new();
+        for step in &self.steps {
+            if step.inputs.is_empty() {
+                continue;
+            }
+            let Some(parsed) = parse_line(registry, &BTreeMap::new(), &step.line)? else {
+                continue;
+            };
+            for (param, name) in &step.inputs {
+                if found.iter().any(|i| &i.name == name) {
+                    continue;
+                }
+                found.push(MacroInput {
+                    name: name.clone(),
+                    command: parsed.command.clone(),
+                    param: param.clone(),
+                    default: parsed.params.get(param).cloned().unwrap_or(Value::Null),
+                });
+            }
+        }
+        Ok(found)
+    }
 }
 
 /// Reads a macro or a batch list. Text whose first non-blank line starts with `{` is a JSON
@@ -134,7 +227,7 @@ pub fn parse_macro(text: &str, limits: &Limits) -> Result<Macro> {
             if parsed.format != MACRO_FORMAT {
                 return Err(malformed(number, "header"));
             }
-            if parsed.version != MACRO_VERSION {
+            if !(MACRO_MIN_VERSION..=MACRO_VERSION).contains(&parsed.version) {
                 return Err(Error::new(codes::MACRO_VERSION_UNSUPPORTED)
                     .with_arg("version", i64::from(parsed.version))
                     .with_detail("version", i64::from(parsed.version)));
@@ -153,10 +246,21 @@ pub fn parse_macro(text: &str, limits: &Limits) -> Result<Macro> {
                 seed: 0,
                 revision: None,
                 selection: Vec::new(),
+                inputs: BTreeMap::new(),
                 line_number: 0,
             }
         };
         step.line_number = number;
+        let version = header.as_ref().map_or(MACRO_VERSION, |h| h.version);
+        if (version < 2 && !step.inputs.is_empty())
+            || step.inputs.len() > MAX_STEP_INPUTS
+            || step
+                .inputs
+                .iter()
+                .any(|(p, n)| !param_ok(p) || !input_ok(n))
+        {
+            return Err(malformed(number, "input"));
+        }
         steps.push(step);
     }
     Ok(Macro { header, steps })
@@ -221,9 +325,31 @@ impl Recorder {
             seed: invocation.seed,
             revision: Some(revision),
             selection: invocation.selection.clone(),
+            inputs: BTreeMap::new(),
             line_number,
         });
         Ok(())
+    }
+
+    /// Makes the value of `param` in recorded step `index` (0-based) an input called `name`
+    /// ([`MacroStep::set_input`]).
+    ///
+    /// # Errors
+    ///
+    /// Those of [`MacroStep::set_input`]; `cmd.macro.malformed` (reason `step`) when there is
+    /// no such step.
+    pub fn set_input(
+        &self,
+        registry: &Registry,
+        index: usize,
+        param: &str,
+        name: &str,
+    ) -> Result<()> {
+        let mut steps = self.steps.lock().unwrap_or_else(PoisonError::into_inner);
+        let step = steps
+            .get_mut(index)
+            .ok_or_else(|| malformed(index.saturating_add(2), "step"))?;
+        step.set_input(registry, param, name)
     }
 
     /// The number of recorded steps.
@@ -302,12 +428,39 @@ pub fn play(
     steps: &[MacroStep],
     group: &str,
 ) -> Result<Vec<Outcome>> {
+    play_with(registry, document, session, steps, group, &BTreeMap::new())
+}
+
+/// [`play`] with values for the inputs of the steps: a parameter that a step declared as an
+/// input takes the value supplied under the input's name (checked by the invoker like any
+/// parameter). Values for names no step declares are ignored.
+///
+/// # Errors
+///
+/// Those of [`play`]; `cmd.macro.input_missing` (argument and detail `input`) for the first
+/// input without a value, before anything changes.
+pub fn play_with(
+    registry: &Registry,
+    document: &Document,
+    session: &Session,
+    steps: &[MacroStep],
+    group: &str,
+    values: &BTreeMap<String, Value>,
+) -> Result<Vec<Outcome>> {
+    for step in steps {
+        if let Some(name) = step.inputs.values().find(|n| !values.contains_key(*n)) {
+            return Err(Error::new(codes::MACRO_INPUT_MISSING)
+                .with_arg("input", name.as_str())
+                .with_detail("input", name.as_str())
+                .with_detail("line", i64::try_from(step.line_number).unwrap_or(i64::MAX)));
+        }
+    }
     document.begin_group(group).wait()?;
     let invoker = Invoker::new(registry);
     let content = content_digest(document);
     let mut outcomes = Vec::with_capacity(steps.len());
     for step in steps {
-        match run_step(&invoker, registry, document, session, step, content) {
+        match run_step(&invoker, registry, document, session, step, content, values) {
             Ok(outcome) => outcomes.push(outcome),
             Err(error) => {
                 document.fail_group().wait()?;
@@ -327,11 +480,18 @@ fn run_step(
     session: &Session,
     step: &MacroStep,
     content: u64,
+    values: &BTreeMap<String, Value>,
 ) -> Result<Outcome> {
     let Some(parsed) = parse_line(registry, &BTreeMap::new(), &step.line)? else {
         return Err(malformed(step.line_number, "empty"));
     };
-    let mut invocation = Invocation::new(parsed.command, Value::Object(parsed.params));
+    let mut params = parsed.params;
+    for (param, name) in &step.inputs {
+        if let Some(value) = values.get(name) {
+            params.insert(param.clone(), value.clone());
+        }
+    }
+    let mut invocation = Invocation::new(parsed.command, Value::Object(params));
     let now = document.snapshot().revision();
     invocation.seed = adjusted_seed(step.seed, step.revision, now, content);
     invocation.selection.clone_from(&step.selection);
@@ -389,7 +549,7 @@ mod tests {
             .code(),
             "cmd.macro.malformed"
         );
-        let future = r#"{"format":"arc-macro","version":2,"protocol":"1.0","product":{"name":"","version":""}}"#;
+        let future = r#"{"format":"arc-macro","version":3,"protocol":"1.0","product":{"name":"","version":""}}"#;
         assert_eq!(code(future, &d).code(), "cmd.macro.version_unsupported");
         let header = r#"{"format":"arc-macro","version":1,"protocol":"1.0","product":{"name":"","version":""}}"#;
         let e = code(&format!("{header}\n{{\"line\":1}}"), &d);
