@@ -9,7 +9,12 @@
 //! The file is read, never written or renamed: it lives in a directory the user does not own. A
 //! missing file applies nothing. A file that exists but cannot be used stops the application from
 //! starting ([`is_fatal`]): nothing from it is applied and the application does not fall back to
-//! running without the administrator's locks.
+//! running without the administrator's locks. On Windows a file or folder that is not owned by an
+//! administrative principal is not an administrator's file: it is ignored with a warning and the
+//! application starts without locks ([`apply_system`]). The check is on the owner only: a folder a
+//! standard user created, a file owned by its creating account instead of the Administrators group,
+//! and a file that is momentarily unreadable are all ignored, so an administrator creates the
+//! folder and the file.
 
 use std::fs;
 use std::path::Path;
@@ -36,6 +41,10 @@ pub struct Managed {
     /// Lock-list entries that were ignored: unknown keys, non-text entries and a list that is
     /// not an array.
     pub ignored: Vec<String>,
+    /// On Windows, why the whole file was ignored (`not_regular`, `not_administrative` or
+    /// `check_failed`); `None` when it was applied or is missing. The caller reports it: the log
+    /// subscriber may not exist yet.
+    pub ignored_file: Option<&'static str>,
 }
 
 /// Reads the managed settings table. A missing file yields an empty table.
@@ -69,7 +78,11 @@ pub fn read(path: &Path) -> Result<Table> {
 /// # Errors
 /// As [`read`]; nothing is changed when reading fails.
 pub fn apply(store: &mut SettingsStore, path: &Path) -> Result<Managed> {
-    let table = read(path)?;
+    apply_table(store, read(path)?)
+}
+
+/// Sets `table` as the system scope of `store` and locks the keys its lock list names.
+fn apply_table(store: &mut SettingsStore, table: Table) -> Result<Managed> {
     let mut ignored = Vec::new();
     let mut requested = Vec::new();
     match table
@@ -98,19 +111,40 @@ pub fn apply(store: &mut SettingsStore, path: &Path) -> Result<Managed> {
     for key in &ignored {
         tracing::warn!(key = %key, "managed settings: lock entry ignored");
     }
-    Ok(Managed { locked, ignored })
+    Ok(Managed {
+        locked,
+        ignored,
+        ignored_file: None,
+    })
 }
 
 /// Reads and applies the administrator file at `path` as [`apply`] does, after checking where it
 /// lives. On Unix the file and its folder must be owned by the superuser and not writable by
 /// group or other users; otherwise the file is refused with `app.managed.untrusted` and nothing is
-/// read.
+/// read. On Windows the file and its folder must be owned by an administrative principal
+/// (`arc_winsec::owner_is_administrative`) and the file must not be a link; otherwise, or when the
+/// check itself fails, the file is ignored: nothing is read, no key is locked, and a warning with
+/// the reason (`not_regular`, `not_administrative` or `check_failed`) is logged. Any user can
+/// create files under `C:\ProgramData`, so a file they planted must neither lock settings nor
+/// stop the start.
 ///
 /// # Errors
-/// As [`apply`], and `app.managed.untrusted`. Every one of them is fatal ([`is_fatal`]).
+/// As [`apply`], and on Unix `app.managed.untrusted`. Every one of them is fatal ([`is_fatal`]).
 pub fn apply_system(store: &mut SettingsStore, path: &Path) -> Result<Managed> {
     #[cfg(unix)]
     require_owner(path, ADMINISTRATOR_UID)?;
+    #[cfg(windows)]
+    match untrusted_reason(path, arc_winsec::owner_is_administrative) {
+        None => {}
+        // Never read the path again after a miss: it could have been planted in between.
+        Some(ABSENT) => return apply_table(store, Table::new()),
+        Some(reason) => {
+            tracing::warn!(reason, path = %path.display(), "managed settings: file ignored");
+            let mut managed = apply_table(store, Table::new())?;
+            managed.ignored_file = Some(reason);
+            return Ok(managed);
+        }
+    }
     apply(store, path)
 }
 
@@ -153,6 +187,43 @@ fn require_owner(path: &Path, owner: u32) -> Result<()> {
         return Ok(());
     }
     Err(Error::new(codes::MANAGED_UNTRUSTED).with_arg("path", path.display().to_string()))
+}
+
+/// The reason [`untrusted_reason`] gives for a missing file.
+#[cfg(any(windows, test))]
+const ABSENT: &str = "absent";
+
+/// Why the file at `path` is not an administrator's file, [`ABSENT`] when it is missing, or `None`
+/// when it passes.
+/// `owner_is_administrative` answers for one path. Any failure of the check counts against the
+/// file: a file whose owner cannot be established is not trusted.
+// shortcut: owner check only, the access control list is not inspected; upgrade when a deployment
+// guide requires non-default folder permissions
+#[cfg(any(windows, test))]
+fn untrusted_reason(
+    path: &Path,
+    owner_is_administrative: impl Fn(&Path) -> std::io::Result<bool>,
+) -> Option<&'static str> {
+    let file = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(ABSENT),
+        Err(_) => return Some("check_failed"),
+    };
+    if !file.is_file() {
+        return Some("not_regular");
+    }
+    let folder = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    for target in [path, folder] {
+        match owner_is_administrative(target) {
+            Ok(true) => {}
+            Ok(false) => return Some("not_administrative"),
+            Err(_) => return Some("check_failed"),
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -349,6 +420,26 @@ mod tests {
         let mut store = store_with_user(USER);
         let applied = apply_system(&mut store, &d.join("absent.toml")).unwrap();
         assert!(applied.locked.is_empty());
+    }
+
+    #[test]
+    fn the_windows_rule_ignores_a_file_or_folder_that_is_not_administrative() {
+        use std::io::{Error, ErrorKind};
+        let d = dir("managed-win-rule");
+        let file = d.join("managed-settings.toml");
+        write(&file, "[managed]\nlocked = []\n");
+        let folder_only = |p: &Path| Ok(p == file.as_path());
+        let nothing = |_: &Path| Ok(false);
+        let fails = |_: &Path| Err(Error::from(ErrorKind::PermissionDenied));
+        assert_eq!(untrusted_reason(&file, |_| Ok(true)), None);
+        assert_eq!(
+            untrusted_reason(&file, folder_only),
+            Some("not_administrative")
+        );
+        assert_eq!(untrusted_reason(&file, nothing), Some("not_administrative"));
+        assert_eq!(untrusted_reason(&file, fails), Some("check_failed"));
+        assert_eq!(untrusted_reason(&d, |_| Ok(true)), Some("not_regular"));
+        assert_eq!(untrusted_reason(&d.join("none.toml"), fails), Some(ABSENT));
     }
 
     #[cfg(unix)]

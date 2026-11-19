@@ -90,6 +90,7 @@ PDFium, PROJ, openNURBS and process isolation are outside it.
 | `arc-brep-occt` | Open CASCADE through an Arc-owned C++ shim | Dynamic | Private to `arc-brep`; see [geometry](geometry.md#kernel-isolation) |
 | `arc-pdfium` | PDFium for PDF import and underlay rasterization | Dynamic, loaded at run time | Used only inside `arc-worker` |
 | `arc-opennurbs` | openNURBS for reading Rhino 3DM files | Static | Used only inside `arc-worker`; see [ADR-0012](../adr/0012-opennurbs-ffi-crate.md) |
+| `arc-winsec` | The Windows security descriptor owner of a file or folder, through `windows-sys` | Operating system library | Windows only, empty elsewhere; used by `arc-app` for the administrator settings file; see [ADR-0017](../adr/0017-windows-security-ffi-crate.md) |
 
 Adding an FFI crate requires an architecture decision record. Every FFI crate exposes a safe API,
 documents the invariant behind each `unsafe` block in a `SAFETY:` comment, runs its tests under

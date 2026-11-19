@@ -89,7 +89,8 @@ in `arc-suite`; change it there first.
 
 - The layer table in `xtask/layers.toml` is the authority; L0–L4 never depend on `winit`, `wgpu`,
   `egui` or other UI crates. Changing the table needs an ADR.
-- `unsafe` exists only in `arc-brep-occt`, `arc-pdfium` and `arc-opennurbs`. STEP, IGES, PDFium and
+- `unsafe` exists only in `arc-brep-occt`, `arc-pdfium`, `arc-opennurbs` and `arc-winsec` (the file
+  owner check on Windows, ADR-0017). STEP, IGES, PDFium and
   3DM work runs in `arc-worker`; licensed bridges run only as separate processes the user enabled.
 - Objects are addressed by `ObjectId` (UUIDv7) everywhere outside one snapshot; handles are never
   persisted or sent.

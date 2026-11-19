@@ -33,6 +33,7 @@ arc-io-mesh = { path = "crates/arc-io-mesh" }
 arc-io-common = { path = "crates/arc-io-common" }
 arc-io-ifc = { path = "crates/arc-io-ifc" }
 arc-io-dwg = { path = "crates/arc-io-dwg" }
+arc-winsec = { path = "crates/arc-winsec" }
 
 # DWG reading in `arc-io-dwg`, wrapped behind a byte-level API; the default `parallel` feature
 # (rayon) stays off, the optional `import`, `serde` and `parallel` features stay off.
@@ -124,6 +125,9 @@ wgpu = { version = "=30.0.1", default-features = false, features = ["std", "wgsl
 # Wayland loaded at run time, Wayland decorations without title text (no font crate).
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
 uuid = { version = "1.29", default-features = false, features = ["std", "serde"] }
+# Owner of the administrator settings file in `arc-winsec`, Windows only: the three features of the
+# calls it makes, nothing else.
+windows-sys = { version = "0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization"] }
 
 # The suite lint table (arc-suite docs/engineering/coding-standards.md). Every crate inherits it
 # with `[lints] workspace = true`; `cargo xtask layers` fails a crate that does not.

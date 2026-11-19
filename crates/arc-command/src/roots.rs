@@ -19,10 +19,14 @@
 //!   neither a read nor a new file can be redirected outside the roots.
 //! - **Windows**: every directory of the resolved path from the root down to the parent is
 //!   opened without following reparse points and without sharing delete access, so none of them
-//!   can be renamed, deleted or replaced by a junction while the file is opened; a reparse point
-//!   on that chain is refused. The file itself is opened without following a reparse point. Device names,
-//!   alternate data streams, and device-namespace paths are rejected; UNC paths only when a root
-//!   is a UNC path.
+//!   can be renamed, deleted or replaced by a junction while the file is opened. A symbolic link
+//!   or junction on that chain, or as the file, is refused with `cmd.path.rejected` and reason
+//!   `link`. A directory that is another reparse point, such as a cloud-synchronized folder, is
+//!   accepted. A file with the reparse-point attribute that is not a link is refused with reason
+//!   `reparse_file` and never read, because a file opened without following its reparse point can
+//!   be a stub. A file the system presents as an ordinary file is read. Device names, alternate
+//!   data streams, and device-namespace paths are rejected; UNC paths only when a root is a UNC
+//!   path.
 //! - **WebAssembly**: there is no file system; granting a root fails and every access is
 //!   `cmd.path.outside_roots`.
 //!
@@ -454,11 +458,17 @@ mod native {
         fs::canonicalize(path).ok().filter(|p| p.is_dir())
     }
 
-    /// Checks the handle is no reparse point and has the expected kind.
+    /// Checks the handle is no link and has the expected kind. `is_symlink` on Windows is true
+    /// for name-surrogate reparse points (symbolic links and junctions). A directory that is
+    /// another reparse point is accepted; a file with the reparse-point attribute is refused, as
+    /// its data may not be present locally.
     fn plain(file: &File, dir: bool) -> Result<()> {
         let meta = file.metadata().map_err(|e| io_error(&e))?;
-        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(outside());
+        if meta.file_type().is_symlink() {
+            return Err(rejected("link"));
+        }
+        if !dir && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(rejected("reparse_file"));
         }
         if dir != meta.is_dir() || (!dir && !meta.is_file()) {
             return Err(rejected(if dir { "not_a_directory" } else { "not_a_file" }));
@@ -561,6 +571,55 @@ mod native {
         };
         file.set_len(0).map_err(|e| io_error(&e))?;
         Ok(file)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #![allow(clippy::unwrap_used, reason = "tests")]
+
+        use super::*;
+
+        /// A junction is refused as a link with a reason, while a plain directory passes the same
+        /// handle check. Non-link reparse points (cloud placeholders) cannot be created in a test.
+        #[test]
+        fn a_junction_is_refused_as_a_link_and_a_directory_is_not() {
+            let base = std::env::temp_dir().join(format!("arc-roots-jn-{}", std::process::id()));
+            let (target, link) = (base.join("t"), base.join("j"));
+            let _ = fs::remove_dir_all(&base);
+            fs::create_dir_all(&target).unwrap();
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&target)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if !made {
+                let _ = fs::remove_dir_all(&base);
+                return;
+            }
+            let open = |p: &Path| {
+                OpenOptions::new()
+                    .read(true)
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                    .open(p)
+                    .unwrap()
+            };
+            let refused = {
+                let handle = open(&link);
+                plain(&handle, true).unwrap_err()
+            };
+            let accepted = plain(&open(&target), true);
+            let reason = refused.details().get("reason").cloned();
+            let _ = fs::remove_dir(&link);
+            let _ = fs::remove_dir_all(&base);
+            assert_eq!(refused.code(), "cmd.path.rejected");
+            assert_eq!(
+                reason,
+                Some(arc_base::error::Value::Text("link".to_owned()))
+            );
+            assert!(accepted.is_ok());
+        }
     }
 }
 

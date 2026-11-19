@@ -1067,6 +1067,13 @@ save may replace the file it was opened from on every platform.
   the file holds no time stamps, so equal contents give byte-identical files with the same SQLite
   library version; a different SQLite version may lay out pages differently. Two rows with one
   identifier fail with `doc.object.duplicate_id` before anything is written.
+  On Windows the final rename, which replaces the target, is retried when it fails because
+  another process holds the target: `PermissionDenied`, or the errors ERROR_ACCESS_DENIED (5),
+  ERROR_SHARING_VIOLATION (32) and ERROR_LOCK_VIOLATION (33), which `std` does not map to
+  `PermissionDenied`. Up to 5 attempts in all, with pauses of 10, 20, 30 and 40 ms. A rename still denied after that fails with
+  `doc.package.io_failed` (argument `path`), and the target is unchanged. Other platforms rename
+  once. The recovery copy in `recovery.rs` renames a generation file under the session's own
+  name, not a file the user opens, and keeps a single attempt.
 - **Edit locks.** `LockOwner` (user, host, application, time) comes from the application: the
   crate asks the operating system only for its process id. A lock of another opener makes the
   package read-only with `ReadOnlyCause::Locked(holder)`, or `StaleLock(holder)` when the

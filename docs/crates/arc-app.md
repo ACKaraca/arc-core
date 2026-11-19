@@ -130,8 +130,15 @@ reports, Hub) are added in later parts behind settings that default to off.
   colors) at or above the configured level to a `RotatingWriter`. Installing it globally is the
   caller's decision. There is no log viewer in this part.
 - The current file is `<file_name>`; rotation renames it to `<file_name>.1` and shifts older
-  files up; the file that would exceed the count is deleted. At most `max_files` files exist,
-  the current one included; with one file, the file is replaced.
+  files up; the file that would exceed the count is deleted. After a completed rotation at most
+  `max_files` files exist, the current one included; with one file, the file is replaced. A
+  rotation interrupted by a crash can leave `<file_name>.<max_files>` (the file being dropped)
+  until the next rotation removes it.
+- A rotation that fails (for example, another process holds a file on Windows) undoes its
+  completed moves in reverse order, so the files are as they were, appending continues in the
+  current file, and rotation is tried again at the next write that exceeds the limit. The record
+  that triggered the rotation is written to the current file, never dropped; the file may stay
+  above the limit until a rotation succeeds.
 - Each record is one write and is never split, so a file stays within `max_file_bytes` unless a
   single record is larger. Limits: size 4 KiB to 1 GiB, count 1 to 100. Files left over from an
   earlier, larger count are not cleaned up.
@@ -182,11 +189,27 @@ reports, Hub) are added in later parts behind settings that default to off.
   on Linux, `/Library/Application Support/arc-shell/` on macOS and `C:\ProgramData\arc-shell\` on
   Windows. The reference shell reads it at start; no environment variable or argument changes the
   path, because a user-chosen file could lock nothing. The Windows path is fixed to the system
-  drive; it will move to the known-folder API when a Windows FFI crate is allowed.
+  drive; it will move to the known-folder API later.
 - On Unix, before the file is read, `apply_system` requires the file to be a regular file (a
   symbolic link is refused) owned by uid 0, in a folder owned by uid 0, and neither writable by
   group or other users. Otherwise the file is refused with `app.managed.untrusted` and nothing is
   read. A missing file passes.
+- On Windows, before the file is read, `apply_system` requires the file to be a regular file (a
+  link is not accepted) and both the file and its folder to be owned by an administrative principal:
+  the built-in Administrators group, Local System or the TrustedInstaller service
+  (`arc_winsec::owner_is_administrative`, [ADR-0017](../adr/0017-windows-security-ffi-crate.md)).
+  Any user can create folders and files under `C:\ProgramData`, so a file that fails the check, or
+  whose check fails, is ignored as if absent: nothing is read, no key is locked, the start is not
+  refused, and a warning with the reason (`not_regular`, `not_administrative` or `check_failed`) is
+  logged and returned in `Managed::ignored_file`, which the reference shell prints to standard error
+  (the log subscriber does not exist yet at that point). Consequences: a folder created by a standard
+  user before deployment makes the file ignored, so an administrator must create the folder; a file
+  whose owner is the creating account rather than the Administrators group (the default-owner policy
+  "object creator") is ignored; an administrative file that is momentarily unreadable is ignored, not
+  fatal. A file that passes the check and is then unusable stops the start like on the other
+  platforms. The check examines the owner only, not the access control list: an account that can
+  write to an administratively owned folder or file despite its owner defeats it. A deployment guide
+  that requires non-default folder permissions needs the list inspected too.
 - Its top-level values are the system scope. The table `managed` holds the lock list,
   `managed.locked`, an array of setting keys. The table is reserved: no setting key starts with
   `managed`.
@@ -202,12 +225,12 @@ reports, Hub) are added in later parts behind settings that default to off.
 - Lock-list entries that are not registered keys, that are not text, or a `locked` value that is
   not an array are ignored and logged with `tracing` at warning level. Only the key is logged.
 - The file is read, never written or renamed. A missing file applies nothing. A file that exists
-  but cannot be read, is too large, not UTF-8, not TOML or refused by the ownership check stops the
-  reference shell from starting: it prints the localized error and exits with a non-zero code.
+  but cannot be read, is too large, not UTF-8, not TOML or refused by the Unix ownership check stops
+  the reference shell from starting: it prints the localized error and exits with a non-zero code.
   Every such error is fatal (`managed::is_fatal`).
-- Decisions: fail closed. A damaged or untrusted administrator file stops the start, so a user
+- Decisions: fail closed. A damaged administrator file, and on Unix an untrusted one, stops the start, so a user
   cannot run without the locks it sets; the rejected alternative applied nothing and started, which
-  lets anyone who can damage the file remove the locks. A reset in the user scope of a locked key
+  lets anyone who can damage the file remove the locks. On Windows an untrusted file is ignored instead, because any user can plant one under `C:\ProgramData`: refusing the start would let any user block every other user, and a planted file cannot be told from an administrator's by its content. The rejected alternative left Windows unchecked. A reset in the user scope of a locked key
   is refused too; the rejected alternative allowed it, since it only removes a value that is
   ignored anyway, but the rule is one check for all writes. A malformed file is not set aside,
   unlike user files; renaming inside a system directory needs rights the application does not have.

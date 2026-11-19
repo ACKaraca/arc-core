@@ -24,6 +24,7 @@ each specification; the total is 528.
 | `arc-gpu` | L5 | `GPU` | [arc-gpu.md](arc-gpu.md) | 40 |
 | `arc-ui` | L6 | `UI` | [arc-ui.md](arc-ui.md) | 41 |
 | `arc-app` | L6 | `APP` | [arc-app.md](arc-app.md) | 36 |
+| `arc-winsec` | L5 (FFI) | none | [arc-winsec.md](arc-winsec.md) | 0 |
 
 ## Capability tables
 

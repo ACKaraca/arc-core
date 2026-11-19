@@ -121,7 +121,9 @@ struct State {
     name: String,
     max_bytes: u64,
     max_files: u32,
-    file: File,
+    /// The open current file; `None` after a rotation closed it, until [`State::current`]
+    /// opens it again.
+    file: Option<File>,
     size: u64,
 }
 
@@ -130,40 +132,95 @@ impl State {
         self.dir.join(format!("{}.{n}", self.name))
     }
 
-    fn open(path: &Path) -> io::Result<(File, u64)> {
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
-        let size = file.metadata()?.len();
-        Ok((file, size))
+    /// The current file, opened for appending when it is not open.
+    fn current(&mut self) -> io::Result<&mut File> {
+        if self.file.is_none() {
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.dir.join(&self.name))?;
+            self.size = file.metadata()?.len();
+            self.file = Some(file);
+        }
+        self.file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("log file is not open"))
     }
 
-    /// Shifts `name` to `name.1`, `name.1` to `name.2`, and so on; the file that would become
-    /// `name.<max_files>` is deleted, so at most `max_files` files exist.
-    fn rotate(&mut self) -> io::Result<()> {
+    /// Rotates with the operating system's rename: see [`State::shift_with`].
+    fn shift(&mut self) -> io::Result<()> {
+        self.shift_with(|from, to| fs::rename(from, to))
+    }
+
+    /// Moves the current file to `name.1`, `name.1` to `name.2`, and so on, so that the file
+    /// that held `name.<max_files - 1>` is dropped. The dropped file moves to `name.<max_files>`
+    /// first and is removed last. Every move is recorded, and when one fails the moves are undone
+    /// in reverse order, so a failed rotation restores the files exactly and a retry starts from
+    /// the same state. `rename` is injected so tests can block a step.
+    fn shift_with(&self, rename: impl Fn(&Path, &Path) -> io::Result<()>) -> io::Result<()> {
+        let mut moved = Vec::new();
+        let result = self.shift_steps(&rename, &mut moved);
+        if result.is_err() {
+            for (from, to) in moved.iter().rev() {
+                let _ = rename(to, from);
+            }
+        }
+        result
+    }
+
+    fn shift_steps(
+        &self,
+        rename: &impl Fn(&Path, &Path) -> io::Result<()>,
+        moved: &mut Vec<(PathBuf, PathBuf)>,
+    ) -> io::Result<()> {
+        let mut mv = |from: PathBuf, to: PathBuf| -> io::Result<()> {
+            rename(&from, &to)?;
+            moved.push((from, to));
+            Ok(())
+        };
         let current = self.dir.join(&self.name);
-        if self.max_files > 1 {
-            let _ = fs::remove_file(self.numbered(self.max_files - 1));
+        let doomed = self.numbered(self.max_files);
+        if self.max_files == 1 {
+            mv(current, doomed.clone())?;
+        } else {
+            let oldest = self.numbered(self.max_files - 1);
+            if oldest.exists() {
+                mv(oldest, doomed.clone())?;
+            }
             for n in (1..self.max_files - 1).rev() {
                 let from = self.numbered(n);
                 if from.exists() {
-                    fs::rename(from, self.numbered(n + 1))?;
+                    mv(from, self.numbered(n + 1))?;
                 }
             }
-            fs::rename(&current, self.numbered(1))?;
-        } else {
-            fs::remove_file(&current)?;
+            mv(current, self.numbered(1))?;
         }
-        let (file, size) = Self::open(&current)?;
-        self.file = file;
-        self.size = size;
+        // The commit: the dropped file is removed only after every move succeeded.
+        if doomed.exists() {
+            fs::remove_file(&doomed)?;
+        }
         Ok(())
+    }
+
+    /// Rotates and reopens the current file. Rotation is attempted at a later write when this
+    /// fails: the current file is open for appending again, so no record is lost.
+    fn rotate(&mut self) -> io::Result<()> {
+        // std opens files without delete sharing on Windows, which makes a rename of a file
+        // with an open handle fail, so the handle is closed before the shift.
+        self.file = None;
+        let shifted = self.shift();
+        let reopened = self.current().map(drop);
+        shifted.and(reopened)
     }
 
     fn write(&mut self, record: &[u8]) -> io::Result<()> {
         let len = u64::try_from(record.len()).unwrap_or(u64::MAX);
         if self.size > 0 && self.size.saturating_add(len) > self.max_bytes {
-            self.rotate()?;
+            // A failed rotation (a viewer holds a file on Windows, for example) keeps the
+            // record in the current file; the next write tries again.
+            let _ = self.rotate();
         }
-        self.file.write_all(record)?;
+        self.current()?.write_all(record)?;
         self.size = self.size.saturating_add(len);
         Ok(())
     }
@@ -186,16 +243,17 @@ impl RotatingWriter {
         config.validate()?;
         let io = |e: io::Error| Error::new(codes::LOG_IO).with_source(e);
         fs::create_dir_all(&config.dir).map_err(io)?;
-        let (file, size) = State::open(&config.dir.join(&config.file_name)).map_err(io)?;
+        let mut state = State {
+            dir: config.dir.clone(),
+            name: config.file_name.clone(),
+            max_bytes: config.max_file_bytes,
+            max_files: config.max_files,
+            file: None,
+            size: 0,
+        };
+        state.current().map_err(io)?;
         Ok(Self {
-            state: Arc::new(Mutex::new(State {
-                dir: config.dir.clone(),
-                name: config.file_name.clone(),
-                max_bytes: config.max_file_bytes,
-                max_files: config.max_files,
-                file,
-                size,
-            })),
+            state: Arc::new(Mutex::new(state)),
         })
     }
 }
@@ -208,7 +266,10 @@ impl Write for RotatingWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.file.flush()
+        match state.file.as_mut() {
+            Some(file) => file.flush(),
+            None => Ok(()),
+        }
     }
 }
 
@@ -418,6 +479,71 @@ mod tests {
         let names: Vec<_> = fs::read_dir(&d).unwrap().collect();
         assert_eq!(names.len(), 1);
         assert!(fs::metadata(d.join("arc.log")).unwrap().len() <= 4096);
+    }
+
+    #[test]
+    fn a_failed_rotation_keeps_appending_and_a_later_write_retries() {
+        let d = dir("retry");
+        // A directory where the first rotated file goes makes the shift fail, as a file held by
+        // another process does on Windows.
+        let blocker = d.join("arc.log.1");
+        fs::create_dir(&blocker).unwrap();
+        let mut w = RotatingWriter::open(&config(d.clone(), 4096, 2)).unwrap();
+        for _ in 0..8 {
+            w.write_all(&[b'x'; 1000]).unwrap();
+        }
+        assert_eq!(fs::metadata(d.join("arc.log")).unwrap().len(), 8000);
+        fs::remove_dir(&blocker).unwrap();
+        w.write_all(&[b'y'; 1000]).unwrap();
+        assert_eq!(fs::metadata(d.join("arc.log.1")).unwrap().len(), 8000);
+        assert_eq!(fs::metadata(d.join("arc.log")).unwrap().len(), 1000);
+        assert!(!d.join("arc.log.0").exists());
+    }
+
+    #[test]
+    fn a_blocked_middle_step_loses_no_rotated_content_on_retry() {
+        let d = dir("blocked");
+        let state = State {
+            dir: d.clone(),
+            name: "arc.log".into(),
+            max_bytes: 4096,
+            max_files: 5,
+            file: None,
+            size: 0,
+        };
+        for (name, text) in [
+            ("arc.log", "c"),
+            ("arc.log.1", "1"),
+            ("arc.log.2", "2"),
+            ("arc.log.3", "3"),
+            ("arc.log.4", "4"),
+        ] {
+            fs::write(d.join(name), text).unwrap();
+        }
+        let blocked = d.join("arc.log.2");
+        let refuse = |from: &Path, to: &Path| {
+            if from == blocked.as_path() {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            } else {
+                fs::rename(from, to)
+            }
+        };
+        assert!(state.shift_with(refuse).is_err());
+        assert!(state.shift_with(refuse).is_err());
+        let contents = |name: &str| fs::read_to_string(d.join(name)).ok();
+        assert_eq!(contents("arc.log").as_deref(), Some("c"));
+        assert_eq!(contents("arc.log.1").as_deref(), Some("1"));
+        assert_eq!(contents("arc.log.2").as_deref(), Some("2"));
+        assert_eq!(contents("arc.log.3").as_deref(), Some("3"));
+        assert_eq!(contents("arc.log.4").as_deref(), Some("4"));
+        state.shift_with(|from, to| fs::rename(from, to)).unwrap();
+        // The oldest file is dropped by the completed rotation; the others moved up.
+        assert_eq!(contents("arc.log.1").as_deref(), Some("c"));
+        assert_eq!(contents("arc.log.2").as_deref(), Some("1"));
+        assert_eq!(contents("arc.log.3").as_deref(), Some("2"));
+        assert_eq!(contents("arc.log.4").as_deref(), Some("3"));
+        assert!(!d.join("arc.log.5").exists());
+        assert!(!d.join("arc.log").exists());
     }
 
     #[test]

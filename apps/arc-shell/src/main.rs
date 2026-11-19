@@ -98,7 +98,7 @@ fn data_dir() -> PathBuf {
 /// the environment would let a user choose a file that locks nothing.
 fn managed_settings_path() -> PathBuf {
     if cfg!(target_os = "windows") {
-        // shortcut: fixed system drive path, switch to the known-folder API when a Windows FFI crate is allowed
+        // shortcut: fixed system drive path; asking the system for the known folder is a later step
         PathBuf::from("C:\\ProgramData\\arc-shell\\managed-settings.toml")
     } else if cfg!(target_os = "macos") {
         PathBuf::from("/Library/Application Support/arc-shell/managed-settings.toml")
@@ -199,11 +199,22 @@ fn start() -> Result<(), String> {
     let mut app = Application::new(product, config);
     // Fail closed: an administrator file that exists but cannot be used stops the start, so the
     // user cannot run without the locks it sets (CORE-APP-013).
-    if let Err(e) = managed::apply_system(app.settings_mut(), &managed_settings_path()) {
-        if managed::is_fatal(&e) {
-            return Err(arc_shell::describe(&e, Some(&localizer)));
+    match managed::apply_system(app.settings_mut(), &managed_settings_path()) {
+        Ok(applied) => {
+            // The log subscriber does not exist yet, so the ignored file is reported here.
+            if let Some(reason) = applied.ignored_file {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "managed settings file ignored (not owned by an administrator): {reason}"
+                );
+            }
         }
-        report(&e, &localizer);
+        Err(e) => {
+            if managed::is_fatal(&e) {
+                return Err(arc_shell::describe(&e, Some(&localizer)));
+            }
+            report(&e, &localizer);
+        }
     }
     for file in &files {
         // A file that cannot be opened is reported and the shell still starts.

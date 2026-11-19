@@ -630,9 +630,17 @@ schema is the inline form (`data`) or the file form (`path`) of [View rendering]
     like a read.
   - Windows: after the path is resolved, every directory of the resolved path from the root
     down to the parent is opened without following reparse points and without sharing delete
-    access, so none can be renamed, deleted or replaced by a junction meanwhile; a reparse
-    point found on that chain (a swap after resolution) is refused, and the file is opened
-    without following a reparse point. A new file is created with exclusive creation inside the
+    access, so none can be renamed, deleted or replaced by a junction meanwhile. Reparse points
+    are classified as follows, and each refusal is `cmd.path.rejected`:
+    - a symbolic link or junction, as a directory on the chain or as the file (a swap after
+      resolution): reason `link`;
+    - a directory that is another reparse point, such as a cloud-synchronized folder: accepted;
+    - a file with the reparse-point attribute that is not a link: reason `reparse_file`, and the
+      file is never read, because a file opened without following its reparse point can be a
+      stub for data that is not available locally;
+    - a file the system presents as an ordinary file, including a file of a synchronized folder
+      whose data is available: read as any other file.
+    The file is opened without following a reparse point. A new file is created with exclusive creation inside the
     held chain; an existing name, a link among them, is resolved and opened like a read.
   - WebAssembly: there is no file system; granting a root fails and every access is
     `cmd.path.outside_roots`.
@@ -640,7 +648,8 @@ schema is the inline form (`data`) or the file form (`path`) of [View rendering]
 - The escape-test suite (`tests/escape.rs`) builds a tree with a canary file outside the
   roots and tries absolute and relative symbolic links out, links in, link loops, `..` chains,
   Unicode normalization and case variants, NUL, over-long paths, junctions on Windows (skipped
-  with a message when the system refuses to create them) and races (a thread swapping a file
+  with a message when the system refuses to create them; a unit test in `roots.rs` checks that a
+  junction handle is refused as `link`) and races (a thread swapping a file
   or a directory for a link while another opens it repeatedly), asserting that the canary is
   never read, written or joined by a new file. The table of escape cases (absolute and
   dot-dot paths, links out, a dangling link, a device node, over-long and relative paths, NUL,

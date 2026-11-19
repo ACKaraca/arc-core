@@ -69,6 +69,7 @@ third_party = [
   "unic-langid",
   "uuid",
   "wgpu",
+  "windows-sys",
   "winit",
 ]
 
@@ -108,6 +109,8 @@ arc-draft-dxf = "layer(4)"
 arc-shell-sample = "layer(4)"
 arc-pdfium = "ffi(4)"
 arc-opennurbs = "ffi(4)"
+# The Windows security query of the administrator settings file (ADR-0017).
+arc-winsec = "ffi(5)"
 arc-gpu = "layer(5)"
 arc-ui = "layer(6)"
 arc-app = "layer(6)"

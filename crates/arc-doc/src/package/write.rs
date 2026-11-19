@@ -4,8 +4,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OpenFlags, params};
@@ -389,12 +391,58 @@ fn write_with(
         .and_then(|file| file.sync_all())
         .map_err(|e| io_error(e, &temp))?;
     progress(SaveProgress::Step(SaveStep::Replace))?;
-    // Replaces the target atomically on the same file system; on Windows `std` replaces an
-    // existing file, which fails while another process has it open without delete sharing.
-    fs::rename(&temp, target).map_err(|e| io_error(e, target))?;
+    // Replaces the target atomically on the same file system.
+    replace(&temp, target).map_err(|e| io_error(e, target))?;
     guard.0 = None;
     sync_directory(target);
     Ok(())
+}
+
+/// Attempts of the rename that replaces a package on Windows, where another process holding the
+/// target without delete sharing fails it with `PermissionDenied`.
+const RENAME_ATTEMPTS: u32 = 5;
+
+/// Renames `temp` over `target`. On Windows the rename is retried on `PermissionDenied` (see
+/// [`retry_denied`]); elsewhere it runs once.
+#[cfg(windows)]
+fn replace(temp: &Path, target: &Path) -> io::Result<()> {
+    retry_denied(|| fs::rename(temp, target), std::thread::sleep)
+}
+
+#[cfg(not(windows))]
+fn replace(temp: &Path, target: &Path) -> io::Result<()> {
+    fs::rename(temp, target)
+}
+
+/// Whether an error means another process holds the file: `PermissionDenied`, or on Windows
+/// ERROR_ACCESS_DENIED (5), ERROR_SHARING_VIOLATION (32) or ERROR_LOCK_VIOLATION (33), which
+/// `std` does not map to `PermissionDenied`.
+fn is_busy(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
+        || matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
+/// Runs `op`, and while it fails with a busy error (see [`is_busy`]) runs it again after a pause
+/// that grows by 10 ms per retry, up to [`RENAME_ATTEMPTS`] attempts in all (at most 100 ms of
+/// pauses). Other errors return at once. `pause` is injected so tests run without sleeping.
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "used by the Windows rename; tested everywhere")
+)]
+fn retry_denied<T>(
+    mut op: impl FnMut() -> io::Result<T>,
+    mut pause: impl FnMut(Duration),
+) -> io::Result<T> {
+    let mut attempt = 1;
+    loop {
+        match op() {
+            Err(e) if is_busy(&e) && attempt < RENAME_ATTEMPTS => {
+                pause(Duration::from_millis(10 * u64::from(attempt)));
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
 }
 
 /// A temporary file and its journal, removed when dropped unless taken.
@@ -747,4 +795,92 @@ fn verify(temp: &Path, contents: &Contents<'_>, objects: &[&StoredObject]) -> Re
         return Err(failed("objects"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    fn denied() -> io::Error {
+        io::Error::from(io::ErrorKind::PermissionDenied)
+    }
+
+    #[test]
+    fn a_denied_rename_succeeds_after_two_retries() {
+        let calls = RefCell::new(0_u32);
+        let pauses = RefCell::new(Vec::new());
+        let result = retry_denied(
+            || {
+                *calls.borrow_mut() += 1;
+                if *calls.borrow() < 3 {
+                    Err(denied())
+                } else {
+                    Ok(7)
+                }
+            },
+            |d| pauses.borrow_mut().push(d),
+        );
+        assert_eq!(result.ok(), Some(7));
+        assert_eq!(*calls.borrow(), 3);
+        assert_eq!(pauses.borrow().len(), 2);
+    }
+
+    #[test]
+    fn a_rename_that_stays_denied_fails_after_the_bounded_attempts() {
+        let calls = RefCell::new(0_u32);
+        let pauses = RefCell::new(Vec::new());
+        let result: io::Result<()> = retry_denied(
+            || {
+                *calls.borrow_mut() += 1;
+                Err(denied())
+            },
+            |d| pauses.borrow_mut().push(d),
+        );
+        assert_eq!(
+            result.map_err(|e| e.kind()),
+            Err(io::ErrorKind::PermissionDenied)
+        );
+        assert_eq!(*calls.borrow(), RENAME_ATTEMPTS);
+        assert_eq!(pauses.borrow().len(), (RENAME_ATTEMPTS - 1) as usize);
+        let total: Duration = pauses.borrow().iter().sum();
+        assert!(total < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn sharing_and_lock_violations_are_retried_like_denial() {
+        for raw in [5, 32, 33] {
+            let calls = RefCell::new(0_u32);
+            let result = retry_denied(
+                || {
+                    *calls.borrow_mut() += 1;
+                    if *calls.borrow() < 2 {
+                        Err(io::Error::from_raw_os_error(raw))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_| {},
+            );
+            assert!(result.is_ok(), "raw {raw}");
+            assert_eq!(*calls.borrow(), 2, "raw {raw}");
+        }
+    }
+
+    #[test]
+    fn other_errors_are_not_retried() {
+        let calls = RefCell::new(0_u32);
+        let paused = RefCell::new(false);
+        let result: io::Result<()> = retry_denied(
+            || {
+                *calls.borrow_mut() += 1;
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            },
+            |_| *paused.borrow_mut() = true,
+        );
+        assert!(result.is_err());
+        assert_eq!(*calls.borrow(), 1);
+        assert!(!*paused.borrow());
+    }
 }

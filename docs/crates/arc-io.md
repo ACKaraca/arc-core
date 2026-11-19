@@ -85,7 +85,7 @@ memory limit and emits an invalid package, each asserting that the document is u
 | ID | Capability | Behavior | Tier | Phase |
 |---|---|---|---|---|
 | CORE-IO-001 | Neutral models | Every reader produces a typed neutral model of its format with source identifiers on every entity and no product types. | T1 | 1 |
-| CORE-IO-002 | Limits enforcement | Every reader enforces the caller's limits profile and stops with `io.limit_exceeded` naming the limit, never allocating beyond it. | T1 | 1 |
+| CORE-IO-002 | Limits enforcement | Every reader enforces the `input_bytes`, `string_bytes`, `array_length` and `record_count` limits of the caller's profile and stops with `io.limit_exceeded` naming the limit before allocating beyond it. `nesting_depth` is enforced by every reader except DWG and PDF. `memory_bytes` and `wall_clock_seconds` are consulted by the IFC reader only. | T1 | 1 |
 | CORE-IO-003 | Preserved records | Readers emit unmodeled records as preserved records; writers of the same format re-emit them with remapped references. | T1 | 1 |
 | CORE-IO-004 | Loss reports | Every import and export returns a loss report conforming to the published schema, also when nothing was lost. | T1 | 1 |
 | CORE-IO-005 | Deterministic writers | Writers produce identical bytes for identical neutral models and options. | T1 | 1 |
@@ -332,7 +332,8 @@ the library `acadrust` 0.6.8 (MPL-2.0, used unmodified), which is wrapped so tha
 library appears in a signature, a result or an error. The layer amendment and the reasons for the
 same-layer edge to `arc-io-dxf` are in [ADR-0001](../adr/0001-enforced-layering.md#amendment-dwg-reader-over-a-wrapped-library).
 The crate is in the WebAssembly set; its build for `wasm32-unknown-unknown` succeeds with the
-library's default features off.
+library's default features off. Reading DWG files that are not trusted is experimental until
+parsing runs in a separate worker process (CORE-IO-013).
 
 ### Reading
 
@@ -364,12 +365,14 @@ library's default features off.
   argument `limit` set to `decompressed_bytes`; the refusal is recognized by the library's message
   text, and a test of this crate fails if that text changes.
 - The read, the whole mapping and the drop of the library's document run inside one
-  `catch_unwind` (the isolation boundary of `library.rs`). A panic anywhere in that span, including
-  in a library accessor, a destructor or the progress callback, becomes `io.dwg.library_failed`.
-  Only the neutral drawing and report leave the boundary. Cancellation and limit errors are not
-  panics and keep their own codes. The boundary does not protect against aborts, stack overflows or
-  unbounded memory use inside the library; running the read in `arc-worker` is the intended
-  hardening, and it is required before untrusted files are read (CORE-IO-013).
+  `catch_unwind` (the isolation boundary of `library.rs`), in native builds only. A panic anywhere
+  in that span, including in a library accessor, a destructor or the progress callback, becomes
+  `io.dwg.library_failed`. Only the neutral drawing and report leave the boundary. Cancellation and
+  limit errors are not panics and keep their own codes. The WebAssembly build has no such boundary:
+  there a panic aborts the module, so the library's panics are not contained. The boundary also does
+  not protect against aborts, stack overflows or unbounded memory use inside the library; running the
+  read in `arc-worker` is the intended hardening, and it is required before untrusted files are read
+  (CORE-IO-013).
 - The library bounds some per-record allocations only by the record length times the size of the
   element, so a small multiline, table or mesh record can make the library reserve memory far larger
   than the record. This crate cannot prevent that; untrusted files are read only in the worker
@@ -462,7 +465,7 @@ tables and every table entry. Objects are not carried, so they are not counted.
 | `io.dwg.truncated` | `corrupt_data` | The library reached the end of the input inside a structure it needs |
 | `io.dwg.structure_invalid` | `corrupt_data` | The library reports malformed structures, unknown handles or unsupported content |
 | `io.dwg.checksum_mismatch` | `corrupt_data` | A checksum stored in the file does not match its data |
-| `io.dwg.library_failed` | `internal` | The read or the mapping of the wrapped library panicked; the file was not read |
+| `io.dwg.library_failed` | `internal` | The read or the mapping of the wrapped library panicked (native builds only; a WebAssembly panic aborts instead); the file was not read |
 
 The shared codes `io.limit_exceeded` (`limit_exceeded`) and `base.cancelled` (`cancelled`) apply as
 in the DXF reader. The limit code names the field of the profile in the argument `limit`.
@@ -479,7 +482,7 @@ polyline, a bulged hatch polyline, an elliptic hatch edge with ratio 0.5, a mesh
 the R13 version) and assert the mapped value. A writer refusal fails the test. Inputs the writer
 cannot produce, such as a block member that names no entity or a linetype with a number that is not
 finite, are tested on the mapping functions with constructed library values. The isolation boundary
-is tested with a closure that panics and one that panics in a destructor. Property tests read
+is tested with a closure that panics and one that panics in a destructor (native builds). Property tests read
 arbitrary bytes, bytes that start with a supported signature, and up to 128 mutations of a valid
 file at any position, and assert that no read unwinds or reports a library panic. No sample file is
 part of the repository.

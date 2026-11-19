@@ -77,6 +77,25 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `oem_cp` | OEM code-page tables inside `acadrust` | MIT |
 | `phf`, `phf_shared` | Static lookup tables inside `acadrust` | MIT |
 | `ryu` | Number formatting inside `acadrust` | Apache-2.0 OR BSL-1.0 |
+| `adler2`, `simd-adler32` | Adler-32 checksums inside `acadrust` | 0BSD OR MIT OR Apache-2.0; MIT |
+| `bitflags` | Flag sets inside `acadrust` | MIT OR Apache-2.0 |
+| `byteorder` | Byte-order conversion inside `acadrust` | Unlicense OR MIT |
+| `cfg-if` | Conditional compilation macro inside `acadrust` | MIT OR Apache-2.0 |
+| `core_detect` | Processor feature detection inside `acadrust` | MIT/Apache-2.0 |
+| `crc32fast` | CRC-32 checksums inside `acadrust` | MIT OR Apache-2.0 |
+| `equivalent`, `hashbrown`, `indexmap` | Hash maps and their key equivalence inside `acadrust` | Apache-2.0 OR MIT; MIT OR Apache-2.0 |
+| `foldhash` | Hashing inside `acadrust` | Zlib |
+| `flate2` | Deflate streams inside `acadrust` | MIT OR Apache-2.0 |
+| `itoa` | Integer formatting inside `acadrust` | MIT OR Apache-2.0 |
+| `libc` | Operating-system bindings inside `acadrust` | MIT OR Apache-2.0 |
+| `memchr` | Byte search inside `acadrust` | Unlicense OR MIT |
+| `memmap2` | Memory-mapped file access inside `acadrust` | MIT OR Apache-2.0 |
+| `once_cell` | Lazily initialized values inside `acadrust` | MIT OR Apache-2.0 |
+| `proc-macro2`, `quote`, `syn`, `thiserror-impl`, `unicode-ident` | Procedural-macro support of `thiserror` inside `acadrust`; compile time only | MIT OR Apache-2.0; (MIT OR Apache-2.0) AND Unicode-3.0 |
+| `scopeguard` | Scope guards inside `acadrust` | MIT OR Apache-2.0 |
+| `simdutf8` | UTF-8 validation inside `acadrust` | MIT OR Apache-2.0 |
+| `siphasher` | Hashing inside `acadrust` | MIT OR Apache-2.0 |
+| `web-time` | Time types inside `acadrust` | MIT OR Apache-2.0 |
 | `resvg` | Icon and SVG rasterization | Apache-2.0 or MIT |
 | `egui` | The widget toolkit of `arc-ui` with its AccessKit tree, re-exported by `arc-ui` (no default features: no bundled fonts); `resvg` is used in `arc-ui` without default features (no text, system fonts, compressed SVG or raster images) | MIT or Apache-2.0 |
 | `winit` | Windows and the event loop of the windowed shell in `arc-app` (feature `window`; features `rwh_06`, `x11`, `wayland`, `wayland-dlopen` and `wayland-csd-adwaita-notitle`, no default features) | Apache-2.0 |
@@ -99,6 +118,7 @@ Small, widely used crates the baseline relies on. The same columns apply; all ar
 | `skrifa` | Reading glyph outlines (feature `std` only, no autohinting) behind the outline text of `arc-gpu` (feature `draft`); no `skrifa` type appears in a public signature; already brought by `parley` | Apache-2.0 or MIT |
 | `spade` | Constrained Delaunay triangulation behind the polygon triangulation of `arc-geom`; no `spade` type appears in a public signature | MIT or Apache-2.0 |
 | `toml` | Reading the layer table and manifests in `xtask` | MIT or Apache-2.0 |
+| `windows-sys` | Raw bindings of three Windows calls (security descriptor owner, security identifier conversion and comparison) behind `arc-winsec`, Windows only; features `Win32_Foundation`, `Win32_Security` and `Win32_Security_Authorization` | MIT or Apache-2.0 |
 | `wgpu` | The renderer of `arc-gpu`, pinned to one version and re-exported; features: Vulkan, Metal, DirectX 12, OpenGL and WGSL only | MIT or Apache-2.0 |
 | `parley` | Shaping, bidirectional reordering, line breaking and alignment of outline text in `arc-draft` (feature `outline-text`, off by default; feature `std` only: no system font discovery); brings `fontique`, `harfrust`, `skrifa`, `read-fonts` and the `icu` segmentation and property crates | Apache-2.0 or MIT; `icu` crates Unicode-3.0 |
 
