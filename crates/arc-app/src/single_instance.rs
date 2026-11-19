@@ -886,7 +886,9 @@ mod tests {
     /// Polls until something arrives: delivery of a sent message is not instant on every
     /// platform, so a test that expects paths asks again instead of assuming one poll.
     fn settle(instance: &mut SingleInstance, now: Instant) -> Vec<PathBuf> {
-        for _ in 0..200_000 {
+        // Bounded by time, not by turns: a loaded machine may need many turns for one delivery.
+        let end = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < end {
             let paths = instance.poll(now);
             if !paths.is_empty() {
                 return paths;
@@ -904,6 +906,7 @@ mod tests {
     }
 
     /// One complete message naming `paths`, newline included.
+    #[cfg(unix)]
     fn message(paths: &[&str]) -> String {
         format!("{}\n", serde_json::json!({ "paths": paths }))
     }
@@ -1014,7 +1017,7 @@ mod tests {
         let _idle = connect(&run);
         let mut client = connect(&run);
         client
-            .write_all(message(&["/d/next.arc"]).as_bytes())
+            .write_all(message_for(&[abs("next.arc")]).as_bytes())
             .unwrap();
         assert_eq!(settle(&mut running, Instant::now()), [abs("next.arc")]);
     }

@@ -2,3 +2,5 @@
 # limit. The slowest test of the default run takes about ten seconds.
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 3 }
+# One run reports every failure, so a platform that is only tested in CI needs fewer runs.
+fail-fast = false
