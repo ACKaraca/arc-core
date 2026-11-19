@@ -1,6 +1,7 @@
-//! Bounded readers and deterministic writers for three triangle-mesh formats over a neutral
-//! scene: Wavefront OBJ with its MTL material library, STL (ASCII and binary) and PLY (ASCII,
-//! binary little endian and binary big endian).
+//! Bounded readers and deterministic writers for four triangle-mesh formats over a neutral
+//! scene: Wavefront OBJ with its MTL material library, STL (ASCII and binary), PLY (ASCII,
+//! binary little endian and binary big endian), and glTF 2.0 with its GLB container, whose scene
+//! hierarchy the scene keeps as well.
 //!
 //! Each format is a module with a `read` and a `write` function. Readers take byte buffers and
 //! never paths; the caller supplies the MTL bytes of an OBJ file. Every count, index, line length
@@ -10,7 +11,8 @@
 //! [`LossReport`] that says what the format could not keep.
 //!
 //! The formats are implemented here from their published descriptions; the one third-party
-//! dependency is `serde`, which serializes the loss report as the rest of the family does.
+//! dependencies are `serde`, which serializes the loss report as the rest of the family does, and
+//! `serde_json`, which parses the glTF JSON.
 //!
 //! ```
 //! use arc_base::{Limits, math::Point3};
@@ -24,8 +26,9 @@
 //! ];
 //! let mesh = TriMesh::new(positions, vec![[0, 1, 2]], &Limits::DEFAULT)?;
 //! let scene = MeshScene {
-//!     meshes: vec![MeshPart { name: String::new(), mesh, material: None }],
+//!     meshes: vec![MeshPart { name: String::new(), mesh, material: None, preserved: Default::default() }],
 //!     materials: Vec::new(),
+//!     ..MeshScene::default()
 //! };
 //! let written = stl::write(&scene, &mut WriteOptions::default())?;
 //! let read = stl::read(&written.bytes, &mut ReadOptions::default())?;
@@ -35,6 +38,7 @@
 
 mod binary;
 pub mod error;
+pub mod gltf;
 pub mod loss;
 pub mod model;
 pub mod obj;
@@ -45,5 +49,8 @@ mod text;
 
 pub use error::{codes, reasons};
 pub use loss::{LossItem, LossReport, Outcome, Severity};
-pub use model::{Material, MeshPart, MeshScene, TextureMap};
+pub use model::{
+    AlphaMode, Camera, ImageSource, Light, LightKind, Material, MeshGroup, MeshPart, MeshScene,
+    Node, Preserved, Projection, TextureMap, Transform,
+};
 pub use options::{Encoding, Progress, ReadOptions, ReadOutput, WriteOptions, WriteOutput};

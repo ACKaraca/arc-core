@@ -185,6 +185,13 @@ impl LossReport {
     }
 }
 
+/// The most distinct items a loss log keeps before it folds the rest into one overflow item per reason.
+pub(crate) const MAX_LOSS_ITEMS: usize = 1024;
+
+/// The record kind of the overflow item. A file may name an element this way too; the counts of the
+/// two then merge, which is harmless.
+pub(crate) const OVERFLOW_KIND: &str = "(overflow)";
+
 /// One aggregated item: reason, count, first source and arguments.
 type Entry = (Reason, u64, Option<String>, Vec<(String, Argument)>);
 
@@ -218,6 +225,14 @@ impl LossLog {
         if count == 0 {
             return;
         }
+        // Past the cap, a new kind joins the overflow item of its reason, so the report stays bounded
+        // and the counts stay exact.
+        let known = self.items.contains_key(&(reason.code, kind.to_owned()));
+        let (kind, arguments) = if known || self.items.len() < MAX_LOSS_ITEMS {
+            (kind, arguments)
+        } else {
+            (OVERFLOW_KIND, Vec::new())
+        };
         let entry = self
             .items
             .entry((reason.code, kind.to_owned()))

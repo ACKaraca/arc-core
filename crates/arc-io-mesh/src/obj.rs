@@ -6,13 +6,15 @@
 //! file. Each `o` or `g` statement starts a part; a `usemtl` statement after faces starts a part
 //! too, so every part has one material. A part is a vertex per distinct corner (position, texture
 //! coordinate and normal together), which keeps attributes per vertex. Polygons are fan
-//! triangulated. A new object or group starts without a material, so writing always names the
-//! material of each part after its `o` statement. Smoothing groups (`s`) and the `mtllib` statement
-//! are not kept. Continuation lines (a backslash at the end) are joined; comments are removed.
+//! triangulated. A `usemtl` stays in effect across following `o` and `g` statements, so a new
+//! object or group starts with the material in effect; writing names the material of each part
+//! after its `o` statement. Smoothing groups (`s`) and the `mtllib` statement are not kept. Continuation lines (a backslash at the end) are joined; comments are removed.
 //!
 //! Writing emits the parts in order, with every vertex written once, and the MTL bytes for the
-//! materials of the scene. Vertex colors and channels other than normals and the first texture
-//! coordinate set are dropped and reported.
+//! materials of the scene. OBJ has no statement that unsets a material, so a part without one
+//! that follows a part with one reads back with the material in effect; the writer reports it.
+//! Vertex colors and channels other than normals and the first texture coordinate set are dropped
+//! and reported.
 
 use std::collections::HashMap;
 
@@ -22,7 +24,9 @@ use arc_mesh::{AttributeKey, Channel};
 
 use crate::error::{at_line, codes, limit, reasons};
 use crate::loss::{Direction, LossHeader, LossLog};
-use crate::model::{Material, MeshPart, MeshScene, TextureMap, attribute_name, build_mesh};
+use crate::model::{
+    Material, MeshPart, MeshScene, Preserved, TextureMap, attribute_name, build_mesh,
+};
 use crate::options::{Control, Encoding, ReadOptions, ReadOutput, WriteOptions, WriteOutput};
 use crate::text::{self, Lines, len_u64, text32, text64};
 
@@ -51,7 +55,11 @@ pub fn read(obj: &[u8], mtl: Option<&[u8]>, options: &mut ReadOptions<'_>) -> Re
     control.finish(len_u64(obj.len()));
     let report = loss.finish(LossHeader::new("obj", "", Direction::Import, Some(limits)));
     Ok(ReadOutput {
-        scene: MeshScene { meshes, materials },
+        scene: MeshScene {
+            meshes,
+            materials,
+            ..MeshScene::default()
+        },
         report,
     })
 }
@@ -168,20 +176,17 @@ impl Reader {
 
     fn statement(&mut self, number: u64, statement: &str) -> Result<()> {
         let (keyword, rest) = split_keyword(statement);
+        if keyword.is_empty() {
+            return Ok(());
+        }
+        self.count_record()?;
         match keyword {
-            "" => Ok(()),
             "v" => self.vertex(number, rest),
             "vt" => self.texture(number, rest),
             "vn" => self.normal(number, rest),
             "f" => self.face(number, rest),
-            "o" | "g" => {
-                self.start_part(rest.to_owned());
-                Ok(())
-            }
-            "usemtl" if !rest.is_empty() => {
-                self.use_material(rest.to_owned());
-                Ok(())
-            }
+            "o" | "g" => self.start_part(rest.to_owned()),
+            "usemtl" if !rest.is_empty() => self.use_material(rest.to_owned()),
             "usemtl" => Err(at_line(codes::MESH_STRUCTURE_INVALID, number)),
             "mtllib" | "s" => Ok(()),
             other => {
@@ -193,7 +198,6 @@ impl Reader {
     }
 
     fn vertex(&mut self, number: u64, rest: &str) -> Result<()> {
-        self.count_record()?;
         let fields: Vec<&str> = rest.split_ascii_whitespace().collect();
         let [x, y, z, extra @ ..] = fields.as_slice() else {
             return Err(at_line(codes::MESH_STRUCTURE_INVALID, number));
@@ -227,7 +231,6 @@ impl Reader {
     }
 
     fn texture(&mut self, number: u64, rest: &str) -> Result<()> {
-        self.count_record()?;
         let fields: Vec<&str> = rest.split_ascii_whitespace().collect();
         let (u, v, w) = match fields.as_slice() {
             [u] => (*u, "0", None),
@@ -246,7 +249,6 @@ impl Reader {
     }
 
     fn normal(&mut self, number: u64, rest: &str) -> Result<()> {
-        self.count_record()?;
         let fields: Vec<&str> = rest.split_ascii_whitespace().collect();
         let [x, y, z] = fields.as_slice() else {
             return Err(at_line(codes::MESH_STRUCTURE_INVALID, number));
@@ -260,7 +262,6 @@ impl Reader {
     }
 
     fn face(&mut self, number: u64, rest: &str) -> Result<()> {
-        self.count_record()?;
         let tokens: Vec<&str> = rest.split_ascii_whitespace().collect();
         if tokens.len() < 3 {
             return Err(at_line(codes::MESH_FACE_INVALID, number));
@@ -319,23 +320,35 @@ impl Reader {
         })
     }
 
-    fn start_part(&mut self, name: String) {
-        let next = Part::named(name, None);
+    /// Keeps a finished part, failing with `io.limit_exceeded` once the parts reach `array_length`.
+    fn finish_part(&mut self, part: Part) -> Result<()> {
+        let count = len_u64(self.finished.len());
+        if count >= self.limits.array_length {
+            return Err(limit("array_length", count + 1));
+        }
+        self.finished.push(part);
+        Ok(())
+    }
+
+    fn start_part(&mut self, name: String) -> Result<()> {
+        let next = Part::named(name, self.current.material.clone());
         if self.current.has_faces() {
             let done = std::mem::replace(&mut self.current, next);
-            self.finished.push(done);
+            self.finish_part(done)
         } else {
             self.current = next;
+            Ok(())
         }
     }
 
-    fn use_material(&mut self, material: String) {
+    fn use_material(&mut self, material: String) -> Result<()> {
         if self.current.has_faces() {
             let next = Part::named(self.current.name.clone(), Some(material));
             let done = std::mem::replace(&mut self.current, next);
-            self.finished.push(done);
+            self.finish_part(done)
         } else {
             self.current.material = Some(material);
+            Ok(())
         }
     }
 
@@ -343,7 +356,7 @@ impl Reader {
     fn finish(mut self) -> Result<(Vec<MeshPart>, LossLog)> {
         if self.current.has_faces() {
             let last = std::mem::take(&mut self.current);
-            self.finished.push(last);
+            self.finish_part(last)?;
         }
         let mut meshes = Vec::new();
         for part in std::mem::take(&mut self.finished) {
@@ -393,8 +406,14 @@ impl Reader {
             name: part.name,
             mesh,
             material: part.material,
+            preserved: Preserved::default(),
         })
     }
+}
+
+/// The texture statements of an MTL library: the slots the reader keeps and the writer writes.
+fn is_texture_slot(keyword: &str) -> bool {
+    matches!(keyword, "bump" | "disp" | "decal" | "refl" | "norm") || keyword.starts_with("map_")
 }
 
 /// Splits a statement into its keyword and the rest, trimmed.
@@ -505,10 +524,7 @@ fn apply_mtl_statement(
         },
         "d" => material.opacity = Some(last_number(number, rest)?),
         "Tr" => material.opacity = Some(1.0 - last_number(number, rest)?),
-        "bump" | "disp" | "decal" | "refl" | "norm" => {
-            push_texture(material, number, keyword, rest)?
-        }
-        slot if slot.starts_with("map_") => push_texture(material, number, keyword, rest)?,
+        slot if is_texture_slot(slot) => push_texture(material, number, keyword, rest)?,
         other => loss.add(reasons::ELEMENT_SKIPPED, other, Some(number), 1),
     }
     Ok(())
@@ -572,10 +588,17 @@ pub fn write(scene: &MeshScene, options: &mut WriteOptions<'_>) -> Result<WriteO
         .sum();
     let mut bases = Bases::default();
     let mut done = 0_u64;
+    // The material the reader will have in effect after the parts written so far.
+    let mut in_effect: Option<&str> = None;
     for part in &scene.meshes {
         if part.mesh.triangle_count() == 0 {
             loss.add(reasons::ELEMENT_SKIPPED, "part", None, 1);
             continue;
+        }
+        match (&part.material, in_effect) {
+            (Some(material), _) => in_effect = Some(material.as_str()),
+            (None, Some(_)) => loss.add(reasons::MATERIAL_INHERITED, "usemtl", None, 1),
+            (None, None) => {}
         }
         write_part(
             &mut out,
@@ -589,13 +612,14 @@ pub fn write(scene: &MeshScene, options: &mut WriteOptions<'_>) -> Result<WriteO
     let mtl = if scene.materials.is_empty() {
         None
     } else {
-        Some(write_mtl(&scene.materials)?)
+        Some(write_mtl(&scene.materials, &mut loss)?)
     };
     control.finish(total);
     let report = loss.finish(LossHeader::new("obj", "", Direction::Export, None));
     Ok(WriteOutput {
         bytes: out.into_bytes(),
         mtl,
+        buffer: None,
         report,
     })
 }
@@ -712,7 +736,9 @@ fn mtl_text(value: &str, allow_empty: bool) -> Result<()> {
     text::line_text(value)
 }
 
-fn write_mtl(materials: &[Material]) -> Result<Vec<u8>> {
+/// Writes the MTL library. A texture slot that the reader would not take as a texture statement is
+/// skipped and reported, so the file reads back as the writer meant it.
+fn write_mtl(materials: &[Material], loss: &mut LossLog) -> Result<Vec<u8>> {
     let mut out = String::new();
     for material in materials {
         mtl_text(&material.name, false)?;
@@ -735,7 +761,11 @@ fn write_mtl(materials: &[Material]) -> Result<Vec<u8>> {
             out.push_str(&format!("d {}\n", text32(opacity)));
         }
         for texture in &material.textures {
-            if texture.slot.is_empty() || texture.slot.contains(char::is_whitespace) {
+            if !is_texture_slot(&texture.slot) {
+                loss.add(reasons::TEXTURE_DROPPED, &texture.slot, None, 1);
+                continue;
+            }
+            if texture.slot.contains(char::is_whitespace) {
                 return Err(Error::new(codes::MESH_WRITE_VALUE_INVALID));
             }
             mtl_text(&texture.slot, false)?;
@@ -744,4 +774,109 @@ fn write_mtl(materials: &[Material]) -> Result<Vec<u8>> {
         }
     }
     Ok(out.into_bytes())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, reason = "test code")]
+mod tests {
+    use arc_base::error::Value;
+
+    use super::*;
+    use crate::loss::MAX_LOSS_ITEMS;
+
+    fn limit_name(error: &Error) -> Option<String> {
+        match error.arguments().get("limit") {
+            Some(Value::Text(name)) => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn every_statement_counts_against_the_record_limit() {
+        let limits = Limits {
+            record_count: 3,
+            ..Limits::DEFAULT
+        };
+        for line in ["k x\n", "o a\n", "g b\n", "usemtl m\n"] {
+            let data = line.repeat(10);
+            let error =
+                read(data.as_bytes(), None, &mut ReadOptions::with_limits(limits)).unwrap_err();
+            assert_eq!(error.code(), "io.limit_exceeded", "{line}");
+            assert_eq!(
+                limit_name(&error).as_deref(),
+                Some("record_count"),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn distinct_loss_entries_are_capped_and_the_counts_stay_exact() {
+        let lines = MAX_LOSS_ITEMS + 50;
+        let mut data = String::new();
+        for index in 0..lines {
+            data.push_str(&format!("k{index} x\n"));
+        }
+        let output = read(data.as_bytes(), None, &mut ReadOptions::default()).unwrap();
+        // The cap, plus the one aggregate item that holds the overflow.
+        assert!(output.report.items.len() <= MAX_LOSS_ITEMS + 1);
+        assert_eq!(output.report.summary.dropped, len_u64(lines));
+    }
+
+    #[test]
+    fn parts_are_bounded_by_array_length_and_empty_parts_make_no_mesh() {
+        let limits = Limits {
+            array_length: 3,
+            ..Limits::DEFAULT
+        };
+        let data = "v 0 0 0\nv 1 0 0\nv 0 1 0\no a\no b\no c\nf 1 2 3\n";
+        let output = read(data.as_bytes(), None, &mut ReadOptions::with_limits(limits)).unwrap();
+        assert_eq!(output.scene.meshes.len(), 1);
+
+        let parts = "o p\nf 1 2 3\n".repeat(4);
+        let data = format!("v 0 0 0\nv 1 0 0\nv 0 1 0\n{parts}");
+        let error = read(data.as_bytes(), None, &mut ReadOptions::with_limits(limits)).unwrap_err();
+        assert_eq!(error.code(), "io.limit_exceeded");
+        assert_eq!(limit_name(&error).as_deref(), Some("array_length"));
+    }
+
+    #[test]
+    fn the_writer_keeps_only_the_texture_slots_the_reader_recognizes() {
+        let textures = [
+            ("newmtl", "x.png"),
+            ("Kd", "k.png"),
+            ("d", "y"),
+            ("map_Kd", "a.png"),
+            ("bump", "b.png"),
+        ];
+        let material = Material {
+            name: "m".to_owned(),
+            textures: textures
+                .into_iter()
+                .map(|(slot, value)| TextureMap {
+                    slot: slot.to_owned(),
+                    value: value.to_owned(),
+                })
+                .collect(),
+            ..Material::default()
+        };
+        let scene = MeshScene {
+            materials: vec![material],
+            ..MeshScene::default()
+        };
+        let written = write(&scene, &mut WriteOptions::default()).unwrap();
+        assert_eq!(written.report.summary.dropped, 3);
+        let mtl = written.mtl.clone().unwrap();
+        assert_eq!(
+            String::from_utf8(mtl.clone()).unwrap(),
+            "newmtl m\nmap_Kd a.png\nbump b.png\n"
+        );
+        let back = read(&written.bytes, Some(&mtl), &mut ReadOptions::default()).unwrap();
+        let slots: Vec<&str> = back.scene.materials[0]
+            .textures
+            .iter()
+            .map(|texture| texture.slot.as_str())
+            .collect();
+        assert_eq!(slots, ["map_Kd", "bump"]);
+    }
 }

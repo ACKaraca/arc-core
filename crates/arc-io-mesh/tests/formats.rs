@@ -484,8 +484,10 @@ fn scene_of(mesh: TriMesh) -> MeshScene {
             name: String::new(),
             mesh,
             material: None,
+            preserved: Default::default(),
         }],
         materials: Vec::new(),
+        ..MeshScene::default()
     }
 }
 
@@ -684,5 +686,71 @@ fn cancellation_stops_every_reader_and_writer() {
     assert_eq!(
         ply::write(&scene, &mut write).unwrap_err().code(),
         "base.cancelled"
+    );
+}
+
+#[test]
+fn obj_material_stays_in_effect_across_objects_and_groups() {
+    let text = "v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\n\
+usemtl red\no first\nf 1 2 3\no second\nf 2 4 3\ng third\nf 1 4 2\n";
+    let read = read_ok(obj::read(
+        text.as_bytes(),
+        None,
+        &mut ReadOptions::default(),
+    ));
+    let parts: Vec<(&str, Option<&str>)> = read
+        .scene
+        .meshes
+        .iter()
+        .map(|p| (p.name.as_str(), p.material.as_deref()))
+        .collect();
+    assert_eq!(
+        parts,
+        vec![
+            ("first", Some("red")),
+            ("second", Some("red")),
+            ("third", Some("red")),
+        ]
+    );
+    // The written file names the material again after each object statement.
+    let written = read_ok(obj::write(&read.scene, &mut WriteOptions::default()));
+    let written = String::from_utf8(written.bytes).unwrap();
+    assert_eq!(written.matches("usemtl red").count(), 3);
+}
+
+#[test]
+fn obj_writer_reports_a_part_that_inherits_the_material_in_effect() {
+    let square = triangle_mesh(
+        &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        &[[0, 1, 2]],
+    );
+    let part = |name: &str, material: Option<&str>| MeshPart {
+        name: name.to_owned(),
+        mesh: square.clone(),
+        material: material.map(str::to_owned),
+        preserved: Default::default(),
+    };
+    let scene = MeshScene {
+        meshes: vec![
+            part("a", Some("red")),
+            part("b", None),
+            part("c", Some("blue")),
+            part("d", None),
+        ],
+        materials: Vec::new(),
+        ..MeshScene::default()
+    };
+    let written = read_ok(obj::write(&scene, &mut WriteOptions::default()));
+    assert_eq!(written.report.summary.approximated, 2);
+    let read = read_ok(obj::read(&written.bytes, None, &mut ReadOptions::default()));
+    let materials: Vec<Option<&str>> = read
+        .scene
+        .meshes
+        .iter()
+        .map(|p| p.material.as_deref())
+        .collect();
+    assert_eq!(
+        materials,
+        vec![Some("red"), Some("red"), Some("blue"), Some("blue")]
     );
 }

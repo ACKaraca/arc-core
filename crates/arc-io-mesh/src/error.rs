@@ -91,6 +91,24 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "io-mesh-write-value-invalid",
     };
+    /// A glTF index refers to an element that does not exist, or a node is reached twice.
+    pub const MESH_REFERENCE_INVALID: ErrorCode = ErrorCode {
+        code: "io.mesh.reference_invalid",
+        category: Category::CorruptData,
+        message_id: "io-mesh-reference-invalid",
+    };
+    /// A glTF file requires an extension that this crate does not support.
+    pub const MESH_EXTENSION_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "io.mesh.extension_unsupported",
+        category: Category::Unsupported,
+        message_id: "io-mesh-extension-unsupported",
+    };
+    /// A glTF buffer is stored outside the file and the caller's resolver did not supply it.
+    pub const MESH_RESOURCE_UNAVAILABLE: ErrorCode = ErrorCode {
+        code: "io.mesh.resource_unavailable",
+        category: Category::NotFound,
+        message_id: "io-mesh-resource-unavailable",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -104,6 +122,9 @@ pub mod codes {
         MESH_TEXT_INVALID,
         MESH_ENCODING_UNSUPPORTED,
         MESH_WRITE_VALUE_INVALID,
+        MESH_REFERENCE_INVALID,
+        MESH_EXTENSION_UNSUPPORTED,
+        MESH_RESOURCE_UNAVAILABLE,
     ];
 }
 
@@ -154,6 +175,28 @@ pub mod reasons {
         severity: Severity::Warning,
         message_id: "io-mesh-loss-precision-reduced",
     };
+    /// A glTF extension or extras object that this crate does not interpret was kept as JSON text.
+    pub const EXTENSION_PRESERVED: Reason = Reason {
+        code: "io.mesh.extension_preserved",
+        outcome: Outcome::Preserved,
+        severity: Severity::Info,
+        message_id: "io-mesh-loss-extension-preserved",
+    };
+    /// A texture reference the target cannot hold, such as a buffer view of the input, was dropped.
+    pub const TEXTURE_DROPPED: Reason = Reason {
+        code: "io.mesh.texture_dropped",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-mesh-loss-texture-dropped",
+    };
+    /// A part without a material follows a part with one; OBJ has no statement that unsets a
+    /// material, so the part reads back with the material in effect.
+    pub const MATERIAL_INHERITED: Reason = Reason {
+        code: "io.mesh.material_inherited",
+        outcome: Outcome::Approximated,
+        severity: Severity::Warning,
+        message_id: "io-mesh-loss-material-inherited",
+    };
 
     /// Every reason of this crate, for the registry check.
     pub const ALL: &[Reason] = &[
@@ -163,6 +206,9 @@ pub mod reasons {
         ATTRIBUTE_DROPPED,
         ATTRIBUTE_INCOMPLETE,
         PRECISION_REDUCED,
+        MATERIAL_INHERITED,
+        EXTENSION_PRESERVED,
+        TEXTURE_DROPPED,
     ];
 }
 

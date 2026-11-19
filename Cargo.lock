@@ -233,6 +233,7 @@ dependencies = [
  "arc-mesh",
  "proptest",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

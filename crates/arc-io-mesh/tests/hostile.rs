@@ -68,8 +68,10 @@ fn cube_scene() -> MeshScene {
             name: "cube".to_owned(),
             mesh: cube(),
             material: None,
+            preserved: Default::default(),
         }],
         materials: Vec::new(),
+        ..MeshScene::default()
     }
 }
 

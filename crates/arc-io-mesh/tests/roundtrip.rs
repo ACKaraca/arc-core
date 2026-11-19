@@ -116,6 +116,7 @@ fn build(spec: &PartSpec) -> MeshPart {
         name: spec.name.clone(),
         mesh: builder.build(&Limits::DEFAULT).unwrap(),
         material: spec.material.clone(),
+        preserved: Default::default(),
     }
 }
 
@@ -123,6 +124,7 @@ fn scene(parts: &[PartSpec]) -> MeshScene {
     MeshScene {
         meshes: parts.iter().map(build).collect(),
         materials: Vec::new(),
+        ..MeshScene::default()
     }
 }
 
@@ -192,9 +194,15 @@ proptest! {
         let read = read_obj(&written.bytes);
         prop_assert_eq!(read.meshes.len(), scene.meshes.len());
         let keep = Keep { normal: true, uv: true, color: false };
+        // A usemtl stays in effect across o and g, so a part without a material reads back with
+        // the material in effect after the parts before it.
+        let mut in_effect: Option<String> = None;
         for (original, got) in scene.meshes.iter().zip(&read.meshes) {
             prop_assert_eq!(&original.name, &got.name);
-            prop_assert_eq!(&original.material, &got.material);
+            if original.material.is_some() {
+                in_effect.clone_from(&original.material);
+            }
+            prop_assert_eq!(&in_effect, &got.material);
             prop_assert_eq!(corners(&original.mesh, keep), corners(&got.mesh, keep));
         }
     }
@@ -275,8 +283,10 @@ fn ply_colors_are_rounded_and_reported_when_they_are_not_bytes() {
             name: String::new(),
             mesh,
             material: None,
+            preserved: Default::default(),
         }],
         materials: Vec::new(),
+        ..MeshScene::default()
     };
     let written = ply::write(&scene, &mut WriteOptions::default()).unwrap();
     assert_eq!(written.report.summary.approximated, 3);

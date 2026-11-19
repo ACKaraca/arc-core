@@ -511,8 +511,8 @@ because the layer table does not allow one format crate to depend on another.
 
 ## Mesh formats as implemented
 
-`arc-io-mesh` is the OBJ, STL and PLY part of the family. It depends on `arc-base` and `arc-mesh`,
-and on `serde` for the serialization of the loss report. The three formats are implemented in the
+`arc-io-mesh` is the OBJ, STL, PLY and glTF part of the family. It depends on `arc-base` and `arc-mesh`,
+and on `serde` and `serde_json` for the loss report and the glTF JSON. The four formats are implemented in the
 crate from their published descriptions; none needs a third-party crate. Its readers take byte buffers and never paths, and it builds for
 `wasm32-unknown-unknown`. The neutral model is `MeshScene`: named `arc_mesh::TriMesh` parts, each
 with an optional material name, and the materials of an MTL library. Per-vertex normals, texture
@@ -526,9 +526,12 @@ coordinates and colors are the attribute channels `Normal`, `Uv(0)` and `Color` 
   the pool read so far. A part holds one vertex per distinct corner (position, texture coordinate
   and normal together), so attributes stay per vertex. Polygons are fan-triangulated. Each `o` or
   `g` statement starts a part, and a `usemtl` statement after faces starts a part too, so every
-  part has one material. A new object or group starts without a material. Smoothing groups (`s`)
+  part has one material. A `usemtl` stays in effect across following `o` and `g` statements, so a
+  new object or group starts with the material in effect. Smoothing groups (`s`)
   and `mtllib` are not kept. A backslash at a line end joins the next line, and `#` starts a
-  comment. Other statements (`l`, `p`, curves and surfaces) are skipped and reported.
+  comment. Other statements (`l`, `p`, curves and surfaces) are skipped and reported. Every statement
+  that is not blank counts against `record_count`, and every part that holds faces counts against
+  `array_length`; a part without faces creates no mesh.
 - MTL: `newmtl` starts a material. `Ka`, `Kd` and `Ks` take three colors; other forms (spectral or
   CIE curves) are skipped and reported. `d` (after an optional `-halo`) and `Tr` give the opacity.
   The statements `map_*`, `bump`, `disp`, `decal`, `refl` and `norm` keep the text after their
@@ -542,7 +545,10 @@ coordinates and colors are the attribute channels `Normal`, `Uv(0)` and `Color` 
   `nx ny nz`, texture coordinates from `s t`, `u v`, `texture_u texture_v` or `texture_s
   texture_t`, and colors from `red green blue` with an optional `alpha`; integer colors are divided
   by 255. Faces come from the list `vertex_indices` (or `vertex_index`), are fan-triangulated, and
-  are checked against the vertex count after every element is read. Vertices keep their order. Other
+  are fan-triangulated; their triangles count against `array_length` as each face is read, and
+  indices are checked against the vertex count after every element is read. Integer values are
+  checked against the range of their declared type. A binary element without properties takes no
+  bytes: it counts once against `record_count` and is skipped. Vertices keep their order. Other
   elements and properties are skipped and reported. The result is one part with an empty name.
 - Every count, line and total size is checked before it is used. The limits of the profile are
   enforced as follows:
@@ -551,11 +557,13 @@ coordinates and colors are the attribute channels `Normal`, `Uv(0)` and `Color` 
 |---|---|
 | `input_bytes` | Each input buffer, before any parsing |
 | `string_bytes` | Each line, and each joined OBJ statement |
-| `record_count` | OBJ and MTL statements, STL facets and PLY records over all elements |
-| `array_length` | Corners of a polygon, vertices and triangles of a part, PLY list lengths and header elements |
+| `record_count` | OBJ statements that are not blank, MTL statements, STL facets and PLY records over all elements |
+| `array_length` | Corners of a polygon, vertices and triangles of a part, parts of an OBJ file, triangles of a PLY file, PLY list lengths and header elements |
 
   A count that the remaining bytes cannot hold fails with `io.mesh.truncated` before any record is
   read, so a declared count does not drive an allocation.
+- A loss report keeps at most 1024 distinct items. Further record kinds join one item per reason
+  with the record kind `(overflow)`, and the counts stay exact.
 
 ### Writing
 
@@ -564,7 +572,9 @@ coordinates and colors are the attribute channels `Normal`, `Uv(0)` and `Color` 
   one-based indices. Parts without triangles are skipped and reported. With `mtl_name` set and
   materials present, the file begins with `mtllib`. The result carries the MTL bytes when the scene
   has materials; the caller stores them under the name it chose. Names may not contain `#`, a
-  backslash or a line break.
+  backslash or a line break. Texture statements of the MTL file are written only for the slots the
+  reader keeps (`map_*`, `bump`, `disp`, `decal`, `refl`, `norm`); other slots are skipped and
+  reported as dropped texture references.
 - `stl::write(scene, options)` writes ASCII, one solid for each part, or little-endian binary with
   one solid for all parts; binary drops the part names and the division into parts, and both are
   reported. Positions are rounded to single precision, and each rounded position is reported. Facet
@@ -580,6 +590,83 @@ Numbers are written in the shortest form that reads back to the same value: plai
 magnitudes from 0.0001 up to, not including, 10^15, and exponent form otherwise. Output depends
 only on the scene and the options; a writer never writes a timestamp or an identifier.
 
+### glTF reading
+
+- `gltf::read(bytes, resolver, options)` takes the bytes of a glTF JSON file or of a GLB container.
+  The `resolver` maps a URI, as the file writes it (percent-encoding is not decoded), to the bytes
+  of the resource, or to `None`; the crate never opens a file. The GLB magic selects the container:
+  the header version must be 2, the first chunk must be JSON, and the first binary chunk is the
+  buffer that has no URI. Unknown and repeated chunks are skipped and reported. The nesting depth
+  of the JSON is checked before it is parsed.
+- Buffers come from the binary chunk, from `data:` URIs in base64 (decoded by a bounded decoder in
+  the crate), or from the resolver. Decoded and resolved bytes count against
+  `Limits::decompressed_bytes`.
+- Accessors read every component type (5120 to 5126) and element type (`SCALAR` to `MAT4`).
+  `byteStride` may not be shorter than an element. `normalized` applies to integer components.
+  Sparse accessors replace the listed elements; `min` and `max` are not read. Matrix layouts pad
+  each column to four bytes. Matrix accessors are not read into geometry, and the mesh attributes
+  must have the element types named below.
+- Primitives in modes triangles, triangle strip and triangle fan become triangles. A strip's odd
+  triangles swap their first two corners to keep one orientation; a fan keeps its first corner.
+  Points, lines and line strips are skipped and reported. Attributes read: `POSITION` (required,
+  `VEC3`), `NORMAL` (`VEC3`), `TEXCOORD_0` (`VEC2`) and `COLOR_0` (`VEC3`, with alpha 1, or
+  `VEC4`), kept as the channels `Normal`, `Uv(0)` and `Color`. Other attributes are skipped and
+  reported. Each primitive is a `MeshPart`; each glTF mesh is a `MeshGroup` that names its parts.
+- Nodes keep their file order and their transforms. A node gives a matrix, or translation, rotation
+  and scale, where a missing component takes its glTF default; giving both forms is an error. A node
+  names a mesh group, a camera and a light, and lists its children. The roots are the nodes of the
+  default scene (the scene named by `scene`, or the first one). A node reached twice, a cycle, or a
+  node deeper than `Limits::nesting_depth` is an error. Nodes that name one mesh group share its
+  parts; the parts are stored once.
+- Materials keep the `pbrMetallicRoughness` factors, the base color texture as
+  `ImageSource::Uri` or `ImageSource::BufferView` (images are not decoded), `alphaMode`,
+  `alphaCutoff` and `doubleSided`. A material keeps its name when the name is present and unused;
+  otherwise it is named `material-<index>`, with `#<n>` added when that name is taken. A value the
+  file does not give stays absent. Other material textures and factors are skipped and reported.
+- Cameras (perspective and orthographic) and `KHR_lights_punctual` lights (directional, point and
+  spot) are plain data; a light with no color or intensity takes the extension's defaults.
+- Extensions: `KHR_lights_punctual` is interpreted. Every other extension object of an element, and
+  each `extras` value, is kept on that element as canonical JSON text (`Preserved`) and reported as
+  preserved. An entry of `extensionsRequired` other than `KHR_lights_punctual` is an error.
+- Limits: `record_count` counts every node, mesh, primitive, accessor, buffer view, material,
+  camera and light; `array_length` bounds accessor counts and vertex and index counts;
+  `input_bytes` bounds the file; `string_bytes` bounds each name and URI; `nesting_depth` bounds the
+  JSON and the node hierarchy; `decompressed_bytes` bounds the decoded and resolved buffers. A view
+  or accessor is checked against its buffer before any element is read, so a declared count cannot
+  drive an allocation. An accessor without a view is zero-filled up to `array_length`.
+
+### glTF writing
+
+- `gltf::write(scene, options)` writes three layouts. `Encoding::Ascii` writes JSON with the buffer
+  embedded as a base64 data URI. `Encoding::Ascii` with `WriteOptions::buffer_name` writes JSON that
+  refers to the buffer by that URI and returns the bytes in `WriteOutput::buffer`.
+  `Encoding::BinaryLittleEndian` writes one GLB with the buffer in its binary chunk. Big-endian
+  binary, and a buffer name with binary encoding, fail with `io.mesh.encoding_unsupported`. The
+  output is deterministic: the asset is `{"version": "2.0"}`, and the writer writes no generator
+  name and no time.
+- A mesh group becomes a glTF mesh with one primitive for each part, and a group shared by several
+  nodes is written once. A part that no group names is written as a mesh under a root node of its
+  own, and a group that no node names gets a root node. Parts without triangles are skipped and
+  reported.
+- A primitive writes `POSITION` as `f32` `VEC3` with its minimum and maximum; `NORMAL`, `TEXCOORD_0`
+  and `COLOR_0` as `f32` when the mesh has them; and `indices` as `u16` when the mesh has at most
+  65 536 vertices, and as `u32` otherwise. Each buffer view starts on a four-byte boundary and is
+  padded with zeros. A GLB pads its JSON chunk with spaces.
+- Positions are rounded to single precision, and each value that changes is reported as
+  approximated. Tangents, texture coordinate sets after the first, and user channels are dropped
+  and reported.
+- Materials write the PBR fields that are present, and the names. A base color texture with a URI
+  is written as an image and a texture. A buffer view reference cannot be written, because the
+  image bytes are not kept; it is dropped and reported. The OBJ and MTL fields (`Ka`, `Kd`, `Ks`,
+  `d` and the texture maps) are dropped and reported.
+- Cameras and lights are written from their fields. Preserved extension objects and extras are
+  written back. `extensionsUsed` lists every extension the output contains.
+- A reference to a missing mesh group, material, camera, light or child, a node reached twice, and
+  a value that is not finite fail with `io.mesh.write_value_invalid`.
+- Not written: quantized attributes, image bytes (images are referenced only), sparse accessors,
+  morph targets, skins and animations (the reader skips them and reports them), and the run of an
+  external glTF validator.
+
 ### Loss reports
 
 | Reason | Outcome |
@@ -590,6 +677,9 @@ only on the scene and the options; a writer never writes a timestamp or an ident
 | `io.mesh.attribute_dropped` | `dropped` |
 | `io.mesh.attribute_incomplete` | `dropped` |
 | `io.mesh.precision_reduced` | `approximated` |
+| `io.mesh.material_inherited` | `approximated` |
+| `io.mesh.extension_preserved` | `preserved` |
+| `io.mesh.texture_dropped` | `dropped` |
 
 The record kind of an item names the element, property, statement or attribute it concerns. The
 argument `attribute` of the attribute items names the attribute in the words of the report.
@@ -603,7 +693,10 @@ argument `attribute` of the attribute items names the attribute in the words of 
 | `io.mesh.index_out_of_range` | `corrupt_data` | A face refers to a vertex that does not exist |
 | `io.mesh.face_invalid` | `corrupt_data` | A face has fewer than three corners |
 | `io.mesh.structure_invalid` | `corrupt_data` | Statements, records or blocks are not arranged as the format requires |
-| `io.mesh.header_invalid` | `corrupt_data` | The PLY header is malformed, or names an unknown format or version |
+| `io.mesh.header_invalid` | `corrupt_data` | The PLY header or the GLB header is malformed, or names an unknown format or version |
+| `io.mesh.reference_invalid` | `corrupt_data` | A glTF index names no element, or a node is reached twice |
+| `io.mesh.extension_unsupported` | `unsupported` | A glTF file requires an extension this reader does not support; the argument `extension` names it |
+| `io.mesh.resource_unavailable` | `not_found` | A buffer stored outside the file was not supplied by the resolver; the argument `uri` names it |
 | `io.mesh.text_invalid` | `corrupt_data` | Text of the file is not valid UTF-8 |
 | `io.mesh.encoding_unsupported` | `unsupported` | The writer was asked for an encoding the format does not have |
 | `io.mesh.write_value_invalid` | `invalid_input` | A value or name cannot be written in the format |

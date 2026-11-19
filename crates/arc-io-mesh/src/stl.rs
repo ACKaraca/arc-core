@@ -18,7 +18,7 @@ use arc_base::{Error, Limits, Result};
 use crate::binary::Bytes;
 use crate::error::{at_line, codes, limit, reasons};
 use crate::loss::{Direction, LossHeader, LossLog};
-use crate::model::{MeshPart, MeshScene, attribute_name, build_mesh};
+use crate::model::{MeshPart, MeshScene, Preserved, attribute_name, build_mesh};
 use crate::options::{Control, Encoding, ReadOptions, ReadOutput, WriteOptions, WriteOutput};
 use crate::text::{self, Lines, len_u64, narrow};
 
@@ -85,6 +85,7 @@ impl Solid {
             name: self.name,
             mesh,
             material: None,
+            preserved: Preserved::default(),
         }))
     }
 }
@@ -110,6 +111,7 @@ pub fn read(data: &[u8], options: &mut ReadOptions<'_>) -> Result<ReadOutput> {
         scene: MeshScene {
             meshes: parts,
             materials: Vec::new(),
+            ..MeshScene::default()
         },
         report,
     })
@@ -302,6 +304,7 @@ pub fn write(scene: &MeshScene, options: &mut WriteOptions<'_>) -> Result<WriteO
     Ok(WriteOutput {
         bytes,
         mtl: None,
+        buffer: None,
         report,
     })
 }

@@ -18,7 +18,7 @@ use arc_mesh::{AttributeKey, Channel};
 use crate::binary::Bytes;
 use crate::error::{at_line, at_offset, codes, limit, reasons};
 use crate::loss::{Direction, LossHeader, LossLog};
-use crate::model::{MeshPart, MeshScene, attribute_name, build_mesh};
+use crate::model::{MeshPart, MeshScene, Preserved, attribute_name, build_mesh};
 use crate::options::{Control, Encoding, ReadOptions, ReadOutput, WriteOptions, WriteOutput};
 use crate::text::{self, Lines, len_u64, narrow};
 
@@ -73,6 +73,20 @@ impl Scalar {
             Self::I32 | Self::U32 | Self::F32 => 4,
             Self::F64 => 8,
         }
+    }
+
+    /// Whether an integer token is in the range of this type. Floating-point types hold any value.
+    fn holds(self, value: i64) -> bool {
+        let (min, max): (i64, i64) = match self {
+            Self::I8 => (i8::MIN.into(), i8::MAX.into()),
+            Self::U8 => (0, u8::MAX.into()),
+            Self::I16 => (i16::MIN.into(), i16::MAX.into()),
+            Self::U16 => (0, u16::MAX.into()),
+            Self::I32 => (i32::MIN.into(), i32::MAX.into()),
+            Self::U32 => (0, u32::MAX.into()),
+            Self::F32 | Self::F64 => return true,
+        };
+        (min..=max).contains(&value)
     }
 }
 
@@ -232,7 +246,13 @@ fn push_property(elements: &mut [Element], property: Property, number: u64) -> R
 fn check_counts(header: &Header, body_len: u64, limits: &Limits) -> Result<()> {
     let mut total = 0_u64;
     for element in &header.elements {
-        total = total.saturating_add(element.count);
+        // A binary record without properties takes no bytes: the element counts once, not per record.
+        let records = match header.format {
+            Format::Ascii => element.count,
+            _ if element.record_bytes() == 0 => element.count.min(1),
+            _ => element.count,
+        };
+        total = total.saturating_add(records);
         if total > limits.record_count {
             return Err(limit("record_count", total));
         }
@@ -311,7 +331,13 @@ impl<'a> Source<'a> {
                     Scalar::F32 | Scalar::F64 => {
                         Ok(Number::Float(text::float64(ascii.line, token)?))
                     }
-                    _ => Ok(Number::Int(text::integer(ascii.line, token)?)),
+                    _ => {
+                        let value = text::integer(ascii.line, token)?;
+                        if !ty.holds(value) {
+                            return Err(at_line(codes::MESH_VALUE_INVALID, ascii.line));
+                        }
+                        Ok(Number::Int(value))
+                    }
                 }
             }
             Body::Binary(bytes) => {
@@ -601,6 +627,13 @@ fn push_fan(
     if count > limits.array_length {
         return Err(limit("array_length", count));
     }
+    // The triangles of the file so far and of this face count against the limit before any is pushed.
+    let triangles = count - 2;
+    match len_u64(faces.len()).checked_add(triangles) {
+        Some(total) if total <= limits.array_length => {}
+        Some(total) => return Err(limit("array_length", total)),
+        None => return Err(limit("array_length", u64::MAX)),
+    }
     if count > 3 {
         loss.add(reasons::POLYGON_TRIANGULATED, "face", None, 1);
     }
@@ -653,6 +686,7 @@ fn build(
         name: String::new(),
         mesh,
         material: None,
+        preserved: Preserved::default(),
     }])
 }
 
@@ -722,6 +756,7 @@ pub fn read(data: &[u8], options: &mut ReadOptions<'_>) -> Result<ReadOutput> {
         scene: MeshScene {
             meshes,
             materials: Vec::new(),
+            ..MeshScene::default()
         },
         report,
     })
@@ -732,6 +767,10 @@ fn skip_element(
     element: &Element,
     control: &mut Control<'_>,
 ) -> Result<()> {
+    // Binary records without properties take no bytes, so there is nothing to read.
+    if element.record_bytes() == 0 && matches!(source.body, Body::Binary(_)) {
+        return Ok(());
+    }
     for _ in 0..element.count {
         source.begin()?;
         for property in &element.properties {
@@ -853,6 +892,7 @@ pub fn write(scene: &MeshScene, options: &mut WriteOptions<'_>) -> Result<WriteO
     Ok(WriteOutput {
         bytes: out,
         mtl: None,
+        buffer: None,
         report,
     })
 }
@@ -992,5 +1032,83 @@ fn write_face(out: &mut Vec<u8>, triangle: [u32; 3], offset: u64, format: Format
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, reason = "test code")]
+mod tests {
+    use arc_base::error::Value;
+
+    use super::*;
+
+    fn limit_name(error: &Error) -> Option<String> {
+        match error.arguments().get("limit") {
+            Some(Value::Text(name)) => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_total_of_triangles_counts_against_array_length_while_faces_are_read() {
+        // Each face has four corners, within the limit; two triangles each make the total exceed
+        // it on the third face. The trailing data must not be reached first: the limit fires while
+        // the faces are read, not after the body has been checked.
+        let limits = Limits {
+            array_length: 4,
+            ..Limits::DEFAULT
+        };
+        let ascii = b"ply\nformat ascii 1.0\nelement face 3\nproperty list uchar uint vertex_indices\nend_header\n4 0 1 2 3\n4 0 1 2 3\n4 0 1 2 3\njunk\n";
+        let error = read(ascii, &mut ReadOptions::with_limits(limits)).unwrap_err();
+        assert_eq!(error.code(), "io.limit_exceeded");
+        assert_eq!(limit_name(&error).as_deref(), Some("array_length"));
+
+        let mut binary = b"ply\nformat binary_little_endian 1.0\nelement face 3\nproperty list uchar uint vertex_indices\nend_header\n".to_vec();
+        for _ in 0..3 {
+            binary.extend_from_slice(&[4]);
+            for index in [0_u32, 1, 2, 3] {
+                binary.extend_from_slice(&index.to_le_bytes());
+            }
+        }
+        binary.push(0xFF);
+        let error = read(&binary, &mut ReadOptions::with_limits(limits)).unwrap_err();
+        assert_eq!(error.code(), "io.limit_exceeded");
+        assert_eq!(limit_name(&error).as_deref(), Some("array_length"));
+    }
+
+    #[test]
+    fn ascii_integers_are_range_checked_by_the_declared_type() {
+        for (ty, value) in [("uchar", "300"), ("uchar", "-5"), ("char", "128")] {
+            let text = format!(
+                "ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nproperty {ty} red\nend_header\n0 0 0 {value}\n"
+            );
+            let error = read(text.as_bytes(), &mut ReadOptions::default()).unwrap_err();
+            assert_eq!(error.code(), "io.mesh.value_invalid", "{ty} {value}");
+        }
+        let text = "ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nend_header\n0 0 0 255\n";
+        assert!(read(text.as_bytes(), &mut ReadOptions::default()).is_ok());
+    }
+
+    #[test]
+    fn a_binary_element_without_properties_is_counted_once_and_skipped() {
+        // Four billion records take no bytes: they are counted once against the record limit and
+        // skipped in constant time.
+        let data = b"ply\nformat binary_little_endian 1.0\nelement thing 4000000000\nend_header\n";
+        let limits = Limits {
+            record_count: 3,
+            ..Limits::DEFAULT
+        };
+        let output = read(data, &mut ReadOptions::with_limits(limits)).unwrap();
+        assert!(output.scene.meshes.is_empty());
+        let item = output
+            .report
+            .items
+            .iter()
+            .find(|item| item.record_kind.as_deref() == Some("thing"))
+            .unwrap();
+        assert_eq!(
+            item.arguments.get("count"),
+            Some(&crate::loss::Argument::Int(4_000_000_000))
+        );
     }
 }

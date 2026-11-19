@@ -66,11 +66,17 @@ pub enum Encoding {
 
 /// Options of the writers.
 pub struct WriteOptions<'a> {
-    /// The encoding; OBJ has only [`Encoding::Ascii`], STL has ASCII and little-endian binary.
+    /// The encoding; OBJ has only [`Encoding::Ascii`], STL has ASCII and little-endian binary, and
+    /// glTF has JSON (`Ascii`) and GLB (`BinaryLittleEndian`).
     pub encoding: Encoding,
     /// The name written in the `mtllib` statement of an OBJ file that has materials. No statement
     /// is written when `None`; the caller stores the MTL bytes under the name it chooses.
     pub mtl_name: Option<String>,
+    /// glTF only: the URI of the separate binary buffer. With `None` the buffer is embedded as a
+    /// data URI in the JSON (`Encoding::Ascii`) or stored in the GLB binary chunk
+    /// (`Encoding::BinaryLittleEndian`). With a name, the JSON refers to the buffer by it and the
+    /// bytes come back in `WriteOutput::buffer`; this needs `Encoding::Ascii`.
+    pub buffer_name: Option<String>,
     /// Cancelling it makes the write return `base.cancelled` before the next part.
     pub cancel: Cancel,
     /// Called at the start, every 1024 triangles and at the end.
@@ -82,6 +88,7 @@ impl Default for WriteOptions<'_> {
         Self {
             encoding: Encoding::Ascii,
             mtl_name: None,
+            buffer_name: None,
             cancel: Cancel::new(),
             progress: None,
         }
@@ -125,6 +132,8 @@ pub struct WriteOutput {
     pub bytes: Vec<u8>,
     /// The MTL bytes of an OBJ scene that has materials; `None` for the other formats.
     pub mtl: Option<Vec<u8>>,
+    /// The separate binary buffer of a glTF file written with `WriteOptions::buffer_name`.
+    pub buffer: Option<Vec<u8>>,
     /// The loss report.
     pub report: crate::loss::LossReport,
 }
