@@ -434,10 +434,12 @@ mod tests {
 
     #[test]
     fn numbering_inserts_the_index_before_the_extension() {
-        assert_eq!(numbered_path("/o/sheet.svg", 0, 1), "/o/sheet.svg");
-        assert_eq!(numbered_path("/o/sheet.svg", 0, 3), "/o/sheet-1.svg");
-        assert_eq!(numbered_path("/o/sheet.v2.png", 2, 3), "/o/sheet.v2-3.png");
-        assert_eq!(numbered_path("/o/sheet", 1, 2), "/o/sheet-2");
-        assert_eq!(numbered_path("/o.d/sheet", 1, 2), "/o.d/sheet-2");
+        // Windows joins the new name with its own separator; both separators are valid there.
+        let n = |path, index, count| numbered_path(path, index, count).replace('\\', "/");
+        assert_eq!(n("/o/sheet.svg", 0, 1), "/o/sheet.svg");
+        assert_eq!(n("/o/sheet.svg", 0, 3), "/o/sheet-1.svg");
+        assert_eq!(n("/o/sheet.v2.png", 2, 3), "/o/sheet.v2-3.png");
+        assert_eq!(n("/o/sheet", 1, 2), "/o/sheet-2");
+        assert_eq!(n("/o.d/sheet", 1, 2), "/o.d/sheet-2");
     }
 }
