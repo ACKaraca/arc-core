@@ -76,6 +76,7 @@ pub mod table;
 mod table_commands;
 pub mod text;
 pub mod text_layout;
+mod transform;
 pub mod types;
 pub mod validate;
 

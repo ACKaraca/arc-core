@@ -128,6 +128,13 @@ pub mod codes {
         category: Category::Conflict,
         message_id: "draft-viewport-locked",
     };
+    /// An entity cannot be transformed by the requested transform: its kind is not supported, or
+    /// the kind supports the transform only in some forms (`reason`).
+    pub const ENTITY_TRANSFORM_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "draft.entity.transform_unsupported",
+        category: Category::InvalidInput,
+        message_id: "draft-entity-transform-unsupported",
+    };
     /// The boundary of a wipeout is not a closed polyline.
     pub const WIPEOUT_BOUNDARY_OPEN: ErrorCode = ErrorCode {
         code: "draft.wipeout.boundary_open",
@@ -547,6 +554,7 @@ pub mod codes {
         LAYOUT_DUPLICATE,
         VIEWPORT_CLIP_INVALID,
         VIEWPORT_LOCKED,
+        ENTITY_TRANSFORM_UNSUPPORTED,
         WIPEOUT_BOUNDARY_OPEN,
         STYLE_PARENT_INVALID,
         PURGE_IN_USE,

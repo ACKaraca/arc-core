@@ -264,6 +264,12 @@ pub mod codes {
         category: Category::Conflict,
         message_id: "app-document-read-only",
     };
+    /// The file is open in another tab of the application, so it cannot be a save target here.
+    pub const DOCUMENT_HELD: ErrorCode = ErrorCode {
+        code: "app.document.held",
+        category: Category::Conflict,
+        message_id: "app-document-held",
+    };
     /// The document has no file to save in place.
     pub const DOCUMENT_NO_PATH: ErrorCode = ErrorCode {
         code: "app.document.no_path",
@@ -325,6 +331,7 @@ pub mod codes {
         FILE_UNSUPPORTED_TYPE,
         DOCUMENT_UNKNOWN,
         DOCUMENT_READ_ONLY,
+        DOCUMENT_HELD,
         DOCUMENT_NO_PATH,
         WINDOW_FAILED,
         WINDOW_SURFACE_FAILED,

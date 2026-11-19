@@ -46,6 +46,8 @@ app-product-unknown-type = The extractor { $id } names the object type { $type }
 app-file-unsupported-type = The file { $path } is not of a type this application can use.
 app-document-unknown = The document is not open.
 app-document-read-only = The file { $path } is open read-only and cannot be saved.
+app-document-held = The file { $path } is open in another tab and cannot be a save target here.
+app-document-unprotected = This document is not protected by recovery. Its unsaved changes are lost if the application stops; save it to keep them.
 app-document-no-path = The document has not been saved yet. Choose a file to save it to.
 
 app-banner-locked = { $user } on { $host } is editing this file with { $application }. It is open read-only.

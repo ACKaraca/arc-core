@@ -58,6 +58,9 @@ window = [
 ]
 
 [dev-dependencies]
+arc-draft = { workspace = true }
+# The drafting extraction of the render test.
+arc-gpu = { workspace = true, features = ["draft"] }
 arc-shell-sample = { workspace = true }
 proptest = { workspace = true }
 

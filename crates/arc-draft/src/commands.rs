@@ -113,6 +113,13 @@ const NAMES: &[Names] = &[
         },
     },
     Names {
+        id: "core.draft.entity.transform",
+        message_id: "draft-command-entity-transform",
+        description: Description {
+            message_id: "draft-command-entity-transform-description",
+        },
+    },
+    Names {
         id: "core.draft.entity.delete",
         message_id: "draft-command-entity-delete",
         description: Description {
@@ -1825,6 +1832,7 @@ pub fn register_commands(registry: &mut Registry) -> Result<()> {
         .chain(crate::hatch_commands::specs())
         .chain(crate::table_commands::specs())
         .chain(crate::array::specs())
+        .chain(crate::transform::specs())
     {
         registry.register(spec)?;
     }

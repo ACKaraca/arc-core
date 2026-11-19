@@ -15,7 +15,10 @@ use arc_command::ViewRequest;
 use arc_command::error::codes as command_codes;
 use arc_doc::{Object, Snapshot};
 use arc_geom::view::{Projection, ViewFrame};
-use arc_gpu::{Gpu, GpuSettings, RenderItem, RenderSettings, Renderer, Scene, SceneLimits};
+use arc_gpu::{
+    CurveShape, Extraction, ExtractionResult, Gpu, GpuSettings, Outcome, RenderItem,
+    RenderSettings, Renderer, Scene, SceneLimits,
+};
 use image::{ExtendedColorType, ImageEncoder};
 use serde_json::{Value, json};
 
@@ -32,6 +35,11 @@ const MARGIN: f64 = 1.1;
 /// returns an empty list. An error stops the render and is returned to its caller.
 pub type Extract = fn(&Snapshot, &Object) -> Result<Vec<RenderItem>>;
 
+/// The drawn objects of a snapshot as extractions, one per object, for drawings that need
+/// geometries (fills, outline text): for example `arc_gpu::draft::space_extractions`. An object
+/// that draws nothing is left out. An error stops the render and is returned to its caller.
+pub type Drawing = dyn Fn(&Snapshot) -> Result<Vec<(ObjectId, Extraction)>> + Send + Sync;
+
 /// A rendered view.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rendered {
@@ -43,28 +51,87 @@ pub struct Rendered {
     pub adapter: Value,
 }
 
-/// The smallest box around the points of the drawn line items, or `None` when nothing is drawn.
-fn extents(changes: &[(ObjectId, Vec<RenderItem>)]) -> Option<(Point3, Point3)> {
-    let points = changes
-        .iter()
-        .flat_map(|(_, items)| items)
-        .flat_map(|item| {
-            let RenderItem::Lines(line) = item else {
-                return Vec::new();
-            };
-            let origin = line.origin;
-            line.paths
-                .iter()
-                .flat_map(|path| &path.points)
-                .map(|[x, y, z]| origin + Vector3::new(f64::from(*x), f64::from(*y), f64::from(*z)))
-                .collect()
-        });
-    points.fold(None, |bounds, p| {
-        Some(match bounds {
-            None => (p, p),
-            Some((min, max)) => (min.inf(&p), max.sup(&p)),
-        })
+/// The box `(min, max)` around `points`, grown by each point in turn.
+fn include(bounds: Option<(Point3, Point3)>, p: Point3) -> Option<(Point3, Point3)> {
+    Some(match bounds {
+        None => (p, p),
+        Some((min, max)) => (min.inf(&p), max.sup(&p)),
     })
+}
+
+/// The smallest box around what the objects draw in their own planes: the points of line items,
+/// the points of curve items and the exact bounds of their curves (an arc's bulge included). Mesh
+/// items are not measured here; [`paint`] adds the bounds of their objects from the scene.
+fn extents(objects: &[(ObjectId, Extraction)]) -> Option<(Point3, Point3)> {
+    let mut bounds = None;
+    for (_, extraction) in objects {
+        for item in &extraction.items {
+            match item {
+                RenderItem::Lines(line) => {
+                    for path in &line.paths {
+                        for [x, y, z] in &path.points {
+                            let p = line.origin
+                                + Vector3::new(f64::from(*x), f64::from(*y), f64::from(*z));
+                            bounds = include(bounds, p);
+                        }
+                    }
+                }
+                RenderItem::Curves(curves) => {
+                    for path in &curves.paths {
+                        let corners = match &path.shape {
+                            CurveShape::Point(p) => vec![*p, *p],
+                            CurveShape::Curve(curve) => match curve.bounding_box() {
+                                Some(aabb) => vec![aabb.min(), aabb.max()],
+                                // Rays and lines are unbounded: they frame nothing.
+                                None => Vec::new(),
+                            },
+                        };
+                        for c in corners {
+                            let p = curves.origin + Vector3::new(c.x, c.y, 0.0);
+                            bounds = include(bounds, p);
+                        }
+                    }
+                }
+                RenderItem::Mesh(_) => {}
+            }
+        }
+    }
+    bounds
+}
+
+/// The view sphere of drawn content, for a view that looks down −z: `bounds` is the box of the
+/// curves, lines and points, `sphere` the bounding sphere of the mesh objects. Only the planar
+/// extent matters, so the center is the middle of the planar box holding both, and the radius
+/// reaches the farthest box corner and the far side of the sphere, measured in the plane. A sphere
+/// alone frames itself with its own radius.
+fn frame_of(
+    bounds: Option<(Point3, Point3)>,
+    sphere: Option<(Point3, f64)>,
+) -> Option<(Point3, f64)> {
+    let mut merged = bounds;
+    if let Some((center, radius)) = sphere {
+        let planar = Vector3::new(radius, radius, 0.0);
+        merged = include(merged, center - planar);
+        merged = include(merged, center + planar);
+    }
+    let (min, max) = merged?;
+    let center = min + (max - min) / 2.0;
+    let planar = |p: Point3| (p.x - center.x).hypot(p.y - center.y);
+    let mut radius: f64 = 0.0;
+    if let Some((low, high)) = bounds {
+        for corner in [
+            low,
+            high,
+            Point3::new(low.x, high.y, 0.0),
+            Point3::new(high.x, low.y, 0.0),
+        ] {
+            radius = radius.max(planar(corner));
+        }
+    }
+    if let Some((c, r)) = sphere {
+        radius = radius.max(planar(c) + r);
+    }
+    Some((center, radius))
 }
 
 /// The default view looking down −z at `center`, `height` model units tall.
@@ -79,28 +146,27 @@ fn top_view(center: Point3, height: f64) -> Result<ViewFrame> {
     )
 }
 
-/// The objects of a snapshot that draw something, with the extents of their lines.
-struct Drawn {
-    changes: Vec<(ObjectId, Vec<RenderItem>)>,
-    extents: Option<(Point3, Point3)>,
-}
-
-/// Runs `extract` on every object of `snapshot`. It runs before any device is created, so an
-/// extraction error creates none.
+/// Runs `extract` on every object of `snapshot` and keeps the objects that draw something. It
+/// runs before any device is created, so an extraction error creates none.
 ///
 /// # Errors
 ///
 /// The error of `extract`, unchanged.
-fn draw(snapshot: &Snapshot, extract: Extract) -> Result<Drawn> {
-    let mut changes = Vec::new();
+fn draw(snapshot: &Snapshot, extract: Extract) -> Result<Vec<(ObjectId, Extraction)>> {
+    let mut objects = Vec::new();
     for (_, object) in snapshot.iter() {
         let items = extract(snapshot, object)?;
         if !items.is_empty() {
-            changes.push((object.id, items));
+            objects.push((
+                object.id,
+                Extraction {
+                    items,
+                    ..Extraction::default()
+                },
+            ));
         }
     }
-    let extents = extents(&changes);
-    Ok(Drawn { changes, extents })
+    Ok(objects)
 }
 
 /// Renders the default view of `snapshot` at `width` by `height` pixels, drawing what `extract`
@@ -111,30 +177,67 @@ fn draw(snapshot: &Snapshot, extract: Extract) -> Result<Drawn> {
 /// The error of `extract`, the `gpu.*` errors of adapter selection and rendering, and
 /// `cmd.path.io` when the PNG cannot be encoded.
 pub fn render(snapshot: &Snapshot, extract: Extract, width: u32, height: u32) -> Result<Rendered> {
-    let drawn = draw(snapshot, extract)?;
+    let objects = draw(snapshot, extract)?;
     let gpu = Gpu::new(&GpuSettings::default())?;
-    paint(&gpu, drawn, width, height)
+    paint(&gpu, objects, width, height)
 }
 
-/// Draws `drawn` on `gpu` as the default view at `width` by `height` pixels, and encodes it.
-fn paint(gpu: &Gpu, drawn: Drawn, width: u32, height: u32) -> Result<Rendered> {
-    let Drawn { changes, extents } = drawn;
-    let objects = changes.len();
+/// Renders the default view of the objects `drawing` returns for `snapshot`, on a new device.
+/// The frame covers the exact bounds of curves and the bounds of meshes.
+///
+/// # Errors
+///
+/// The error of `drawing`, the `gpu.*` errors of adapter selection and rendering, and
+/// `cmd.path.io` when the PNG cannot be encoded.
+pub fn render_drawing(
+    snapshot: &Snapshot,
+    drawing: &Drawing,
+    width: u32,
+    height: u32,
+) -> Result<Rendered> {
+    let objects = drawing(snapshot)?;
+    let gpu = Gpu::new(&GpuSettings::default())?;
+    paint(&gpu, objects, width, height)
+}
+
+/// Draws `objects` on `gpu` as the default view at `width` by `height` pixels, and encodes it.
+fn paint(
+    gpu: &Gpu,
+    objects: Vec<(ObjectId, Extraction)>,
+    width: u32,
+    height: u32,
+) -> Result<Rendered> {
+    let count = objects.len();
+    let bounds = extents(&objects);
+    let meshed: Vec<ObjectId> = objects
+        .iter()
+        .filter(|(_, e)| e.items.iter().any(|i| matches!(i, RenderItem::Mesh(_))))
+        .map(|(id, _)| *id)
+        .collect();
+    let results = objects
+        .into_iter()
+        .enumerate()
+        .map(|(sequence, (object, extraction))| ExtractionResult {
+            object,
+            revision: 0,
+            sequence: sequence as u64,
+            outcome: Outcome::Items(extraction),
+        })
+        .collect();
     let mut scene = Scene::new(gpu, SceneLimits::DEFAULT)?;
-    scene.update(changes)?;
+    if let Some((_, error)) = scene.apply_extractions(results).failed.into_iter().next() {
+        return Err(error);
+    }
+    let sphere = scene.bounding_sphere(Some(&meshed));
     let aspect = f64::from(width.max(1)) / f64::from(height.max(1));
-    let frame = match extents {
-        Some((min, max)) => {
-            let center = min + (max - min) / 2.0;
-            let radius = (max - min).norm() / 2.0;
-            arc_gpu::navigation::zoom_to_sphere(
-                &top_view(center, 1.0)?,
-                &center,
-                radius * MARGIN,
-                aspect,
-                &Tolerance::DEFAULT,
-            )?
-        }
+    let frame = match frame_of(bounds, sphere) {
+        Some((center, radius)) => arc_gpu::navigation::zoom_to_sphere(
+            &top_view(center, 1.0)?,
+            &center,
+            radius * MARGIN,
+            aspect,
+            &Tolerance::DEFAULT,
+        )?,
         None => top_view(Point3::origin(), 10.0)?,
     };
     let settings = RenderSettings {
@@ -149,7 +252,7 @@ fn paint(gpu: &Gpu, drawn: Drawn, width: u32, height: u32) -> Result<Rendered> {
     let report = gpu.report();
     Ok(Rendered {
         png,
-        objects,
+        objects: count,
         adapter: json!({"name": report.name, "software": report.software, "fallback": report.fallback}),
     })
 }
@@ -161,9 +264,8 @@ fn paint(gpu: &Gpu, drawn: Drawn, width: u32, height: u32) -> Result<Rendered> {
 /// The renderer keeps one device, created by the first render that needs it, and renders one image
 /// at a time: a render waits for the one in progress. A failed device creation is not kept; the
 /// next render tries again.
-#[derive(Debug)]
 pub struct SnapshotRenderer {
-    extract: Extract,
+    source: Source,
     /// The device between renders. A render takes it out, so the lock also serializes renders; a
     /// render that fails or panics leaves none, and the next one creates a device.
     gpu: Mutex<Option<Gpu>>,
@@ -172,12 +274,47 @@ pub struct SnapshotRenderer {
     devices: AtomicUsize,
 }
 
+/// What a snapshot renderer draws: the objects of a per-object function, or a drawing.
+enum Source {
+    Objects(Extract),
+    Drawing(Box<Drawing>),
+}
+
+impl Source {
+    fn objects(&self, snapshot: &Snapshot) -> Result<Vec<(ObjectId, Extraction)>> {
+        match self {
+            Self::Objects(extract) => draw(snapshot, *extract),
+            Self::Drawing(drawing) => drawing(snapshot),
+        }
+    }
+}
+
+impl std::fmt::Debug for SnapshotRenderer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotRenderer").finish_non_exhaustive()
+    }
+}
+
 impl SnapshotRenderer {
     /// A renderer drawing with `extract`.
     #[must_use]
     pub fn new(extract: Extract) -> Self {
+        Self::from_source(Source::Objects(extract))
+    }
+
+    /// A renderer drawing what `drawing` returns: extractions with geometries, such as the
+    /// drafting extraction of `arc_gpu::draft`. The closure is called with the snapshot of each
+    /// request.
+    #[must_use]
+    pub fn with_drawing(
+        drawing: impl Fn(&Snapshot) -> Result<Vec<(ObjectId, Extraction)>> + Send + Sync + 'static,
+    ) -> Self {
+        Self::from_source(Source::Drawing(Box::new(drawing)))
+    }
+
+    fn from_source(source: Source) -> Self {
         Self {
-            extract,
+            source,
             gpu: Mutex::new(None),
             #[cfg(test)]
             devices: AtomicUsize::new(0),
@@ -212,7 +349,7 @@ impl arc_command::ViewRenderer for SnapshotRenderer {
         // The lock covers the extraction too, so renders never overlap; the device is created only
         // after the extraction succeeded.
         let mut slot = self.gpu.lock().unwrap_or_else(PoisonError::into_inner);
-        let drawn = draw(request.snapshot, self.extract)?;
+        let objects = self.source.objects(request.snapshot)?;
         let gpu = match slot.take() {
             Some(gpu) => gpu,
             None => {
@@ -222,7 +359,7 @@ impl arc_command::ViewRenderer for SnapshotRenderer {
                 gpu
             }
         };
-        let rendered = paint(&gpu, drawn, request.width, request.height);
+        let rendered = paint(&gpu, objects, request.width, request.height);
         *slot = Some(gpu);
         Ok(rendered?.png)
     }
@@ -235,6 +372,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use arc_base::id::Identifier;
+    use arc_base::math::Vector2;
     use arc_command::{ViewRenderer, ViewRequest};
     use arc_doc::graph::Evaluators;
     use arc_doc::{Document, Header, Schema, SchemaVersion, TypeDecl, TypeKey, TypeRegistry};
@@ -320,6 +458,58 @@ mod tests {
 
     fn failing(_: &Snapshot, _: &Object) -> Result<Vec<RenderItem>> {
         Err(Error::new(command_codes::RENDER_UNSUPPORTED).with_detail("feature", "extraction"))
+    }
+
+    #[test]
+    fn the_frame_of_a_mesh_sphere_is_that_sphere_and_a_box_keeps_its_half_diagonal() {
+        let center = Point3::new(1.0, 2.0, 0.0);
+        let (c, r) = frame_of(None, Some((center, 3.0))).unwrap();
+        assert!(
+            (c - center).norm() < 1e-9 && (r - 3.0).abs() < 1e-9,
+            "{c:?} {r}"
+        );
+        let (c, r) =
+            frame_of(Some((Point3::origin(), Point3::new(10.0, 10.0, 0.0))), None).unwrap();
+        assert!((c.x - 5.0).abs() < 1e-9 && (c.y - 5.0).abs() < 1e-9);
+        assert!((r - 50f64.sqrt()).abs() < 1e-9, "{r}");
+    }
+
+    #[test]
+    fn extents_of_an_arc_include_its_bulge_and_unbounded_lines_frame_nothing() {
+        use arc_base::math::Point2;
+        use arc_geom::{Arc2, Curve2, Ray2};
+        use arc_gpu::{CurveItem, CurvePath, LineStyle, LineWidth};
+        let arc =
+            Curve2::Arc(Arc2::new(Point2::origin(), 5.0, 0.0, 1.5 * std::f64::consts::PI).unwrap());
+        let ray = Curve2::Ray(Ray2::new(Point2::new(100.0, 100.0), Vector2::x()).unwrap());
+        let item = |curve| {
+            RenderItem::Curves(CurveItem {
+                origin: Point3::origin(),
+                paths: vec![CurvePath::curve(curve)],
+                style: LineStyle::round(LineWidth::Screen(1.0)),
+                color: Color::WHITE,
+                pattern: None,
+                clip: None,
+            })
+        };
+        let objects = vec![(
+            ObjectId::from_u128(1),
+            Extraction {
+                items: vec![item(arc), item(ray)],
+                ..Extraction::default()
+            },
+        )];
+        let (min, max) = extents(&objects).unwrap();
+        // The quarter turn missing from the sweep ends at (0, 0) and (5, 0); the sweep reaches
+        // (−5, 0), (0, 5) and (0, −5), so the box is the full square of the circle.
+        assert!(
+            (min.x + 5.0).abs() < 1e-9 && (min.y + 5.0).abs() < 1e-9,
+            "{min:?}"
+        );
+        assert!(
+            (max.x - 5.0).abs() < 1e-9 && (max.y - 5.0).abs() < 1e-9,
+            "{max:?}"
+        );
     }
 
     #[test]

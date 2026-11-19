@@ -11,6 +11,7 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_base::error::Value;
 use arc_base::{DocumentId, Error, IdGenerator, Limits, Result, SessionId};
@@ -20,7 +21,7 @@ use arc_doc::package::{Access, Metadata, Mode, Package, ReadOnlyCause};
 use arc_doc::{Document, DocumentConfig, LoadOptions};
 
 use crate::codes;
-use crate::product::Product;
+use crate::product::{NativeFormat, Product};
 use crate::recent::RecentFiles;
 use crate::settings::SettingsStore;
 
@@ -97,6 +98,9 @@ pub struct Tab {
     id: TabId,
     path: Option<PathBuf>,
     package: Option<Package>,
+    /// The product's own format the document was opened with, and saves through; `None` for a
+    /// package document. A native document has no edit lock and no recovery journal.
+    format: Option<Arc<NativeFormat>>,
     document: Document,
     journal: Option<Arc<RecoveryJournal>>,
     /// The revision of the saved state; `None` when the state was never saved (a recovered
@@ -485,6 +489,7 @@ impl Application {
             id: TabId(0),
             path: None,
             package: None,
+            format: None,
             document,
             journal,
             saved_revision: Some(revision),
@@ -512,12 +517,19 @@ impl Application {
     /// arguments `version` and `current`, for a newer format major version, which is refused)
     /// and of [`Package::open_document`]. Nothing is opened on an error.
     pub fn open(&mut self, path: &Path) -> Result<TabId> {
-        if let Some(tab) = self.tabs.iter().find(|t| t.path.as_deref() == Some(path)) {
+        if let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|t| t.path.as_deref().is_some_and(|p| same_file(p, path)))
+        {
             let id = tab.id;
             self.active = Some(id);
             return Ok(id);
         }
         self.require_type(path, false)?;
+        if let Some(format) = self.product.opener(path).cloned() {
+            return self.open_native(path, format);
+        }
         let core = self.product.headless();
         let package = Package::open(path, Mode::Edit(&core.owner), &self.limits)?;
         let session = self.ids.generate();
@@ -544,10 +556,32 @@ impl Application {
             id: TabId(0),
             path: Some(path.to_path_buf()),
             package: Some(package),
+            format: None,
             document,
             journal,
             saved_revision: Some(revision),
             banners,
+            views: Vec::new(),
+        }))
+    }
+
+    /// Opens a file of the product's own format as a new tab: the product's reader makes the
+    /// document, which is clean. The path moves to the front of the recent files.
+    fn open_native(&mut self, path: &Path, format: Arc<NativeFormat>) -> Result<TabId> {
+        let session = self.ids.generate();
+        let config = self.document_config(session);
+        let document = format.read(path, config)?;
+        let revision = document.snapshot().revision();
+        self.recent.touch(path);
+        Ok(self.push(Tab {
+            id: TabId(0),
+            path: Some(path.to_path_buf()),
+            package: None,
+            format: Some(format),
+            document,
+            journal: None,
+            saved_revision: Some(revision),
+            banners: vec![unprotected_banner()],
             views: Vec::new(),
         }))
     }
@@ -611,6 +645,20 @@ impl Application {
     /// of [`Package::save_document`].
     pub fn save(&mut self, id: TabId) -> Result<()> {
         let at = self.index(id)?;
+        if let Some(format) = self.tabs.get(at).and_then(|t| t.format.clone()) {
+            let path = self
+                .tabs
+                .get(at)
+                .and_then(|t| t.path.clone())
+                .ok_or_else(no_path)?;
+            self.require_type(&path, true)?;
+            let tab = self.tabs.get_mut(at).ok_or_else(no_path)?;
+            let revision = tab.document.snapshot().revision();
+            write_native(&format, &tab.document, &path)?;
+            tab.saved_revision = Some(revision);
+            self.recent.touch(&path);
+            return Ok(());
+        }
         let tab = self.tabs.get_mut(at).ok_or_else(no_path)?;
         let Some(package) = tab.package.as_mut() else {
             return Err(no_path());
@@ -651,10 +699,28 @@ impl Application {
     /// the errors of [`Package::create`], [`Package::open`] and [`Package::save_document`].
     pub fn save_as(&mut self, id: TabId, target: &Path) -> Result<()> {
         let at = self.index(id)?;
-        if self.tabs.get(at).and_then(|t| t.path.as_deref()) == Some(target) {
+        if self
+            .tabs
+            .get(at)
+            .and_then(|t| t.path.as_deref())
+            .is_some_and(|p| same_file(p, target))
+        {
             return self.save(id);
         }
+        if self
+            .tabs
+            .iter()
+            .any(|t| t.id != id && t.path.as_deref().is_some_and(|p| same_file(p, target)))
+        {
+            return Err(Error::new(codes::DOCUMENT_HELD).with_arg("path", path_arg(target)));
+        }
         self.require_type(target, true)?;
+        if let Some(format) = self.product.opener(target).cloned() {
+            return self.save_as_native(at, target, &format);
+        }
+        if self.tabs.get(at).is_some_and(|t| t.format.is_some()) {
+            return Err(unsupported_path(target));
+        }
         let owner = self.product.headless().owner.clone();
         let tab = self.tabs.get(at).ok_or_else(no_path)?;
         let metadata = match &tab.package {
@@ -705,6 +771,34 @@ impl Application {
         tab.saved_revision = Some(revision);
         tab.banners = banners;
         self.tabs.insert(at, tab);
+        self.recent.touch(target);
+        Ok(())
+    }
+
+    /// Saves tab `at` to `target`, which has the product's own format: a native tab, or a new
+    /// document that was never saved, is written by the product's writer and becomes a native tab
+    /// (its recovery journal is discarded, since the file now holds the changes). A package
+    /// document is refused with `app.file.unsupported_type`.
+    fn save_as_native(
+        &mut self,
+        at: usize,
+        target: &Path,
+        format: &Arc<NativeFormat>,
+    ) -> Result<()> {
+        let tab = self.tabs.get(at).ok_or_else(no_path)?;
+        if tab.format.is_none() && tab.package.is_some() {
+            return Err(unsupported_path(target));
+        }
+        let revision = tab.document.snapshot().revision();
+        write_native(format, &tab.document, target)?;
+        let tab = self.tabs.get_mut(at).ok_or_else(no_path)?;
+        if let Some(journal) = tab.journal.take() {
+            journal.discard();
+        }
+        tab.path = Some(target.to_path_buf());
+        tab.format = Some(Arc::clone(format));
+        tab.saved_revision = Some(revision);
+        tab.banners = vec![unprotected_banner()];
         self.recent.touch(target);
         Ok(())
     }
@@ -817,6 +911,7 @@ impl Application {
             id: TabId(0),
             path: package.as_ref().map(|p| p.path().to_path_buf()),
             package,
+            format: None,
             document: recovered.document,
             journal: Some(recovered.journal),
             saved_revision: None,
@@ -832,6 +927,69 @@ impl Application {
     pub fn discard_recovery(&self, orphan: &Orphan) -> Result<()> {
         recovery::discard(orphan)
     }
+}
+
+/// The banner of a native document: it has no recovery journal, so its unsaved changes are lost
+/// if the application stops.
+fn unprotected_banner() -> Banner {
+    Banner {
+        message_id: "app-document-unprotected",
+        arguments: BTreeMap::new(),
+    }
+}
+
+/// The identity of `path` for comparisons: its canonical form. A file that does not exist yet
+/// takes the canonical form of its directory; a path that cannot be canonicalized is kept as given.
+/// Two paths name the same file when their identities are equal.
+fn identity(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    if let (Some(name), Some(parent)) = (path.file_name(), path.parent()) {
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        if let Ok(directory) = std::fs::canonicalize(parent) {
+            return directory.join(name);
+        }
+    }
+    path.to_path_buf()
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b || identity(a) == identity(b)
+}
+
+/// Writes a native document to `target` through the writer of `format`. The writer gets a
+/// temporary path beside the target; on success the file is renamed over the target, on failure
+/// the temporary file is removed and the target is left as it was. The rename is a plain rename on
+/// every platform: the package writer's retry on Windows is not shared with this crate.
+fn write_native(format: &NativeFormat, document: &Document, target: &Path) -> Result<()> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let name = target.file_name().map_or_else(
+        || "document".to_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let temp = target.with_file_name(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (format.writer())(document, &temp).and_then(|()| {
+        std::fs::rename(&temp, target).map_err(|_| {
+            Error::new(arc_command::error::codes::PATH_IO).with_detail("reason", "rename")
+        })
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+fn unsupported_path(path: &Path) -> Error {
+    Error::new(codes::FILE_UNSUPPORTED_TYPE).with_arg("path", path_arg(path))
 }
 
 fn no_path() -> Error {

@@ -35,10 +35,81 @@ fn parse_tag(text: &str) -> Option<LanguageIdentifier> {
     base.parse().ok()
 }
 
-/// Parsed catalogs by language.
+/// The Fluent catalogs of the messages the reference shell formats with, for every shipped
+/// locale: the sources of the crates' catalogs in `locales/`, concatenated per locale. A product
+/// starts from [`shell_catalogs`] and adds its own with [`Catalogs::append`].
+pub const SHELL_CATALOGS: &[(&str, &str)] = &[
+    (
+        "en-US",
+        concat!(
+            include_str!("../../../locales/en-US/arc-app.ftl"),
+            include_str!("../../../locales/en-US/arc-ui.ftl"),
+            include_str!("../../../locales/en-US/arc-command.ftl"),
+            include_str!("../../../locales/en-US/arc-doc.ftl"),
+            include_str!("../../../locales/en-US/arc-gpu.ftl"),
+            include_str!("../../../locales/en-US/arc-base.ftl"),
+            include_str!("../../../locales/en-US/arc-shell.ftl"),
+        ),
+    ),
+    (
+        "tr-TR",
+        concat!(
+            include_str!("../../../locales/tr-TR/arc-app.ftl"),
+            include_str!("../../../locales/tr-TR/arc-ui.ftl"),
+            include_str!("../../../locales/tr-TR/arc-command.ftl"),
+            include_str!("../../../locales/tr-TR/arc-doc.ftl"),
+            include_str!("../../../locales/tr-TR/arc-gpu.ftl"),
+            include_str!("../../../locales/tr-TR/arc-base.ftl"),
+            include_str!("../../../locales/tr-TR/arc-shell.ftl"),
+        ),
+    ),
+];
+
+/// A catalog set holding the shell's messages for every shipped locale (see [`SHELL_CATALOGS`]).
+/// A syntax error in any of them fails: use [`shell_catalogs_with_fallback`] at run time.
+///
+/// # Errors
+/// `app.locale.catalog_invalid` when a catalog does not parse.
+pub fn shell_catalogs() -> Result<Catalogs> {
+    let mut catalogs = Catalogs::new();
+    for (tag, source) in SHELL_CATALOGS {
+        catalogs.add(tag, source)?;
+    }
+    Ok(catalogs)
+}
+
+/// The shell's catalogs for a run, where a shipped language whose catalog does not parse is left
+/// out rather than failing the start: English must parse, and every other language that fails
+/// is returned with its error, so the caller can report it and that language falls back to
+/// English. The shell's own tests use [`shell_catalogs`], which fails on any error.
+///
+/// # Errors
+/// The error of the `en-US` catalog, when it does not parse.
+pub fn shell_catalogs_with_fallback() -> Result<(Catalogs, Vec<(&'static str, Error)>)> {
+    catalogs_from(SHELL_CATALOGS)
+}
+
+fn catalogs_from(
+    sources: &[(&'static str, &str)],
+) -> Result<(Catalogs, Vec<(&'static str, Error)>)> {
+    let mut catalogs = Catalogs::new();
+    let mut skipped = Vec::new();
+    for (tag, source) in sources {
+        match catalogs.add(tag, source) {
+            Ok(()) => {}
+            Err(error) if *tag == FALLBACK => return Err(error),
+            Err(error) => skipped.push((*tag, error)),
+        }
+    }
+    Ok((catalogs, skipped))
+}
+
+/// Parsed catalogs by language. A language holds one or more resources: [`Catalogs::add`]
+/// replaces them, [`Catalogs::append`] adds one. Where two resources define a message, the one
+/// appended last wins (see [`Catalogs::append`]).
 #[derive(Default)]
 pub struct Catalogs {
-    map: BTreeMap<LanguageIdentifier, Arc<FluentResource>>,
+    map: BTreeMap<LanguageIdentifier, Vec<Arc<FluentResource>>>,
 }
 
 impl std::fmt::Debug for Catalogs {
@@ -60,6 +131,25 @@ impl Catalogs {
     /// `app.locale.invalid_tag`, `app.locale.catalog_too_large` or
     /// `app.locale.catalog_invalid` (any syntax error rejects the whole catalog).
     pub fn add(&mut self, tag: &str, source: &str) -> Result<()> {
+        let (locale, resource) = Self::parse(tag, source)?;
+        self.map.insert(locale, vec![resource]);
+        Ok(())
+    }
+
+    /// Parses and adds a catalog of `tag` beside the ones the language already has. A message
+    /// that the earlier resources define is overridden: the definition of the resource appended
+    /// last is the one formatted. Within one catalog a repeated message keeps its first
+    /// definition.
+    ///
+    /// # Errors
+    /// The errors of [`Catalogs::add`].
+    pub fn append(&mut self, tag: &str, source: &str) -> Result<()> {
+        let (locale, resource) = Self::parse(tag, source)?;
+        self.map.entry(locale).or_default().push(resource);
+        Ok(())
+    }
+
+    fn parse(tag: &str, source: &str) -> Result<(LanguageIdentifier, Arc<FluentResource>)> {
         let locale: LanguageIdentifier = tag
             .parse()
             .map_err(|_| Error::new(codes::LOCALE_INVALID_TAG).with_arg("tag", tag))?;
@@ -71,8 +161,7 @@ impl Catalogs {
                 .with_arg("tag", tag)
                 .with_detail("errors", i64::try_from(errors.len()).unwrap_or(i64::MAX))
         })?;
-        self.map.insert(locale, Arc::new(resource));
-        Ok(())
+        Ok((locale, Arc::new(resource)))
     }
 
     /// The languages that have a catalog.
@@ -190,15 +279,18 @@ impl Localizer {
         order.extend([sibling, fallback_id()]);
         let mut chain: Vec<(LanguageIdentifier, FluentBundle<Arc<FluentResource>>)> = Vec::new();
         for id in order {
-            let Some(resource) = self.catalogs.map.get(&id) else {
+            let Some(resources) = self.catalogs.map.get(&id) else {
                 continue;
             };
             if chain.iter().any(|(seen, _)| *seen == id) {
                 continue;
             }
             let mut bundle = FluentBundle::new_concurrent(vec![id.clone()]);
-            // A duplicate message in one catalog keeps the first definition; not an error here.
-            let _ = bundle.add_resource(Arc::clone(resource));
+            // Fluent keeps the first definition of a message, so the last appended resource is
+            // added first and its definitions win over the earlier ones.
+            for resource in resources.iter().rev() {
+                let _ = bundle.add_resource(Arc::clone(resource));
+            }
             chain.push((id, bundle));
         }
         self.active = selection.locale.clone();
@@ -390,6 +482,72 @@ mod tests {
         let l = Localizer::new(c, &[]).unwrap();
         let e = Error::new(codes::SETTINGS_UNKNOWN_KEY).with_arg("key", "a.b");
         assert_eq!(plain(&l.format_error(&e)), "Unknown setting a.b.");
+    }
+
+    #[test]
+    fn a_product_catalog_set_formats_shell_messages_in_en_us_and_tr_tr() {
+        // The product appends its own catalog to the shell's, per locale.
+        let product = |greeting: &str| format!("product-greeting = {greeting}\n");
+        let build = || -> Catalogs {
+            let mut catalogs = shell_catalogs().unwrap();
+            catalogs
+                .append("en-US", &product("Hello from the product"))
+                .unwrap();
+            catalogs
+                .append("tr-TR", &product("Üründen merhaba"))
+                .unwrap();
+            catalogs
+        };
+        let english = Localizer::new(build(), &["en-US".to_owned()]).unwrap();
+        assert_eq!(plain(&english.format("shell-title", &[])), "Arc Shell");
+        assert_eq!(
+            plain(&english.format("product-greeting", &[])),
+            "Hello from the product"
+        );
+        let turkish = Localizer::new(build(), &["tr-TR".to_owned()]).unwrap();
+        assert_eq!(plain(&turkish.format("shell-title", &[])), "Arc Kabuğu");
+        assert_eq!(
+            plain(&turkish.format("shell-panel-settings", &[])),
+            "Ayarlar"
+        );
+        assert_eq!(
+            plain(&turkish.format("product-greeting", &[])),
+            "Üründen merhaba"
+        );
+    }
+
+    #[test]
+    fn a_later_appended_catalog_overrides_an_earlier_message() {
+        let mut catalogs = shell_catalogs().unwrap();
+        catalogs
+            .append("en-US", "shell-title = Product title\n")
+            .unwrap();
+        let localizer = Localizer::new(catalogs, &["en-US".to_owned()]).unwrap();
+        assert_eq!(
+            plain(&localizer.format("shell-title", &[])),
+            "Product title"
+        );
+        assert_eq!(
+            plain(&localizer.format("shell-panel-settings", &[])),
+            "Settings",
+            "messages the product does not define keep the shell's text"
+        );
+    }
+
+    #[test]
+    fn a_broken_shipped_language_is_left_out_and_english_must_parse() {
+        let sources: &[(&str, &str)] = &[
+            ("en-US", "shell-title = Arc Shell\n"),
+            ("tr-TR", "shell-title = Kabuk\nbroken = {\n"),
+        ];
+        let (catalogs, skipped) = catalogs_from(sources).unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].0, "tr-TR");
+        assert_eq!(skipped[0].1.code(), "app.locale.catalog_invalid");
+        let localizer = Localizer::new(catalogs, &["tr-TR".to_owned()]).unwrap();
+        assert_eq!(plain(&localizer.format("shell-title", &[])), "Arc Shell");
+        let broken_english: &[(&str, &str)] = &[("en-US", "broken = {\n")];
+        assert!(catalogs_from(broken_english).is_err());
     }
 
     #[test]

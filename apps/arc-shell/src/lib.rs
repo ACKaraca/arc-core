@@ -261,24 +261,33 @@ pub fn localizer(requested: &[String]) -> Result<arc_app::locale::Localizer> {
     arc_app::locale::Localizer::new(catalogs()?, requested)
 }
 
-/// The crates' English catalogs, to which callers may add other languages.
+/// The localizer for the requested languages, and one line per shipped language whose catalog did
+/// not parse: that language is left out, so its messages fall back to English, and the caller
+/// reports the lines.
+///
+/// # Errors
+/// `app.locale.catalog_invalid` when the English catalog does not parse.
+pub fn localizer_with_report(
+    requested: &[String],
+) -> Result<(arc_app::locale::Localizer, Vec<String>)> {
+    let (catalogs, skipped) = arc_app::locale::shell_catalogs_with_fallback()?;
+    let report = skipped
+        .iter()
+        .map(|(tag, error)| format!("{tag}: {}", error.code()))
+        .collect();
+    Ok((
+        arc_app::locale::Localizer::new(catalogs, requested)?,
+        report,
+    ))
+}
+
+/// The shell's message catalogs for every shipped locale, from
+/// [`arc_app::locale::shell_catalogs`]; callers may append their own catalogs.
 ///
 /// # Errors
 /// `app.locale.catalog_invalid` when a catalog does not parse.
 pub fn catalogs() -> Result<arc_app::locale::Catalogs> {
-    let mut catalogs = arc_app::locale::Catalogs::new();
-    let english = [
-        include_str!("../../../locales/en-US/arc-app.ftl"),
-        include_str!("../../../locales/en-US/arc-ui.ftl"),
-        include_str!("../../../locales/en-US/arc-command.ftl"),
-        include_str!("../../../locales/en-US/arc-doc.ftl"),
-        include_str!("../../../locales/en-US/arc-gpu.ftl"),
-        include_str!("../../../locales/en-US/arc-base.ftl"),
-        include_str!("../../../locales/en-US/arc-shell.ftl"),
-    ]
-    .concat();
-    catalogs.add("en-US", &english)?;
-    Ok(catalogs)
+    arc_app::locale::shell_catalogs()
 }
 
 /// A message of the shell.

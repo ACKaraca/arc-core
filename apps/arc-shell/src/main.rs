@@ -140,6 +140,24 @@ fn run_directory(data: &Path, localizer: &Localizer) -> Option<PathBuf> {
 }
 
 /// Runs the shell; the error is the start-up failure as a line for standard error.
+/// The localizer for the requested languages; a shipped language whose catalog does not parse is
+/// reported on standard error and left out.
+fn reported_localizer(requested: &[String]) -> Result<arc_app::locale::Localizer, Error> {
+    let (localizer, skipped) = arc_shell::localizer_with_report(requested)?;
+    for line in &skipped {
+        let _ = writeln!(
+            std::io::stderr(),
+            "arc-shell: catalog skipped, its messages fall back to English: {line}"
+        );
+    }
+    Ok(localizer)
+}
+
+/// The English localizer for errors raised before the user's language is known.
+fn fallback_localizer() -> Option<arc_app::locale::Localizer> {
+    arc_shell::localizer_with_report(&[]).ok().map(|(l, _)| l)
+}
+
 fn start() -> Result<(), String> {
     let fail = |e: Error| arc_shell::describe(&e, None);
     let owner = LockOwner {
@@ -152,8 +170,8 @@ fn start() -> Result<(), String> {
         .iter()
         .filter_map(|n| std::env::var(n).ok())
         .collect();
-    let localizer = arc_shell::localizer(&os_locales).map_err(fail)?;
-    let with = |e: Error| arc_shell::describe(&e, arc_shell::localizer(&[]).ok().as_ref());
+    let localizer = reported_localizer(&os_locales).map_err(fail)?;
+    let with = |e: Error| arc_shell::describe(&e, fallback_localizer().as_ref());
     let dir = data_dir();
     std::fs::create_dir_all(&dir).map_err(|e| {
         with(

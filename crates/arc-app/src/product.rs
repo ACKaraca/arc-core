@@ -8,7 +8,7 @@
 //! whose [`Factory`] the windowed shell calls and downcasts to its own types.
 
 use std::any::Any;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -16,9 +16,9 @@ use arc_base::{Error, Result};
 use arc_command::Registry;
 use arc_command::headless;
 use arc_command::{Clock, ViewRenderer};
-use arc_doc::TypeRegistry;
 use arc_doc::graph::Evaluators;
 use arc_doc::package::LockOwner;
+use arc_doc::{Document, DocumentConfig, TypeRegistry};
 
 use crate::codes;
 use crate::settings::{Setting, SettingsRegistry};
@@ -95,6 +95,51 @@ pub struct FileType {
     pub save: bool,
 }
 
+/// The reader of a product's own format: the document of a file, made with the configuration the
+/// application gives a document.
+type NativeOpen = dyn Fn(&Path, DocumentConfig) -> Result<Document> + Send + Sync;
+
+/// The writer of a product's own format: a document to a file.
+type NativeSave = dyn Fn(&Document, &Path) -> Result<()> + Send + Sync;
+
+/// A product's own file format, opened and saved by the product's functions instead of the
+/// package format. Registered with [`ProductBuilder::opener`] for one extension.
+pub struct NativeFormat {
+    open: Box<NativeOpen>,
+    save: Arc<NativeSave>,
+}
+
+impl NativeFormat {
+    /// A format whose files `open` reads into a document (it gets the configuration the
+    /// application makes for a document: identifiers, session and limits) and whose documents
+    /// `save` writes to a path. The application never saves a native document to a package.
+    pub fn new(
+        open: impl Fn(&Path, DocumentConfig) -> Result<Document> + Send + Sync + 'static,
+        save: impl Fn(&Document, &Path) -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            open: Box::new(open),
+            save: Arc::new(save),
+        }
+    }
+
+    /// Reads the document at `path`.
+    pub(crate) fn read(&self, path: &Path, config: DocumentConfig) -> Result<Document> {
+        (self.open)(path, config)
+    }
+
+    /// The save function, shared with the tabs that opened this format.
+    pub(crate) fn writer(&self) -> Arc<NativeSave> {
+        Arc::clone(&self.save)
+    }
+}
+
+impl std::fmt::Debug for NativeFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeFormat").finish_non_exhaustive()
+    }
+}
+
 /// A product as the application runs it: the headless product and the application-only
 /// registrations.
 pub struct Product {
@@ -105,6 +150,7 @@ pub struct Product {
     tools: Vec<Entry>,
     extractors: Vec<Extractor>,
     view_renderer: Option<Arc<dyn ViewRenderer>>,
+    openers: BTreeMap<String, Arc<NativeFormat>>,
 }
 
 impl std::fmt::Debug for Product {
@@ -167,6 +213,14 @@ impl Product {
         let extension = path.extension()?.to_str()?.to_ascii_lowercase();
         self.file_types.iter().find(|t| t.extension == extension)
     }
+
+    /// The product's own format for `path`, by extension (case-insensitive); `None` means the
+    /// package format.
+    #[must_use]
+    pub fn opener(&self, path: &Path) -> Option<&Arc<NativeFormat>> {
+        let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+        self.openers.get(&extension)
+    }
 }
 
 /// Collects a product's registrations.
@@ -182,6 +236,8 @@ pub struct ProductBuilder {
     tools: Vec<Entry>,
     extractors: Vec<Extractor>,
     view_renderer: Option<Arc<dyn ViewRenderer>>,
+    openers: BTreeMap<String, Arc<NativeFormat>>,
+    package_extension: Option<String>,
 }
 
 impl std::fmt::Debug for ProductBuilder {
@@ -229,6 +285,8 @@ impl ProductBuilder {
             tools: Vec::new(),
             extractors: Vec::new(),
             view_renderer: None,
+            openers: BTreeMap::new(),
+            package_extension: None,
         }
     }
 
@@ -290,6 +348,35 @@ impl ProductBuilder {
         Ok(())
     }
 
+    /// Declares the extension of the product's document package format. Its file type is a
+    /// package type, so no opener may be registered for it. Without this call the application
+    /// has no package extension to protect.
+    pub fn package_extension(&mut self, extension: &str) {
+        self.package_extension = Some(extension.to_owned());
+    }
+
+    /// Registers the product's own format for `extension`: a path with this extension is opened
+    /// and saved by `format` instead of the package format. The extension must also be declared
+    /// with [`ProductBuilder::file_type`]; [`ProductBuilder::build`] checks that.
+    ///
+    /// # Errors
+    /// `app.product.invalid_id` for a malformed extension or the package extension;
+    /// `app.product.duplicate` for an extension with an opener already.
+    pub fn opener(&mut self, extension: &str, format: NativeFormat) -> Result<()> {
+        let well_formed = (1..=MAX_EXTENSION_BYTES).contains(&extension.len())
+            && extension
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+        if !well_formed || self.package_extension.as_deref() == Some(extension) {
+            return Err(invalid(extension));
+        }
+        if self.openers.contains_key(extension) {
+            return Err(duplicate(extension));
+        }
+        self.openers.insert(extension.to_owned(), Arc::new(format));
+        Ok(())
+    }
+
     /// Registers a panel.
     ///
     /// # Errors
@@ -333,6 +420,12 @@ impl ProductBuilder {
     /// # Errors
     /// `app.product.unknown_type` when an extractor names a type that is not registered.
     pub fn build(self, clock: Arc<dyn Clock>, owner: LockOwner) -> Result<Product> {
+        for extension in self.openers.keys() {
+            let declared = self.file_types.iter().any(|t| t.extension == *extension);
+            if !declared || self.package_extension.as_deref() == Some(extension.as_str()) {
+                return Err(invalid(extension));
+            }
+        }
         let known: BTreeSet<&str> = self.types.iter().map(|d| d.key.as_str()).collect();
         for extractor in &self.extractors {
             if let Some(missing) = extractor.types.iter().find(|t| !known.contains(t.as_str())) {
@@ -357,6 +450,7 @@ impl ProductBuilder {
             tools: self.tools,
             extractors: self.extractors,
             view_renderer: self.view_renderer,
+            openers: self.openers,
         })
     }
 }

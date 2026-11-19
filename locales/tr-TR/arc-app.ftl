@@ -46,6 +46,8 @@ app-product-unknown-type = { $id } çıkarıcısı, kayıtlı olmayan { $type } 
 app-file-unsupported-type = { $path } dosyası, bu uygulamanın kullanabileceği türde değil.
 app-document-unknown = Belge açık değil.
 app-document-read-only = { $path } dosyası salt okunur açık ve kaydedilemez.
+app-document-held = { $path } dosyası başka bir sekmede açık; burada kayıt hedefi olamaz.
+app-document-unprotected = Bu belge kurtarma ile korunmuyor. Uygulama durursa kaydedilmemiş değişiklikler kaybolur; korumak için kaydedin.
 app-document-no-path = Belge henüz kaydedilmedi. Kaydedileceği bir dosya seçin.
 
 app-banner-locked = { $user }, { $host } üzerinde bu dosyayı { $application } ile düzenliyor. Dosya salt okunur açıldı.

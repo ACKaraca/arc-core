@@ -275,6 +275,7 @@ family.
 | `core.draft.spline.create` | Creates a spline in `owner` from `degree` (default 3) and either `control_points` with optional `weights`, or `fit_points`; optionally on `layer` |
 | `core.draft.spline.set` | Replaces the curve and the fit points of splines from the same description |
 | `core.draft.entity.modify` | Sets a field of entities, block references included |
+| `core.draft.entity.transform` | Transforms entities (`objects`, repeated identifiers counted once) by `transform`: an optional mirror across a line through the origin (applied first), a uniform `scale` about the origin, a `rotation` in radians, then a `translation`. Acts in the drawing plane and refuses non-default extrusions. Points, curves (including splines and wipeouts), single-line texts, rich texts (translation and rotation only) and block references are transformed; dimensions, leaders, multileaders, hatches, tables and arrays (derived from other objects) and external references are refused with `draft.entity.transform_unsupported`, and a refused entity fails the whole command. Mirror is refused for text. A new value that is not finite (an overflow) fails the command with `draft.field.invalid`. Dimensions and hatches that reference a transformed curve but are not selected follow it through the regeneration graph; the display list after the transform equals a direct rebuild. |
 | `core.draft.entity.delete` | Deletes entities |
 | `core.draft.layer.create` | Creates a layer with `name` and optional `color`, `linetype` and `lineweight` |
 | `core.draft.layer.modify` | Sets a field of layers |
@@ -1504,6 +1505,7 @@ The codes of every part of the crate:
 | `draft.layout.duplicate` | `conflict` | A layout space would own two layout settings objects |
 | `draft.viewport.clip_invalid` | `invalid_input` | The clip boundary of a viewport is not a closed polyline |
 | `draft.viewport.locked` | `conflict` | A command changes the view of a locked viewport |
+| `draft.entity.transform_unsupported` | `invalid_input` | An entity cannot take the requested transform: its kind is associative or external, or the kind does not take this form of the transform (`reason`) |
 | `draft.wipeout.boundary_open` | `invalid_input` | The boundary of a wipeout is not a closed polyline |
 | `draft.style.parent_invalid` | `invalid_input` | A dimension style's parent rule is broken |
 | `draft.purge.in_use` | `conflict` | An object selected for purging is in use |

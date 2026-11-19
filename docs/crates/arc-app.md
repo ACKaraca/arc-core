@@ -111,6 +111,18 @@ reports, Hub) are added in later parts behind settings that default to off.
 
 - Catalogs are parsed once and added per language tag; a catalog with a syntax error or above
   4 MiB is rejected as a whole. A `Localizer` requires the `en-US` catalog.
+- `SHELL_CATALOGS` holds the Fluent sources of the shell's messages for every shipped locale (the
+  `arc-app`, `arc-ui`, `arc-command`, `arc-doc`, `arc-gpu`, `arc-base` and `arc-shell` catalogs,
+  concatenated per locale; `en-US` and `tr-TR`). `shell_catalogs()` returns a `Catalogs` holding
+  them. A product starts from it and adds its own catalog with `Catalogs::append(tag, source)`,
+  which keeps the resources already present for the language; `Catalogs::add` replaces them.
+  Where two resources define a message, the one appended last is formatted, so a product can
+  override a shell text on purpose. Within one catalog a message defined twice keeps its first
+  definition.
+- `shell_catalogs()` fails when any shipped catalog does not parse (the tests use it).
+  `shell_catalogs_with_fallback()` is the run-time form: English must parse, and a language whose
+  catalog does not parse is left out and returned with its error. The reference shell reports each
+  such language on standard error and its messages fall back to English.
 - The requested tags are either the operating-system list, when the `ui.language` value is
   `system` or empty, or the single configured tag. POSIX spellings (`tr_TR.UTF-8`) are accepted;
   unparsable tags are skipped.
@@ -400,11 +412,20 @@ standard error. Windows uses the data directory.
 ### View rendering (CORE-CMD-026, feature `render`)
 
 - The module `render` (feature `render`, on with `window`) renders the default view of a snapshot
-  headless: the product's extractor draws each object (`Extract`, a function from a snapshot object
-  to a result of render items), the view is zoomed to the drawn objects, shaded on white through `arc-gpu` on
-  the adapter its selection rules choose, and encoded as PNG. `render::render` returns the PNG, the
-  number of objects drawn and the adapter (`name`, `software`, `fallback`).
-- `SnapshotRenderer::new(extract)` implements `arc_command::ViewRenderer` for that drawing. It
+  headless. A product draws either through `Extract`, a function from a snapshot object to render
+  items (lines, curves, meshes), or through `Drawing`, a function from a snapshot to one
+  `arc_gpu::Extraction` per object (items with their geometries, such as the fills and outline
+  glyphs of `arc_gpu::draft::space_extractions`). The extractions are applied to a scene, the view
+  is zoomed to what they draw and shaded on white through `arc-gpu` on the adapter its selection
+  rules choose, and encoded as PNG. `render::render` (per-object) and `render::render_drawing`
+  return the PNG, the number of objects drawn and the adapter (`name`, `software`, `fallback`).
+- The frame covers the exact bounds of curves: a curve's bounding box from `arc-geom` (an arc's
+  bulge included), the points of line items and the bounding sphere of the mesh objects. The view
+  looks down −z, so the frame uses the planar extent only: the center is the middle of the planar
+  box that holds both, and the radius reaches the farthest box corner and the far side of the
+  sphere. A sphere alone frames itself with its own radius. Rays and lines frame nothing.
+- `SnapshotRenderer::new(extract)` and `SnapshotRenderer::with_drawing(drawing)` implement
+  `arc_command::ViewRenderer`. The first takes the per-object function, the second the drawing. It
   accepts the view `default` and the display mode `shaded`, and refuses a camera and section planes
   with `cmd.render.unsupported` (detail `feature`), since nothing draws them yet.
 - The product attaches its renderer with `ProductBuilder::view_renderer`; the windowed shell
@@ -508,6 +529,7 @@ The codes `arc-app` owns; messages are in `locales/en-US/arc-app.ftl`.
 | `app.product.invalid_id` | `invalid_input` | A panel, tool or extractor identifier is not a dotted key, or a file extension is malformed or can neither be opened nor saved |
 | `app.product.duplicate` | `conflict` | A panel, tool, extractor or file extension is registered twice |
 | `app.product.unknown_type` | `not_found` | An extractor names an object type that is not registered |
+| `app.document.held` | `conflict` | `save_as` names a file another tab of the application holds |
 | `app.file.unsupported_type` | `unsupported` | No registered file type with the needed capability matches a path's extension |
 | `app.document.unknown` | `not_found` | No open tab has the identifier |
 | `app.document.read_only` | `conflict` | A save targets a package that is open read-only |
@@ -535,7 +557,9 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
   and the application run the same registration; the application-only parts are kept beside it.
 - A `FileType` is an extension (1 to 16 lowercase ASCII letters and digits, matched
   case-insensitively), the description's message identifier and whether it opens and saves.
-  Every file type is a document package; the extension only routes a path to the product.
+  Every file type is a document package unless the product registers its own format for the
+  extension (see [Native formats](#native-formats-and-openers)); the extension routes a path to
+  the product either way.
 - Panels and tools are `Entry`s (a dotted-key identifier, unique per kind, the label's message
   identifier and a `Factory`); an `Extractor` has an identifier, the object type keys it handles
   (each must be registered when the product is built) and a `Factory`. `Factory::create` returns
@@ -590,6 +614,38 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
   On failure a target this call created is removed and the tab is unchanged.
 - `take_over(tab)` takes over a stale edit lock after the user confirmed it
   (`Package::take_over`) and starts a recovery journal.
+
+### Native formats and openers
+
+- `ProductBuilder::opener(extension, NativeFormat)` registers a product's own format for one
+  extension. The extension must be well formed and unique (`app.product.invalid_id`,
+  `app.product.duplicate`) and must not be the package extension declared with
+  `ProductBuilder::package_extension`. `ProductBuilder::build` fails with `app.product.invalid_id`
+  for an opener whose extension has no declared file type.
+- `NativeFormat::new(open, save)`: `open(path, config)` reads the file and returns an
+  `arc_doc::Document` (the application passes the document configuration: identifiers, session
+  and limits). `save(document, path)` writes a document to a file. The writer does not get the
+  target path: it gets a temporary path beside the target, and the application renames that file
+  over the target when the writer succeeds and removes it when the writer fails. The rename is a
+  plain rename on every platform (the package writer's retry on Windows is not shared with this
+  crate), so a target held by another process may fail the save with the file untouched.
+- `open(path)` with a registered extension calls the product's `open`; the package reader is the
+  default for every other extension. The file must still be a declared file type that opens. A
+  path already open in a tab activates it: two paths name the same file when their canonical
+  forms are equal (a path that cannot be canonicalized is compared as given).
+- A native document is clean when opened and has no package, no edit lock and no recovery
+  journal. It is not protected against a crash: the application shows the banner
+  `app-document-unprotected` on it and on any document converted to the native format. A native
+  file is not locked against another process; the product owns the file's integrity.
+- `save(tab)` of a native tab requires that the file type allows saving (`app.file.unsupported_type`
+  otherwise), then calls the product's writer, and the tab is clean. A failed save keeps the tab
+  dirty and leaves the file as it was.
+- `save_as(tab, target)` with a target that has a registered opener: a native tab is written by
+  the product's writer and moves to the target; a new document that was never saved is written
+  the same way and becomes a native tab, its recovery journal discarded (the file holds its
+  changes). A package document is refused with `app.file.unsupported_type` and nothing is
+  written. A native tab saved to a package target is refused with the same error.
+- `save_as` refuses a target that another tab holds (`app.document.held`), and writes nothing.
 
 ### Read-only and lock banners (CORE-APP-005)
 
