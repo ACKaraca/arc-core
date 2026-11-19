@@ -532,7 +532,7 @@ the field names and profile values are those of [interchange.md](../architecture
 | `string_bytes` | A ZIP entry name; an XML name, the bytes of one element's attributes, one text node |
 | `array_length` | XML attributes of one element; namespace declarations in scope |
 | `nesting_depth` | XML open elements |
-| `decompressed_bytes` | Each declared size and the sum of declared sizes at open; the output of all reads together |
+| `decompressed_bytes` | Each declared size and the sum of declared sizes at open; the output of all reads together, failed reads included |
 | `decompression_ratio` | Each declared size against the compressed size times the ratio, at open; the output of an inflate call |
 
 ### ZIP archives
@@ -542,48 +542,80 @@ the field names and profile values are those of [interchange.md](../architecture
   its CRC-32 is checked.
 - Validation order: the input size; the end record, found by a backward search over at most 65,558
   offsets for a signature whose comment length ends at the end of the buffer; the ZIP64 locator and
-  end record when a field holds its marker; the disk fields (all zero, otherwise `io.zip.multi_disk`);
-  every central record, with the count checked against `record_count` and against the directory size
-  before the directory is allocated; for each entry, the name, the encryption flags, the method, the
-  declared sizes and the ratio, and the uniqueness of the name; for each entry, its local header
-  (signature, name, method, flags, and CRC and sizes unless a descriptor follows the data) and its
-  data descriptor when the central record sets bit 3; finally the layout, in which no two of the
-  entry ranges, the directory range and the trailing end records share a byte.
+  end record when the locator sits immediately before the end record; the disk fields (all zero,
+  otherwise `io.zip.multi_disk`); every central record, with the count checked against
+  `record_count` and against the directory size before the directory is allocated; for each entry,
+  the name, the encryption flags, the method, the declared sizes and the ratio, and the uniqueness
+  of the name; the names of all entries together, for file and folder conflicts; then, in the order
+  of their local headers, each entry's local header (signature, name, method, the agreed flags, and
+  CRC and sizes unless a descriptor follows the data) and its data descriptor when the central record
+  sets bit 3. The directory and the end records must not share a byte with an entry, and no two
+  entries may either. A local header that starts inside the directory, the end records or an
+  earlier entry, or whose data reaches one of those ranges, is `io.zip.overlap`; the check happens
+  before any later header is parsed.
 - Supported methods are stored (0) and deflate (8). Encrypted entries (flags bit 0, bit 6) are refused
   with `io.zip.encrypted`; other methods with `io.zip.method_unsupported`.
-- ZIP64 is read where a 32-bit field holds `0xFFFFFFFF` or an entry count holds `0xFFFF`: the sizes
-  and the offset come from the ZIP64 extension, and the values are then checked like any others.
+- ZIP64 is read when the ZIP64 locator sits immediately before the end record. A field of the end
+  record that holds its marker (`0xFFFF` for the count, `0xFFFFFFFF` for the size and the offset) takes
+  the ZIP64 value; a field that does not hold a marker must equal the ZIP64 value, or the archive is
+  refused with `io.zip.structure_invalid`. A marker without the locator is `io.zip.structure_invalid`;
+  without the locator, an entry count of 65,535 is an ordinary count. In a central record, a 32-bit
+  field that holds `0xFFFFFFFF` takes its value from the ZIP64 extension, in the order size, compressed
+  size, offset. The values are then checked like any others.
+- The local header and its central record must agree on the encryption (bits 0 and 6), UTF-8 (bit 11)
+  and data descriptor (bit 3) flags; otherwise `io.zip.header_mismatch`.
 - A data descriptor is accepted when its CRC and sizes equal the central record's (the signature is
-  optional, the sizes are 8 bytes for a ZIP64 record); otherwise `io.zip.data_descriptor_unverified`.
+  optional). Its sizes are 8 bytes wide when the local header carries a ZIP64 extra field and 4 bytes
+  otherwise; a mismatch is `io.zip.data_descriptor_unverified`.
 - Offsets are absolute. Data before the first entry (for example a self-extracting stub) makes the
   local headers disagree with the directory and is refused as `io.zip.header_mismatch`.
 - Names: the bytes are UTF-8 when flag bit 11 is set. Otherwise each byte maps to the code point of
   the same value (ISO 8859-1), which names the bytes without claiming a code page. A name is refused
   (`io.zip.name_invalid`) when it is empty, contains a control character or an empty component, or
   is not valid UTF-8. It is refused (`io.zip.path_unsafe`) when it starts with `/`, contains a
-  backslash or a colon, or has a `.` or `..` component. A trailing `/` marks a directory. Two names
-  are duplicates (`io.zip.name_duplicate`) when their paths are equal after lowercasing every
-  character by its simple Unicode mapping; canonical equivalence of Unicode forms is not considered.
+  backslash, a colon or one of the characters `< > " | ? *`, or has a `.` or `..` component. It is
+  refused with the same code when a component ends with a dot or a space, or when the stem of a
+  component (the part before its first dot, without trailing spaces) is a Windows device name (`CON`,
+  `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`), compared without regard to case. The
+  errors for these Windows rules name the reason in their details. A trailing `/` marks a directory. Two names are duplicates
+  (`io.zip.name_duplicate`) when their paths are equal after lowercasing every character by its simple
+  Unicode mapping; canonical equivalence of Unicode forms is not considered. A file whose path is also
+  a folder that another entry needs, such as `a` with `a/b`, is `io.zip.name_conflict`, under the same
+  comparison.
 - While inflating, the output is capped by the declared size, by the ratio and by the remaining
-  budget, and the stream is stopped one byte past the cap. A stream that produces a different
-  number of bytes from its declared size, or leaves compressed bytes unread, is `io.zip.size_mismatch`.
-- The budget is the archive's: every read charges its output against `decompressed_bytes`, so
-  reading an entry again uses budget again.
+  budget, and the stream is stopped one byte past the cap. The output vector grows toward the declared
+  size in bounded steps and never holds more than the declared size plus one byte of capacity. A stream
+  that produces a different number of bytes from its declared size, or leaves compressed bytes unread
+  (for example trailing bytes inside the entry's compressed range), is `io.zip.size_mismatch`.
+- The budget is the archive's: every call to `read_entry` charges the bytes it produced against
+  `decompressed_bytes`, whether the entry then passes its CRC-32 check or not. Reading an entry again
+  uses budget again, and an entry that fails its checks cannot be inflated without limit.
 
 ### XML documents
 
 - `XmlReader::new(bytes, options)` returns a pull reader; `next_event()` returns `Event::Start`
   (name and attributes), `Event::End` (name) or `Event::Text`, and `None` at the end. An empty
   element yields a start and an end. Adjacent character data, CDATA sections and references form one
-  text node. Comments and the XML declaration are consumed without an event.
+  text node. A comment ends a text node: text on either side of a comment is delivered as two
+  `Event::Text` events. Comments are consumed without an event.
+- The XML declaration is consumed without an event when it is the first event of the document. Any
+  other declaration is a processing instruction and is refused.
 - Attribute values are normalized as XML requires (white space becomes a space; character references
   are kept). Text line ends become line feeds. Names and values are UTF-8.
-- Refused: a document type declaration (`io.xml.doctype_refused`), a processing instruction
-  (`io.xml.processing_instruction_refused`), any entity reference other than the five predefined
-  entities and character references (`io.xml.entity_refused`), a character reference to a value that
-  XML does not allow (`io.xml.reference_invalid`), and a declared encoding other than UTF-8 or US-ASCII,
-  or a UTF-16 byte-order mark (`io.xml.encoding_unsupported`). Entity expansion and external
-  entities therefore cannot occur.
+- Element and attribute names follow the `Name` production of XML 1.0 (fifth edition), checked by
+  character ranges; a name that breaks it is `io.xml.syntax`. A qualified name has at most one colon,
+  which is neither its first nor its last character; otherwise it is `io.xml.structure_invalid`. An
+  empty namespace prefix (`xmlns:`) is therefore refused.
+- Markup characters are refused where XML forbids them: a raw `<` in an attribute value and the
+  sequence `]]>` in character data are `io.xml.syntax`. Write `&lt;` and `]]&gt;` instead.
+- Outside the root element only white space is allowed, and it is not delivered. Character data,
+  CDATA sections and references outside the root are `io.xml.structure_invalid`.
+- Refused: a document type declaration (`io.xml.doctype_refused`), a processing instruction, including
+  an XML declaration that is not the first event (`io.xml.processing_instruction_refused`), any entity
+  reference other than the five predefined entities and character references (`io.xml.entity_refused`),
+  a character reference to a value that XML does not allow (`io.xml.reference_invalid`), and a declared
+  encoding other than UTF-8 or US-ASCII, or a UTF-16 byte-order mark (`io.xml.encoding_unsupported`).
+  Entity expansion and external entities therefore cannot occur.
 - Namespace declarations stay as attributes named `xmlns` or `xmlns:prefix`. `resolve_prefix(prefix)`
   returns the URI in scope (the innermost declaration wins; `xml` is bound to the XML namespace) and
   `split_qualified_name(name)` splits a qualified name. The declarations in scope are bounded by
@@ -596,7 +628,7 @@ the field names and profile values are those of [interchange.md](../architecture
 | `io.limit_exceeded` | `limit_exceeded` | A limit of the profile was exceeded; the argument `limit` names it |
 | `io.zip.truncated` | `corrupt_data` | The archive ends inside a record, a header, a name or an entry's data |
 | `io.zip.end_missing` | `corrupt_data` | No end record matches the end of the buffer |
-| `io.zip.structure_invalid` | `corrupt_data` | A signature, count, offset or size of the archive's structures is inconsistent |
+| `io.zip.structure_invalid` | `corrupt_data` | A signature, count, offset or size of the archive's structures is inconsistent, including a ZIP64 record that disagrees with the end record |
 | `io.zip.multi_disk` | `unsupported` | The archive spans several disks |
 | `io.zip.encrypted` | `unsupported` | An entry is encrypted |
 | `io.zip.method_unsupported` | `unsupported` | An entry uses a method other than stored or deflate |
@@ -604,18 +636,19 @@ the field names and profile values are those of [interchange.md](../architecture
 | `io.zip.header_mismatch` | `corrupt_data` | A local header does not agree with its central record |
 | `io.zip.overlap` | `corrupt_data` | Two parts of the archive share a byte |
 | `io.zip.name_invalid` | `corrupt_data` | An entry name is empty, malformed or not valid UTF-8 |
-| `io.zip.path_unsafe` | `corrupt_data` | An entry name is absolute, contains a backslash or a colon, or has a `.` or `..` component |
+| `io.zip.path_unsafe` | `corrupt_data` | An entry name is absolute, contains a backslash, a colon, a character Windows does not allow or a `.` or `..` component, or names a Windows device or ends a component with a dot or a space |
 | `io.zip.name_duplicate` | `corrupt_data` | Two entry names are equal after normalization |
+| `io.zip.name_conflict` | `corrupt_data` | A file has the name of a folder that another entry needs |
 | `io.zip.size_mismatch` | `corrupt_data` | Compressed data does not produce its declared size, or leaves bytes unread |
 | `io.zip.inflate_failed` | `corrupt_data` | A deflate stream is malformed |
 | `io.zip.crc_mismatch` | `corrupt_data` | The data of an entry does not match its CRC-32 |
 | `io.zip.entry_missing` | `not_found` | The index names no entry |
 | `io.xml.truncated` | `corrupt_data` | The document ends inside a tag, a text node or an open element, or has no root |
-| `io.xml.syntax` | `corrupt_data` | The markup is not well formed |
-| `io.xml.structure_invalid` | `corrupt_data` | Elements do not nest, a second root starts, text appears outside the root, or an attribute repeats |
-| `io.xml.text_invalid` | `corrupt_data` | A name, value or text is not UTF-8 or contains a character XML does not allow |
+| `io.xml.syntax` | `corrupt_data` | The markup is not well formed, including a name outside the XML grammar, a raw `<` in an attribute value and `]]>` in character data |
+| `io.xml.structure_invalid` | `corrupt_data` | Elements do not nest, a second root starts, content other than white space appears outside the root, a qualified name has a misplaced colon, or an attribute repeats |
+| `io.xml.text_invalid` | `corrupt_data` | A name, value or text is not UTF-8, or a value or text contains a character XML does not allow |
 | `io.xml.doctype_refused` | `unsupported` | The document has a document type declaration |
-| `io.xml.processing_instruction_refused` | `unsupported` | The document has a processing instruction |
+| `io.xml.processing_instruction_refused` | `unsupported` | The document has a processing instruction, or an XML declaration that is not its first event |
 | `io.xml.entity_refused` | `unsupported` | An entity reference is not one of the five predefined entities |
 | `io.xml.reference_invalid` | `corrupt_data` | A character reference names no valid character or is not terminated |
 | `io.xml.encoding_unsupported` | `unsupported` | The document is not encoded in UTF-8 |

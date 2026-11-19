@@ -140,3 +140,36 @@ fn a_declared_latin1_encoding_is_refused() {
     let document = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><a/>";
     assert_eq!(events(document), Err("io.xml.encoding_unsupported"));
 }
+
+#[test]
+fn a_comment_ends_a_text_node() {
+    let document = b"<a>one<!-- c -->two</a>";
+    assert_eq!(
+        events(document),
+        Ok(vec![
+            start("a", &[]),
+            Event::Text("one".to_owned()),
+            Event::Text("two".to_owned()),
+            Event::End("a".to_owned()),
+        ])
+    );
+}
+
+#[test]
+fn white_space_outside_the_root_is_not_delivered() {
+    assert_eq!(
+        events(b"\n<a/>\r\n"),
+        Ok(vec![start("a", &[]), Event::End("a".to_owned())])
+    );
+}
+
+#[test]
+fn valid_xml_names_are_accepted() {
+    assert_eq!(
+        events("<caf\u{e9}.x-1 _y:z=\"1\"/>".as_bytes()),
+        Ok(vec![
+            start("caf\u{e9}.x-1", &[("_y:z", "1")]),
+            Event::End("caf\u{e9}.x-1".to_owned()),
+        ])
+    );
+}

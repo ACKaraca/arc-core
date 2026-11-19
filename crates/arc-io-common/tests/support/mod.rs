@@ -36,6 +36,13 @@ pub struct Spec {
     /// A data descriptor (CRC, compressed size, size) written after the data, if set. The local
     /// header then carries zeros, as the format allows.
     pub descriptor: Option<(u32, u32, u32)>,
+    /// A local header flags word that differs from the central record's, if set.
+    pub local_flags: Option<u16>,
+    /// Whether the local header carries a ZIP64 extra field (its sizes then live there) and a
+    /// data descriptor, if any, has 8-byte sizes.
+    pub local_zip64: bool,
+    /// Whether the central record marks only its offset as ZIP64, with the sizes in 32 bits.
+    pub central_offset_zip64: bool,
 }
 
 impl Spec {
@@ -53,6 +60,9 @@ impl Spec {
             local_method: None,
             local_crc: None,
             descriptor: None,
+            local_flags: None,
+            local_zip64: false,
+            central_offset_zip64: false,
         }
     }
 
@@ -71,6 +81,9 @@ impl Spec {
             local_method: None,
             local_crc: None,
             descriptor: None,
+            local_flags: None,
+            local_zip64: false,
+            central_offset_zip64: false,
         }
     }
 }
@@ -146,8 +159,8 @@ pub fn archive_with(entries: &[Spec], layout: &Layout) -> Vec<u8> {
 
 fn write_local(out: &mut Vec<u8>, spec: &Spec) {
     let descriptor = spec.descriptor.is_some();
-    let flags = spec.flags | if descriptor { 1 << 3 } else { 0 };
-    let (crc, compressed, size) = if descriptor {
+    let flags = spec.local_flags.unwrap_or(spec.flags) | if descriptor { 1 << 3 } else { 0 };
+    let (crc, mut compressed, mut size) = if descriptor {
         (0, 0, 0)
     } else {
         (
@@ -156,6 +169,21 @@ fn write_local(out: &mut Vec<u8>, spec: &Spec) {
             spec.size,
         )
     };
+    let mut extra = Vec::new();
+    if spec.local_zip64 {
+        // The sizes move to the ZIP64 extra field, and the header marks them.
+        let (size64, compressed64) = if descriptor {
+            (0, 0)
+        } else {
+            (u64::from(spec.size), u64::from(spec.compressed))
+        };
+        extra.extend_from_slice(&0x0001_u16.to_le_bytes());
+        extra.extend_from_slice(&16_u16.to_le_bytes());
+        extra.extend_from_slice(&size64.to_le_bytes());
+        extra.extend_from_slice(&compressed64.to_le_bytes());
+        compressed = u32::MAX;
+        size = u32::MAX;
+    }
     let name = spec.local_name.clone().unwrap_or_else(|| spec.name.clone());
     out.extend_from_slice(&0x0403_4B50_u32.to_le_bytes());
     out.extend_from_slice(&20_u16.to_le_bytes());
@@ -166,30 +194,46 @@ fn write_local(out: &mut Vec<u8>, spec: &Spec) {
     out.extend_from_slice(&compressed.to_le_bytes());
     out.extend_from_slice(&size.to_le_bytes());
     out.extend_from_slice(&u16::try_from(name.len()).unwrap_or(0).to_le_bytes());
-    out.extend_from_slice(&0_u16.to_le_bytes());
+    out.extend_from_slice(&u16::try_from(extra.len()).unwrap_or(0).to_le_bytes());
     out.extend_from_slice(&name);
+    out.extend_from_slice(&extra);
     out.extend_from_slice(&spec.payload);
     if let Some((crc, compressed, size)) = spec.descriptor {
         out.extend_from_slice(&0x0807_4B50_u32.to_le_bytes());
         out.extend_from_slice(&crc.to_le_bytes());
-        out.extend_from_slice(&compressed.to_le_bytes());
-        out.extend_from_slice(&size.to_le_bytes());
+        if spec.local_zip64 {
+            out.extend_from_slice(&u64::from(compressed).to_le_bytes());
+            out.extend_from_slice(&u64::from(size).to_le_bytes());
+        } else {
+            out.extend_from_slice(&compressed.to_le_bytes());
+            out.extend_from_slice(&size.to_le_bytes());
+        }
     }
 }
 
 fn write_central(out: &mut Vec<u8>, spec: &Spec, offset: u32, zip64: bool) {
     let mut extra = Vec::new();
+    let offset_only = !zip64 && spec.central_offset_zip64;
     if zip64 {
         extra.extend_from_slice(&0x0001_u16.to_le_bytes());
         extra.extend_from_slice(&24_u16.to_le_bytes());
         extra.extend_from_slice(&u64::from(spec.size).to_le_bytes());
         extra.extend_from_slice(&u64::from(spec.compressed).to_le_bytes());
         extra.extend_from_slice(&u64::from(offset).to_le_bytes());
+    } else if offset_only {
+        extra.extend_from_slice(&0x0001_u16.to_le_bytes());
+        extra.extend_from_slice(&8_u16.to_le_bytes());
+        extra.extend_from_slice(&u64::from(offset).to_le_bytes());
     }
-    let (size32, compressed32, offset32) = if zip64 {
-        (u32::MAX, u32::MAX, u32::MAX)
+    let (size32, compressed32) = if zip64 {
+        (u32::MAX, u32::MAX)
     } else {
-        (spec.size, spec.compressed, offset)
+        (spec.size, spec.compressed)
+    };
+    let offset32 = if zip64 || offset_only {
+        u32::MAX
+    } else {
+        offset
     };
     let flags = spec.flags | if spec.descriptor.is_some() { 1 << 3 } else { 0 };
     out.extend_from_slice(&0x0201_4B50_u32.to_le_bytes());

@@ -14,6 +14,7 @@ io-zip-overlap = Arşivin iki parçası aynı baytları kaplıyor.
 io-zip-name-invalid = Arşiv boş ya da bozuk bir öğe adı içeriyor.
 io-zip-path-unsafe = Arşiv, çıkarma klasörünün dışına çıkacak bir öğe adı içeriyor.
 io-zip-name-duplicate = Arşiv aynı adlı iki öğe içeriyor.
+io-zip-name-conflict = Arşiv, başka bir öğenin klasör olarak gerektirdiği bir dosya öğesi içeriyor.
 io-zip-size-mismatch = Sıkıştırılmış veri arşivde bildirilen boyutla eşleşmiyor.
 io-zip-inflate-failed = Bir öğenin sıkıştırılmış verisi bozuk.
 io-zip-crc-mismatch = Bir öğenin verisi sağlama değeriyle eşleşmiyor.

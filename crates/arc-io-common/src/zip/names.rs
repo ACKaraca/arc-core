@@ -2,7 +2,7 @@
 //! to one onto the first 256 code points), then checked for control characters, path safety and
 //! empty components. The duplicate check is done by the archive, on [`Checked::key`].
 
-use arc_base::{Limits, Result};
+use arc_base::{Error, Limits, Result};
 
 use crate::bytes::to_u64;
 use crate::error::codes;
@@ -35,16 +35,16 @@ pub(super) fn check(raw: &[u8], utf8: bool, limits: &Limits, index: usize) -> Re
     if body.is_empty() {
         return Err(at_entry(codes::ZIP_NAME_INVALID, index));
     }
-    for component in body.split('/') {
-        match component {
-            "" => return Err(at_entry(codes::ZIP_NAME_INVALID, index)),
-            "." | ".." => return Err(at_entry(codes::ZIP_PATH_UNSAFE, index)),
-            _ => {}
-        }
-    }
+    check_components(body, index)?;
     let key = body.chars().flat_map(char::to_lowercase).collect();
     Ok(Checked { name, key })
 }
+
+/// The names that Windows reserves for devices, which a file of the same stem would open.
+const DEVICE_NAMES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
 
 fn check_characters(name: &str, index: usize) -> Result<()> {
     if name.chars().any(char::is_control) {
@@ -53,7 +53,43 @@ fn check_characters(name: &str, index: usize) -> Result<()> {
     if name.starts_with('/') || name.contains(['\\', ':']) {
         return Err(at_entry(codes::ZIP_PATH_UNSAFE, index));
     }
+    // Characters that Windows does not allow in a file name.
+    if name.contains(['<', '>', '"', '|', '?', '*']) {
+        return Err(refused(index, "windows_character"));
+    }
     Ok(())
+}
+
+/// Checks the components of the name without its trailing `/`. A component that ends with a dot
+/// or a space, or whose stem (before the first dot, without trailing spaces) is a device name,
+/// names a different file on Windows.
+fn check_components(body: &str, index: usize) -> Result<()> {
+    for component in body.split('/') {
+        match component {
+            "" => return Err(at_entry(codes::ZIP_NAME_INVALID, index)),
+            "." | ".." => return Err(at_entry(codes::ZIP_PATH_UNSAFE, index)),
+            _ => {}
+        }
+        if component.ends_with(['.', ' ']) {
+            return Err(refused(index, "trailing_dot_or_space"));
+        }
+        let stem = component
+            .split_once('.')
+            .map_or(component, |(stem, _)| stem)
+            .trim_end_matches(' ');
+        if DEVICE_NAMES
+            .iter()
+            .any(|device| stem.eq_ignore_ascii_case(device))
+        {
+            return Err(refused(index, "device_name"));
+        }
+    }
+    Ok(())
+}
+
+/// An unsafe-path refusal that names the reason in its details.
+fn refused(index: usize, reason: &'static str) -> Error {
+    at_entry(codes::ZIP_PATH_UNSAFE, index).with_detail("reason", reason)
 }
 
 #[cfg(test)]

@@ -15,7 +15,7 @@
 mod inflate;
 mod names;
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use arc_base::{Cancel, Error, Limits, Result};
 
@@ -42,6 +42,8 @@ const FLAG_ENCRYPTED: u16 = 1 << 0;
 const FLAG_DESCRIPTOR: u16 = 1 << 3;
 const FLAG_STRONG_ENCRYPTION: u16 = 1 << 6;
 const FLAG_UTF8: u16 = 1 << 11;
+/// The flags that a local header and its central record must agree on.
+const FLAGS_AGREED: u16 = FLAG_ENCRYPTED | FLAG_DESCRIPTOR | FLAG_STRONG_ENCRYPTION | FLAG_UTF8;
 const METHOD_STORED: u16 = 0;
 const METHOD_DEFLATE: u16 = 8;
 /// The bytes between two cancellation checks while a CRC-32 is computed.
@@ -107,19 +109,14 @@ impl<'a> ZipArchive<'a> {
         let directory = locate_directory(data, &limits)?;
         let records = read_central(data, &directory)?;
         let mut entries = declare_entries(&records, &limits)?;
-        let mut spans = vec![
+        let fixed = [
             (
                 directory.offset,
                 directory.offset.saturating_add(directory.size),
             ),
             (directory.tail, data.len()),
         ];
-        for (index, (entry, record)) in entries.iter_mut().zip(&records).enumerate() {
-            let located = check_local(data, record, index)?;
-            entry.data_start = located.data_start;
-            spans.push((located.start, located.end));
-        }
-        check_layout(spans)?;
+        locate_entries(data, &records, &fixed, &mut entries)?;
         Ok(Self {
             data,
             limits,
@@ -137,8 +134,9 @@ impl<'a> ZipArchive<'a> {
 
     /// Inflates entry `index` and returns its data after checking its CRC-32.
     ///
-    /// The bytes produced by every call count against `Limits::decompressed_bytes` for the whole
-    /// archive, so reading an entry again uses budget again.
+    /// Every call charges the bytes it produced against `Limits::decompressed_bytes` for the whole
+    /// archive, whether or not the data then passes its checks, so reading an entry again uses
+    /// budget again and a failing entry cannot be inflated without limit.
     ///
     /// # Errors
     ///
@@ -168,8 +166,12 @@ impl<'a> ZipArchive<'a> {
         let input = to_usize(compressed)
             .and_then(|len| slice(self.data, start, len))
             .ok_or_else(|| Error::new(codes::ZIP_TRUNCATED))?;
-        let out = match method {
-            Method::Stored => input.to_vec(),
+        let mut out = Vec::new();
+        let produced = match method {
+            Method::Stored => {
+                out.extend_from_slice(input);
+                Ok(())
+            }
             Method::Deflate => {
                 let bounds = Bounds {
                     expected: size,
@@ -177,13 +179,14 @@ impl<'a> ZipArchive<'a> {
                         .saturating_mul(u64::from(self.limits.decompression_ratio)),
                     budget: remaining,
                 };
-                inflate_entry(input, &bounds, &self.cancel)?
+                inflate_entry(input, &bounds, &self.cancel, &mut out)
             }
         };
+        self.decompressed = self.decompressed.saturating_add(to_u64(out.len()));
+        produced?;
         if !crc_matches(&out, crc32, &self.cancel)? {
             return Err(at_entry(codes::ZIP_CRC_MISMATCH, index));
         }
-        self.decompressed = self.decompressed.saturating_add(to_u64(out.len()));
         Ok(out)
     }
 }
@@ -206,12 +209,11 @@ struct Central<'a> {
     sizes: Sizes,
 }
 
-/// Sizes and the offset of a record, with its ZIP64 flag.
+/// The sizes and the offset of a record.
 struct Sizes {
     size: u64,
     compressed: u64,
     offset: u64,
-    zip64: bool,
 }
 
 /// Where an entry's local header and data lie in the buffer.
@@ -262,17 +264,26 @@ fn locate_directory(data: &[u8], limits: &Limits) -> Result<Directory> {
     if disk != 0 || cd_disk != 0 || disk_entries != total {
         return Err(multi_disk());
     }
-    let (count, size, offset, tail) =
-        if total == u16::MAX || cd_size == MARK32 || cd_offset == MARK32 {
-            zip64_directory(data, end)?
-        } else {
-            (
-                u64::from(total),
-                u64::from(cd_size),
-                u64::from(cd_offset),
-                end,
-            )
-        };
+    let (count, size, offset, tail) = if has_locator(data, end) {
+        let (z_count, z_size, z_offset, record) = zip64_directory(data, end)?;
+        (
+            agree(u64::from(total), z_count, u64::from(u16::MAX))?,
+            agree(u64::from(cd_size), z_size, u64::from(MARK32))?,
+            agree(u64::from(cd_offset), z_offset, u64::from(MARK32))?,
+            record,
+        )
+    } else if cd_size == MARK32 || cd_offset == MARK32 {
+        // A marker means the value is in the ZIP64 record, which is absent. A count of 0xFFFF
+        // alone is a plain count.
+        return Err(structure());
+    } else {
+        (
+            u64::from(total),
+            u64::from(cd_size),
+            u64::from(cd_offset),
+            end,
+        )
+    };
     let offset = to_usize(offset).ok_or_else(truncated)?;
     let size = to_usize(size).ok_or_else(truncated)?;
     if offset.checked_add(size).is_none_or(|stop| stop > tail) {
@@ -290,6 +301,23 @@ fn locate_directory(data: &[u8], limits: &Limits) -> Result<Directory> {
         size,
         tail,
     })
+}
+
+/// Whether the ZIP64 locator sits immediately before the end record at `end`.
+fn has_locator(data: &[u8], end: usize) -> bool {
+    end.checked_sub(ZIP64_LOCATOR_LEN)
+        .and_then(|locator| u32_at(data, locator))
+        .is_some_and(|signature| signature == ZIP64_LOCATOR_SIGNATURE)
+}
+
+/// The value of a field that both the end record and the ZIP64 record hold. The end record's
+/// value must be the marker, which means the ZIP64 value applies, or equal the ZIP64 value.
+fn agree(end: u64, zip64: u64, marker: u64) -> Result<u64> {
+    if end == marker || end == zip64 {
+        Ok(zip64)
+    } else {
+        Err(structure())
+    }
 }
 
 /// Reads the ZIP64 locator and end record that precede the end record at `end`.
@@ -391,7 +419,6 @@ fn resolve_sizes(
         size: u64::from(size32),
         compressed: u64::from(compressed32),
         offset: offset32.map_or(0, u64::from),
-        zip64,
     };
     if !zip64 {
         return Ok(sizes);
@@ -435,7 +462,8 @@ fn zip64_body(extra: &[u8]) -> Option<&[u8]> {
 /// Checks the entries that need no data: names, duplicates, encryption, methods, declared sizes
 /// and the ratio. The returned entries have no data offset yet.
 fn declare_entries(records: &[Central<'_>], limits: &Limits) -> Result<Vec<ZipEntry>> {
-    let mut seen = HashSet::with_capacity(records.len());
+    let mut seen = BTreeSet::new();
+    let mut files = Vec::new();
     let mut total: u64 = 0;
     let mut entries = Vec::with_capacity(records.len());
     for (index, record) in records.iter().enumerate() {
@@ -445,6 +473,9 @@ fn declare_entries(records: &[Central<'_>], limits: &Limits) -> Result<Vec<ZipEn
             limits,
             index,
         )?;
+        if !checked.name.ends_with('/') {
+            files.push((index, checked.key.clone()));
+        }
         if !seen.insert(checked.key) {
             return Err(at_entry(codes::ZIP_NAME_DUPLICATE, index));
         }
@@ -486,6 +517,17 @@ fn declare_entries(records: &[Central<'_>], limits: &Limits) -> Result<Vec<ZipEn
             data_start: 0,
         });
     }
+    // A file cannot share its name with a folder that another entry needs: `a` with `a/b`.
+    for (index, key) in files {
+        let folder = format!("{key}/");
+        let needed = seen
+            .range(folder.clone()..)
+            .next()
+            .is_some_and(|other| other.starts_with(&folder));
+        if needed {
+            return Err(at_entry(codes::ZIP_NAME_CONFLICT, index));
+        }
+    }
     Ok(entries)
 }
 
@@ -512,7 +554,7 @@ fn check_local(data: &[u8], record: &Central<'_>, index: usize) -> Result<Locate
         return Err(at_entry(codes::ZIP_HEADER_MISMATCH, index));
     }
     let descriptor = record.flags & FLAG_DESCRIPTOR != 0;
-    if (flags & FLAG_DESCRIPTOR != 0) != descriptor {
+    if (flags ^ record.flags) & FLAGS_AGREED != 0 {
         return Err(at_entry(codes::ZIP_HEADER_MISMATCH, index));
     }
     if !descriptor {
@@ -529,7 +571,9 @@ fn check_local(data: &[u8], record: &Central<'_>, index: usize) -> Result<Locate
         .filter(|end| *end <= data.len())
         .ok_or_else(truncated)?;
     let end = if descriptor {
-        check_descriptor(data, data_end, record, index)?
+        // The local header decides the width of the descriptor's sizes.
+        let wide = zip64_body(local_extra).is_some();
+        check_descriptor(data, data_end, record, wide, index)?
     } else {
         data_end
     };
@@ -541,15 +585,22 @@ fn check_local(data: &[u8], record: &Central<'_>, index: usize) -> Result<Locate
 }
 
 /// Checks the data descriptor that follows the data of an entry and returns its end. The
-/// descriptor's CRC and sizes must equal the central record's; the signature is optional.
-fn check_descriptor(data: &[u8], at: usize, record: &Central<'_>, index: usize) -> Result<usize> {
+/// descriptor's CRC and sizes must equal the central record's; the signature is optional. Its
+/// sizes are 8 bytes wide when `wide`, which is the case when the local header has a ZIP64 extra
+/// field, and 4 bytes otherwise.
+fn check_descriptor(
+    data: &[u8],
+    at: usize,
+    record: &Central<'_>,
+    wide: bool,
+    index: usize,
+) -> Result<usize> {
     let unverified = || at_entry(codes::ZIP_DESCRIPTOR_UNVERIFIED, index);
     let at = if u32_at(data, at) == Some(DESCRIPTOR_SIGNATURE) {
         at.checked_add(4).ok_or_else(unverified)?
     } else {
         at
     };
-    let wide = record.sizes.zip64;
     let width = if wide { 8 } else { 4 };
     let (crc32, compressed, size) = descriptor_fields(data, at, wide).ok_or_else(unverified)?;
     if crc32 != record.crc32 || compressed != record.sizes.compressed || size != record.sizes.size {
@@ -574,16 +625,40 @@ fn descriptor_fields(data: &[u8], at: usize, wide: bool) -> Option<(u32, u64, u6
     }
 }
 
-/// Fails when two of the given `[start, end)` ranges share a byte. Empty ranges share nothing.
-fn check_layout(mut spans: Vec<(usize, usize)>) -> Result<()> {
-    spans.retain(|(start, end)| start < end);
-    spans.sort_unstable();
-    let mut reach = 0;
-    for (start, end) in spans {
-        if start < reach {
-            return Err(Error::new(codes::ZIP_OVERLAP));
+/// Locates the local header and data of every entry, visiting the entries in the order of their
+/// local headers. `fixed` holds the `[start, end)` ranges of the directory and the end records,
+/// which no header may touch. An entry whose header starts inside a fixed range or an earlier
+/// entry is refused before its header is parsed, and an entry whose data reaches another range is
+/// refused as soon as its data is located, so overlapping headers cost no more than the input.
+fn locate_entries(
+    data: &[u8],
+    records: &[Central<'_>],
+    fixed: &[(usize, usize)],
+    entries: &mut [ZipEntry],
+) -> Result<()> {
+    let mut order = Vec::with_capacity(records.len());
+    for (index, record) in records.iter().enumerate() {
+        order.push((to_usize(record.sizes.offset).ok_or_else(truncated)?, index));
+    }
+    order.sort_unstable();
+    let overlap = || Error::new(codes::ZIP_OVERLAP);
+    let mut reach = 0_usize;
+    for (start, index) in order {
+        let inside_fixed = fixed.iter().any(|&(from, to)| from <= start && start < to);
+        if start < reach || inside_fixed {
+            return Err(overlap());
         }
-        reach = reach.max(end);
+        let record = records.get(index).ok_or_else(structure)?;
+        let located = check_local(data, record, index)?;
+        if fixed
+            .iter()
+            .any(|&(from, to)| from < located.end && located.start < to)
+        {
+            return Err(overlap());
+        }
+        reach = located.end.max(reach);
+        let entry = entries.get_mut(index).ok_or_else(structure)?;
+        entry.data_start = located.data_start;
     }
     Ok(())
 }
@@ -596,4 +671,47 @@ fn crc_matches(out: &[u8], expected: u32, cancel: &Cancel) -> Result<bool> {
         crc.update(chunk);
     }
     Ok(crc.value() == expected)
+}
+
+#[cfg(test)]
+mod tests {
+    use arc_base::Limits;
+
+    use super::{CENTRAL_LEN, END_LEN, END_SIGNATURE, MARK32, locate_directory};
+    use crate::error::codes;
+
+    /// An end record (without comment) that says `count` entries span `size` bytes at `offset`.
+    fn end_record(count: u16, size: u32, offset: u32) -> Vec<u8> {
+        let mut end = Vec::with_capacity(END_LEN);
+        end.extend_from_slice(&END_SIGNATURE.to_le_bytes());
+        end.extend_from_slice(&[0_u8; 4]);
+        end.extend_from_slice(&count.to_le_bytes());
+        end.extend_from_slice(&count.to_le_bytes());
+        end.extend_from_slice(&size.to_le_bytes());
+        end.extend_from_slice(&offset.to_le_bytes());
+        end.extend_from_slice(&[0_u8; 2]);
+        end
+    }
+
+    fn code_of(data: &[u8]) -> Option<&'static str> {
+        locate_directory(data, &Limits::CONSTRAINED)
+            .err()
+            .map(|error| error.code())
+    }
+
+    #[test]
+    fn a_plain_archive_with_65535_entries_is_not_taken_for_zip64() {
+        let size = usize::from(u16::MAX) * CENTRAL_LEN;
+        let mut data = vec![0_u8; size];
+        let size32 = u32::try_from(size).unwrap_or(u32::MAX);
+        data.extend(end_record(u16::MAX, size32, 0));
+        let directory = locate_directory(&data, &Limits::CONSTRAINED).ok();
+        assert_eq!(directory.map(|d| (d.count, d.tail)), Some((65_535, size)));
+    }
+
+    #[test]
+    fn a_marker_without_the_zip64_locator_is_a_structure_error() {
+        let data = end_record(3, MARK32, 0);
+        assert_eq!(code_of(&data), Some(codes::ZIP_STRUCTURE_INVALID.code));
+    }
 }

@@ -92,7 +92,9 @@ pub mod codes {
         category: Category::CorruptData,
         message_id: "io-zip-name-invalid",
     };
-    /// An entry name is absolute, contains a backslash, a colon or a `.` or `..` component.
+    /// An entry name is absolute, contains a backslash, a colon, a character Windows does not
+    /// allow, or a `.` or `..` component, or a component that ends with a dot or a space or names
+    /// a Windows device.
     pub const ZIP_PATH_UNSAFE: ErrorCode = ErrorCode {
         code: "io.zip.path_unsafe",
         category: Category::CorruptData,
@@ -103,6 +105,12 @@ pub mod codes {
         code: "io.zip.name_duplicate",
         category: Category::CorruptData,
         message_id: "io-zip-name-duplicate",
+    };
+    /// An entry is a file whose name another entry needs as a folder, such as `a` and `a/b`.
+    pub const ZIP_NAME_CONFLICT: ErrorCode = ErrorCode {
+        code: "io.zip.name_conflict",
+        category: Category::CorruptData,
+        message_id: "io-zip-name-conflict",
     };
     /// A deflate stream produces more or fewer bytes than declared, or leaves compressed bytes
     /// unread.
@@ -136,20 +144,22 @@ pub mod codes {
         category: Category::CorruptData,
         message_id: "io-xml-truncated",
     };
-    /// The markup is not well formed.
+    /// The markup is not well formed, which includes a name that the XML name grammar refuses, a
+    /// raw `<` in an attribute value and `]]>` in character data.
     pub const XML_SYNTAX: ErrorCode = ErrorCode {
         code: "io.xml.syntax",
         category: Category::CorruptData,
         message_id: "io-xml-syntax",
     };
-    /// Elements do not nest, a second root element starts, or text appears outside the root.
+    /// Elements do not nest, a second root element starts, content other than white space appears
+    /// outside the root, a qualified name has a misplaced colon, or an attribute repeats.
     pub const XML_STRUCTURE_INVALID: ErrorCode = ErrorCode {
         code: "io.xml.structure_invalid",
         category: Category::CorruptData,
         message_id: "io-xml-structure-invalid",
     };
-    /// A name, attribute value or text is not valid UTF-8, or contains a character XML does not
-    /// allow.
+    /// A name, attribute value or text is not valid UTF-8, or an attribute value or text contains a
+    /// character XML does not allow.
     pub const XML_TEXT_INVALID: ErrorCode = ErrorCode {
         code: "io.xml.text_invalid",
         category: Category::CorruptData,
@@ -203,6 +213,7 @@ pub mod codes {
         ZIP_NAME_INVALID,
         ZIP_PATH_UNSAFE,
         ZIP_NAME_DUPLICATE,
+        ZIP_NAME_CONFLICT,
         ZIP_SIZE_MISMATCH,
         ZIP_INFLATE_FAILED,
         ZIP_CRC_MISMATCH,

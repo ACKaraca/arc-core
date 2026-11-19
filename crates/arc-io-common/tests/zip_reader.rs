@@ -127,3 +127,25 @@ fn an_index_out_of_range_is_not_found() {
     let error = zip.read_entry(1).err().map(|e| e.code());
     assert_eq!(error, Some("io.zip.entry_missing"));
 }
+
+#[test]
+fn a_descriptor_is_four_bytes_when_only_the_central_offset_is_zip64() {
+    let data = b"offset only";
+    let mut spec = Spec::stored("offset.txt", data);
+    spec.central_offset_zip64 = true;
+    spec.descriptor = Some((spec.crc, spec.compressed, spec.size));
+    let bytes = archive(&[spec]);
+    let mut zip = ZipArchive::open(&bytes, &options()).unwrap();
+    assert_eq!(zip.read_entry(0).unwrap(), data);
+}
+
+#[test]
+fn a_descriptor_is_eight_bytes_when_the_local_header_is_zip64() {
+    let data = b"wide descriptor";
+    let mut spec = Spec::stored("wide.txt", data);
+    spec.local_zip64 = true;
+    spec.descriptor = Some((spec.crc, spec.compressed, spec.size));
+    let bytes = archive(&[spec]);
+    let mut zip = ZipArchive::open(&bytes, &options()).unwrap();
+    assert_eq!(zip.read_entry(0).unwrap(), data);
+}

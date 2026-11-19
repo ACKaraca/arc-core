@@ -148,13 +148,21 @@ impl<'a> XmlReader<'a> {
                 return Ok(None);
             }
             match self.read_raw()? {
-                QuickEvent::Text(raw) => self.append(&raw)?,
+                QuickEvent::Text(raw) => {
+                    let bytes: &[u8] = &raw;
+                    if bytes.windows(3).any(|window| window == b"]]>") {
+                        return Err(Error::new(codes::XML_SYNTAX));
+                    }
+                    self.append(bytes)?;
+                }
                 QuickEvent::GeneralRef(raw) => {
+                    self.outside_root_refused()?;
                     self.append(b"&")?;
                     self.append(&raw)?;
                     self.append(b";")?;
                 }
                 QuickEvent::CData(raw) => {
+                    self.outside_root_refused()?;
                     for &byte in raw.iter() {
                         if byte == b'&' {
                             self.append(b"&amp;")?;
@@ -198,6 +206,15 @@ impl<'a> XmlReader<'a> {
         self.reader.read_event().map_err(map_error)
     }
 
+    /// Character data, references and CDATA sections are refused outside the root element; only
+    /// white space may stand there.
+    fn outside_root_refused(&self) -> Result<()> {
+        if self.open.is_empty() {
+            return Err(Error::new(codes::XML_STRUCTURE_INVALID));
+        }
+        Ok(())
+    }
+
     fn append(&mut self, bytes: &[u8]) -> Result<()> {
         let total = to_u64(self.text.len().saturating_add(bytes.len()));
         if total > self.limits.string_bytes {
@@ -232,10 +249,13 @@ impl<'a> XmlReader<'a> {
             QuickEvent::Start(start) => self.start(&start, false),
             QuickEvent::Empty(start) => self.start(&start, true),
             QuickEvent::End(end) => {
-                let name = utf8(end.name().as_ref())?;
+                let name = qualified_name(end.name().as_ref())?;
                 self.end_element(name)
             }
-            QuickEvent::Decl(decl) => check_declaration(&decl),
+            // The declaration is accepted only as the first event; anywhere else it is a
+            // processing instruction, which is refused.
+            QuickEvent::Decl(decl) if self.events == 1 => check_declaration(&decl),
+            QuickEvent::Decl(_) => Err(Error::new(codes::XML_PROCESSING_INSTRUCTION_REFUSED)),
             QuickEvent::PI(_) => Err(Error::new(codes::XML_PROCESSING_INSTRUCTION_REFUSED)),
             QuickEvent::DocType(_) => Err(Error::new(codes::XML_DOCTYPE_REFUSED)),
             QuickEvent::Eof => self.finish(),
@@ -247,7 +267,7 @@ impl<'a> XmlReader<'a> {
         if self.open.is_empty() && self.root_seen {
             return Err(Error::new(codes::XML_STRUCTURE_INVALID));
         }
-        let name = utf8(start.name().as_ref())?;
+        let name = qualified_name(start.name().as_ref())?;
         self.check_length(name.len())?;
         if to_u64(self.open.len()) >= u64::from(self.limits.nesting_depth) {
             return Err(limit("nesting_depth", to_u64(self.open.len()) + 1));
@@ -258,6 +278,10 @@ impl<'a> XmlReader<'a> {
             if attribute.name == "xmlns" {
                 self.declare(String::new(), &attribute.value)?;
             } else if let Some(prefix) = attribute.name.strip_prefix("xmlns:") {
+                // An empty prefix would bind the default namespace; qualified_name refuses it.
+                if prefix.is_empty() {
+                    return Err(Error::new(codes::XML_STRUCTURE_INVALID));
+                }
                 self.declare(prefix.to_owned(), &attribute.value)?;
             }
         }
@@ -284,7 +308,7 @@ impl<'a> XmlReader<'a> {
             if to_u64(attributes.len()) >= self.limits.array_length {
                 return Err(limit("array_length", to_u64(attributes.len()) + 1));
             }
-            let name = utf8(attribute.key.as_ref())?;
+            let name = qualified_name(attribute.key.as_ref())?;
             let value = text::decode(&attribute.value, Mode::Attribute)?;
             bytes = bytes.saturating_add(to_u64(name.len() + attribute.value.len()));
             if bytes > self.limits.string_bytes {
@@ -352,6 +376,21 @@ fn utf8(bytes: &[u8]) -> Result<String> {
     std::str::from_utf8(bytes)
         .map(str::to_owned)
         .map_err(|_| Error::new(codes::XML_TEXT_INVALID))
+}
+
+/// A qualified name: UTF-8, a `Name` of the XML grammar, and at most one colon that is neither
+/// first nor last. The grammar is a syntax error; a misplaced colon is a structure error.
+fn qualified_name(bytes: &[u8]) -> Result<String> {
+    let name = utf8(bytes)?;
+    if !text::is_name(&name) {
+        return Err(Error::new(codes::XML_SYNTAX));
+    }
+    let colons = name.matches(':').count();
+    let placed = name.starts_with(':') || name.ends_with(':');
+    if colons > 1 || (colons == 1 && placed) {
+        return Err(Error::new(codes::XML_STRUCTURE_INVALID));
+    }
+    Ok(name)
 }
 
 fn map_attribute_error(error: AttrError) -> Error {

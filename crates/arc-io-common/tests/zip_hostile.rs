@@ -110,7 +110,7 @@ fn the_total_declared_size_is_limited_over_entries() {
 }
 
 #[test]
-fn a_ratio_bomb_stops_at_the_declared_cap_while_inflating() {
+fn a_stream_longer_than_its_declared_size_stops_at_the_cap() {
     // 4 MiB of zeros deflates to a few kilobytes; the declared size is small, so the stream
     // exceeds it and the reader stops one byte past the cap.
     let zeros = vec![0_u8; 4 << 20];
@@ -325,4 +325,155 @@ fn a_zip64_size_beyond_the_limit_is_refused() {
     };
     let bytes = archive_with(&[Spec::stored("big", &noise(200, 8))], &layout);
     assert_eq!(open_code_with(&bytes, limits), Some("io.limit_exceeded"));
+}
+
+#[test]
+fn a_ratio_above_a_lowered_limit_is_refused_before_inflating() {
+    // The declared size matches the data, but the compressed size is so small that the ratio
+    // exceeds the lowered limit, so the entry is refused at open with nothing inflated.
+    let limits = Limits {
+        decompression_ratio: 10,
+        ..Limits::CONSTRAINED
+    };
+    let bytes = archive(&[Spec::deflated("zeros.bin", &vec![0_u8; 10_000])]);
+    assert_eq!(open_code_with(&bytes, limits), Some("io.limit_exceeded"));
+}
+
+#[test]
+fn trailing_bytes_after_the_deflate_stream_are_a_size_mismatch() {
+    let data = b"the stream ends here";
+    let mut spec = Spec::deflated("tail.txt", data);
+    spec.payload.extend_from_slice(b"garbage");
+    spec.compressed = u32::try_from(spec.payload.len()).unwrap_or(u32::MAX);
+    let bytes = archive(&[spec]);
+    let mut zip = ZipArchive::open(&bytes, &ReadOptions::default()).unwrap();
+    assert_eq!(
+        zip.read_entry(0).err().map(|e| e.code()),
+        Some("io.zip.size_mismatch")
+    );
+}
+
+#[test]
+fn a_wrong_crc_read_repeatedly_exhausts_the_budget() {
+    let mut spec = Spec::deflated("bad.bin", &noise(600, 11));
+    spec.crc ^= 0xFFFF;
+    spec.local_crc = Some(spec.crc);
+    let limits = Limits {
+        decompressed_bytes: 1000,
+        ..Limits::CONSTRAINED
+    };
+    let bytes = archive(&[spec]);
+    let mut zip = ZipArchive::open(&bytes, &ReadOptions::with_limits(limits)).unwrap();
+    let codes: Vec<_> = (0..3)
+        .map(|_| zip.read_entry(0).err().map(|e| e.code()))
+        .collect();
+    assert_eq!(
+        codes,
+        vec![
+            Some("io.zip.crc_mismatch"),
+            Some("io.limit_exceeded"),
+            Some("io.limit_exceeded"),
+        ]
+    );
+}
+
+#[test]
+fn overlapping_local_headers_are_refused_before_a_later_header_is_parsed() {
+    // Each entry's data runs one byte into the next entry's local header, so the first overlap is
+    // found at the second entry. The last local header names another file, which would be the
+    // reported error if every header were parsed before the layout is checked.
+    let mut specs: Vec<Spec> = (0..300)
+        .map(|index| {
+            let mut spec = Spec::stored(&format!("entry-{index:03}"), b"x");
+            spec.size += 1;
+            spec.compressed += 1;
+            spec
+        })
+        .collect();
+    if let Some(last) = specs.last_mut() {
+        last.local_name = Some(b"entry-29X".to_vec());
+    }
+    assert_eq!(open_code(&archive(&specs)), Some("io.zip.overlap"));
+}
+
+#[test]
+fn local_flags_that_disagree_in_an_encryption_or_utf8_bit_are_header_mismatches() {
+    for flags in [1_u16, 1 << 6, 1 << 11] {
+        let mut spec = Spec::stored("flags.txt", b"x");
+        spec.local_flags = Some(flags);
+        assert_eq!(
+            open_code(&archive(&[spec])),
+            Some("io.zip.header_mismatch"),
+            "{flags:#x}"
+        );
+    }
+}
+
+#[test]
+fn a_zip64_record_that_disagrees_with_the_end_record_is_a_structure_error() {
+    let layout = Layout {
+        zip64: true,
+        ..Layout::default()
+    };
+    let mut bytes = archive_with(&[Spec::stored("a", b"1")], &layout);
+    // The end record (22 bytes, no comment) now claims five entries; the ZIP64 record claims one.
+    let end = bytes.len() - 22;
+    bytes[end + 8..end + 10].copy_from_slice(&5_u16.to_le_bytes());
+    bytes[end + 10..end + 12].copy_from_slice(&5_u16.to_le_bytes());
+    assert_eq!(open_code(&bytes), Some("io.zip.structure_invalid"));
+}
+
+#[test]
+fn file_and_folder_names_that_conflict_are_refused() {
+    let file_first = archive(&[Spec::stored("a", b"1"), Spec::stored("a/b", b"2")]);
+    let folder_first = archive(&[Spec::stored("a/b", b"2"), Spec::stored("A", b"1")]);
+    assert_eq!(open_code(&file_first), Some("io.zip.name_conflict"));
+    assert_eq!(open_code(&folder_first), Some("io.zip.name_conflict"));
+}
+
+#[test]
+fn a_folder_with_the_same_name_as_a_file_prefix_is_accepted() {
+    let bytes = archive(&[
+        Spec::stored("a/", b""),
+        Spec::stored("a/b", b"2"),
+        Spec::stored("a-b", b"3"),
+    ]);
+    assert_eq!(open_code(&bytes), None);
+}
+
+#[test]
+fn a_name_and_the_same_name_with_a_trailing_dot_cannot_both_exist() {
+    let bytes = archive(&[Spec::stored("a", b"1"), Spec::stored("a.", b"2")]);
+    assert_eq!(open_code(&bytes), Some("io.zip.path_unsafe"));
+}
+
+#[test]
+fn names_that_alias_on_windows_are_refused_as_unsafe() {
+    for name in [
+        "a.",
+        "a ",
+        "dir/a. /b",
+        "CON",
+        "con.txt",
+        "dir/NUL.log",
+        "LPT9.tar.gz",
+        "CON .txt",
+        "a<b",
+        "a>b",
+        "a\"b",
+        "a|b",
+        "a?b",
+        "a*b",
+    ] {
+        let bytes = archive(&[Spec::stored(name, b"x")]);
+        assert_eq!(open_code(&bytes), Some("io.zip.path_unsafe"), "{name}");
+    }
+}
+
+#[test]
+fn names_that_only_resemble_windows_reserved_names_are_accepted() {
+    for name in ["CONSOLE.txt", "COM10", "NULL", "a.b.c", "contact"] {
+        let bytes = archive(&[Spec::stored(name, b"x")]);
+        assert_eq!(open_code(&bytes), None, "{name}");
+    }
 }

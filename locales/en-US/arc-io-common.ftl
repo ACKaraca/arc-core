@@ -14,6 +14,7 @@ io-zip-overlap = Two parts of the archive occupy the same bytes.
 io-zip-name-invalid = The archive contains an entry name that is empty or malformed.
 io-zip-path-unsafe = The archive contains an entry name that would leave the extraction folder.
 io-zip-name-duplicate = The archive contains two entries with the same name.
+io-zip-name-conflict = The archive contains a file whose name another entry needs as a folder.
 io-zip-size-mismatch = The compressed data does not match the size the archive declares.
 io-zip-inflate-failed = The compressed data of an entry is malformed.
 io-zip-crc-mismatch = The data of an entry does not match its checksum.

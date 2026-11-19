@@ -15,6 +15,9 @@ pub(super) enum Mode {
 
 /// Decodes the raw bytes of one text node or attribute value.
 pub(super) fn decode(raw: &[u8], mode: Mode) -> Result<String> {
+    if mode == Mode::Attribute && raw.contains(&b'<') {
+        return Err(Error::new(codes::XML_SYNTAX));
+    }
     let text = std::str::from_utf8(raw).map_err(|_| Error::new(codes::XML_TEXT_INVALID))?;
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -99,6 +102,42 @@ fn character_reference(name: &str) -> Result<char> {
     char::from_u32(value)
         .filter(|ch| is_xml_char(*ch))
         .ok_or_else(invalid)
+}
+
+/// Whether `name` is a `Name` of XML 1.0 (fifth edition): a name start character, then name
+/// characters. The colon is allowed here; the namespace rules are checked by the caller.
+pub(super) fn is_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(is_name_start) && chars.all(is_name_char)
+}
+
+fn is_name_start(ch: char) -> bool {
+    matches!(
+        ch,
+        ':' | 'A'..='Z'
+            | '_'
+            | 'a'..='z'
+            | '\u{C0}'..='\u{D6}'
+            | '\u{D8}'..='\u{F6}'
+            | '\u{F8}'..='\u{2FF}'
+            | '\u{370}'..='\u{37D}'
+            | '\u{37F}'..='\u{1FFF}'
+            | '\u{200C}'..='\u{200D}'
+            | '\u{2070}'..='\u{218F}'
+            | '\u{2C00}'..='\u{2FEF}'
+            | '\u{3001}'..='\u{D7FF}'
+            | '\u{F900}'..='\u{FDCF}'
+            | '\u{FDF0}'..='\u{FFFD}'
+            | '\u{10000}'..='\u{EFFFF}'
+    )
+}
+
+fn is_name_char(ch: char) -> bool {
+    is_name_start(ch)
+        || matches!(
+            ch,
+            '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}'
+        )
 }
 
 /// Whether `ch` is a character of XML 1.0 (`Char` in the grammar).

@@ -229,3 +229,85 @@ proptest! {
         read_to_end(&bytes);
     }
 }
+
+const SYNTAX: &str = "io.xml.syntax";
+const STRUCTURE: &str = "io.xml.structure_invalid";
+const PROCESSING: &str = "io.xml.processing_instruction_refused";
+
+#[test]
+fn an_empty_namespace_prefix_is_a_structure_error() {
+    assert_eq!(code(b"<a xmlns:=\"u\"/>", constrained()), Some(STRUCTURE));
+}
+
+#[test]
+fn a_declaration_is_accepted_only_as_the_first_event() {
+    assert_eq!(
+        code(b"<a><?xml version=\"1.0\"?></a>", constrained()),
+        Some(PROCESSING)
+    );
+    assert_eq!(
+        code(
+            b"<?xml version=\"1.0\"?><?xml version=\"1.0\"?><a/>",
+            constrained()
+        ),
+        Some(PROCESSING)
+    );
+    assert_eq!(
+        code(b" <?xml version=\"1.0\"?><a/>", constrained()),
+        Some(PROCESSING)
+    );
+}
+
+#[test]
+fn a_less_than_sign_in_an_attribute_value_is_refused() {
+    assert_eq!(code(b"<a x=\"a<b\"/>", constrained()), Some(SYNTAX));
+}
+
+#[test]
+fn the_cdata_end_marker_in_character_data_is_refused() {
+    assert_eq!(code(b"<a>x]]>y</a>", constrained()), Some(SYNTAX));
+    assert_eq!(code(b"<a><![CDATA[x]]></a>", constrained()), None);
+    assert_eq!(code(b"<a>x]]&gt;y</a>", constrained()), None);
+}
+
+#[test]
+fn names_outside_the_xml_name_grammar_are_refused() {
+    for document in [
+        &b"<a\x01/>"[..],
+        b"<1a/>",
+        b"<a!b/>",
+        b"<a x\x01=\"1\"/>",
+        b"<-a/>",
+        b"<a\xC2\xA0b/>",
+    ] {
+        assert_eq!(code(document, constrained()), Some(SYNTAX), "{document:?}");
+    }
+}
+
+#[test]
+fn a_misplaced_colon_in_a_qualified_name_is_a_structure_error() {
+    for document in [&b"<a:/>"[..], b"<:a/>", b"<a:b:c/>", b"<a x:=\"1\"/>"] {
+        assert_eq!(
+            code(document, constrained()),
+            Some(STRUCTURE),
+            "{document:?}"
+        );
+    }
+}
+
+#[test]
+fn content_other_than_white_space_outside_the_root_is_refused() {
+    for document in [
+        &b"<![CDATA[ ]]><a/>"[..],
+        b"&#32;<a/>",
+        b"<a/>&#32;",
+        b"<a/><![CDATA[x]]>",
+        b"<a/>text",
+    ] {
+        assert_eq!(
+            code(document, constrained()),
+            Some(STRUCTURE),
+            "{document:?}"
+        );
+    }
+}
