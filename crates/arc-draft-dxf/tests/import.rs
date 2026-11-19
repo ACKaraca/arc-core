@@ -218,7 +218,8 @@ fn file_access_outside_the_roots_and_without_permission_is_denied() {
     std::fs::remove_file(&outside).unwrap();
     assert_eq!(error.code(), "cmd.path.outside_roots");
     let inside = env.write("in.dxf", &bytes(&drawing(vec![], None)));
-    let traversal = format!("{}/../in.dxf", env.dir.0.join("sub").display());
+    // A path that leaves the root through `..`; it names no file, so every platform refuses it.
+    let traversal = format!("{}/../arc-draft-dxf-none.dxf", env.dir.0.display());
     assert!(env.import(&traversal, space).is_err());
     let error = env
         .invoke(
