@@ -1,0 +1,20 @@
+[package]
+name = "arc-io-ifc"
+description = "Bounded reader for IFC files: the STEP physical file (ISO 10303-21) and IFC-ZIP, with a neutral entity model and typed views of the spatial structure, types, property sets and quantity sets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+arc-base = { workspace = true }
+arc-io-common = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

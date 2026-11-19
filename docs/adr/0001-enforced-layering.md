@@ -101,6 +101,7 @@ pull reader that the ZIP- and XML-based format crates share (capability CORE-IO-
 `arc-base` and on the third-party crates `miniz_oxide` and `quick-xml`, and it is in the
 WebAssembly set. It has no same-layer edge yet: each format crate that reads ZIP or XML adds a
 same-layer edge from itself to `arc-io-common` in the table when it starts using the crate.
+`arc-io-ifc` (CORE-IO-014) is the first such crate and records the edge `arc-io-ifc -> arc-io-common`.
 
 The crate is needed because the format crates may not depend on each other (the family's crates
 are peers, and a format crate that read another format's container would inherit that crate's
