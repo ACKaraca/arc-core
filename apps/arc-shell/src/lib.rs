@@ -101,11 +101,9 @@ pub fn extract_sample(snapshot: &Snapshot, object: &Object, _: &Cancel) -> Resul
 }
 
 /// The render items of a sample object for the view renderer: those of [`extract_sample`], which
-/// nothing cancels here.
-fn draw_sample(snapshot: &Snapshot, object: &Object) -> Vec<RenderItem> {
-    extract_sample(snapshot, object, &Cancel::new())
-        .map(|extraction| extraction.items)
-        .unwrap_or_default()
+/// nothing cancels here. An extraction error is returned to the client, not drawn as nothing.
+fn draw_sample(snapshot: &Snapshot, object: &Object) -> Result<Vec<RenderItem>> {
+    extract_sample(snapshot, object, &Cancel::new()).map(|extraction| extraction.items)
 }
 
 fn entry(id: &str, label: Message, make: fn() -> Box<dyn shell::Panel>) -> Entry {

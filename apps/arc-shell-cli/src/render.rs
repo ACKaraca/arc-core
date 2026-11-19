@@ -129,8 +129,11 @@ fn offset(from: Point3, to: Point3) -> [f32; 3] {
 
 /// The render items of a sample object: a dot for a point, a segment for a line; layers have
 /// none.
-#[must_use]
-pub fn extract_sample(snapshot: &Snapshot, object: &Object) -> Vec<RenderItem> {
+///
+/// # Errors
+///
+/// None: every object of the sample types has items or none.
+pub fn extract_sample(snapshot: &Snapshot, object: &Object) -> Result<Vec<RenderItem>, Error> {
     let key = snapshot
         .resolve(object.id)
         .ok()
@@ -147,7 +150,7 @@ pub fn extract_sample(snapshot: &Snapshot, object: &Object) -> Vec<RenderItem> {
             color: Color::from_srgb8(INK),
         })
     };
-    match key.as_str() {
+    Ok(match key.as_str() {
         arc_shell_sample::POINT => point_of(object, 0)
             .map(|p| item(p, vec![[0.0, 0.0, 0.0]]))
             .into_iter()
@@ -157,7 +160,7 @@ pub fn extract_sample(snapshot: &Snapshot, object: &Object) -> Vec<RenderItem> {
             _ => Vec::new(),
         },
         _ => Vec::new(),
-    }
+    })
 }
 
 /// Runs `render` with `args` (after the subcommand) and writes its JSON result to `stdout`.

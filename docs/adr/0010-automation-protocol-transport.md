@@ -63,7 +63,9 @@ changes. A client that presents only a token keeps working unchanged.
   presented token is compared only against the named client's token; an unknown name is compared
   against a dummy token so the answer takes the same time. Clients are added and removed while the
   socket serves; removing one revokes and closes its open connections, refuses its next handshake
-  and stops their queued requests from running.
+  and stops their queued requests from running. Client files that an earlier instance of the same
+  socket name left behind are removed when the socket binds; links and files of other names are
+  left alone.
 - At most half of the connection slots may wait in their handshake at once, so connections that
   never authenticate cannot take every slot. A connection beyond that share is closed at once.
 - The host may observe connections: a connection that passes its handshake is reported as opened,
@@ -94,6 +96,10 @@ Decisions:
   written to a path only with the `file_write` permission inside a write root. Inline keeps a
   session self-contained; the file variant serves images too large for the message.
 - A renderer is attached by the host; the protocol does not know the GPU layer.
+- An inline image is refused before its base64 text is made when its size does not fit the
+  message limit, and before the render when an estimate of one bit per pixel does not fit. A
+  session revoked while its render runs writes no file and gets no image; the render itself is
+  not interrupted.
 
 Alternatives rejected:
 

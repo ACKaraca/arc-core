@@ -89,7 +89,9 @@ reports, Hub) are added in later parts behind settings that default to off.
 - A `Float` accepts a TOML integer and converts it; non-finite floats are invalid. Out-of-range
   integers and texts outside a `Choice` are type mismatches.
 - `set` validates key, scope, type and range and fails with a code instead of storing a bad value;
-  `reset` removes the value of one scope. Keys the registry does not know stay in the tables.
+  `reset` removes the value of one scope. Keys the registry does not know stay in the tables. An
+  internal key (below) is refused by both with `app.settings.type_mismatch`: its owning module
+  changes it.
 - The registry `SettingsRegistry::builtin` holds `ui.language`, `log.level`, `log.max_file_bytes`,
   `log.max_files` and `recent.max_entries`, all user-scoped.
 
@@ -268,13 +270,19 @@ reports, Hub) are added in later parts behind settings that default to off.
 - The setting `automation.grants` is registered with the internal setting type: the system scope
   can lock it (a locked key refuses `grant` and `revoke` with `app.settings.locked`), but it is not
   resolved or edited through the settings store and is hidden from the settings editor.
+- While the system scope locks `automation.grants`, the effective grants are exactly the system
+  scope's value of the key; the user scope's grants are ignored, and with no system value there are
+  none. An administrator can therefore forbid the user's grants and define the grants in the same
+  lock. Without a lock the effective grants are the user scope's.
 - `Automation::sync(store, dir, product, renderer)` applies the effective value. On: binds a
   client-table socket (`LocalSocket::bind_clients`) named `automation` in `dir` and serves the
-  product's commands on a thread the module owns, with one client per stored grant. Off: stops that
-  thread, which closes the connections and removes the socket and the token files. `start` and
-  `stop` do the same without the setting; dropping an `Automation` stops it. The reference shells
-  call `sync` from their event loop when the effective value changes, with the directory
-  `automation` in the user data directory and the product's renderer.
+  product's commands on a thread the module owns, with one client per effective grant. A socket
+  that already listens is reconciled with the effective grants: a client whose grant is no longer
+  effective, or changed, is removed (its connections close), and a grant without a client is added.
+  Off: stops that thread, which closes the connections and removes the socket and the token files.
+  `start` and `stop` do the same without the setting; dropping an `Automation` stops it. The
+  reference shells call `sync` from their event loop when the effective value changes, with the
+  directory `automation` in the user data directory and the product's renderer.
 - Grants are stored in the user settings file as `automation.grants`, an array of tables
   `{ client = "<label>", permissions = ["read", ...] }`. A label is 1 to 64 bytes with no control
   characters; `grant` replaces an earlier grant of the label, and an empty permission set or
@@ -283,7 +291,9 @@ reports, Hub) are added in later parts behind settings that default to off.
   (`client-<n>`, unique for the life of the switch) and sends it as `clientName` in the handshake; the
   client's token is the content of the file `automation@client-<n>.token` in the socket directory,
   which `Automation::clients` reports as `token_path`. The label, the identifier and the permissions
-  are shown; the token is never shown, logged or put in an error.
+  are shown; the token is never shown, logged or put in an error. The client is listed before the
+  socket admits it, so a connection that authenticates at once is listed; a client the socket
+  refuses is removed from the list again, and its grant stays in the settings.
 - `Automation::grant` and `Automation::revoke` change the settings and the running socket at once,
   with no restart. `grant` on a label that has a client removes that client first, which closes its
   connections and refuses its old token, then adds a client with the new permissions and a new token
@@ -317,7 +327,7 @@ reports, Hub) are added in later parts behind settings that default to off.
 
 - The module `render` (feature `render`, on with `window`) renders the default view of a snapshot
   headless: the product's extractor draws each object (`Extract`, a function from a snapshot object
-  to render items), the view is zoomed to the drawn objects, shaded on white through `arc-gpu` on
+  to a result of render items), the view is zoomed to the drawn objects, shaded on white through `arc-gpu` on
   the adapter its selection rules choose, and encoded as PNG. `render::render` returns the PNG, the
   number of objects drawn and the adapter (`name`, `software`, `fallback`).
 - `SnapshotRenderer::new(extract)` implements `arc_command::ViewRenderer` for that drawing. It
@@ -327,6 +337,11 @@ reports, Hub) are added in later parts behind settings that default to off.
   attaches `SnapshotRenderer` over its extractor, so the automation socket answers `view.render`.
   `arc-shell-cli` attaches it to the `serve` and `mcp` subcommands. The renderer runs on the
   thread of the session that asked.
+- `SnapshotRenderer` keeps one GPU device: the first render that needs it creates it, and later
+  renders reuse it. A failed creation is not kept, so the next render tries again. The renderer
+  takes its lock before the extraction, so renders run one at a time and a session waits its turn.
+  An extraction error is returned to the client as it is (`Extract` returns a `Result`), and no
+  device is created for it. The reference shell's extractor returns its errors this way too.
 - Feature `render` adds the dependencies `arc-gpu`, `arc-geom` and `image` (PNG encoding, the
   workspace entry with the `png` feature only). `arc-app` is layer 6, above `arc-gpu` (layer 5).
 

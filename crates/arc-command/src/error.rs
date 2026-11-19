@@ -413,8 +413,9 @@ pub mod codes {
         category: Category::LimitExceeded,
         message_id: "cmd-render-size-exceeded",
     };
-    /// The image cannot be returned inline; the detail `limit` names the bound. A write to a path
-    /// in a write root has no such bound beyond the file system.
+    /// The image cannot be returned inline; the detail `limit` names the bound (`inline_bytes`,
+    /// `message_bytes`). The file variant has no such bound beyond the file system: its message
+    /// suggests it.
     pub const RENDER_TOO_LARGE: ErrorCode = ErrorCode {
         code: "cmd.render.too_large",
         category: Category::LimitExceeded,

@@ -423,3 +423,71 @@ fn the_mcp_tool_without_a_renderer_answers_unavailable() {
             .contains("cmd.render.unavailable")
     );
 }
+
+/// [`session`] with the server's message limit set to `message_bytes`, over the renderer given.
+fn session_with_message_limit(
+    renderer: &dyn ViewRenderer,
+    message_bytes: u64,
+    lines: &[Value],
+) -> Vec<Value> {
+    let registry = registry();
+    let documents = docs();
+    let mut config = ServerConfig::new("arc-test", "0.1.0", [Permission::Read]);
+    config.max_message_bytes = message_bytes;
+    let server = Server::new(&registry, &documents, config, &NoLog).with_view_renderer(renderer);
+    let mut input = String::new();
+    for line in lines {
+        input.push_str(&line.to_string());
+        input.push('\n');
+    }
+    let mut output = Vec::new();
+    server
+        .serve(Cursor::new(input.into_bytes()), &mut output)
+        .unwrap();
+    String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn an_inline_image_whose_estimate_does_not_fit_is_refused_before_rendering() {
+    let renderer = Recording::new(0);
+    // A 64 by 64 image is estimated at 512 bytes, which is 684 bytes of base64 plus the envelope:
+    // more than the 1,200-byte message limit, so the renderer is not called.
+    let answers = session_with_message_limit(
+        &renderer,
+        1200,
+        &[
+            initialize(&["read"]),
+            render(2, json!({"document": "main", "width": 64, "height": 64})),
+        ],
+    );
+    assert_eq!(error_code(&answers[1]), "cmd.render.too_large");
+    assert_eq!(
+        answers[1]["error"]["data"]["details"]["limit"],
+        "message_bytes"
+    );
+    assert!(renderer.calls().is_empty(), "the renderer is not called");
+}
+
+#[test]
+fn an_inline_image_too_large_for_the_message_is_refused_after_rendering() {
+    // The estimate of an 8 by 8 image fits; the image the renderer returns does not.
+    let renderer = Recording::new(1000);
+    let answers = session_with_message_limit(
+        &renderer,
+        2000,
+        &[
+            initialize(&["read"]),
+            render(2, json!({"document": "main", "width": 8, "height": 8})),
+        ],
+    );
+    assert_eq!(error_code(&answers[1]), "cmd.render.too_large");
+    assert_eq!(
+        answers[1]["error"]["data"]["details"]["limit"],
+        "message_bytes"
+    );
+    assert_eq!(renderer.calls().len(), 1, "the renderer ran once");
+}

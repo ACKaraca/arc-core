@@ -9,7 +9,8 @@
 //! - [`LocalSocket::bind_clients`]: a table of clients, each with its own token file
 //!   (`<name>@<client>.token`) and its own permission ceiling. Clients are added and removed with
 //!   [`LocalSocket::add_client`] and [`LocalSocket::remove_client`] while the socket serves.
-//!   The `@` separator is outside the name alphabet, so no socket's file can be another's.
+//!   The `@` separator is outside the name alphabet, so no socket's file can be another's; the
+//!   client files an earlier instance of the same name left behind are removed when it binds.
 //!
 //! Tokens are random, written with owner-only permissions, compared in constant time and never
 //! logged or sent. The first line of a connection is the transport handshake `arc.authenticate`;
@@ -289,6 +290,38 @@ mod unix {
         same_owner(directory_uid, file_uid)
     }
 
+    /// Removes the client token files that an earlier instance of socket `name` left behind: the
+    /// regular files `<name>@<client>.token` owned by the owner of `directory`. Links and other
+    /// entries are skipped, and so is anything that cannot be inspected or removed.
+    fn remove_client_files(directory: &Path, name: &str) {
+        let Ok(owner) = fs::metadata(directory) else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        let prefix = format!("{name}@");
+        for entry in entries.flatten() {
+            let Some(file) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let is_client_file = file
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.strip_suffix(".token"))
+                .is_some_and(|client| !client.is_empty());
+            if !is_client_file {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.is_file() && same_owner(owner.uid(), meta.uid()).is_ok() {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+
     /// A client name for the observer: control characters replaced. The handshake bounds the
     /// length, so the result is bounded too.
     fn shown(name: &str) -> String {
@@ -352,7 +385,9 @@ mod unix {
 
         /// Binds the socket in client-table mode: no session token is created, every client is
         /// added with [`add_client`](Self::add_client), and a connection authenticates as the
-        /// client whose name and token it presents. Errors as [`bind`](Self::bind).
+        /// client whose name and token it presents. The client files of an earlier instance of
+        /// the name are removed first, once no live socket of that name answers. Errors as
+        /// [`bind`](Self::bind).
         ///
         /// # Errors
         ///
@@ -377,6 +412,9 @@ mod unix {
                 }
                 Ok(_) => return Err(io_error("exists")),
                 Err(_) => {}
+            }
+            if clients {
+                remove_client_files(&config.directory, &config.name);
             }
             let listener = UnixListener::bind(&socket_path).map_err(|_| io_error("bind"))?;
             // From here the socket is this call's: a failure below removes it and nothing else.
@@ -422,6 +460,13 @@ mod unix {
             &self.token_path
         }
 
+        /// The path of the token file of client `client`, as [`add_client`](Self::add_client)
+        /// writes it. The file exists only while the client does.
+        #[must_use]
+        pub fn client_token_path(&self, client: &str) -> PathBuf {
+            self.directory.join(format!("{}@{client}.token", self.name))
+        }
+
         /// A handle that ends [`serve`](Self::serve).
         #[must_use]
         pub fn stopper(&self) -> SocketStop {
@@ -435,8 +480,8 @@ mod unix {
         /// created exclusively) and grants it `ceiling`. The connections of the client run with
         /// the intersection of `ceiling` and the server's ceiling.
         ///
-        /// A file of that name left by a process that died blocks the name until someone removes
-        /// it: sweeping the directory could delete the token of another socket with a similar name.
+        /// The client files of an earlier instance of this socket name are removed when the socket
+        /// is bound, so a file of that name found here was written by this socket.
         ///
         /// # Errors
         ///
@@ -455,7 +500,7 @@ mod unix {
             if !name_ok(client) {
                 return Err(io_error("client_name"));
             }
-            let token_path = self.directory.join(format!("{}@{client}.token", self.name));
+            let token_path = self.client_token_path(client);
             let mut table = self.lock();
             if table.clients.contains_key(client) {
                 return Err(io_error("exists"));
@@ -827,6 +872,12 @@ mod stub {
         #[must_use]
         pub fn token_path(&self) -> &Path {
             Path::new("")
+        }
+
+        /// Always empty: there is no socket.
+        #[must_use]
+        pub fn client_token_path(&self, _: &str) -> PathBuf {
+            PathBuf::new()
         }
 
         /// A handle that ends [`serve`](Self::serve).

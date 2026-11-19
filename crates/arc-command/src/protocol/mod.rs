@@ -709,7 +709,7 @@ impl<'a> Server<'a> {
                         p.preview,
                     )
                 }),
-                _ => self.query(&session, method, params),
+                _ => self.query(&session, method, params, &AtomicBool::new(false)),
             }
         }))
         .unwrap_or_else(|payload| {
@@ -727,7 +727,13 @@ impl<'a> Server<'a> {
     }
 
     /// Answers the command methods that do not run a command; any other method is unknown.
-    fn query(&self, session: &Session, method: &str, params: Map<String, Value>) -> Answer {
+    fn query(
+        &self,
+        session: &Session,
+        method: &str,
+        params: Map<String, Value>,
+        revoked: &AtomicBool,
+    ) -> Answer {
         match method {
             "command.list" => decode::<ListParams>(method, params).and_then(|p| {
                 let snapshot = p
@@ -758,7 +764,7 @@ impl<'a> Server<'a> {
             "query.objects" | "query.references" | "query.diagnostics" | "query.history" => {
                 self.read_method(session, method, params)
             }
-            "view.render" => self.view_render(session, params),
+            "view.render" => self.view_render(session, params, revoked),
             _ => Err(Error::new(codes::PROTOCOL_METHOD_UNKNOWN)
                 .with_arg("method", method)
                 .into()),
@@ -1042,7 +1048,7 @@ impl<'a> Reader<'_, 'a> {
             "arc.capabilities" => Ok(capabilities()),
             "command.list" | "command.describe" | "command.validate" | "query.objects"
             | "query.references" | "query.diagnostics" | "query.history" | "view.render" => {
-                server.query(&session, method, params)
+                server.query(&session, method, params, self.revoked)
             }
             "event.subscribe" | "event.unsubscribe" => self.hub.subscribe(
                 server,

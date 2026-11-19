@@ -488,14 +488,18 @@ impl SettingsStore {
     /// value was removed. Parent tables left empty are removed too.
     ///
     /// # Errors
-    /// `app.settings.unknown_key` and `app.settings.locked` (a locked key outside the system
-    /// scope).
+    /// `app.settings.unknown_key`, `app.settings.locked` (a locked key outside the system
+    /// scope) and, as for [`set`](Self::set), `app.settings.type_mismatch` for an internal key:
+    /// its owning module removes it.
     pub fn reset(&mut self, scope: Scope, key: &str) -> Result<bool> {
         let Some(setting) = self.registry.get(key) else {
             return Err(Error::new(codes::SETTINGS_UNKNOWN_KEY).with_arg("key", key));
         };
         if scope != Scope::System && self.locked.contains(setting.key) {
             return Err(locked_error(key, scope));
+        }
+        if setting.ty == SettingType::Internal {
+            return Err(Error::new(codes::SETTINGS_TYPE_MISMATCH).with_arg("key", key));
         }
         let Some(table) = self.layers.get_mut(&scope) else {
             return Ok(false);
@@ -676,6 +680,34 @@ mod tests {
             "app.settings.path_conflict"
         );
         assert_eq!(s.get("zzz").unwrap_err().code(), "app.settings.unknown_key");
+    }
+
+    #[test]
+    fn internal_keys_are_changed_only_by_their_owning_module() {
+        let mut r = registry();
+        r.register(setting(
+            "a.internal",
+            SettingType::Internal,
+            SettingValue::Text(String::new()),
+            Scope::User,
+        ))
+        .unwrap();
+        let mut s = SettingsStore::new(r);
+        s.set_layer(Scope::User, "[a]\ninternal = [\"kept\"]\n".parse().unwrap())
+            .unwrap();
+        let set_error = s
+            .set(Scope::User, "a.internal", SettingValue::Text("x".into()))
+            .unwrap_err();
+        let reset_error = s.reset(Scope::User, "a.internal").unwrap_err();
+        assert_eq!(reset_error.code(), set_error.code());
+        assert_eq!(reset_error.code(), codes::SETTINGS_TYPE_MISMATCH.code);
+        assert!(
+            s.layer(Scope::User).unwrap()["a"]["internal"].is_array(),
+            "the owning module's value is not removed"
+        );
+        let editor_error =
+            crate::settings_editor::reset(&mut s, Scope::User, "a.internal", None).unwrap_err();
+        assert_eq!(editor_error.code(), set_error.code());
     }
 
     #[test]

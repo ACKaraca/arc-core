@@ -800,7 +800,7 @@ gives `validate <file>` the package check, so parameter validation is the separa
 | `cmd.socket.io` | `io` | The system refused an operation on the socket or its token; the detail `reason` says which |
 | `cmd.render.unavailable` | `unsupported` | No renderer is attached, so a view cannot be rendered |
 | `cmd.render.size_exceeded` | `limit_exceeded` | The requested width, height or pixel count is above the bound; the detail `limit` names it (`side` or `pixels`) |
-| `cmd.render.too_large` | `limit_exceeded` | The image cannot be returned inline; the detail `limit` names the bound (`inline_bytes` or `message_bytes`) |
+| `cmd.render.too_large` | `limit_exceeded` | The image cannot be returned inline, or its estimate cannot fit before the render; the detail `limit` names the bound (`inline_bytes` or `message_bytes`); the message suggests the `path` parameter |
 | `cmd.render.unsupported` | `unsupported` | The renderer does not draw a feature of the request; the detail `feature` names it (`view`, `display_mode`, `camera` or `sections`) |
 
 ## Model Context Protocol endpoint and local socket as implemented
@@ -912,11 +912,16 @@ after [ADR-0010](../adr/0010-automation-protocol-transport.md).
   handshake and removes its token file before it releases the table, so an `add_client` of the
   same name right after it succeeds; it returns whether the client existed. A revoked session
   reads no further request, starts no run it had queued and answers each such run with
-  `cmd.cancelled`; a command already running is cancelled when its session's reader ends. Adding
-  a client on a single-token socket is refused. A client file left by a process that died blocks
-  its name until someone removes it: the directory is not swept, since that could delete the
-  token of another socket with a similar name. Dropping the socket removes the client files it
-  wrote.
+  `cmd.cancelled`; a command already running is cancelled when its session's reader ends, and a
+  `view.render` in progress writes no file once its session is revoked (see
+  [View rendering](#view-rendering-as-implemented)). Adding a client on a single-token socket is
+  refused. `client_token_path(name)` gives the path `add_client` writes for a name, whether or not
+  the client exists.
+- **Stale client files**: `bind_clients`, once it has established that no live socket of the name
+  answers, removes the files `<name>@<client>.token` of an earlier instance of that name. Only
+  regular files owned by the owner of the directory are removed; links and other entries are left
+  alone, and so are files of other socket names (`other@x.token`), since `@` is outside the name
+  alphabet. Dropping the socket removes the client files it wrote.
 - **Connection events**: `serve_observed(server, observer)` tells a `ConnectionObserver` when a
   connection passes its handshake (`opened`, with a connection identifier unique for the life of
   the socket and the client name the handshake carried, with control characters replaced, empty
@@ -957,16 +962,25 @@ the renderer is attached (`cmd.render.unavailable`, before the parameters are re
 `camera`, `sections` or the decoder's message); the size bounds (`cmd.render.size_exceeded`, detail
 `limit`: `side` or `pixels`). The file variant also needs the `file_write` permission
 (`cmd.permission_denied`, detail `permission`) and a write root: without any, `cmd.path.outside_roots`.
-The document must be held (`cmd.document.unknown`). Then the renderer runs. The file is created
-through `Roots::create_write`, so a path outside the write roots is `cmd.path.outside_roots` after
-the render; no file is created then.
+The document must be held (`cmd.document.unknown`). An inline request is refused next when even its
+estimate does not fit (`cmd.render.too_large`, detail `limit`, see below). A session already
+revoked is answered `cmd.cancelled`. Then the renderer runs. The file is created through
+`Roots::create_write`, so a path outside the write roots is `cmd.path.outside_roots` after the
+render; no file is created then.
 
 Results:
 
 - Inline: `{"mimeType": "image/png", "width", "height", "bytes", "data"}`, `data` the base64 of the
-  PNG. An image over 12 MiB (`MAX_INLINE_BYTES`, whose base64 text is 16 MiB) or whose text does
-  not fit the message limit with its envelope is `cmd.render.too_large`.
+  PNG. The PNG size is checked first: an image over 12 MiB (`MAX_INLINE_BYTES`, detail
+  `inline_bytes`) is `cmd.render.too_large`. The message size follows, and is checked before the
+  base64 text is made: the text takes `((bytes + 2) / 3) * 4` bytes, the envelope 1,024 more, and
+  the sum must not exceed the message limit (detail `message_bytes`).
+- The estimate before the render: an inline request whose `width * height / 8` bytes, with the
+  same two checks, do not fit is refused with `cmd.render.too_large` before the renderer runs. The
+  estimate takes one bit per pixel, so a PNG smaller than that is refused too; the file variant has
+  no such bound.
 - File: `{"path", "mimeType": "image/png", "width", "height", "bytes"}`; the path is echoed as given.
+- The message of `cmd.render.too_large` suggests the `path` parameter.
 
 `render_view` maps its `view`, `width` and `height` arguments to `view.render` of the served
 document and answers the image as an MCP `image` item (`data`, `mimeType`), then a text item with
@@ -980,16 +994,21 @@ Decisions:
 - Camera and sections are passed through as JSON objects and checked for shape only; the renderer
   decides what it draws and refuses the rest with `cmd.render.unsupported`. Rejected: fixing a camera
   schema now, before any renderer draws one.
-- Bounds are checked before rendering, and the inline limit after it, since the PNG size is known
-  only then. Rejected: a byte budget before rendering, which would need a size estimate per
-  renderer.
+- Bounds are checked before rendering, and the inline limits after it, since the PNG size is known
+  only then; an inline estimate of one bit per pixel refuses the requests that cannot fit even so.
+  Rejected: a byte budget from the renderer, which would need a size estimate per renderer.
 - The file variant checks the write root before rendering only when no write root exists. Rejected:
   a separate root check that duplicates the native path checks of `Roots`; the write stays the one
   place that decides.
 - `view.render` runs on the thread of the session that asked, as the queries do. Rejected: a run
   queue entry, which would make the render cancellable but would serialize it with commands.
-  Shortcut: a render of a large image blocks the reader of its session until it finishes;
-  upgrade it when renders become long enough to need cancellation.
+  Shortcut: a render of a large image blocks the reader of its session until it finishes, and a
+  revoked session's render is not interrupted: stopping the socket waits for it; upgrade it when
+  renders become long enough to need cancellation.
+- Revocation: the session's flag is checked before the renderer runs and again after it returns,
+  before any file is created or any image is answered. A revoked client therefore gets no file.
+  Renders of one server may overlap; a host that needs one at a time serializes them (the
+  `arc-app` snapshot renderer does).
 - Base64 is encoded here (RFC 4648, standard alphabet, padded) since no encoding crate is in the
   technology baseline.
 

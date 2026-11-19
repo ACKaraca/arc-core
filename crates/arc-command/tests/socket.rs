@@ -19,9 +19,11 @@ use std::time::Duration;
 
 use arc_command::protocol::{
     ConnectionObserver, LocalSocket, MAX_CLIENTS, MAX_HANDSHAKE_BYTES, MAX_HANDSHAKING, NoObserver,
-    SocketConfig, SocketStop,
+    SocketConfig, SocketStop, ViewRenderer, ViewRequest,
 };
-use arc_command::{CommandSpec, NoLog, Permission, Registry, Server, ServerConfig, UndoBehavior};
+use arc_command::{
+    CommandSpec, NoLog, Permission, Registry, Roots, Server, ServerConfig, UndoBehavior,
+};
 use arc_doc::Document;
 use common::{document, registry};
 use serde_json::{Value, json};
@@ -913,4 +915,121 @@ fn a_removed_client_name_can_be_added_again_at_once() {
             barrier.wait();
         }
     });
+}
+
+#[test]
+fn client_files_left_by_a_dead_instance_do_not_block_the_name() {
+    let temp = Temp::new();
+    let dir = temp.socket_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Left by an instance that died: a client file of this socket name, and a file of another
+    // socket name that only resembles it.
+    std::fs::write(dir.join("arc@client-1.token"), "stale").unwrap();
+    std::fs::write(dir.join("other@x.token"), "foreign").unwrap();
+    // A link of the pattern is neither followed nor removed.
+    let target = temp.0.join("target");
+    std::fs::write(&target, "keep").unwrap();
+    std::os::unix::fs::symlink(&target, dir.join("arc@link.token")).unwrap();
+
+    let socket = LocalSocket::bind_clients(&temp.config(true)).unwrap();
+    assert!(
+        !dir.join("arc@client-1.token").exists(),
+        "the stale file is removed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("other@x.token")).unwrap(),
+        "foreign"
+    );
+    assert!(std::fs::symlink_metadata(dir.join("arc@link.token")).is_ok());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+
+    // The name is free again: the counter's first client gets a new token that authenticates.
+    let file = socket
+        .add_client("client-1", BTreeSet::from([Permission::Read]))
+        .unwrap();
+    let token = std::fs::read_to_string(&file).unwrap();
+    assert_ne!(token, "stale");
+    serve_bound(&socket, &NoObserver, |socket| {
+        let mut conn = Conn::open(socket.socket_path());
+        send_hello(&mut conn, Some("client-1"), &token);
+        assert_eq!(conn.read().unwrap()["result"], json!({}));
+    });
+}
+
+/// Announces that a render started, then waits until it is released and answers a small PNG-like
+/// payload.
+struct BlockingRenderer {
+    started: Mutex<Sender<()>>,
+    release: Mutex<Receiver<()>>,
+}
+
+impl ViewRenderer for BlockingRenderer {
+    fn render(&self, _: &ViewRequest<'_>) -> arc_base::Result<Vec<u8>> {
+        let _ = self.started.lock().unwrap().send(());
+        let _ = self.release.lock().unwrap().recv();
+        Ok(vec![137, 80, 78, 71])
+    }
+}
+
+#[test]
+fn a_render_in_flight_writes_nothing_once_its_client_is_revoked() {
+    let temp = Temp::new();
+    let out_dir = temp.0.join("out");
+    std::fs::create_dir(&out_dir).unwrap();
+    let socket = LocalSocket::bind_clients(&temp.config(true)).unwrap();
+    let file = socket
+        .add_client(
+            "viewer",
+            BTreeSet::from([Permission::Read, Permission::FileWrite]),
+        )
+        .unwrap();
+    let token = std::fs::read_to_string(&file).unwrap();
+    let (started_tx, started_rx) = channel();
+    let (release_tx, release_rx) = channel();
+    let renderer = BlockingRenderer {
+        started: Mutex::new(started_tx),
+        release: Mutex::new(release_rx),
+    };
+    let mut config = ServerConfig::new(
+        "arc-test",
+        "0.1.0",
+        [Permission::Read, Permission::Edit, Permission::FileWrite],
+    );
+    config.roots = Roots::new(Vec::<&Path>::new(), vec![out_dir.as_path()]).unwrap();
+    let registry = registry();
+    let docs = documents();
+    let server = Server::new(&registry, &docs, config, &NoLog).with_view_renderer(&renderer);
+    let target = out_dir.join("view.png");
+    let stop = socket.stopper();
+    std::thread::scope(|scope| {
+        let served = scope.spawn(|| socket.serve(&server));
+        struct StopOnDrop(SocketStop);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.0.stop();
+            }
+        }
+        let guard = StopOnDrop(stop);
+        let mut conn = Conn::open(socket.socket_path());
+        send_hello(&mut conn, Some("viewer"), &token);
+        assert_eq!(conn.read().unwrap()["result"], json!({}));
+        let init = json!({"clientName": "v", "protocolVersions": {"min": "1.0", "max": "1.0"},
+                          "permissions": ["read", "file_write"]});
+        assert_eq!(conn.call(2, "arc.initialize", init).get("error"), None);
+        conn.send(
+            &json!({"jsonrpc": "2.0", "id": 3, "method": "view.render",
+                    "params": {"document": "main", "width": 8, "height": 8,
+                               "path": target}})
+            .to_string(),
+        );
+        started_rx.recv().unwrap();
+        assert!(socket.remove_client("viewer"));
+        release_tx.send(()).unwrap();
+        // The connection was closed by the revocation, so the session answers nothing.
+        assert!(conn.read().is_none(), "no answer reaches a revoked client");
+        drop(guard);
+        served.join().unwrap().unwrap();
+    });
+    assert!(!target.exists(), "the revoked render wrote no file");
 }
