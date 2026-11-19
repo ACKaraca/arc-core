@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use arc_base::id::Identifier;
 use arc_base::math::{Matrix3, Point2, Transform2};
 use arc_base::{Color, Error, Limits, ObjectId, Result};
+use arc_doc::link::Links;
 use arc_doc::relationship::ReferenceField;
 use arc_doc::{Snapshot, Value};
 use arc_geom::encoding::GeomCodec;
@@ -23,10 +24,11 @@ use arc_geom::{Aabb2, Curve2, Loop2, Polyline2, PolylineVertex, Region};
 use crate::appearance::default_color;
 use crate::clip::{Piece, cut, piece};
 use crate::display::{
-    DisplayList, DisplayOptions, Lists, Primitive, Shape, space_list, transform_polyline,
-    transform_shape, viewport_list,
+    DisplayList, DisplayOptions, Lists, Primitive, Shape, space_list_with_links,
+    transform_polyline, transform_shape, viewport_list_with_links,
 };
 use crate::error::codes;
+use crate::external::ReferenceProblem;
 use crate::layout::{LAYOUT, VIEWPORT, settings, sheet_size, view};
 use crate::linetype::{DashOptions, Dashes, Pattern, dashes};
 use crate::plot_style::{
@@ -496,17 +498,24 @@ fn redash(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the stream parameters, passed through"
+)]
 fn collect_viewports(
     snapshot: &Snapshot,
     lists: Lists<'_>,
+    links: Option<&Links>,
     layout: ObjectId,
     display: &DisplayOptions,
     groups: &mut Vec<Group>,
     failed: &mut Vec<ObjectId>,
+    problems: &mut Vec<ReferenceProblem>,
 ) {
     for vp in owned(snapshot, layout, VIEWPORT) {
-        let listed = view(snapshot, vp)
-            .and_then(|v| viewport_list(snapshot, lists, vp, display).map(|l| (v, l)));
+        let listed = view(snapshot, vp).and_then(|v| {
+            viewport_list_with_links(snapshot, lists, links, vp, display).map(|l| (v, l))
+        });
         match listed {
             Ok((
                 v,
@@ -514,9 +523,11 @@ fn collect_viewports(
                     primitives,
                     clip,
                     failed: f,
+                    problems: p,
                 },
             )) => {
                 failed.extend(f);
+                problems.extend(p);
                 groups.push(Group {
                     clip: clip.or(Some(v.clip)),
                     pattern_scale: scale_of(&v.transform),
@@ -779,6 +790,35 @@ pub fn layout_stream(
     options: &PlotOptions,
     display: &DisplayOptions,
 ) -> Result<PlotStream> {
+    layout_stream_with_links(snapshot, lists, None, layout, options, display).map(|p| p.stream)
+}
+
+/// A plot stream with the problems of the placed external references in its drawing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkedPlot {
+    /// The stream. A placed reference that draws nothing, or part of its linked drawing, is listed
+    /// in `failed` as well.
+    pub stream: PlotStream,
+    /// The problems of the placed external references, in build order (see
+    /// [`DisplayList::problems`]).
+    pub problems: Vec<ReferenceProblem>,
+}
+
+/// The stream of the layout space `layout` as [`layout_stream`], with the loaded `links` of
+/// `snapshot`'s document: placed external references of its viewports and of the sheet draw
+/// their linked drawings through them.
+///
+/// # Errors
+///
+/// As [`layout_stream`].
+pub fn layout_stream_with_links(
+    snapshot: &Snapshot,
+    lists: Lists<'_>,
+    links: Option<&Links>,
+    layout: ObjectId,
+    options: &PlotOptions,
+    display: &DisplayOptions,
+) -> Result<LinkedPlot> {
     let sheet = Sheet::read(snapshot, layout)?;
     let f = sheet.factor;
     let (w, h) = sheet_size(&sheet.values);
@@ -795,9 +835,20 @@ pub fn layout_stream(
     };
     let mut groups = Vec::new();
     let mut failed = Vec::new();
-    collect_viewports(snapshot, lists, layout, display, &mut groups, &mut failed);
-    let own = space_list(snapshot, lists, layout, display)?;
+    let mut problems = Vec::new();
+    collect_viewports(
+        snapshot,
+        lists,
+        links,
+        layout,
+        display,
+        &mut groups,
+        &mut failed,
+        &mut problems,
+    );
+    let own = space_list_with_links(snapshot, lists, links, layout, display)?;
     failed.extend(own.failed);
+    problems.extend(own.problems);
     groups.push(Group {
         clip: None,
         pattern_scale: 1.0,
@@ -819,7 +870,9 @@ pub fn layout_stream(
             max: Point2::new(w - r, h - t),
         };
     }
-    build(snapshot, groups, failed, f, &paper, &options, display)
+    failed.extend(problems.iter().map(|p| p.reference));
+    let stream = build(snapshot, groups, failed, f, &paper, &options, display)?;
+    Ok(LinkedPlot { stream, problems })
 }
 
 /// The stream of the model space `space` on `paper`: the part chosen by `options.area` at the
@@ -837,25 +890,41 @@ pub fn model_stream(
     options: &PlotOptions,
     display: &DisplayOptions,
 ) -> Result<PlotStream> {
+    model_stream_with_links(snapshot, lists, None, space, paper, options, display).map(|p| p.stream)
+}
+
+/// The stream of the model space `space` as [`model_stream`], with the loaded `links` of
+/// `snapshot`'s document (see [`layout_stream_with_links`]).
+///
+/// # Errors
+///
+/// As [`model_stream`].
+pub fn model_stream_with_links(
+    snapshot: &Snapshot,
+    lists: Lists<'_>,
+    links: Option<&Links>,
+    space: ObjectId,
+    paper: &Paper,
+    options: &PlotOptions,
+    display: &DisplayOptions,
+) -> Result<LinkedPlot> {
     if !type_is(snapshot, space, SPACE) {
         return Err(Error::new(codes::PLOT_SOURCE_INVALID).with_detail("id", space.to_string()));
     }
-    let list = space_list(snapshot, lists, space, display)?;
+    let list = space_list_with_links(snapshot, lists, links, space, display)?;
     let groups = vec![Group {
         clip: None,
         pattern_scale: 1.0,
         primitives: list.primitives,
     }];
     let factor = unit_of(snapshot, space).factor_to(SpaceUnit::Millimeter);
-    build(
-        snapshot,
-        groups,
-        list.failed,
-        factor,
-        paper,
-        options,
-        display,
-    )
+    let mut failed = list.failed;
+    failed.extend(list.problems.iter().map(|p| p.reference));
+    let stream = build(snapshot, groups, failed, factor, paper, options, display)?;
+    Ok(LinkedPlot {
+        stream,
+        problems: list.problems,
+    })
 }
 
 // ----- canonical bytes -----

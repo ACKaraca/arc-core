@@ -20,6 +20,7 @@ use arc_doc::graph::{
     Derived, DerivedKey, DerivedValue, EvalContext, Evaluators, Graph, NodeKey, StateKind,
     content_hash,
 };
+use arc_doc::link::Links;
 use arc_doc::relationship::ReferenceField;
 use arc_doc::{ColorValue, Snapshot, TypeKey, Value};
 use arc_geom::encoding::GeomCodec;
@@ -32,6 +33,7 @@ use crate::appearance::{
 use crate::clip::{Piece, cut, keeps, piece};
 use crate::dimension::{DIMENSION, Resolution};
 use crate::error::codes;
+use crate::external::{self, DEFAULT_MAX_EXPANSIONS, Memo, ReferenceProblem, Scope};
 use crate::fonts::{Fonts, Substitutions, font_table_id};
 use crate::layout::{Overrides, view};
 use crate::leader::{LEADER, MULTILEADER};
@@ -42,7 +44,8 @@ use crate::text_layout::{
     VAlign,
 };
 use crate::types::{
-    BLOCK, BLOCK_REF, ENTITIES, POINT, POLYLINE, SPACE, SpaceUnit, WIPEOUT, entity, layer,
+    BLOCK, BLOCK_REF, ENTITIES, EXTERNAL_REF, POINT, POLYLINE, SPACE, SpaceUnit, WIPEOUT, entity,
+    layer,
 };
 use crate::validate::DEFAULT_MAX_NESTING;
 
@@ -191,6 +194,9 @@ pub struct EntityList {
     pub depth: u32,
     /// The primitives in draw order, in the coordinates of the entity's container.
     pub primitives: Vec<Primitive>,
+    /// The placed external references below the entity that draw nothing or part of their
+    /// linked drawing, and why.
+    pub problems: Vec<ReferenceProblem>,
 }
 
 impl Derived for EntityList {
@@ -212,6 +218,9 @@ pub struct DisplayList {
     /// The entities whose list failed, or whose primitives could not be cut or transformed;
     /// they are left out.
     pub failed: Vec<ObjectId>,
+    /// The placed external references that draw nothing or part of their linked drawing, and
+    /// why. Nothing is deleted for them.
+    pub problems: Vec<ReferenceProblem>,
 }
 
 /// What building a list reads: the dependency graph, or a snapshot directly.
@@ -231,6 +240,10 @@ pub(crate) trait Reader {
     fn evaluated(&self, id: ObjectId) -> Result<crate::fields::Evaluated>;
     /// The evaluated cells of the table `id`.
     fn table(&self, id: ObjectId) -> Result<crate::table::Resolution>;
+    /// The loaded links of the document read, when the reader has them.
+    fn scope(&self) -> Option<Scope<'_>>;
+    /// The nesting depth of the entity being read: 0 at the top of a list.
+    fn depth(&self) -> u32;
 }
 
 /// Whether `error` says that no evaluator is registered for a node: the reader then evaluates
@@ -307,6 +320,12 @@ impl Reader for GraphReader<'_, '_> {
             Err(e) => Err(e),
         }
     }
+    fn scope(&self) -> Option<Scope<'_>> {
+        None
+    }
+    fn depth(&self) -> u32 {
+        0
+    }
     fn table(&self, id: ObjectId) -> Result<crate::table::Resolution> {
         match self.ctx.node(&crate::table::resolved_node(id)?) {
             Ok(value) => value
@@ -323,6 +342,8 @@ struct SnapshotReader<'a> {
     snapshot: &'a Snapshot,
     options: &'a DisplayOptions,
     depth: u32,
+    /// The loaded links of `snapshot`'s document; placed external references read through them.
+    scope: Option<Scope<'a>>,
 }
 
 impl Reader for SnapshotReader<'_> {
@@ -380,6 +401,12 @@ impl Reader for SnapshotReader<'_> {
     fn table(&self, id: ObjectId) -> Result<crate::table::Resolution> {
         crate::table::resolve_with(self, id, &self.options.tolerance)
     }
+    fn scope(&self) -> Option<Scope<'_>> {
+        self.scope
+    }
+    fn depth(&self) -> u32 {
+        self.depth
+    }
 }
 
 /// Runs `f` with a reader of `snapshot`.
@@ -392,6 +419,7 @@ pub(crate) fn with_snapshot<R>(
         snapshot,
         options,
         depth: 0,
+        scope: None,
     })
 }
 
@@ -400,7 +428,7 @@ fn nesting(limit: u32) -> Error {
 }
 
 /// The entities a space or block definition contains, in no particular order.
-fn members(snapshot: &Snapshot, container: ObjectId) -> Vec<ObjectId> {
+pub(crate) fn members(snapshot: &Snapshot, container: ObjectId) -> Vec<ObjectId> {
     snapshot
         .referrers(container)
         .filter(|r| r.field == ReferenceField::Owner)
@@ -636,6 +664,7 @@ fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<
         order,
         depth: 0,
         primitives: Vec::new(),
+        problems: Vec::new(),
     };
     if matches!(values.get(entity::VISIBLE), Some(Some(Value::Bool(false)))) {
         return Ok(list);
@@ -667,6 +696,10 @@ fn build(reader: &dyn Reader, id: ObjectId, options: &DisplayOptions) -> Result<
                 &["block", "position", "scale", "rotation"],
             )?);
             return reference_list(reader, &values, base, &look, top, options);
+        }
+        EXTERNAL_REF => {
+            values.extend(read(reader, id, &external::FIELD_NAMES)?);
+            return external::list(reader, base, &values, options);
         }
         POINT => {
             if let Some(Value::Point2(p)) = reader.field(id, "position")? {
@@ -982,6 +1015,7 @@ pub fn text_layout(
         snapshot,
         options,
         depth: 0,
+        scope: None,
     };
     let key = reader
         .type_key(entity)
@@ -994,10 +1028,44 @@ pub fn text_layout(
 
 /// The map of a block reference: position · rotation · scale (with the unit factor of the
 /// definition to the container) · translation by the negated base point.
+/// The unit of the space or block definition `id`; unitless without one.
+fn unit_field(reader: &dyn Reader, id: Option<ObjectId>) -> Result<SpaceUnit> {
+    Ok(match id {
+        Some(id) => match reader.field(id, "unit")? {
+            Some(Value::Enum(code)) => SpaceUnit::of(code).unwrap_or(SpaceUnit::Unitless),
+            _ => SpaceUnit::Unitless,
+        },
+        None => SpaceUnit::Unitless,
+    })
+}
+
 fn reference_transform(
     reader: &dyn Reader,
     values: &[Option<Value>],
     block: ObjectId,
+    container: Option<ObjectId>,
+) -> Result<Transform2> {
+    let base = match reader.field(block, "base_point")? {
+        Some(Value::Point2(p)) => p,
+        _ => Point2::origin(),
+    };
+    placement(
+        reader,
+        values,
+        base,
+        unit_field(reader, Some(block))?,
+        container,
+    )
+}
+
+/// The transform of a reference with the fields at [`entity::REF_POSITION`] and the following
+/// slots of `values`: `base` of the inserted drawing maps to the position, scaled per axis by
+/// `from` to `container`'s unit and rotated. `from` is the unit of the inserted drawing.
+pub(crate) fn placement(
+    reader: &dyn Reader,
+    values: &[Option<Value>],
+    base: Point2,
+    from: SpaceUnit,
     container: Option<ObjectId>,
 ) -> Result<Transform2> {
     let at = |i| values.get(i).cloned().flatten();
@@ -1010,20 +1078,7 @@ fn reference_transform(
         _ => (1.0, 1.0),
     };
     let rotation = number(at(entity::REF_ROTATION)).unwrap_or(0.0);
-    let base = match reader.field(block, "base_point")? {
-        Some(Value::Point2(p)) => p,
-        _ => Point2::origin(),
-    };
-    let unit = |id: Option<ObjectId>| -> Result<SpaceUnit> {
-        Ok(match id {
-            Some(id) => match reader.field(id, "unit")? {
-                Some(Value::Enum(code)) => SpaceUnit::of(code).unwrap_or(SpaceUnit::Unitless),
-                _ => SpaceUnit::Unitless,
-            },
-            None => SpaceUnit::Unitless,
-        })
-    };
-    let factor = unit(Some(block))?.factor_to(unit(container)?);
+    let factor = from.factor_to(unit_field(reader, container)?);
     let (sin, cos) = rotation.sin_cos();
     let (fx, fy) = (sx * factor, sy * factor);
     let (a, b, c, d) = (cos * fx, -sin * fy, sin * fx, cos * fy);
@@ -1113,6 +1168,10 @@ pub(crate) fn reference_list(
     }
     let own_linetype = look.linetype();
     let mut primitives = Vec::with_capacity(count);
+    let problems: Vec<ReferenceProblem> = lists
+        .iter()
+        .flat_map(|(_, _, l)| l.problems.iter().copied())
+        .collect();
     for (_, member, list) in lists {
         for child in &list.primitives {
             let mut p = child.clone();
@@ -1148,6 +1207,7 @@ pub(crate) fn reference_list(
         order: base.draw_order,
         depth,
         primitives,
+        problems,
     })
 }
 
@@ -1196,11 +1256,44 @@ pub fn entity_list(
     entity: ObjectId,
     options: &DisplayOptions,
 ) -> Result<EntityList> {
+    entity_list_at(snapshot, None, entity, options, 0)
+}
+
+/// The list of `entity` as [`entity_list`], with the loaded `links` of `snapshot`'s document:
+/// placed external references draw their linked drawings through them.
+///
+/// # Errors
+///
+/// As [`entity_list`]. A placed reference whose link cannot be read is not an error: it draws
+/// nothing and is listed in [`EntityList::problems`].
+pub fn entity_list_with_links(
+    snapshot: &Snapshot,
+    links: Option<&Links>,
+    entity: ObjectId,
+    options: &DisplayOptions,
+) -> Result<EntityList> {
+    let memo = Memo::new(DEFAULT_MAX_EXPANSIONS);
+    entity_list_at(snapshot, scope_of(links, &memo), entity, options, 0)
+}
+
+/// The scope of a build with `links` and `memo`; none without links.
+fn scope_of<'a>(links: Option<&'a Links>, memo: &'a Memo) -> Option<Scope<'a>> {
+    links.map(|links| Scope { links, memo })
+}
+
+fn entity_list_at(
+    snapshot: &Snapshot,
+    scope: Option<Scope<'_>>,
+    entity: ObjectId,
+    options: &DisplayOptions,
+    depth: u32,
+) -> Result<EntityList> {
     build(
         &SnapshotReader {
             snapshot,
             options,
-            depth: 0,
+            depth,
+            scope,
         },
         entity,
         options,
@@ -1228,25 +1321,38 @@ fn layer_hidden(snapshot: &Snapshot, layer: ObjectId) -> bool {
         })
 }
 
-/// The visible primitives of the entities of `space`, in draw order.
+/// The visible primitives of the entities of `space`, in draw order, and the deepest nesting
+/// of their lists. Placed external references are always built directly, with `links`, since
+/// the graph does not hold the linked drawings.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the assembly parameters, passed through"
+)]
 fn gather(
     snapshot: &Snapshot,
     lists: Lists<'_>,
+    scope: Option<Scope<'_>>,
     space: ObjectId,
     frozen: &BTreeSet<ObjectId>,
     scale: f64,
     options: &DisplayOptions,
+    depth: u32,
     out: &mut DisplayList,
-) -> Result<Vec<Primitive>> {
+) -> Result<(Vec<Primitive>, u32)> {
     let mut entries = Vec::new();
     for member in members(snapshot, space) {
+        let external = snapshot
+            .resolve(member)
+            .ok()
+            .and_then(|h| snapshot.type_key(h))
+            .is_some_and(|k| k.as_str() == EXTERNAL_REF);
         let list: Option<DerivedValue> = match lists {
-            Lists::Graph(graph) => graph
+            Lists::Graph(graph) if !external => graph
                 .evaluate_now(&node(member)?)
                 .ok()
                 .filter(|v| v.state.kind() == StateKind::Clean)
                 .and_then(|v| v.result),
-            Lists::Direct => entity_list(snapshot, member, options)
+            _ => entity_list_at(snapshot, scope, member, options, depth)
                 .ok()
                 .map(|l| Arc::new(l) as DerivedValue),
         };
@@ -1261,6 +1367,10 @@ fn gather(
         .iter()
         .filter_map(|(id, v)| v.downcast_ref::<EntityList>().map(|l| (l.order, *id, l)))
         .collect();
+    let deepest = ordered.iter().map(|(_, _, l)| l.depth).max().unwrap_or(0);
+    for (_, _, list) in &ordered {
+        out.problems.extend(list.problems.iter().copied());
+    }
     ordered.sort_by_key(|(order, id, _)| (*order, *id));
     let mut hidden = std::collections::BTreeMap::new();
     let mut is_hidden = |layer: ObjectId| {
@@ -1279,7 +1389,7 @@ fn gather(
             }
         }
     }
-    Ok(primitives)
+    Ok((primitives, deepest))
 }
 
 /// The bounding box of the outer loops of `region`.
@@ -1291,12 +1401,12 @@ pub(crate) fn region_box(region: &Region) -> Option<arc_geom::Aabb2> {
         .reduce(|a, b| a.union(&b))
 }
 
-fn boundary_loop(boundary: &Polyline2, tol: &Tolerance) -> Result<Loop2> {
+pub(crate) fn boundary_loop(boundary: &Polyline2, tol: &Tolerance) -> Result<Loop2> {
     Loop2::new(vec![Curve2::Polyline(boundary.clone())], tol)
 }
 
 /// Cuts the curves and points of `p` to `boundary`; `false` when nothing is left.
-fn cut_primitive(
+pub(crate) fn cut_primitive(
     p: &mut Primitive,
     boundary: &Loop2,
     inside: bool,
@@ -1385,20 +1495,80 @@ pub fn space_list(
     space: ObjectId,
     options: &DisplayOptions,
 ) -> Result<DisplayList> {
-    let mut out = DisplayList::default();
-    let mut primitives = gather(
+    space_list_with_links(snapshot, lists, None, space, options)
+}
+
+/// The display list of `space` as [`space_list`], with the loaded `links` of `snapshot`'s
+/// document. Placed external references (CORE-DRAFT-025) draw their linked drawings through
+/// `links`; without links they draw nothing and are listed in [`DisplayList::problems`].
+///
+/// # Errors
+///
+/// As [`space_list`].
+pub fn space_list_with_links(
+    snapshot: &Snapshot,
+    lists: Lists<'_>,
+    links: Option<&Links>,
+    space: ObjectId,
+    options: &DisplayOptions,
+) -> Result<DisplayList> {
+    space_list_with_budget(
         snapshot,
         lists,
+        links,
+        space,
+        options,
+        DEFAULT_MAX_EXPANSIONS,
+    )
+}
+
+/// The display list of `space` as [`space_list_with_links`], with at most `max_expansions`
+/// linked-space expansions in the build (see [`crate::external::DEFAULT_MAX_EXPANSIONS`]). A
+/// placed reference that needs an expansion after the budget is used up draws nothing and
+/// reports `draft.external_ref.budget_exceeded`.
+///
+/// # Errors
+///
+/// As [`space_list`].
+pub fn space_list_with_budget(
+    snapshot: &Snapshot,
+    lists: Lists<'_>,
+    links: Option<&Links>,
+    space: ObjectId,
+    options: &DisplayOptions,
+    max_expansions: usize,
+) -> Result<DisplayList> {
+    let memo = Memo::new(max_expansions);
+    Ok(assemble(snapshot, lists, scope_of(links, &memo), space, options, 0)?.0)
+}
+
+/// The assembled list of `space` at `depth`: the visible primitives in draw order with the
+/// wipeouts applied, and the deepest nesting of the entities. Used for the spaces of linked
+/// drawings too.
+pub(crate) fn assemble(
+    snapshot: &Snapshot,
+    lists: Lists<'_>,
+    scope: Option<Scope<'_>>,
+    space: ObjectId,
+    options: &DisplayOptions,
+    depth: u32,
+) -> Result<(DisplayList, u32)> {
+    let mut out = DisplayList::default();
+    let (mut primitives, deepest) = gather(
+        snapshot,
+        lists,
+        scope,
         space,
         &BTreeSet::new(),
         options.annotation_scale,
         options,
+        depth,
         &mut out,
     )?;
     apply_masks(&mut primitives, &options.tolerance, &mut out.failed);
     out.primitives = primitives;
     dedup(&mut out.failed);
-    Ok(out)
+    Ok((out, deepest))
 }
 
 /// Applies the viewport's appearance overrides to a primitive whose value came from an
@@ -1464,22 +1634,43 @@ pub fn viewport_list(
     viewport: ObjectId,
     options: &DisplayOptions,
 ) -> Result<DisplayList> {
+    viewport_list_with_links(snapshot, lists, None, viewport, options)
+}
+
+/// The display list of `viewport` as [`viewport_list`], with the loaded `links` of
+/// `snapshot`'s document (see [`space_list_with_links`]).
+///
+/// # Errors
+///
+/// As [`viewport_list`].
+pub fn viewport_list_with_links(
+    snapshot: &Snapshot,
+    lists: Lists<'_>,
+    links: Option<&Links>,
+    viewport: ObjectId,
+    options: &DisplayOptions,
+) -> Result<DisplayList> {
     let view = view(snapshot, viewport)?;
     let tol = &options.tolerance;
     let mut out = DisplayList::default();
-    let mut primitives = gather(
+    let memo = Memo::new(DEFAULT_MAX_EXPANSIONS);
+    let scope = scope_of(links, &memo);
+    let (mut primitives, _) = gather(
         snapshot,
         lists,
+        scope,
         view.model,
         &view.overrides.frozen,
         view.annotation_scale,
         options,
+        0,
         &mut out,
     )?;
     let reader = SnapshotReader {
         snapshot,
         options,
         depth: 0,
+        scope,
     };
     let mut overridden = Vec::with_capacity(primitives.len());
     for mut p in primitives.drain(..) {

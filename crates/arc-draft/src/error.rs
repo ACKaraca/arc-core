@@ -332,6 +332,51 @@ pub mod codes {
         message_id: "draft-raster-encode-failed",
     };
 
+    /// A placed external reference names no `core.doc.link` object.
+    pub const EXTERNAL_LINK_INVALID: ErrorCode = ErrorCode {
+        code: "draft.external_ref.link_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-external-ref-link-invalid",
+    };
+    /// Display lists were built without the loaded links, so a placed reference draws nothing.
+    pub const EXTERNAL_NO_LINKS: ErrorCode = ErrorCode {
+        code: "draft.external_ref.no_links",
+        category: Category::Unsupported,
+        message_id: "draft-external-ref-no-links",
+    };
+    /// The linked drawing holds no space that the placed reference names, or no model space.
+    pub const EXTERNAL_SPACE_INVALID: ErrorCode = ErrorCode {
+        code: "draft.external_ref.space_invalid",
+        category: Category::NotFound,
+        message_id: "draft-external-ref-space-invalid",
+    };
+    /// A clip boundary of a placed external reference is not a closed polyline.
+    pub const EXTERNAL_CLIP_INVALID: ErrorCode = ErrorCode {
+        code: "draft.external_ref.clip_invalid",
+        category: Category::InvalidInput,
+        message_id: "draft-external-ref-clip-invalid",
+    };
+    /// The linked-space expansions of one display build are used up; the placed reference that
+    /// needed another one draws nothing.
+    pub const EXTERNAL_BUDGET_EXCEEDED: ErrorCode = ErrorCode {
+        code: "draft.external_ref.budget_exceeded",
+        category: Category::LimitExceeded,
+        message_id: "draft-external-ref-budget-exceeded",
+    };
+    /// Some entities of a linked drawing could not be drawn in a placed reference (a warning).
+    pub const EXTERNAL_PARTIAL: ErrorCode = ErrorCode {
+        code: "draft.external_ref.partial",
+        category: Category::FailedOperation,
+        message_id: "draft-external-ref-partial",
+    };
+    /// Binding would copy an entity of a type that binding does not copy; the argument `type`
+    /// names it.
+    pub const EXTERNAL_BIND_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "draft.external_ref.bind_unsupported",
+        category: Category::Unsupported,
+        message_id: "draft-external-ref-bind-unsupported",
+    };
+
     /// A stored hatch loop is not a closed circle, ellipse or polyline, the hatch has no loop, or
     /// a boundary object cannot bound a region.
     pub const HATCH_BOUNDARY_INVALID: ErrorCode = ErrorCode {
@@ -539,6 +584,13 @@ pub mod codes {
         TABLE_FORMULA_CYCLE,
         ARRAY_INVALID,
         ARRAY_TOO_MANY_ITEMS,
+        EXTERNAL_LINK_INVALID,
+        EXTERNAL_NO_LINKS,
+        EXTERNAL_SPACE_INVALID,
+        EXTERNAL_CLIP_INVALID,
+        EXTERNAL_BIND_UNSUPPORTED,
+        EXTERNAL_PARTIAL,
+        EXTERNAL_BUDGET_EXCEEDED,
     ];
 }
 

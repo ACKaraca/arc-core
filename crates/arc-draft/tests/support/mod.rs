@@ -56,13 +56,31 @@ impl Fixture {
         Self::build(arc_draft::validate::DEFAULT_MAX_NESTING, evaluators)
     }
 
+    /// A drafting document that also holds `core.doc.link` objects (external references).
+    pub fn drafting_with_links() -> Self {
+        let mut registry = TypeRegistry::new();
+        arc_draft::register_types(&mut registry).unwrap();
+        arc_doc::link::register(&mut registry).unwrap();
+        let mut evaluators = Evaluators::new();
+        arc_draft::register_evaluators(&mut evaluators, DisplayOptions::default()).unwrap();
+        Self::build_with(
+            Arc::new(registry),
+            arc_draft::validate::DEFAULT_MAX_NESTING,
+            evaluators,
+        )
+    }
+
     fn build(limit: u32, evaluators: Evaluators) -> Self {
+        Self::build_with(types(), limit, evaluators)
+    }
+
+    fn build_with(types: Arc<TypeRegistry>, limit: u32, evaluators: Evaluators) -> Self {
         let config = DocumentConfig {
             workers: 0,
             ..DocumentConfig::default()
         };
         let document =
-            Document::open(Snapshot::empty(types()), Arc::new(evaluators), config).unwrap();
+            Document::open(Snapshot::empty(types), Arc::new(evaluators), config).unwrap();
         for validator in arc_draft::validate::validators(limit) {
             document.add_validator(validator);
         }

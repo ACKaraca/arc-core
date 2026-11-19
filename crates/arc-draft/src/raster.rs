@@ -68,6 +68,8 @@ pub struct Raster {
     /// The number of items that were not drawn: glyph runs (outline glyphs are not rasterized
     /// by this part) and curves that could not be flattened.
     pub skipped: usize,
+    /// The resolution the image was rendered at, in pixels per inch; written to TIFF tags.
+    pub dpi: f64,
 }
 
 impl Raster {
@@ -102,6 +104,151 @@ impl Raster {
             Error::new(codes::RASTER_ENCODE_FAILED).with_detail("reason", e.to_string())
         })?;
         Ok(bytes)
+    }
+
+    /// The TIFF bytes of the image: an uncompressed baseline RGB file, little-endian, with one
+    /// strip, and the resolution tags of [`Raster::dpi`] in inches.
+    ///
+    /// Alpha is dropped: every pixel of a rendered page is opaque. Classic TIFF addresses the
+    /// file with 32-bit offsets, so an image whose file would exceed `u32::MAX` bytes is refused.
+    ///
+    /// # Errors
+    ///
+    /// `draft.raster.too_large` when the file would not fit a classic TIFF (argument `limit`:
+    /// the most pixels such a file holds); `draft.raster.invalid` when the pixels or the
+    /// resolution do not match the image.
+    pub fn tiff(&self) -> Result<Vec<u8>> {
+        tiff::encode(self)
+    }
+}
+
+/// The classic TIFF writer and the sizes it checks.
+mod tiff {
+    use super::{Raster, invalid};
+    use arc_base::{Error, Result};
+
+    use crate::error::codes;
+
+    const HEADER: u64 = 8;
+    /// The number of entries of the image file directory the writer emits.
+    const ENTRIES: u64 = 13;
+    /// The bytes of the out-of-line BitsPerSample values: three shorts.
+    const BITS: u64 = 6;
+    /// The bytes of one rational.
+    const RATIONAL: u64 = 8;
+
+    /// Byte size of the file for `pixels`, with the offsets of its parts, or `None` when a
+    /// size overflows `u64` or the file would not fit a classic TIFF.
+    struct Layout {
+        strip: u64,
+        bits: u64,
+        x_resolution: u64,
+        y_resolution: u64,
+        directory: u64,
+        end: u64,
+    }
+
+    fn align2(at: u64) -> Option<u64> {
+        at.checked_add(1).map(|n| n & !1)
+    }
+
+    fn layout(data: u64) -> Option<Layout> {
+        let strip = HEADER;
+        let bits = align2(strip.checked_add(data)?)?;
+        let x_resolution = bits.checked_add(BITS)?;
+        let y_resolution = x_resolution.checked_add(RATIONAL)?;
+        let directory = y_resolution.checked_add(RATIONAL)?;
+        // Count, entries and the offset of the next directory (absent).
+        let end = directory.checked_add(2 + ENTRIES * 12 + 4)?;
+        (end <= u64::from(u32::MAX)).then_some(Layout {
+            strip,
+            bits,
+            x_resolution,
+            y_resolution,
+            directory,
+            end,
+        })
+    }
+
+    /// The TIFF rational of `dpi`: thousandths of a pixel per inch.
+    fn rational(dpi: f64) -> Result<(u32, u32)> {
+        let n = (dpi * 1000.0).round();
+        if !(dpi.is_finite() && n >= 1.0 && n <= f64::from(u32::MAX)) {
+            return Err(invalid("dpi"));
+        }
+        Ok((n as u32, 1000))
+    }
+
+    fn too_large(width: u32, height: u32) -> Error {
+        let limit = (u64::from(u32::MAX) / 4).min(u64::from(width) * u64::from(height));
+        Error::new(codes::RASTER_TOO_LARGE)
+            .with_arg("limit", i64::try_from(limit).unwrap_or(i64::MAX))
+    }
+
+    pub(super) fn encode(raster: &Raster) -> Result<Vec<u8>> {
+        let pixels = u64::from(raster.width)
+            .checked_mul(u64::from(raster.height))
+            .ok_or_else(|| too_large(raster.width, raster.height))?;
+        let data = pixels
+            .checked_mul(3)
+            .ok_or_else(|| too_large(raster.width, raster.height))?;
+        let layout = layout(data).ok_or_else(|| too_large(raster.width, raster.height))?;
+        if u64::try_from(raster.rgba.len()).ok() != pixels.checked_mul(4) {
+            return Err(invalid("pixels"));
+        }
+        let (x_num, x_den) = rational(raster.dpi)?;
+        let (y_num, y_den) = (x_num, x_den);
+        let width = raster.width;
+        let height = raster.height;
+        let data_bytes = u32::try_from(data).map_err(|_| too_large(width, height))?;
+
+        let mut out = Vec::with_capacity(layout.end as usize);
+        // Header: byte order, magic 42, offset of the image file directory.
+        out.extend_from_slice(b"II");
+        out.extend_from_slice(&42u16.to_le_bytes());
+        out.extend_from_slice(&(layout.directory as u32).to_le_bytes());
+        for px in raster.rgba.chunks_exact(4) {
+            out.extend_from_slice(&px[..3]);
+        }
+        out.resize(layout.bits as usize, 0);
+        for _ in 0..3 {
+            out.extend_from_slice(&8u16.to_le_bytes());
+        }
+        out.extend_from_slice(&x_num.to_le_bytes());
+        out.extend_from_slice(&x_den.to_le_bytes());
+        out.extend_from_slice(&y_num.to_le_bytes());
+        out.extend_from_slice(&y_den.to_le_bytes());
+        debug_assert_eq!(out.len() as u64, layout.directory);
+
+        // Entries in ascending tag order: (tag, type, count, value).
+        const SHORT: u16 = 3;
+        const LONG: u16 = 4;
+        const RATIONAL_TYPE: u16 = 5;
+        let entries: [(u16, u16, u32, u32); 13] = [
+            (256, LONG, 1, width),
+            (257, LONG, 1, height),
+            (258, SHORT, 3, layout.bits as u32),
+            (259, SHORT, 1, 1),
+            (262, SHORT, 1, 2),
+            (273, LONG, 1, layout.strip as u32),
+            (277, SHORT, 1, 3),
+            (278, LONG, 1, height),
+            (279, LONG, 1, data_bytes),
+            (282, RATIONAL_TYPE, 1, layout.x_resolution as u32),
+            (283, RATIONAL_TYPE, 1, layout.y_resolution as u32),
+            (284, SHORT, 1, 1),
+            (296, SHORT, 1, 2),
+        ];
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&kind.to_le_bytes());
+            out.extend_from_slice(&count.to_le_bytes());
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&0u32.to_le_bytes());
+        debug_assert_eq!(out.len() as u64, layout.end);
+        Ok(out)
     }
 }
 
@@ -318,6 +465,7 @@ pub fn render(stream: &PlotStream, options: &RasterOptions) -> Result<Raster> {
         height,
         rgba: pixmap.take(),
         skipped,
+        dpi,
     })
 }
 

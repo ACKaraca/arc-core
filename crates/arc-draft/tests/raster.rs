@@ -368,3 +368,149 @@ fn png_bytes_decode_to_the_same_pixels_and_options_are_checked() {
     .unwrap_err();
     assert_eq!(err.code(), "draft.raster.too_large");
 }
+
+/// The fields a test needs from a file written by `Raster::tiff`.
+struct Tiff {
+    width: u32,
+    height: u32,
+    ifd: u32,
+    resolution: (u32, u32, u32, u32),
+    rgb: Vec<u8>,
+}
+
+fn u16_at(b: &[u8], at: usize) -> u16 {
+    u16::from_le_bytes([b[at], b[at + 1]])
+}
+
+fn u32_at(b: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+}
+
+/// Reads the baseline RGB, one-strip little-endian TIFF that `Raster::tiff` writes, and checks
+/// the tags it must carry.
+fn read_tiff(b: &[u8]) -> Tiff {
+    assert_eq!(&b[0..2], b"II");
+    assert_eq!(u16_at(b, 2), 42);
+    let ifd = u32_at(b, 4);
+    let count = usize::from(u16_at(b, ifd as usize));
+    let mut tags = std::collections::BTreeMap::new();
+    let mut previous = 0;
+    for i in 0..count {
+        let at = ifd as usize + 2 + i * 12;
+        let tag = u16_at(b, at);
+        assert!(tag > previous, "tags are in ascending order");
+        previous = tag;
+        tags.insert(
+            tag,
+            (u16_at(b, at + 2), u32_at(b, at + 4), u32_at(b, at + 8)),
+        );
+    }
+    assert_eq!(
+        u32_at(b, ifd as usize + 2 + count * 12),
+        0,
+        "no next directory"
+    );
+    let width = tags[&256].2;
+    let height = tags[&257].2;
+    assert_eq!(tags[&259].2, 1, "uncompressed");
+    assert_eq!(tags[&262].2, 2, "RGB");
+    assert_eq!(tags[&277].2, 3, "three samples");
+    assert_eq!(tags[&284].2, 1, "chunky");
+    assert_eq!(tags[&296].2, 2, "inches");
+    assert_eq!(tags[&278].2, height, "one strip");
+    let bits = tags[&258].2 as usize;
+    for k in 0..3 {
+        assert_eq!(u16_at(b, bits + 2 * k), 8);
+    }
+    let rational = |tag: u16| {
+        let at = tags[&tag].2 as usize;
+        (u32_at(b, at), u32_at(b, at + 4))
+    };
+    let (xn, xd) = rational(282);
+    let (yn, yd) = rational(283);
+    let offset = tags[&273].2 as usize;
+    let bytes = tags[&279].2 as usize;
+    assert_eq!(bytes, width as usize * height as usize * 3);
+    Tiff {
+        width,
+        height,
+        ifd,
+        resolution: (xn, xd, yn, yd),
+        rgb: b[offset..offset + bytes].to_vec(),
+    }
+}
+
+#[test]
+fn tiff_pixels_equal_the_png_pixels_and_the_header_fields_are_written() {
+    let mut f = Fixture::new();
+    let sheet = layout(&mut f);
+    let line = f.entity(sheet.0, segment_json(20.0, 50.0, 60.0, 50.0));
+    support::pen(&mut f, line, BLACK, 0.5, None);
+    let stream = plot_layout(&f, sheet.0);
+    let options = RasterOptions {
+        dpi: 50.0,
+        ..RasterOptions::default()
+    };
+    let r = render(&stream, &options).unwrap();
+    let tiff = read_tiff(&r.tiff().unwrap());
+    assert_eq!((tiff.width, tiff.height), (r.width, r.height));
+    // 50 dpi: 500 thousandths of a pixel per inch with the denominator 1000.
+    assert_eq!(tiff.resolution, (50_000, 1000, 50_000, 1000));
+    assert_eq!(tiff.ifd % 2, 0, "the directory starts at an even offset");
+
+    let decoded = image::load_from_memory_with_format(&r.png().unwrap(), image::ImageFormat::Png)
+        .unwrap()
+        .to_rgb8();
+    assert_eq!(decoded.as_raw(), &tiff.rgb);
+    let expected: Vec<u8> = r
+        .rgba
+        .chunks_exact(4)
+        .flat_map(|px| px[..3].to_vec())
+        .collect();
+    assert_eq!(tiff.rgb, expected);
+    // Identical renders write identical files.
+    assert_eq!(
+        r.tiff().unwrap(),
+        render(&stream, &options).unwrap().tiff().unwrap()
+    );
+}
+
+#[test]
+fn tiff_refuses_sizes_and_resolutions_it_cannot_write() {
+    let huge = Raster {
+        width: u32::MAX,
+        height: u32::MAX,
+        rgba: Vec::new(),
+        skipped: 0,
+        dpi: 300.0,
+    };
+    assert_eq!(huge.tiff().unwrap_err().code(), "draft.raster.too_large");
+    // Three bytes per pixel and 32-bit offsets: 2^31 pixels is too large.
+    let wide = Raster {
+        width: 1 << 16,
+        height: 1 << 15,
+        rgba: Vec::new(),
+        skipped: 0,
+        dpi: 300.0,
+    };
+    assert_eq!(wide.tiff().unwrap_err().code(), "draft.raster.too_large");
+    let mismatched = Raster {
+        width: 2,
+        height: 2,
+        rgba: vec![0; 15],
+        skipped: 0,
+        dpi: 300.0,
+    };
+    assert_eq!(
+        mismatched.tiff().unwrap_err().code(),
+        "draft.raster.invalid"
+    );
+    let no_dpi = Raster {
+        width: 1,
+        height: 1,
+        rgba: vec![0; 4],
+        skipped: 0,
+        dpi: 0.0,
+    };
+    assert_eq!(no_dpi.tiff().unwrap_err().code(), "draft.raster.invalid");
+}

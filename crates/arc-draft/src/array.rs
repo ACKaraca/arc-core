@@ -487,6 +487,7 @@ pub(crate) fn list(
         order: base.draw_order,
         depth,
         primitives,
+        problems: Vec::new(),
     })
 }
 

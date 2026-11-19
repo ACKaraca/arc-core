@@ -55,6 +55,9 @@ pub const BLOCK_REF: &str = "core.draft.block_ref";
 /// beneath it in draw order (CORE-DRAFT-004).
 pub const WIPEOUT: &str = "core.draft.wipeout";
 
+/// A placed reference to a linked drawing (CORE-DRAFT-025, [`crate::external`]).
+pub const EXTERNAL_REF: &str = "core.draft.external_ref";
+
 /// Every entity type key: objects with the common fields that live in a space or block.
 pub const ENTITIES: &[&str] = &[
     POINT,
@@ -69,6 +72,7 @@ pub const ENTITIES: &[&str] = &[
     SPLINE,
     BLOCK_REF,
     WIPEOUT,
+    EXTERNAL_REF,
     crate::text::TEXT,
     crate::text::RICH_TEXT,
     crate::dimension::DIMENSION,
@@ -640,7 +644,7 @@ fn block_ref_fields() -> Vec<FieldDecl> {
 /// Every drafting type declaration.
 fn declarations() -> arc_base::Result<Vec<TypeDecl>> {
     let curve = || with_kind(vec![geometry()]);
-    let table: [(&str, Vec<FieldDecl>, Vec<TypeValidator>); 16] = [
+    let table: [(&str, Vec<FieldDecl>, Vec<TypeValidator>); 17] = [
         (SPACE, space_fields(), vec![space_findings]),
         (LAYER, layer_fields(), vec![]),
         (LINETYPE, linetype_fields(), vec![linetype_findings]),
@@ -676,6 +680,11 @@ fn declarations() -> arc_base::Result<Vec<TypeDecl>> {
             WIPEOUT,
             with_kind(vec![geometry(), flag("frame", false)]),
             vec![wipeout_entity],
+        ),
+        (
+            EXTERNAL_REF,
+            with_kind(crate::external::fields()),
+            vec![crate::external::findings],
         ),
     ];
     let version = SchemaVersion::new(1, 0);
@@ -769,7 +778,7 @@ mod tests {
     fn every_type_registers_and_field_indices_match_names() {
         let mut registry = TypeRegistry::new();
         register_types(&mut registry).unwrap();
-        assert_eq!(registry.len(), 34);
+        assert_eq!(registry.len(), 35);
         let name = |key: &str, i: usize| registry.get(key).unwrap().schema.fields[i].name.clone();
         assert_eq!(name(LINE, entity::EXTRUSION), "extrusion");
         assert_eq!(name(LINE, entity::KIND), "geometry");

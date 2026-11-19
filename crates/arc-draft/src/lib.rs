@@ -26,6 +26,8 @@
 //!   dimension chains (CORE-DRAFT-010 to 012, [`dimension`], [`format`]), leaders and
 //!   multi-leaders (CORE-DRAFT-013, [`leader`]) and annotation scaling (CORE-DRAFT-014,
 //!   [`annotation`]);
+//! - external drawing references to linked drawings, read-only, with clip and bind (CORE-DRAFT-025,
+//!   [`external`]);
 //! - hatches with islands, associativity, pattern line generation and the Arc hatch-pattern
 //!   file format and library (CORE-DRAFT-003 and 020, [`hatch`], [`hatch_pattern`]);
 //! - spline entities (CORE-DRAFT-002, [`spline`]);
@@ -47,6 +49,8 @@ pub mod commands;
 pub mod dimension;
 pub mod display;
 pub mod error;
+pub mod external;
+pub mod external_commands;
 pub mod fields;
 pub mod fonts;
 pub mod format;

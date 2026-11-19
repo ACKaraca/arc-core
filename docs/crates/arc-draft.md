@@ -144,6 +144,7 @@ The first part of the crate implements CORE-DRAFT-001, 002, 005, 009, 016, 017, 
 | `core.draft.polyline` | common fields; `geometry`: a polyline with bulges and per-vertex widths; `continuous_pattern` |
 | `core.draft.spline` | common fields; `geometry`: a NURBS curve in the `arc.geom` encoding, version 2; `fit_points`: a list of points (default empty) |
 | `core.draft.block_ref` | common fields; `block`; `position`; `scale` (per axis); `rotation` in radians; `attributes`: a map from tag to value |
+| `core.draft.external_ref` | common fields; `link` (a `core.doc.link` object of this document); `position`; `scale` (per axis); `rotation` in radians; `space` (the 16-byte identifier of a space of the linked drawing; absent: its model space); `clip` (optional closed polyline in the linked drawing's coordinates) |
 
 The common fields of every entity, in order: `layer`; `color_by` and `color`; `linetype_by` and
 `linetype`; `linetype_scale` (positive, default 1); `lineweight_by` and `lineweight`;
@@ -917,7 +918,7 @@ in millimeters, end style, join style, linetype) for everything but masks.
 
 With the feature `raster` (off by default; it adds `tiny-skia` and the `png` feature of `image`),
 `raster::render` draws a stream at `RasterOptions::dpi` (1 to 10000, `draft.raster.invalid`
-otherwise; at most `max_pixels` pixels, `draft.raster.too_large`) and `Raster::png` encodes it.
+otherwise; at most `max_pixels` pixels, `draft.raster.too_large`) `Raster::png` and `Raster::tiff` encode it.
 
 - **Image.** One pixel is 25.4 / dpi millimeters; the image is the page rounded up to whole
   pixels, opaque, filled with the paper color, row 0 at the top of the page.
@@ -931,7 +932,14 @@ otherwise; at most `max_pixels` pixels, `draft.raster.too_large`) and `Raster::p
 - **Clips.** Everything is clipped to `area`, and viewport items also to their clip region, as
   anti-aliased masks.
 - **Not drawn.** Outline glyph runs, and curves that cannot be flattened within one million
-  vertices, are skipped and counted in `Raster::skipped`. TIFF is not written.
+  vertices, are skipped and counted in `Raster::skipped`.
+- **TIFF.** `Raster::tiff` writes a classic little-endian TIFF, uncompressed, baseline RGB with
+  8 bits per sample and one strip, with `XResolution` and `YResolution` in inches (`dpi` as
+  thousandths over 1000) and `Raster::dpi`. Alpha is dropped: every rendered pixel is opaque.
+  The file must fit 32-bit offsets, else `draft.raster.too_large` (argument `limit`: the most
+  pixels a file holds). Decision: RGB rather than RGBA with an alpha sample, because the alpha
+  is always 255 and RGB is one third smaller and read by every baseline TIFF reader; rejected:
+  compressed strips, which need a codec and a dependency.
 
 ## Hatches as implemented
 
@@ -1212,6 +1220,126 @@ editing one array regenerates no other. Items share the sub-object keys of the d
 `core.draft.text.create` takes `fields`; rich text takes them in the runs of its paragraphs. Every table
 command checks the whole table and leaves it unchanged on an error.
 
+## External drawing references as implemented (CORE-DRAFT-025)
+
+A placed external reference is an entity of type `core.draft.external_ref`. It shows the content of a
+linked drawing read-only, through the document links that `arc-doc` loads ([External references and
+links](arc-doc.md#external-references-and-links-core-doc-011-core-doc-012)). The product registers
+the `core.doc.link` type (`arc_doc::link::register`) in the registry of the documents it opens; the
+drafting types refer to it and do not register it.
+
+- **Placement.** The linked drawing's points and curves appear transformed by the reference's
+  `position`, per-axis `scale` and `rotation`, with the origin of the linked drawing as base point,
+  as a block reference does. The unit factor from the linked space's unit to the unit of the
+  container applies. `space` selects the space of the linked drawing; absent, the first model space
+  of that drawing in identifier order.
+- **Clip.** `clip` is a closed polyline in the coordinates of the linked drawing, applied before the
+  insertion transform, so it moves with the reference. Its parts inside the boundary are kept
+  (`clip::cut` with `inside`), and the wipeouts of the linked space apply first.
+- **Display.** `display::space_list_with_links`, `viewport_list_with_links` and
+  `entity_list_with_links` take the loaded `arc_doc::link::Links` of the host document; `space_list`
+  and `viewport_list` pass none. The linked drawing's lists are built directly from its snapshot,
+  not through the graph, which holds one document only. Each primitive of a placed reference has
+  `source` set to the placed reference and `path` set to `[link, linked entity, nested path...]`:
+  the link object of the host, then the object of the linked drawing. The nested path is the one
+  of the linked drawing's own lists. Its layers are the linked drawing's layers and the layer of the
+  placed reference. Layers that are off or frozen in the linked drawing hide their primitives.
+- **Problems.** A reference whose link is missing, unresolved, refused or not loaded, whose linked
+  space cannot be found, or whose display list is built without links draws nothing and adds
+  a `ReferenceProblem` (`reference`, `link`, the stable `code`) to `DisplayList::problems` or
+  `EntityList::problems`. Entities of a linked drawing that fail to draw leave the reference
+  partially drawn: `draft.external_ref.partial` (a warning) is reported for the reference. Nothing is
+  deleted or rewritten.
+- **Nesting.** A placed reference below another level of linked drawings counts as one level of
+  nesting. A reference nested deeper than `DisplayOptions::max_nesting` draws nothing and reports
+  `draft.block.nesting_too_deep`; a drawing that references itself through links therefore
+  terminates at that limit and is reported, not failed.
+- **Work.** One top-level display build (`space_list_with_links`, `viewport_list_with_links`,
+  `entity_list_with_links`, the plot functions) keeps a memo of the untransformed list of each
+  linked space, keyed by linked document, space and nesting depth. A placed reference reuses the
+  list of its key and applies its own transform and clip, so a drawing with `k` references back
+  to itself builds one list per document, space and depth, not `k` to the power of the depth.
+  Two bounds apply per build, both checked when charged, not configurable through
+  `DisplayOptions` (its literal construction in `arc-gpu` would change): at most
+  `DEFAULT_MAX_EXPANSIONS` (10,000) linked spaces built, counted when built, and at most 100,000
+  primitives charged, counted for each expansion kept and each copy made for a placement.
+  `space_list_with_budget` takes the expansion bound explicitly. A reference that needs an
+  expansion or a copy after a bound is used up draws nothing and reports
+  `draft.external_ref.budget_exceeded`; a reference whose linked list exceeds
+  `DisplayOptions::max_primitives` reports `draft.display.too_large`.
+- **Read-only.** No command writes a linked drawing: the loaded snapshot is immutable, and the
+  commands of this crate change only the objects of the host document.
+- **Snapping and picking.** This crate has no snap or pick query; the display list is the query
+  the other crates use. Snapping to linked geometry uses the same primitives, identified by the
+  `source` and `path` above.
+
+### Commands
+
+| Command | Effect |
+|---|---|
+| `core.draft.external_ref.create` | Creates a placed reference in `owner` with `link` (a `core.doc.link` object), `position`, optional `scale`, `rotation`, `space`, `clip` and `layer`. `clip` must be a closed polyline (`draft.external_ref.clip_invalid`). |
+| `core.draft.external_ref.set_clip` | Sets the `clip` of `objects` to a closed polyline, or removes it with `null`. |
+| `core.draft.external_ref.bind` | Not registered by `register_commands`: `external_commands::bind_command(links)` returns its specification with the loaded links, and the product registers it. |
+
+The bind command runs in one transaction, so one undo restores everything it changed:
+
+1. It refuses, before any change, a linked space with an entity that is not a point or a curve
+   (`draft.external_ref.bind_unsupported`, argument `type`).
+2. It creates a block definition named after the linked space: the space's name when free, else
+   `<file name>-<space name>`, then with a counter. Its base point is `(0, 0)` and its unit is the unit
+   of the linked space.
+3. It copies the layers and linetypes the copied entities use. A name that exists in the host is
+   renamed `<file name>-<name>` (with a counter if that is taken too). Copied values are kept, except
+   the names and the references to copied layers and linetypes.
+4. It copies each entity into the block with its values and draw order. A clip boundary is applied
+   first: each curve is cut with `clip::cut` and each piece becomes an entity of the type of its
+   curve; points are kept when inside. Block references of this crate do not clip, so the clip
+   boundary itself is not kept.
+5. It creates a block reference with the placed reference's common fields, `position`, `scale` and
+   `rotation`, and deletes the placed reference. The link object is deleted when no other placed
+   reference names it.
+
+For an unclipped reference, the block reference draws the same geometry and colors as the reference
+had, so the display lists agree in shape and color. Identifiers, layers (copies) and the list
+structure differ.
+
+### Decisions
+
+Where the specification was silent:
+
+1. The link is a `Reference` field with the rule of a layer's (`OnDelete::Block`), so a link in use
+   is not deleted by mistake. Rejected: an `ExternalReference` value `(link, target)`, which would
+   need a target for the model space and gives no deletion rule for the link object itself.
+2. The linked space is an `Opaque` 16-byte identifier. Rejected: a `Reference` field, which the
+   host's reference checks would validate against host objects.
+3. The clip is in the linked drawing's coordinates. Rejected: host coordinates, which would leave the
+   clip behind when the reference moves.
+4. A primitive's `source` is the placed reference and its `path` starts with the link object.
+   Rejected: `source` set to the linked object, which loses the link and collides with the host's
+   identifiers.
+5. Problems are returned in the display result, not as errors and not in `failed`. An error would
+   drop the whole list of the host space, and `failed` holds host identifiers only.
+6. Placed references are always built directly, not through the graph. Rejected: graph dependencies
+   on the linked documents, which the graph cannot hold.
+7. Cycles are cut at the nesting limit, as the specification requires. Rejected: detecting a cycle
+   on the active path and reporting it at once, which is cheaper but reports before the limit.
+8. The default space is the first model space in identifier order. Rejected: an error for drawings
+   with more than one model space, since a drawing can legitimately hold several.
+9. Bind copies points and curves only. Rejected: copying every entity type, which needs the references
+   of text, dimension, hatch, table and nested block styles remapped to host objects; the refusal
+   names the first type it meets.
+10. Bind applies a clip by cutting the copies. Rejected: refusing bind for clipped references, which
+   would make the clip feature unusable with bind; and keeping the clip on the block reference, which
+   would need a new field on `core.draft.block_ref` (a versioned type change).
+11. Bind is not registered by `register_commands`. Rejected: a command that reads links from a global
+   store, since a command receives only its document. The product passes its links to
+   `bind_command`.
+12. `layout_stream_with_links` and `model_stream_with_links` return a `LinkedPlot`: the stream and the
+   problems of the placed references, in build order. The plain `layout_stream` and `model_stream`
+   delegate with no links. Rejected: a `problems` field on `PlotStream`, which would break its literal
+   construction in `arc-io-pdf` tests. A placed reference with a problem is also listed in the
+   stream's `failed`, the list the plot already uses for left-out entities.
+
 ## Error codes
 
 The codes of every part of the crate:
@@ -1271,6 +1399,13 @@ The codes of every part of the crate:
 | `draft.raster.invalid` | `invalid_input` | A raster resolution or size is out of range |
 | `draft.raster.too_large` | `limit_exceeded` | A raster image would have more pixels than the bound |
 | `draft.raster.encode_failed` | `internal` | The PNG encoder failed |
+| `draft.external_ref.link_invalid` | `invalid_input` | A placed external reference names no `core.doc.link` object |
+| `draft.external_ref.no_links` | `unsupported` | A placed external reference is listed without loaded links and draws nothing |
+| `draft.external_ref.space_invalid` | `not_found` | The linked drawing holds no space that the placed reference names, or no model space |
+| `draft.external_ref.clip_invalid` | `invalid_input` | A clip boundary of an external reference is not a closed polyline |
+| `draft.external_ref.bind_unsupported` | `unsupported` | Binding meets an entity of a type it does not copy (argument `type`) |
+| `draft.external_ref.budget_exceeded` | `limit_exceeded` | The linked-space expansions of one display build are used up; the placed reference draws nothing |
+| `draft.external_ref.partial` | `failed_operation` | Some entities of a linked drawing could not be drawn in a placed reference (a warning) |
 | `draft.hatch.boundary_invalid` | `invalid_input` | A stored hatch loop is not a closed circle, ellipse or polyline, a hatch has no loop, or a boundary object cannot bound a region |
 | `draft.hatch.parameter_invalid` | `invalid_input` | A hatch scale is not a finite positive number, or its angle or origin is not finite |
 | `draft.hatch.disassociated` | `not_found` | A hatch lost a boundary object and keeps its last boundary (a warning) |

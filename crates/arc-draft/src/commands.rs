@@ -169,6 +169,27 @@ const NAMES: &[Names] = &[
         },
     },
     Names {
+        id: "core.draft.external_ref.create",
+        message_id: "draft-command-external-ref-create",
+        description: Description {
+            message_id: "draft-command-external-ref-create-description",
+        },
+    },
+    Names {
+        id: "core.draft.external_ref.set_clip",
+        message_id: "draft-command-external-ref-set-clip",
+        description: Description {
+            message_id: "draft-command-external-ref-set-clip-description",
+        },
+    },
+    Names {
+        id: "core.draft.external_ref.bind",
+        message_id: "draft-command-external-ref-bind",
+        description: Description {
+            message_id: "draft-command-external-ref-bind-description",
+        },
+    },
+    Names {
         id: "core.draft.block.insert",
         message_id: "draft-command-block-insert",
         description: Description {
@@ -1753,6 +1774,8 @@ pub fn register_commands(registry: &mut Registry) -> Result<()> {
             .with_example(serde_json::json!({"name": "door"})),
         family("core.draft.block.modify", &[BLOCK]),
         spec("core.draft.block.insert", insert_block),
+        crate::external_commands::create_spec(),
+        crate::external_commands::set_clip_spec(),
         spec("core.draft.order.front", |ctx, p: Order| {
             order(ctx, p.objects, Place::Front)
         }),
