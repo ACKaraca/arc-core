@@ -323,17 +323,15 @@ fn refused_kinds_and_mirrored_text_name_the_kind_and_change_nothing() {
         "core.draft.text.create",
         json!({"owner": space.to_string(), "content": "D", "position": [0.0, 0.0]}),
     );
+    // Refers to the segment, which is not selected: an associated dimension is refused.
     let dimension = f.create(
         "core.draft.dimension.create",
         json!({"owner": space.to_string(), "kind": "aligned",
-               "points": [{"position": [0.0, 0.0]}, {"position": [4.0, 0.0]}],
+               "points": [{"object": segment.to_string(), "key": "start"},
+                          {"object": segment.to_string(), "key": "end"}],
                "line_position": [0.0, 3.0]}),
     );
-    let refused = transform(
-        &mut f,
-        &[segment, dimension],
-        json!({"translation": [1.0, 0.0]}),
-    );
+    let refused = transform(&mut f, &[dimension], json!({"translation": [1.0, 0.0]}));
     assert_eq!(code(refused), "draft.entity.transform_unsupported");
     // The segment moved nowhere: the command refuses the whole list.
     let Curve2::Segment(s) = curve(&f, segment) else {

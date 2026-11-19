@@ -512,6 +512,9 @@ fn write_chain(ctx: &mut Context<'_>, id: ObjectId, members: &[ObjectId]) -> Res
     let txn = ctx.txn()?;
     let snapshot = txn.snapshot().clone();
     check_members(&snapshot, members)?;
+    for member in members {
+        crate::lock::check_entity(&snapshot, *member)?;
+    }
     txn.modify(
         id,
         FieldPath::new("members"),
@@ -631,6 +634,7 @@ fn set_scales(ctx: &mut Context<'_>, p: Scales) -> Result<()> {
     for IdParam(id) in p.objects {
         let snapshot = txn.snapshot().clone();
         expect(&snapshot, id, &[DIMENSION, LEADER, MULTILEADER])?;
+        crate::lock::check_entity(&snapshot, id)?;
         let values = values_of(&snapshot, id)?;
         // The annotative fields are the last two of every annotative type.
         let at = values.len().saturating_sub(1);

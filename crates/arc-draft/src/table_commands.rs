@@ -216,6 +216,7 @@ fn load(ctx: &mut Context<'_>, id: ObjectId) -> Result<Table> {
 fn store(ctx: &mut Context<'_>, id: ObjectId, table: &Table) -> Result<()> {
     table.validate(ctx.limits())?;
     let txn = ctx.txn()?;
+    crate::lock::check_entity(txn.snapshot(), id)?;
     for (name, value) in table.stored() {
         txn.modify(id, FieldPath::new(name), Some(value))?;
     }

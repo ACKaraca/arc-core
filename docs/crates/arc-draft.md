@@ -223,6 +223,34 @@ new entity is placed at the front. The reference must not be among the moved ent
 (`draft.order.reference_moved`), and all entities must share one container
 (`draft.order.container_mismatch`).
 
+### Layer locks (CORE-DRAFT-016)
+
+A layer with `locked` set protects the existing entities on it: they can be snapped to and measured, but
+not modified. Each entity is judged by its own layer: an entity inside a block definition is judged by its
+own layer when it is edited, and editing a block reference is allowed even when its definition holds
+entities on locked layers. The shared check refuses with `draft.layer.locked` (argument `layer`, the layer's name) when a
+command would, for an entity the command names:
+
+- modify a field of the entity, transform it, delete it, or reorder it explicitly (`core.draft.order.*`);
+- delete an entity that a dimension or hatch depends on, when that dependent's stored geometry is frozen by
+  the deletion (the dependent is then the modified entity);
+- move the entity onto a locked layer, or off one, by setting its `layer` field;
+- edit rich text (`core.draft.rich_text.set`), a spline (`core.draft.spline.set`), a table
+  (`core.draft.table.*` edits of an existing table), annotation scales and chains
+  (`core.draft.annotation.scales`, `core.draft.chain.*`), a clip boundary
+  (`core.draft.external_ref.set_clip`), or remove a placed external reference by binding it.
+
+Creating entities on a locked layer is allowed in every creation path: `core.draft.entity.create`, the typed
+creation commands, hatch picking, external reference creation, arrays, block references, DXF import and
+binding. Indirect effects are not modifications: a creation or deletion that renumbers the draw order of
+sibling entities, including those on a locked layer, is allowed; the check applies only to the entities a
+command names and to the dependents rule above.
+
+A refused command changes nothing. Setting the `locked` field of the layer itself is allowed. Block
+definition content copied by `core.draft.external_ref.bind` is not placed on a layer of the space and is
+not checked; a copied layer keeps the lock of the linked drawing. The `frozen` and `on` flags are not
+checked by these commands.
+
 ### Appearance resolution (CORE-DRAFT-017)
 
 `appearance::resolve` takes the chain of levels from the entity outward (the entity, the block
@@ -275,7 +303,7 @@ family.
 | `core.draft.spline.create` | Creates a spline in `owner` from `degree` (default 3) and either `control_points` with optional `weights`, or `fit_points`; optionally on `layer` |
 | `core.draft.spline.set` | Replaces the curve and the fit points of splines from the same description |
 | `core.draft.entity.modify` | Sets a field of entities, block references included |
-| `core.draft.entity.transform` | Transforms entities (`objects`, repeated identifiers counted once) by `transform`: an optional mirror across a line through the origin (applied first), a uniform `scale` about the origin, a `rotation` in radians, then a `translation`. Acts in the drawing plane and refuses non-default extrusions. Points, curves (including splines and wipeouts), single-line texts, rich texts (translation and rotation only) and block references are transformed; dimensions, leaders, multileaders, hatches, tables and arrays (derived from other objects) and external references are refused with `draft.entity.transform_unsupported`, and a refused entity fails the whole command. Mirror is refused for text. A new value that is not finite (an overflow) fails the command with `draft.field.invalid`. Dimensions and hatches that reference a transformed curve but are not selected follow it through the regeneration graph; the display list after the transform equals a direct rebuild. |
+| `core.draft.entity.transform` | Transforms entities (`objects`, repeated identifiers counted once) by `transform`: an optional mirror across a line through the origin (applied first), a uniform `scale` about the origin, a `rotation` in radians, then a `translation`. Acts in the drawing plane and refuses non-default extrusions. Points, curves (including splines and wipeouts), single-line texts, rich texts (translation and rotation only), block references, external references, leaders, multi-leaders, hatches, dimensions, tables and arrays are transformed as stated under [Entity transform](#entity-transform). Mirror is refused for text, for dimensions and tables (their text reads in one direction), for multi-leaders with content, and for patterned and gradient hatches. Associative kinds are refused with reason `associated` unless the objects they reference are selected: a dimension's top-level referenced objects (its nested path entries are never required, and selecting one is refused), a path array's path, and a hatch's boundary objects while every boundary record still names an object. Ordinate dimensions refuse any rotation (`rotation`). An entity on a locked layer is refused with `draft.layer.locked`. A refused entity fails the whole command, and a new value that is not finite fails it with `draft.field.invalid`. Dependents that are not selected follow a transformed curve through the regeneration graph; the display list after the transform equals a direct rebuild. |
 | `core.draft.entity.delete` | Deletes entities |
 | `core.draft.layer.create` | Creates a layer with `name` and optional `color`, `linetype` and `lineweight` |
 | `core.draft.layer.modify` | Sets a field of layers |
@@ -287,6 +315,32 @@ family.
 | `core.draft.block.insert` | Creates a block reference; attributes not given take their definition's default, and an unknown tag fails with `draft.block.attribute_unknown` |
 | `core.draft.order.front`, `core.draft.order.back` | Moves entities to the front or back |
 | `core.draft.order.above`, `core.draft.order.below` | Moves entities directly above or below `reference` |
+
+### Entity transform
+
+`core.draft.entity.transform` applies `T · R · S · M` to each entity: `M` is the optional mirror, `S` the
+uniform scale, `R` the rotation and `T` the translation, all about the origin. Per kind:
+
+| Kind | Transformed | Mirror | Associativity |
+|---|---|---|---|
+| point, line, ray, construction line, circle, arc, ellipse, elliptical arc, polyline, wipeout, spline | geometry; spline fit points | allowed | none |
+| single-line text | position, rotation, height | refused (`mirror`) | none |
+| rich text | position, rotation | refused (`mirror`); scale refused (`scale`) | none |
+| block reference, external reference | position, rotation, per-axis scale recomputed from the linear part | allowed | none; the linked drawing keeps its own coordinates, so a clip boundary does not move |
+| leader | points | allowed | none; text size comes from the style |
+| multi-leader | leader points, position, block scale | refused (`mirror`) with text, tolerance or block content | none |
+| hatch, solid | loops, origin, pick point | allowed | while every boundary record names an object, each boundary object must be selected (`associated`); a hatch with a missing boundary object keeps its stored loops and moves as free data |
+| hatch, pattern | loops, origin, pick point, pattern angle and scale | refused (`mirror`) | as for solid |
+| hatch, gradient | loops, origin, pick point, gradient angle | refused (`mirror`) | as for solid |
+| dimension | definition points, dimension line, text position, rotation, annotative positions | refused (`mirror`) | the top-level referenced objects must be selected (`associated`); nested path entries are not required and must not be selected (`associated`). A quadrant key of a circle or arc advances its quarter turn, else `associated`; a parameter key of a circle or arc takes the image angle. Ordinate dimensions refuse rotation (`rotation`) |
+| table | position, rotation, column widths, row heights, cell block scales, break limits | refused (`mirror`) | none |
+| array, rectangular | frame (position, scale, rotation); column spacing, row spacing and axis angle | allowed; the row spacing takes the sign of the mirror | none |
+| array, polar | frame; center; total angle (negated by a mirror) | allowed | none |
+| array, path | frame; spacing; the stored `curve` when there is no path entity | allowed | a path entity must be selected (`associated`) |
+
+Text size and arrow size come from styles and are not scaled; a scale changes stored geometry only. The
+regeneration graph recomputes each derived value from the transformed inputs, so a dimension's measured
+value follows its new geometry.
 
 ## Layouts, viewports and display lists as implemented
 
@@ -1505,7 +1559,8 @@ The codes of every part of the crate:
 | `draft.layout.duplicate` | `conflict` | A layout space would own two layout settings objects |
 | `draft.viewport.clip_invalid` | `invalid_input` | The clip boundary of a viewport is not a closed polyline |
 | `draft.viewport.locked` | `conflict` | A command changes the view of a locked viewport |
-| `draft.entity.transform_unsupported` | `invalid_input` | An entity cannot take the requested transform: its kind is associative or external, or the kind does not take this form of the transform (`reason`) |
+| `draft.entity.transform_unsupported` | `invalid_input` | An entity cannot take the requested transform: the kind does not take this form of the transform (`reason`: `extrusion`, `mirror`, `scale`, `non_uniform_scale`, `associated`, `rotation`, `unsupported`) |
+| `draft.layer.locked` | `conflict` | A command modifies, deletes, reorders or transforms a named entity on a locked layer, edits it, or moves it onto or off a locked layer (`layer`, the layer's name) |
 | `draft.wipeout.boundary_open` | `invalid_input` | The boundary of a wipeout is not a closed polyline |
 | `draft.style.parent_invalid` | `invalid_input` | A dimension style's parent rule is broken |
 | `draft.purge.in_use` | `conflict` | An object selected for purging is in use |

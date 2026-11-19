@@ -25,6 +25,7 @@ draft-viewport-locked = Kilitli bir görünüm alanının görünümü değişti
 draft-command-entity-transform = Varlıkları dönüştür
 draft-command-entity-transform-description = Varlıkları düzlemde taşır, döndürür, ölçekler veya aynalar; bu dönüşümü alamayan türleri reddeder.
 draft-entity-transform-unsupported = { $kind } varlığı bu dönüşümle dönüştürülemez: { $reason }.
+draft-layer-locked = { $layer } katmanı kilitli: mevcut varlıkları değiştirilemez, dönüştürülemez, silinemez veya taşınamaz.
 draft-wipeout-boundary-open = Bir maskeleme sınırı kapalı bir çoklu çizgi olmalıdır.
 draft-style-parent-invalid = Tek bir tür için ölçülendirme stili, tüm türler için bir stili ayrıntılandırmalıdır.
 draft-purge-in-use = Nesne kullanımda olduğu için temizlenemez.

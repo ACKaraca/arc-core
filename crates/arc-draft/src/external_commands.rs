@@ -129,6 +129,7 @@ pub(crate) fn set_clip(ctx: &mut Context<'_>, p: SetClip) -> Result<()> {
     let txn = ctx.txn()?;
     for IdParam(id) in p.objects {
         expect(txn.snapshot(), id, &[EXTERNAL_REF])?;
+        crate::lock::check_entity(txn.snapshot(), id)?;
         txn.modify(id, FieldPath::new("clip"), clip.clone())?;
     }
     Ok(())
@@ -277,6 +278,7 @@ fn bind(ctx: &mut Context<'_>, links: &Links, budget: WorkBudget, p: Bind) -> Re
     block_ref[entity::REF_ROTATION] = placed.get(entity::REF_ROTATION).cloned().flatten();
     block_ref[entity::REF_ATTRIBUTES] = Some(Value::Map(std::collections::BTreeMap::new()));
     let txn = ctx.txn()?;
+    crate::lock::check_entity(txn.snapshot(), reference)?;
     txn.delete(reference)?;
     let others = txn.snapshot().referrers(link).any(|r| {
         txn.snapshot()

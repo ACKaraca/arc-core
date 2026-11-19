@@ -186,6 +186,7 @@ fn set(ctx: &mut Context<'_>, p: SetSpline) -> Result<()> {
             } else {
                 "fit_points"
             };
+            crate::lock::check_entity(txn.snapshot(), id)?;
             txn.modify(id, FieldPath::new(name), Some(value))?;
         }
     }

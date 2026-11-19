@@ -1272,6 +1272,10 @@ fn modify(ctx: &mut Context<'_>, p: SetField, family: &[&str]) -> Result<()> {
             serde_json::Value::Null => None,
             json => Some(field_value(&value_type, json).ok_or_else(|| field_invalid(&p.field))?),
         };
+        crate::lock::check_entity(txn.snapshot(), id)?;
+        if let Some(Value::Reference(target)) = &value {
+            crate::lock::check_layer(txn.snapshot(), *target)?;
+        }
         txn.modify(id, FieldPath::new(p.field.as_str()), value)?;
     }
     Ok(())
@@ -1283,6 +1287,24 @@ pub(crate) fn delete(ctx: &mut Context<'_>, p: Delete, family: &[&str]) -> Resul
     let snapshot = txn.snapshot().clone();
     // Dimensions keep the points of geometry about to be deleted as their last positions.
     let doomed: Vec<ObjectId> = p.objects.iter().map(|IdParam(id)| *id).collect();
+    for id in &doomed {
+        crate::lock::check_entity(&snapshot, *id)?;
+    }
+    // Every entity that refers to a deleted one may have its reference cleared by the deletion,
+    // which modifies it: each is checked against its own layer.
+    let referrers: Vec<ObjectId> = doomed
+        .iter()
+        .flat_map(|id| {
+            snapshot
+                .referrers(*id)
+                .map(|r| r.source)
+                .collect::<Vec<_>>()
+        })
+        .filter(|id| !doomed.contains(id))
+        .collect();
+    for id in referrers {
+        crate::lock::check_entity(&snapshot, id)?;
+    }
     let mut dimensions: Vec<ObjectId> = doomed
         .iter()
         .flat_map(|id| {
@@ -1298,6 +1320,7 @@ pub(crate) fn delete(ctx: &mut Context<'_>, p: Delete, family: &[&str]) -> Resul
     if !dimensions.is_empty() {
         let options = crate::dimension::resolution_options();
         for id in dimensions {
+            crate::lock::check_entity(&snapshot, id)?;
             if let Some(points) = crate::dimension::frozen_points(&snapshot, id, &options) {
                 txn.modify(id, FieldPath::new("points"), Some(points))?;
             }
@@ -1321,6 +1344,7 @@ pub(crate) fn delete(ctx: &mut Context<'_>, p: Delete, family: &[&str]) -> Resul
     if !hatches.is_empty() {
         let options = crate::dimension::resolution_options();
         for id in hatches {
+            crate::lock::check_entity(&snapshot, id)?;
             if let Some(loops) = crate::hatch::frozen_loops(&snapshot, id, &options) {
                 txn.modify(id, FieldPath::new("loops"), Some(loops))?;
             }
@@ -1631,6 +1655,10 @@ fn order(ctx: &mut Context<'_>, objects: Vec<IdParam>, place: Place) -> Result<(
     let Some(container) = container else {
         return Ok(());
     };
+    // Only the named objects are modifications; siblings whose draw order is renumbered are not.
+    for id in &ids {
+        crate::lock::check_entity(&snapshot, *id)?;
+    }
     let changes = reorder(&members(&snapshot, container), &ids, place)?;
     set_order(ctx, changes)
 }
@@ -1703,6 +1731,7 @@ fn set_rich_text(ctx: &mut Context<'_>, p: SetRichText) -> Result<()> {
     let txn = ctx.txn()?;
     for IdParam(id) in p.objects {
         expect(txn.snapshot(), id, &[RICH_TEXT])?;
+        crate::lock::check_entity(txn.snapshot(), id)?;
         txn.modify(id, FieldPath::new("paragraphs"), Some(value.clone()))?;
     }
     Ok(())

@@ -128,6 +128,13 @@ pub mod codes {
         category: Category::Conflict,
         message_id: "draft-viewport-locked",
     };
+    /// A command modifies, transforms, deletes or reorders an existing entity on a locked layer, or
+    /// moves an entity onto or off one.
+    pub const LAYER_LOCKED: ErrorCode = ErrorCode {
+        code: "draft.layer.locked",
+        category: Category::Conflict,
+        message_id: "draft-layer-locked",
+    };
     /// An entity cannot be transformed by the requested transform: its kind is not supported, or
     /// the kind supports the transform only in some forms (`reason`).
     pub const ENTITY_TRANSFORM_UNSUPPORTED: ErrorCode = ErrorCode {
@@ -555,6 +562,7 @@ pub mod codes {
         VIEWPORT_CLIP_INVALID,
         VIEWPORT_LOCKED,
         ENTITY_TRANSFORM_UNSUPPORTED,
+        LAYER_LOCKED,
         WIPEOUT_BOUNDARY_OPEN,
         STYLE_PARENT_INVALID,
         PURGE_IN_USE,

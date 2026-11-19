@@ -25,6 +25,7 @@ draft-viewport-locked = The view of a locked viewport cannot change.
 draft-command-entity-transform = Transform entities
 draft-command-entity-transform-description = Moves, rotates, scales or mirrors entities in the plane; refuses the kinds that cannot take the transform.
 draft-entity-transform-unsupported = The { $kind } entity cannot be transformed here: { $reason }.
+draft-layer-locked = The layer { $layer } is locked: its existing entities cannot be modified, transformed, deleted or moved.
 draft-wipeout-boundary-open = A wipeout boundary must be a closed polyline.
 draft-style-parent-invalid = A dimension style for one kind must refine a style for all kinds.
 draft-purge-in-use = The object is in use and cannot be purged.
