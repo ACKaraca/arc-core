@@ -23,6 +23,9 @@
 //!   [`quantity`]);
 //! - the virtualized tree and outliner (CORE-UI-012, [`tree`]);
 //! - the diagnostics panel (CORE-UI-020, [`diagnostics`]);
+//! - the virtualized table and its clipboard (CORE-UI-013, CORE-UI-014, [`table`]);
+//! - the style pickers for color, layer, linetype, lineweight and material (CORE-UI-015,
+//!   [`style`]);
 //! - with the feature `viewport`, the viewport widget, its interaction state machine and the
 //!   selection gestures (CORE-UI-005, CORE-UI-029, `gesture` and `viewport`) and the view cube
 //!   (`view_cube`).
@@ -43,6 +46,8 @@ pub mod notify;
 pub mod palette;
 pub mod property;
 pub mod quantity;
+pub mod style;
+pub mod table;
 pub mod text;
 pub mod theme;
 pub mod tree;
@@ -73,6 +78,10 @@ pub use notify::{Notification, Notifications, Progress, ProgressView, Severity};
 pub use palette::{MatchKind, Palette, Ranked, Recent, rank, rank_in};
 pub use property::{GridContext, PropertyGrid, PropertyModel, PropertyObject, PropertyRow, Shown};
 pub use quantity::{QuantityField, QuantityInput};
+pub use style::{Preview, StyleEntry, StyleKind, StylePicker};
+pub use table::{
+    CellRef, ColumnInfo, Selection, Sort, SortDirection, TableCommands, TableSource, TableView,
+};
 pub use text::{Fallback, Localize, Message, fold_case, matches_filter, resolve};
 pub use theme::{Appearance, Colors, Density, Metrics, Theme, ThemeId, UiScale};
 pub use tree::{TreeCommands, TreeItem, TreeSource, TreeView};

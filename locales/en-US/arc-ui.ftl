@@ -63,3 +63,21 @@ ui-view-cube-left = Left
 ui-view-cube-right = Right
 ui-view-cube-edge = { $first }-{ $second } edge
 ui-view-cube-corner = { $first }, { $second }, { $third } corner
+ui-table = Table
+ui-table-sorted = { $name }, sorted { $direction }
+ui-table-ascending = ascending
+ui-table-descending = descending
+ui-table-paste-refused = { $count ->
+    [one] One cell was refused.
+   *[other] { $count } cells were refused.
+}
+ui-table-copy-too-large = The selection has too many cells to copy.
+ui-table-too-large = The text is too large to paste.
+ui-style-color = Color
+ui-style-layer = Layer
+ui-style-linetype = Linetype
+ui-style-lineweight = Lineweight
+ui-style-material = Material
+ui-style-filter = Filter
+ui-style-true-color = True color { $hex }
+ui-style-too-many = There are too many style entries.

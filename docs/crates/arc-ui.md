@@ -212,6 +212,8 @@ The codes `arc-ui` owns; messages are in `locales/en-US/arc-ui.ftl`.
 | `ui.quantity.out_of_range` | `invalid_input` | An entered value is outside the field's range |
 | `ui.quantity.not_integer` | `invalid_input` | An entered value is not a whole number where one is needed |
 | `ui.property.too_large` | `limit_exceeded` | The selected objects times their fields exceed 1,000,000 |
+| `ui.table.too_large` | `limit_exceeded` | Clipboard text for a table paste has more than 1 MiB of bytes or 1,000,000 cells |
+| `ui.style.too_many` | `limit_exceeded` | A style picker is given more than 4,096 entries (see `StylePicker::check`) |
 
 ## Panels and widgets as implemented
 
@@ -333,6 +335,96 @@ Objects are listed as hyphenated identifier texts.
   localized message. Check boxes keep errors and warnings; the text filter (at most 256
   characters, ignoring case) matches the code or the localized message. Activating a row with
   objects returns the navigation intent with `objects`.
+
+### Virtualized tables (CORE-UI-013, CORE-UI-014)
+
+- A `TableSource` gives the row and column counts, a column's name, initial width and sortability,
+  the sort it applies, the texts of a window of cells (`cells(rows, columns)`, one list per row)
+  and whether a cell accepts a pasted text. The view draws a `TableView`. It reads cell texts
+  only for the rows in the viewport plus `MARGIN` (2) rows on each side, and for the frozen
+  columns and the columns in the horizontal viewport plus one on each side. A frame therefore
+  asks for the same amount of data for one million rows as for a hundred. At most 256 columns
+  are drawn (`MAX_COLUMNS`); cell text is cut to 256 characters.
+- Rows are placed at a fixed height (the spacing's interact height) and the body is a vertical
+  scroll area; the header and the horizontal position are drawn by the view. Positions above
+  2^24 points (about 800,000 rows at 20 points) are rounded to about two points.
+- Leading columns named by the public field `frozen` stay at the left edge; the others scroll
+  horizontally only when the cursor moves into a column that is out of view. Wheel and scroll-bar
+  input for horizontal scrolling are not implemented yet.
+- Column widths are view state, clamped to 24 to 2,000 points. Dragging the grip at a header's
+  right edge resizes the column; Alt with Left or Right resizes the cursor column by 8 points.
+- Selection is a rectangle of cells held by the view (`selection()`, `cursor()`). Arrows move the
+  cursor (Shift extends); Page Up and Page Down move by a page of rows; Home and End move to the
+  first and last row and keep the column. Keyboard moves scroll the cursor into view. Clicks
+  select, Shift-click extends. The table is one focusable widget; cells are labeled widgets for
+  assistive technology, not focus stops.
+- A click on a sortable header, or Enter with the cursor on a sortable column, returns the intent
+  of `TableCommands::sort` with `column` (index) and `direction` (`ascending` or `descending`). A
+  click on a column already sorted ascending asks for descending. The view does not sort; the
+  source reports the sort it applies through `TableSource::sorted`, which the header shows.
+- Copy (`Event::Copy`) puts the selected cells on the clipboard with `Context::copy_text`, through
+  `format_grid`: cells separated by tabs, records ended by a line feed. A cell that contains a
+  tab, a line feed, a carriage return or a quote is wrapped in quotes with each quote doubled.
+  A selection of more than 100,000 cells is not copied; the table shows a notice.
+- Paste (`Event::Paste`) reads the text with `parse_grid`, the inverse of `format_grid`: a record
+  ends at a line feed, a carriage return, or a carriage return with a line feed; a final record
+  needs no line feed; empty text has no records. Quoted cells may hold tabs, line breaks and
+  doubled quotes. Text over 1 MiB or 1,000,000 cells fails with `ui.table.too_large`. The paste
+  is placed at the top-left corner of the selection. Each cell is offered to
+  `TableSource::accepts`; the accepted cells make one intent of `TableCommands::paste` with
+  `cells`, an array of objects with `row`, `column` and `value`. Refused cells, including those
+  outside the table, are counted by `refused_count()` and listed (at most 100) by `refused()`,
+  and the table shows how many were refused.
+- Decisions with the rejected alternatives:
+  - A drawn table in one vertical scroll area, rather than the planned `egui_table` crate: no new
+    dependency is added in this unit, and the frozen columns need a horizontal position the view
+    controls.
+  - The sort is reported through an intent that the application routes to the source, rather than
+    a callback that mutates the source: widgets never mutate data and never run commands.
+  - Selection and scroll positions are view state with no intent per move: a move would emit one
+    intent per arrow press.
+  - The widget checks `accepts` before it emits the paste intent, so the refused cells can be
+    reported in the same frame. The command repeats the check when it runs.
+  - Copy refuses a selection over 100,000 cells instead of truncating it silently.
+  - Records end with a line feed on output, not a carriage return and line feed: one rule for both
+    directions, and the parser accepts either.
+  - Malformed quoting is read leniently (an unterminated quote runs to the end of the text;
+    characters after a closing quote stay in the cell), rather than rejected: a paste from an
+    external program should not fail on a stray quote.
+  - Home and End move by row, not to the first or last cell: row selection is the primary
+    operation.
+- Open items in this unit: in-place cell editing as commands (the paste is the only cell write
+  path so far), column reordering, wheel and scroll-bar input for horizontal scrolling, and sorting
+  by several columns.
+
+### Style pickers (CORE-UI-015)
+
+- A `StylePicker` of one `StyleKind` (color, layer, linetype, lineweight or material) shows the
+  current entry with its preview and opens with a click, Enter or Space. A `StyleEntry` holds an
+  identifier, a display name and a `Preview`: `Color` (a swatch), `Dash` (alternating dash and gap
+  lengths in points), `Weight` (a lineweight in millimeters) or `None`. The caller maps its own
+  styles to entries; the module depends on no document or drafting type.
+- Typing in the filter keeps the entries whose name or identifier matches, using the case rule of
+  `StylePicker::language` (`text::matches_filter`). Up and Down move the highlight, Enter returns
+  the highlighted identifier, Escape closes the list without a choice. A click returns the clicked
+  entry.
+- For the color kind, a filter text that is a six-digit hexadecimal color (with or without `#`)
+  adds a last row for that true color; choosing it returns `#rrggbb` in lower case. The indexed
+  colors are the caller's entries, so the picker itself has no palette table.
+- Dash previews draw at most 256 dashes; a pattern with more than 16 items, a negative or
+  non-finite item, or a zero total is drawn as a solid line. A lineweight preview is 1 mm = 3.78
+  points, clamped to 1 to 6 points; it is a preview scale, not a physical size.
+- At most 4,096 entries are offered; `StylePicker::check` reports `ui.style.too_many` for a longer
+  list, so the caller checks before it shows the picker.
+- Decisions with the rejected alternatives:
+  - The list opens inline below the current entry rather than in a floating popup: the filter,
+    the highlight and the true-color row need keyboard handling the popup of the existing combo box
+    does not offer.
+  - The true color is typed in the filter rather than entered in red, green and blue fields: one
+    text entry covers the indexed and true-color cases and returns one identifier.
+  - The pickers share one type with a kind parameter rather than five types: they differ only in
+    the message for their name and in the true-color offer.
+- Open items: a floating popup with keyboard focus trapping, and grouping of entries by category.
 
 ### Keyboard operation (CORE-UI-026, in part)
 

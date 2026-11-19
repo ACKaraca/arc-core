@@ -63,3 +63,21 @@ ui-view-cube-left = Sol
 ui-view-cube-right = Sağ
 ui-view-cube-edge = { $first }-{ $second } kenarı
 ui-view-cube-corner = { $first }, { $second }, { $third } köşesi
+ui-table = Tablo
+ui-table-sorted = { $name }, { $direction } sıralı
+ui-table-ascending = artan
+ui-table-descending = azalan
+ui-table-paste-refused = { $count ->
+    [one] Bir hücre reddedildi.
+   *[other] { $count } hücre reddedildi.
+}
+ui-table-copy-too-large = Seçim kopyalamak için çok fazla hücre içeriyor.
+ui-table-too-large = Metin yapıştırmak için çok büyük.
+ui-style-color = Renk
+ui-style-layer = Katman
+ui-style-linetype = Çizgi türü
+ui-style-lineweight = Çizgi kalınlığı
+ui-style-material = Malzeme
+ui-style-filter = Süzgeç
+ui-style-true-color = Gerçek renk { $hex }
+ui-style-too-many = Çok fazla stil girdisi var.

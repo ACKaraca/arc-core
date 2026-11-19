@@ -158,6 +158,18 @@ pub mod codes {
         category: Category::LimitExceeded,
         message_id: "ui-property-too-large",
     };
+    /// Clipboard text for a table paste has more bytes or cells than the limit.
+    pub const TABLE_TOO_LARGE: ErrorCode = ErrorCode {
+        code: "ui.table.too_large",
+        category: Category::LimitExceeded,
+        message_id: "ui-table-too-large",
+    };
+    /// A style picker was given more entries than the limit.
+    pub const STYLE_TOO_MANY: ErrorCode = ErrorCode {
+        code: "ui.style.too_many",
+        category: Category::LimitExceeded,
+        message_id: "ui-style-too-many",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -186,6 +198,8 @@ pub mod codes {
         QUANTITY_OUT_OF_RANGE,
         QUANTITY_NOT_INTEGER,
         PROPERTY_TOO_LARGE,
+        TABLE_TOO_LARGE,
+        STYLE_TOO_MANY,
     ];
 }
 

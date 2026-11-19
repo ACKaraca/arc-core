@@ -220,6 +220,58 @@ pub mod messages {
     pub const VIEW_CORNER: Message = Message {
         message_id: "ui-view-cube-corner",
     };
+    /// The accessible name of a table.
+    pub const TABLE: Message = Message {
+        message_id: "ui-table",
+    };
+    /// The accessible name of a sorted column header, with `name` and `direction`.
+    pub const TABLE_SORTED: Message = Message {
+        message_id: "ui-table-sorted",
+    };
+    /// The sort direction name for an ascending sort.
+    pub const TABLE_ASCENDING: Message = Message {
+        message_id: "ui-table-ascending",
+    };
+    /// The sort direction name for a descending sort.
+    pub const TABLE_DESCENDING: Message = Message {
+        message_id: "ui-table-descending",
+    };
+    /// Shown when a paste refused cells, with `count`.
+    pub const TABLE_PASTE_REFUSED: Message = Message {
+        message_id: "ui-table-paste-refused",
+    };
+    /// Shown when the selection is too large to copy.
+    pub const TABLE_COPY_TOO_LARGE: Message = Message {
+        message_id: "ui-table-copy-too-large",
+    };
+    /// The accessible name of the color picker.
+    pub const STYLE_COLOR: Message = Message {
+        message_id: "ui-style-color",
+    };
+    /// The accessible name of the layer picker.
+    pub const STYLE_LAYER: Message = Message {
+        message_id: "ui-style-layer",
+    };
+    /// The accessible name of the linetype picker.
+    pub const STYLE_LINETYPE: Message = Message {
+        message_id: "ui-style-linetype",
+    };
+    /// The accessible name of the lineweight picker.
+    pub const STYLE_LINEWEIGHT: Message = Message {
+        message_id: "ui-style-lineweight",
+    };
+    /// The accessible name of the material picker.
+    pub const STYLE_MATERIAL: Message = Message {
+        message_id: "ui-style-material",
+    };
+    /// The label of the style pickers' filter field.
+    pub const STYLE_FILTER: Message = Message {
+        message_id: "ui-style-filter",
+    };
+    /// The entry that offers a true color, with the typed `hex` color.
+    pub const STYLE_TRUE_COLOR: Message = Message {
+        message_id: "ui-style-true-color",
+    };
 }
 
 #[cfg(test)]
@@ -343,6 +395,19 @@ pub(crate) mod tests {
             messages::VIEW_RIGHT,
             messages::VIEW_EDGE,
             messages::VIEW_CORNER,
+            messages::TABLE,
+            messages::TABLE_SORTED,
+            messages::TABLE_ASCENDING,
+            messages::TABLE_DESCENDING,
+            messages::TABLE_PASTE_REFUSED,
+            messages::TABLE_COPY_TOO_LARGE,
+            messages::STYLE_COLOR,
+            messages::STYLE_LAYER,
+            messages::STYLE_LINETYPE,
+            messages::STYLE_LINEWEIGHT,
+            messages::STYLE_MATERIAL,
+            messages::STYLE_FILTER,
+            messages::STYLE_TRUE_COLOR,
         ] {
             assert!(
                 catalog.contains(&format!("\n{} = ", m.message_id)),
