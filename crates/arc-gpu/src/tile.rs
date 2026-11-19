@@ -214,6 +214,8 @@ pub fn split_lines(
         }
         let divided = divide(&chain, max_extent / 2.0, &mut budget)?;
         let mut run: Vec<Point3> = Vec::new();
+        // The bounds of the run so far, grown by each point.
+        let mut span: Option<(Point3, Point3)> = None;
         let flush = |run: &mut Vec<Point3>, tiles: &mut Vec<LineTile>| {
             if let Some((low, high)) = bounds(run.iter().copied()) {
                 let origin = center(&low, &high);
@@ -231,14 +233,18 @@ pub fn split_lines(
             }
         };
         for p in divided {
-            let fits = bounds(run.iter().copied().chain([p]))
-                .is_some_and(|(low, high)| (high - low).max() <= max_extent);
-            if !fits && run.len() > 1 {
+            let grown = |span: Option<(Point3, Point3)>| {
+                span.map_or((p, p), |(low, high)| (low.inf(&p), high.sup(&p)))
+            };
+            let (low, high) = grown(span);
+            if (high - low).max() > max_extent && run.len() > 1 {
                 let last = run.last().copied();
                 flush(&mut run, &mut tiles);
                 run.clear();
                 run.extend(last);
+                span = last.map(|l| (l, l));
             }
+            span = Some(grown(span));
             run.push(p);
         }
         flush(&mut run, &mut tiles);
@@ -414,6 +420,18 @@ mod tests {
             };
             assert!((end(&pair[0]) - start(&pair[1])).norm() < 1e-3);
         }
+    }
+
+    #[test]
+    fn a_long_run_of_short_segments_stays_one_run() {
+        // 30,000 short segments within 10 units form one run. The run's bounds are grown per
+        // point, so the split takes time linear in the points, not quadratic.
+        let points: Vec<Point3> = (0..30_000_u32)
+            .map(|i| Point3::new(f64::from(i % 2) * 10.0, f64::from(i) * 1e-4, 0.0))
+            .collect();
+        let tiles = split_lines(&[(points, false)], TILE_SIZE, SEGMENTS).unwrap();
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].paths[0].points.len(), 30_000);
     }
 
     proptest! {

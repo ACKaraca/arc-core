@@ -48,6 +48,10 @@ struct View {
 
 @group(0) @binding(0) var<uniform> view: View;
 
+// Set for the fragment stage of a pipeline whose items have a mirrored instance: the rasterizer does
+// not cull their back faces, so the fragments of back faces are discarded here instead.
+override fragment_cull: bool = false;
+
 // Edges are moved toward the eye by this relative depth offset so they are not hidden by the
 // faces they bound.
 const EDGE_DEPTH_SCALE: f32 = 1.000244140625;
@@ -228,7 +232,7 @@ const DRAFT_TEXT: u32 = 8u;
 fn face_color(in: VertexOut, front: bool, faded: bool) -> vec4<f32> {
     // Derivatives are taken before any discard, in uniform control flow.
     let face = cross(dpdx(in.relative), dpdy(in.relative));
-    if (clipped(in.relative)) {
+    if (clipped(in.relative) || (fragment_cull && !front)) {
         discard;
     }
     // Two-pass transparency: faded faces are left to the blended pass, and only they draw there.
@@ -309,6 +313,15 @@ fn fs_tint(in: VertexOut) -> @location(0) vec4<f32> {
     return view.highlight;
 }
 
+// The tint of faces: like `fs_tint`, but back faces are discarded under per-fragment culling.
+@fragment
+fn fs_tint_faces(in: VertexOut, @builtin(front_facing) facing: bool) -> @location(0) vec4<f32> {
+    if (clipped(in.relative) || (fragment_cull && facing != (in.det > 0.0))) {
+        discard;
+    }
+    return view.highlight;
+}
+
 @fragment
 fn fs_mask(in: VertexOut) -> @location(0) u32 {
     if (clipped(in.relative)) {
@@ -318,8 +331,8 @@ fn fs_mask(in: VertexOut) -> @location(0) u32 {
 }
 
 @fragment
-fn fs_pick(in: VertexOut) -> @location(0) u32 {
-    if (clipped(in.relative)) {
+fn fs_pick(in: VertexOut, @builtin(front_facing) facing: bool) -> @location(0) u32 {
+    if (clipped(in.relative) || (fragment_cull && facing != (in.det > 0.0))) {
         discard;
     }
     return in.instance + 1u;

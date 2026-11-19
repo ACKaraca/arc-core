@@ -15,7 +15,7 @@ mod support;
 use arc_base::Color;
 use arc_base::math::{Point3, Vector3};
 use arc_geom::view::{Projection, ViewFrame};
-use arc_gpu::{MeshInstance, MeshItem, RenderItem, RenderSettings, Scene};
+use arc_gpu::{MeshInstance, MeshItem, PickRegion, RenderItem, RenderSettings, Scene};
 use support::{ids, setup, square, top_view};
 
 const RED: Color = Color::new(1.0, 0.0, 0.0, 1.0);
@@ -134,6 +134,101 @@ fn back_faces_are_culled_only_when_asked() {
         .render_to_image(&mut scene, &frame, 32, 32, &settings)
         .unwrap();
     assert_eq!(culled.pixel(16, 16), Some([0, 0, 0, 255]));
+}
+
+#[test]
+fn a_mirrored_instance_is_culled_by_its_back_faces_not_its_front_faces() {
+    let (_, mut scene, mut renderer) = setup();
+    // Mirrored about x: the determinant is negative, so the triangles wind the other way on
+    // screen, but the square still faces the eye above it.
+    let mirrored = MeshInstance {
+        transform: [
+            [-1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ],
+        ..MeshInstance::new(RED)
+    };
+    place(&mut scene, vec![(Point3::origin(), vec![mirrored])]);
+    let frame = top_view(Point3::origin(), 4.0);
+    let settings = RenderSettings {
+        cull_back_faces: true,
+        ..RenderSettings::default()
+    };
+    let image = renderer
+        .render_to_image(&mut scene, &frame, 32, 32, &settings)
+        .unwrap();
+    assert_eq!(
+        image.pixel(16, 16),
+        Some([255, 0, 0, 255]),
+        "the front face of a mirrored instance is drawn when back faces are culled"
+    );
+}
+
+#[test]
+fn a_mirrored_instance_is_picked_where_it_is_drawn_under_culling() {
+    let (_, mut scene, mut renderer) = setup();
+    let mirrored = MeshInstance {
+        transform: [
+            [-1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ],
+        ..MeshInstance::new(RED)
+    };
+    place(&mut scene, vec![(Point3::origin(), vec![mirrored])]);
+    let frame = top_view(Point3::origin(), 4.0);
+    let settings = RenderSettings {
+        cull_back_faces: true,
+        ..RenderSettings::default()
+    };
+    let hits = renderer
+        .pick(
+            &mut scene,
+            &frame,
+            32,
+            32,
+            &settings,
+            &PickRegion::pixel(16, 16, 0.0),
+        )
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "the front face of a mirrored instance is picked when back faces are culled"
+    );
+}
+
+#[test]
+fn a_mirrored_instance_and_plain_instances_of_one_item_are_all_drawn_under_culling() {
+    let (_, mut scene, mut renderer) = setup();
+    let plain = MeshInstance {
+        transform: [
+            [1.0, 0.0, 0.0, 2.5],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ],
+        ..MeshInstance::new(RED)
+    };
+    let mirrored = MeshInstance {
+        transform: [
+            [-1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ],
+        ..MeshInstance::new(RED)
+    };
+    place(&mut scene, vec![(Point3::origin(), vec![plain, mirrored])]);
+    let frame = top_view(Point3::origin(), 8.0);
+    let settings = RenderSettings {
+        cull_back_faces: true,
+        ..RenderSettings::default()
+    };
+    let image = renderer
+        .render_to_image(&mut scene, &frame, 64, 64, &settings)
+        .unwrap();
+    assert_eq!(image.pixel(32, 32), Some([255, 0, 0, 255]), "mirrored");
+    assert_eq!(image.pixel(52, 32), Some([255, 0, 0, 255]), "plain");
 }
 
 fn nearer_wins(frame: &ViewFrame, near: Point3, far: Point3) {

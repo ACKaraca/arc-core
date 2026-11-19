@@ -364,7 +364,8 @@ pub struct Renderer {
     shared: Option<Shared>,
     /// The sample count and culling the cached pipelines were built for.
     key: (u32, bool),
-    pipelines: HashMap<Kind, wgpu::RenderPipeline>,
+    /// The pipelines by kind; the flag selects the variant that culls per fragment.
+    pipelines: HashMap<(Kind, bool), wgpu::RenderPipeline>,
 }
 
 fn attributes(offset_location: u32, formats: &[wgpu::VertexFormat]) -> Vec<wgpu::VertexAttribute> {
@@ -492,6 +493,8 @@ impl ViewUniform {
 
 /// Everything a color frame needs besides the scene.
 struct ColorFrame<'a> {
+    /// Whether back faces are culled: by the rasterizer, or per fragment for mirrored items.
+    cull: bool,
     width: u32,
     height: u32,
     samples: u32,
@@ -525,17 +528,52 @@ impl Renderer {
         }
         let shared = self.shared.get_or_insert_with(|| build_shared(device));
         for kind in kinds {
-            if !self.pipelines.contains_key(kind) {
-                let pipeline = build_pipeline(device, shared, *kind, samples, cull);
-                self.pipelines.insert(*kind, pipeline);
+            for fragment in [false, true] {
+                if fragment && !(cull && culls_mesh(*kind)) {
+                    continue;
+                }
+                self.pipelines.entry((*kind, fragment)).or_insert_with(|| {
+                    build_pipeline(device, shared, *kind, samples, cull, fragment)
+                });
             }
         }
     }
 
-    fn pipeline(&self, kind: Kind) -> Result<&wgpu::RenderPipeline> {
+    fn pipeline(&self, kind: Kind, fragment: bool) -> Result<&wgpu::RenderPipeline> {
         self.pipelines
-            .get(&kind)
+            .get(&(kind, fragment))
             .ok_or_else(|| Error::new(codes::VALIDATION))
+    }
+
+    /// Draws the mesh items of a pass with the pipeline of `kind`. Under culling, an item with a
+    /// mirrored instance is drawn with the variant that culls per fragment: the rasterizer would
+    /// cull the front faces of a mirrored instance.
+    fn draw_mesh_items<'a>(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        scene: &Scene,
+        kind: Kind,
+        items: impl Iterator<Item = &'a ItemEntry>,
+        cull: bool,
+        edges: bool,
+    ) -> Result<()> {
+        let split = cull && culls_mesh(kind);
+        let (mut plain, mut mirrored) = (Vec::new(), Vec::new());
+        for item in items {
+            if split && item.mirrored {
+                mirrored.push(item);
+            } else {
+                plain.push(item);
+            }
+        }
+        for (fragment, group) in [(false, plain), (true, mirrored)] {
+            if group.is_empty() {
+                continue;
+            }
+            pass.set_pipeline(self.pipeline(kind, fragment)?);
+            draw_meshes(pass, scene, group.into_iter(), edges)?;
+        }
+        Ok(())
     }
 
     fn view_bind_group(&self, uniform: &ViewUniform) -> Result<wgpu::BindGroup> {
@@ -756,7 +794,12 @@ impl Renderer {
             .collect();
         selected.sort_unstable();
         selected.dedup();
+        // Caps are the back faces that show through a cut, so they must not be culled.
+        let capping = extras
+            .section
+            .is_some_and(|s| s.cap_color.is_some() && !s.is_empty());
         let plan = ColorFrame {
+            cull: settings.cull_back_faces && !capping,
             width,
             height,
             samples,
@@ -769,9 +812,6 @@ impl Renderer {
             overlay,
             resolved,
         };
-        let capping = extras
-            .section
-            .is_some_and(|s| s.cap_color.is_some() && !s.is_empty());
         let clips = Clips {
             frame,
             image: (width, height),
@@ -809,8 +849,7 @@ impl Renderer {
             if plan.overlay.is_some() {
                 kinds.extend([Kind::OverlayLine, Kind::OverlayFill]);
             }
-            // Caps are the back faces that show through a cut, so they must not be culled.
-            self.ensure(samples, settings.cull_back_faces && !capping, &kinds);
+            self.ensure(samples, plan.cull, &kinds);
             let (texture, encoder) = self.encode_color(scene, &plan, &clips)?;
             if readback {
                 let rgba8 = read_texture(&self.gpu, encoder, &texture, width, height)?;
@@ -918,9 +957,9 @@ impl Renderer {
                 for (objects, group) in groups {
                     pass.set_bind_group(0, group, &[]);
                     let items = || objects.iter().flat_map(|id| scene.object_items(id));
-                    pass.set_pipeline(self.pipeline(Kind::MeshMask)?);
+                    pass.set_pipeline(self.pipeline(Kind::MeshMask, false)?);
                     draw_meshes(&mut pass, scene, items(), false)?;
-                    pass.set_pipeline(self.pipeline(Kind::LineMask)?);
+                    pass.set_pipeline(self.pipeline(Kind::LineMask, false)?);
                     draw_lines(&mut pass, scene, items(), clips)?;
                 }
             }
@@ -959,37 +998,51 @@ impl Renderer {
                 match step {
                     Pass::Meshes => {
                         if let Some(kind) = faces {
-                            pass.set_pipeline(self.pipeline(kind)?);
                             draw_styled(&mut pass, &styled, &style_binds, &base, |p, items| {
-                                draw_meshes(p, scene, items.iter().copied(), false)
+                                self.draw_mesh_items(
+                                    p,
+                                    scene,
+                                    kind,
+                                    items.iter().copied(),
+                                    plan.cull,
+                                    false,
+                                )
                             })?;
                             // Faces with an override opacity below 1 blend over the opaque ones.
                             if plan.base.over[0] > 0.5 {
-                                pass.set_pipeline(self.pipeline(Kind::MeshFade)?);
                                 draw_styled(
                                     &mut pass,
                                     &styled,
                                     &style_binds,
                                     &base,
-                                    |p, items| draw_meshes(p, scene, items.iter().copied(), false),
+                                    |p, items| {
+                                        self.draw_mesh_items(
+                                            p,
+                                            scene,
+                                            Kind::MeshFade,
+                                            items.iter().copied(),
+                                            plan.cull,
+                                            false,
+                                        )
+                                    },
                                 )?;
                             }
                         }
                     }
                     Pass::Edges => {
-                        pass.set_pipeline(self.pipeline(Kind::Edge)?);
+                        pass.set_pipeline(self.pipeline(Kind::Edge, false)?);
                         draw_styled(&mut pass, &styled, &style_binds, &base, |p, items| {
                             draw_meshes(p, scene, items.iter().copied(), true)
                         })?;
                         if settings.silhouette_edges && faces.is_some() {
-                            pass.set_pipeline(self.pipeline(Kind::Silhouette)?);
+                            pass.set_pipeline(self.pipeline(Kind::Silhouette, false)?);
                             draw_styled(&mut pass, &styled, &style_binds, &base, |p, items| {
                                 draw_silhouettes(p, scene, items.iter().copied())
                             })?;
                         }
                     }
                     Pass::Lines => {
-                        pass.set_pipeline(self.pipeline(Kind::Line)?);
+                        pass.set_pipeline(self.pipeline(Kind::Line, false)?);
                         draw_lines(&mut pass, scene, visible.iter().copied(), clips)?;
                     }
                     Pass::Tint => {
@@ -1005,16 +1058,22 @@ impl Renderer {
                             } else {
                                 (Kind::EdgeTint, true)
                             };
-                            pass.set_pipeline(self.pipeline(kind)?);
-                            draw_meshes(&mut pass, scene, items(), edges)?;
-                            pass.set_pipeline(self.pipeline(Kind::LineTint)?);
+                            self.draw_mesh_items(
+                                &mut pass,
+                                scene,
+                                kind,
+                                items(),
+                                plan.cull,
+                                edges,
+                            )?;
+                            pass.set_pipeline(self.pipeline(Kind::LineTint, false)?);
                             draw_lines(&mut pass, scene, items(), clips)?;
                         }
                         pass.set_bind_group(0, &base, &[]);
                     }
                     Pass::Outline => {
                         if let Some(group) = &outline {
-                            pass.set_pipeline(self.pipeline(Kind::Outline)?);
+                            pass.set_pipeline(self.pipeline(Kind::Outline, false)?);
                             pass.set_bind_group(0, group, &[]);
                             pass.draw(0..3, 0..1);
                             pass.set_bind_group(0, &base, &[]);
@@ -1026,12 +1085,12 @@ impl Renderer {
                             continue;
                         };
                         if let Some(fill) = fill {
-                            pass.set_pipeline(self.pipeline(Kind::OverlayFill)?);
+                            pass.set_pipeline(self.pipeline(Kind::OverlayFill, false)?);
                             pass.set_vertex_buffer(0, fill.slice(..));
                             pass.draw(0..o.fill_vertices, 0..1);
                         }
                         if let (Some(segments), Some(zeros)) = (segments, zeros) {
-                            pass.set_pipeline(self.pipeline(Kind::OverlayLine)?);
+                            pass.set_pipeline(self.pipeline(Kind::OverlayLine, false)?);
                             pass.set_vertex_buffer(0, segments.slice(..));
                             pass.set_vertex_buffer(1, zeros.slice(..));
                             pass.draw(0..6, 0..o.segment_count);
@@ -1190,7 +1249,14 @@ impl Renderer {
                 settings.cull_back_faces && !capping,
                 &[Kind::MeshPick, Kind::LinePick],
             );
-            self.encode_pick(scene, &uniform, region, &clips, &resolved)
+            self.encode_pick(
+                scene,
+                &uniform,
+                region,
+                &clips,
+                &resolved,
+                settings.cull_back_faces && !capping,
+            )
         })?;
         let mut found: Vec<u32> = values
             .chunks_exact(4)
@@ -1225,6 +1291,7 @@ impl Renderer {
         region: &PickRegion,
         clips: &Clips<'_>,
         resolved: &ResolvedOverrides,
+        cull: bool,
     ) -> Result<Vec<u8>> {
         let device = self.gpu.device();
         let size = (region.width, region.height);
@@ -1262,9 +1329,8 @@ impl Renderer {
             pass.set_bind_group(0, &group, &[]);
             let pickable = resolved.groups(scene, true);
             let items = || pickable.iter().flat_map(|(_, i)| i.iter().copied());
-            pass.set_pipeline(self.pipeline(Kind::MeshPick)?);
-            draw_meshes(&mut pass, scene, items(), false)?;
-            pass.set_pipeline(self.pipeline(Kind::LinePick)?);
+            self.draw_mesh_items(&mut pass, scene, Kind::MeshPick, items(), cull, false)?;
+            pass.set_pipeline(self.pipeline(Kind::LinePick, false)?);
             draw_lines(&mut pass, scene, items(), clips)?;
         }
         read_texture(&self.gpu, encoder, &target, region.width, region.height)
@@ -1680,12 +1746,30 @@ enum Input {
 }
 
 #[allow(clippy::too_many_lines)] // One table row per pipeline.
+/// Whether the mesh pipeline of `kind` culls back faces (see `build_pipeline`).
+fn culls_mesh(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Mesh
+            | Kind::MeshDepth
+            | Kind::MeshFade
+            | Kind::MeshXray
+            | Kind::MeshTint
+            | Kind::MeshPick
+    )
+}
+
+/// Builds the pipeline of `kind`. With `cull`, a culled kind culls back faces in the rasterizer;
+/// `fragment` builds the variant for items with a mirrored instance instead, which does not cull
+/// in the rasterizer and discards back faces in its fragment stage.
+#[allow(clippy::too_many_lines)] // One table row per pipeline.
 fn build_pipeline(
     device: &wgpu::Device,
     shared: &Shared,
     kind: Kind,
     samples: u32,
     cull: bool,
+    fragment: bool,
 ) -> wgpu::RenderPipeline {
     use wgpu::CompareFunction::{Always, Greater, GreaterEqual};
     use wgpu::PrimitiveTopology::{LineList, TriangleList};
@@ -1742,7 +1826,7 @@ fn build_pipeline(
         Kind::MeshTint => (
             &shared.mesh,
             "vs_main",
-            "fs_tint",
+            "fs_tint_faces",
             Input::Mesh,
             TriangleList,
             true,
@@ -1944,7 +2028,7 @@ fn build_pipeline(
         primitive: wgpu::PrimitiveState {
             topology,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: (culled && cull).then_some(wgpu::Face::Back),
+            cull_mode: (culled && cull && !fragment).then_some(wgpu::Face::Back),
             ..wgpu::PrimitiveState::default()
         },
         depth_stencil: depth.map(|(write, compare)| wgpu::DepthStencilState {
@@ -1962,7 +2046,14 @@ fn build_pipeline(
         fragment: Some(wgpu::FragmentState {
             module,
             entry_point: Some(fs),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: if fragment && culled && cull {
+                    &[("fragment_cull", 1.0)]
+                } else {
+                    &[]
+                },
+                ..wgpu::PipelineCompilationOptions::default()
+            },
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend,

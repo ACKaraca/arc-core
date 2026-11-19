@@ -236,8 +236,13 @@ cofactor matrix of each instance's linear part; a mesh without normals is shaded
 normal. The phase-0 lighting model is a headlight: the color is the base color times
 `ambient + (1 − ambient) · |n · l|`, where `l` points toward the eye along the view direction and
 `ambient` is a render setting (0.25 by default). Lighting is two-sided; back faces (clockwise in
-the image) are culled when `cull_back_faces` is set. The fragment stage calls one shading function
-whose lit flag and face opacity the shading mode sets.
+the image) are culled when `cull_back_faces` is set. Items whose instances all have a positive
+determinant are culled by the rasterizer. An item with a mirrored instance (a negative determinant
+reverses the winding on the screen) is drawn with a variant that does not cull in the rasterizer
+and discards back faces in its fragment stage, so the mirrored instance keeps its own front faces;
+the items of one pass are split by this rule, and the variant is used only under culling. Caps
+disable culling. The fragment stage calls one shading function whose lit flag and face opacity
+the shading mode sets.
 
 ### Lines
 
@@ -321,7 +326,8 @@ depth target.
   caller's.
 - A pixel shows the nearest face or, where no face is in front, the last drawn line, so a line
   wins over the face it lies on. Faces are picked in every shading mode; back faces are skipped
-  when `cull_back_faces` is set.
+  when `cull_back_faces` is set, by the same rule as drawing (a mirrored item is culled per
+  fragment; caps disable culling).
 - A pick counts as a frame for write accounting (it writes translations when the eye moved).
 - A pick culls items against the view before it draws (see [Culling](#culling-core-gpu-018)),
   and widens the culling margin of lines by the pick tolerance.
@@ -518,7 +524,8 @@ part of these steps.
   polyline share their end points. The divided segments of all paths of one call are bounded by
   `max_segments` (the caller passes `SceneLimits::max_segments_per_item`); the parts of a segment
   are counted before any point is built, so a path of 2 × 10^12 units at a 1 km bound fails with
-  `gpu.limit.exceeded` at once. A join at a run boundary is two caps, so miter and bevel joins
+  `gpu.limit.exceeded` at once. The run bounds grow by each point, so the split takes time linear in
+  the points. A join at a run boundary is two caps, so miter and bevel joins
   are not exact at a boundary vertex. Open item: the dash phase is also lost at a run boundary,
   because each run is a path of its own that starts its pattern at 0, so a dashed split line
   does not keep its pattern across tiles.

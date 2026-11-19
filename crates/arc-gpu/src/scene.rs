@@ -489,6 +489,8 @@ pub(crate) struct ItemEntry {
     pub(crate) visible: bool,
     /// The largest scale factor of the item's instance transforms (1 for lines).
     scale: f64,
+    /// Whether an instance has a negative determinant (a mirror). Always false for lines.
+    pub(crate) mirrored: bool,
     /// The level of detail drawn this frame, when the item's geometry has levels.
     pub(crate) shown: Option<GeometryId>,
     translation_dirty: bool,
@@ -1494,6 +1496,10 @@ impl Scene {
                             count,
                         },
                         origin: mesh.origin,
+                        mirrored: mesh
+                            .instances
+                            .iter()
+                            .any(|i| linear_determinant(&i.transform) < 0.0),
                         radius,
                         bounds: bounds.unwrap_or([[0.0; 3]; 2]),
                         // Edges are one-pixel lines on the surface; two pixels cover them.
@@ -1544,6 +1550,7 @@ impl Scene {
         self.all_translations_dirty |= moved;
         self.pending.line_segment += encoded.bytes.len() as u64;
         Ok(ItemEntry {
+            mirrored: false,
             gpu: ItemGpu::Lines {
                 segments,
                 count: encoded.count,
@@ -1913,6 +1920,19 @@ pub(crate) struct SceneBuffers<'a> {
     pub(crate) mesh_translations: Option<&'a wgpu::Buffer>,
     pub(crate) segments: &'a wgpu::Buffer,
     pub(crate) segment_translations: Option<&'a wgpu::Buffer>,
+}
+
+/// The determinant of the linear part of an instance transform, given as the rows of a 3×4
+/// matrix. A negative value marks a mirrored instance.
+fn linear_determinant(t: &[[f32; 4]; 3]) -> f64 {
+    let [[a0, a1, a2, _], [b0, b1, b2, _], [c0, c1, c2, _]] = *t;
+    let (a, b, c) = (
+        [f64::from(a0), f64::from(a1), f64::from(a2)],
+        [f64::from(b0), f64::from(b1), f64::from(b2)],
+        [f64::from(c0), f64::from(c1), f64::from(c2)],
+    );
+    a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+        + a[2] * (b[0] * c[1] - b[1] * c[0])
 }
 
 #[cfg(test)]

@@ -818,6 +818,21 @@ mod tests {
 
     /// Generous: bounds only a hung thread on a loaded machine.
     const WAIT: Duration = Duration::from_secs(60);
+
+    /// Runs `work` on another thread and fails unless it returns within [`WAIT`]. No time is
+    /// measured: a call that blocks is caught by the deadline, not by a duration check.
+    fn finishes_within_wait(work: impl FnOnce() + Send) {
+        let (done, returned) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                work();
+                let _ = done.send(());
+            });
+            returned
+                .recv_timeout(WAIT)
+                .expect("the call returned before the deadline");
+        });
+    }
     /// A settle time no test reaches: without a clock the thread never draws a settle frame.
     const NEVER: Duration = Duration::from_secs(1 << 30);
 
@@ -1082,14 +1097,14 @@ mod tests {
         viewport.set_camera(view(11.0)).unwrap();
         started.recv_timeout(WAIT).unwrap();
         // The frame is held; every call returns without waiting for it.
-        let begin = Instant::now();
-        for n in 0..1000 {
-            viewport.set_camera(view(12.0 + f64::from(n))).unwrap();
-        }
+        finishes_within_wait(|| {
+            for n in 0..1000 {
+                viewport.set_camera(view(12.0 + f64::from(n))).unwrap();
+            }
+        });
         assert_eq!(viewport.frames(), 1);
         assert!(viewport.latest_frame().is_some());
         assert!(viewport.dirty().camera);
-        assert!(begin.elapsed() < Duration::from_secs(10));
         release.send(()).unwrap();
         started.recv_timeout(WAIT).unwrap();
         release.send(()).unwrap();
@@ -1175,9 +1190,7 @@ mod tests {
         viewport.set_camera(view(11.0)).unwrap();
         started.recv_timeout(WAIT).unwrap();
         let shared = Arc::clone(&viewport.shared);
-        let begin = Instant::now();
-        drop(viewport);
-        assert!(begin.elapsed() < Duration::from_secs(10));
+        finishes_within_wait(move || drop(viewport));
         assert!(!lock(&shared).exited);
         // The detached thread exits after its frame.
         release.send(()).unwrap();
