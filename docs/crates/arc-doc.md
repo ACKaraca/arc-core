@@ -1177,7 +1177,12 @@ makes no environment queries: the application passes its per-user data directory
   through a bounded queue (`QUEUE_CAPACITY`, 1,024); a full queue makes the commit wait. The
   storage thread encodes the records and writes them in group commits, at the latest
   `FLUSH_INTERVAL` (one second, read from the injectable `Clock`) after the first record of a
-  batch, and whenever the queue runs empty. `flush(timeout)` waits for the queued records;
+  batch, and whenever the queue runs empty. The bound is enforced on the commit side: while the
+  oldest record not yet written is at least `FLUSH_INTERVAL` old (a slow or stalled write), the
+  next commit waits for the storage thread, so a commit is never acknowledged ahead of an
+  overdue write; the wait ends when the write completes, protection turns off or the storage
+  thread ends. The guarantee is relative to the running process: a process that is itself
+  suspended for longer than the bound loses what its last second held. `flush(timeout)` waits for the queued records;
   `written()` counts durable records. A failure of the database, of a record's construction or of
   its encoding turns protection off (`is_protected`), drops later records and delivers one
   `doc.recovery.unavailable` diagnostic; commits never fail because of it. A failed base copy is

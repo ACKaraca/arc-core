@@ -84,12 +84,13 @@ fn recovery_child() {
         return;
     };
     let (document, fingerprint) = open(Path::new(&base));
-    let _journal = protect(&document, Path::new(&root), 1, Some(fingerprint));
+    let journal = protect(&document, Path::new(&root), 1, Some(fingerprint));
     let mut acks = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(acks)
         .unwrap();
+    let mut reported = false;
     for i in 1..=30_000_u64 {
         let (a, b) = pair(i);
         let v = i64::try_from(i).unwrap();
@@ -106,6 +107,15 @@ fn recovery_child() {
             })
             .wait()
             .unwrap();
+        // A journal that turned protection off would look like lost transactions in the parent.
+        if !journal.is_protected() && !reported {
+            reported = true;
+            writeln!(
+                std::io::stderr(),
+                "recovery protection turned off before transaction {i}"
+            )
+            .unwrap();
+        }
         writeln!(acks, "{i} {}", now_ms()).unwrap();
         std::thread::sleep(PERIOD);
     }
@@ -114,6 +124,8 @@ fn recovery_child() {
 struct Run {
     dir: TempDir,
     child: Child,
+    /// Whether the child had already exited when the harness went to kill it.
+    exited: Option<String>,
     delay: Duration,
 }
 
@@ -129,6 +141,7 @@ fn spawn(n: u64, seed: &mut u64) -> Run {
     let dir = TempDir::new(&format!("rec-kill-{n}"));
     let base = dir.path("model.arc");
     write_base(&base, &initial(), 1);
+    let errors = std::fs::File::create(dir.path("child.err")).unwrap();
     let child = Command::new(std::env::current_exe().unwrap())
         .args([
             "recovery_child",
@@ -141,17 +154,23 @@ fn spawn(n: u64, seed: &mut u64) -> Run {
         .env(BASE, &base)
         .env(ACKS, dir.path("acks.txt"))
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(errors)
         .spawn()
         .unwrap();
     // Between 0.5 and 4 seconds of editing.
     let delay = Duration::from_millis(500 + next(seed) % 3_500);
-    Run { dir, child, delay }
+    Run {
+        dir,
+        child,
+        exited: None,
+        delay,
+    }
 }
 
 /// Checks one killed run; returns the number of required transactions.
 fn check(run: &Run, killed_at: u64) -> u64 {
     let acks = std::fs::read_to_string(run.dir.path("acks.txt")).unwrap_or_default();
+    let mut last_ack = 0;
     let mut acknowledged = 0;
     let mut required = 0;
     for line in acks.lines() {
@@ -163,9 +182,14 @@ fn check(run: &Run, killed_at: u64) -> u64 {
             continue;
         };
         acknowledged = acknowledged.max(i);
+        last_ack = last_ack.max(time);
         if time + MARGIN_MS <= killed_at {
             required = required.max(i);
         }
+    }
+    if let Some(exited) = &run.exited {
+        let errors = std::fs::read_to_string(run.dir.path("child.err")).unwrap_or_default();
+        panic!("the child {exited} before the kill; stderr: {errors:?}");
     }
     let root = run.dir.path("app");
     let orphans = recovery::scan(&root, &Limits::DEFAULT).unwrap();
@@ -185,9 +209,13 @@ fn check(run: &Run, killed_at: u64) -> u64 {
     .unwrap();
     assert!(recovered.stopped.is_none(), "{:?}", recovered.stopped);
     let k = recovered.replayed;
+    let errors = std::fs::read_to_string(run.dir.path("child.err")).unwrap_or_default();
     assert!(
         k >= required && k <= acknowledged + 1,
-        "recovered {k}, required {required}, acknowledged {acknowledged}"
+        "recovered {k}, required {required}, acknowledged {acknowledged}, last acknowledgement \
+         {} ms before the kill, child {}, child stderr: {errors:?}",
+        killed_at.saturating_sub(last_ack),
+        run.exited.as_deref().unwrap_or("alive at the kill"),
     );
     assert_eq!(state(&recovered.document.snapshot()), after(k));
     required
@@ -213,6 +241,9 @@ fn kill_during_editing(iterations: u64, parallel: u64) {
                 std::thread::sleep(wait);
             }
             killed[i] = now_ms();
+            if let Ok(Some(status)) = run.child.try_wait() {
+                run.exited = Some(format!("had already exited with {status}"));
+            }
             let _ = run.child.kill();
             run.child.wait().unwrap();
         }

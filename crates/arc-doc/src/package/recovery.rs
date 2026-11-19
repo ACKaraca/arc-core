@@ -14,12 +14,13 @@
 //! and crash recovery"). A recovery database is hostile input like a package: reading it never
 //! panics, is bounded by [`Limits`] and fails with stable codes.
 
+use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -42,9 +43,11 @@ use crate::schema::Severity;
 use crate::snapshot::Snapshot;
 use crate::validate::DocumentValidator;
 
-/// The longest time a committed transaction waits in the storage thread's batch before it is
-/// written: no transaction committed more than this before a crash is lost (plus the time of
-/// one write).
+/// The longest time a committed transaction waits before it is durable: no transaction committed
+/// more than this before a crash is lost (plus the time of one write). The storage thread writes
+/// a batch at the latest this long after its first record, and the bound is enforced: while the
+/// oldest record not yet written is older than this (a slow or stalled write), a further commit
+/// waits for the storage thread, so no commit is acknowledged ahead of an overdue write.
 pub const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The records the queue between the executor and the storage thread holds. When it is full, a
@@ -226,9 +229,67 @@ struct Status {
     batches: AtomicU64,
     path: PathBuf,
     diagnostics: Option<Arc<dyn DiagnosticSink>>,
+    /// The commit times of the records sent and not yet settled (written or dropped), oldest
+    /// first.
+    pending: Mutex<VecDeque<u64>>,
+    settled: Condvar,
+    /// False once the storage thread has ended.
+    running: AtomicBool,
+    /// How many commits waited for an overdue write.
+    waits: AtomicU64,
 }
 
 impl Status {
+    fn new(path: PathBuf, diagnostics: Option<Arc<dyn DiagnosticSink>>) -> Self {
+        Self {
+            protected: AtomicBool::new(true),
+            written: AtomicU64::new(0),
+            batches: AtomicU64::new(0),
+            path,
+            diagnostics,
+            pending: Mutex::new(VecDeque::new()),
+            settled: Condvar::new(),
+            running: AtomicBool::new(true),
+            waits: AtomicU64::new(0),
+        }
+    }
+
+    /// Blocks while the oldest unsettled record is at least [`FLUSH_INTERVAL`] old at `clock`,
+    /// unless protection is off or the storage thread has ended; then registers a record of
+    /// `time`.
+    fn admit(&self, clock: &dyn Clock, time: u64) {
+        let interval = u64::try_from(FLUSH_INTERVAL.as_millis()).unwrap_or(u64::MAX);
+        let mut pending = lock(&self.pending);
+        let mut counted = false;
+        while self.protected.load(Ordering::Acquire)
+            && self.running.load(Ordering::Acquire)
+            && pending
+                .front()
+                .is_some_and(|oldest| clock.unix_millis().saturating_sub(*oldest) >= interval)
+        {
+            if !counted {
+                counted = true;
+                self.waits.fetch_add(1, Ordering::AcqRel);
+            }
+            // Timed, so that a clock moving on or a thread ending is noticed.
+            pending = self
+                .settled
+                .wait_timeout(pending, Duration::from_millis(50))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        pending.push_back(time);
+    }
+
+    /// Marks `count` records, the oldest ones, as written or dropped.
+    fn settle(&self, count: usize) {
+        let mut pending = lock(&self.pending);
+        let count = count.min(pending.len());
+        pending.drain(..count);
+        drop(pending);
+        self.settled.notify_all();
+    }
+
     /// Turns recovery protection off and reports why, once.
     fn off(&self, error: Error) {
         if self.protected.swap(false, Ordering::AcqRel) {
@@ -359,13 +420,7 @@ impl RecoveryJournal {
         let held = take_lock(&lock_path)
             .map_err(|e| unavailable(&lock_path, e))?
             .ok_or_else(|| Error::new(codes::RECOVERY_LOCKED).with_arg("path", display(&path)))?;
-        let status = Arc::new(Status {
-            protected: AtomicBool::new(true),
-            written: AtomicU64::new(0),
-            batches: AtomicU64::new(0),
-            path: path.clone(),
-            diagnostics: session.diagnostics.clone(),
-        });
+        let status = Arc::new(Status::new(path.clone(), session.diagnostics.clone()));
         let copy = match from {
             Some(from) => {
                 let name = copy_name(session.session, 0);
@@ -548,12 +603,15 @@ impl JournalSink for RecoveryJournal {
         );
         match record {
             Ok(record) => {
+                let time = self.clock.unix_millis();
+                self.status.admit(&*self.clock, time);
                 let message = Message::Record {
                     record: Box::new(record),
                     registry: Arc::clone(committed.after.registry()),
-                    time: self.clock.unix_millis(),
+                    time,
                 };
                 if !self.send(message) {
+                    self.status.settle(1);
                     self.status.off(
                         Error::new(codes::RECOVERY_UNAVAILABLE)
                             .with_arg("path", display(self.path())),
@@ -642,6 +700,15 @@ impl Writer {
     /// Writes records until the handle closes the queue; returns the records the database
     /// holds then.
     fn run(mut self, receiver: &mpsc::Receiver<Message>) -> u64 {
+        let status = Arc::clone(&self.status);
+        let held = self.run_loop(receiver);
+        // Whatever ended the loop, no commit waits for this thread any more.
+        status.running.store(false, Ordering::Release);
+        status.settled.notify_all();
+        held
+    }
+
+    fn run_loop(&mut self, receiver: &mpsc::Receiver<Message>) -> u64 {
         let interval = u64::try_from(FLUSH_INTERVAL.as_millis()).unwrap_or(u64::MAX);
         let mut batch: Vec<Row> = Vec::new();
         let mut started = 0;
@@ -669,6 +736,7 @@ impl Writer {
                     time,
                 } => {
                     if !self.status.protected.load(Ordering::Acquire) {
+                        self.status.settle(1);
                         continue;
                     }
                     match record.encode(&registry, &self.limits) {
@@ -678,7 +746,10 @@ impl Writer {
                             }
                             batch.push((record.txn_id, time, bytes));
                         }
-                        Err(error) => self.status.off(error),
+                        Err(error) => {
+                            self.status.off(error);
+                            self.status.settle(1);
+                        }
                     }
                 }
                 Message::Flush(done) => {
@@ -743,6 +814,7 @@ impl Writer {
             }
             Err(error) => self.status.off(unavailable(&self.status.path, error)),
         }
+        self.status.settle(records.len());
     }
 
     /// Truncates the records to the saved state and records the new base.
@@ -1369,13 +1441,7 @@ mod tests {
         session.clock = Arc::clone(&clock);
         let path = dir.join("db.arcrec");
         let conn = create(&path, &session, None, &[]).unwrap();
-        let status = Arc::new(Status {
-            protected: AtomicBool::new(true),
-            written: AtomicU64::new(0),
-            batches: AtomicU64::new(0),
-            path,
-            diagnostics: None,
-        });
+        let status = Arc::new(Status::new(path, None));
         let registry = Arc::new(TypeRegistry::new());
         let snapshot = Snapshot::empty(Arc::clone(&registry));
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
@@ -1410,5 +1476,94 @@ mod tests {
         // A clock that passes the interval at every reading: every record is written at once.
         let interval = u64::try_from(FLUSH_INTERVAL.as_millis()).unwrap();
         assert_eq!(batches(interval), 10);
+    }
+
+    /// A clock the test sets, which parks the storage thread (a slow write) while `trap` is set.
+    struct Trapped {
+        now: AtomicU64,
+        trap: Mutex<bool>,
+        released: Condvar,
+    }
+
+    impl Trapped {
+        fn trap(&self, on: bool) {
+            *lock(&self.trap) = on;
+            self.released.notify_all();
+        }
+    }
+
+    impl Clock for Trapped {
+        fn unix_millis(&self) -> u64 {
+            if std::thread::current().name() == Some("arc-doc-recovery") {
+                let mut trap = lock(&self.trap);
+                while *trap {
+                    trap = self
+                        .released
+                        .wait(trap)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+            }
+            self.now.load(Ordering::Acquire)
+        }
+    }
+
+    fn committed(n: u128) -> Committed {
+        let snapshot = Snapshot::empty(Arc::new(TypeRegistry::new()));
+        Committed {
+            meta: TxnMeta::new(TransactionId::from_u128(n), SessionId::from_u128(1)),
+            ops: Vec::new(),
+            before: snapshot.clone(),
+            after: snapshot,
+        }
+    }
+
+    /// While the oldest unwritten record is older than the flush interval (the write is slow), a
+    /// further commit waits instead of being acknowledged ahead of it.
+    #[test]
+    fn a_commit_waits_while_the_oldest_unwritten_record_is_overdue() {
+        let dir =
+            std::env::temp_dir().join(format!("arc-doc-recovery-gate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let clock = Arc::new(Trapped {
+            now: AtomicU64::new(0),
+            trap: Mutex::new(false),
+            released: Condvar::new(),
+        });
+        let mut session = Session::new(
+            &dir,
+            DocumentId::from_u128(1),
+            SessionId::from_u128(1),
+            None,
+        );
+        session.clock = Arc::clone(&clock) as Arc<dyn Clock>;
+        let journal = RecoveryJournal::start(session).unwrap();
+        clock.trap(true);
+        journal.record(&committed(1));
+        let done = Arc::new(AtomicBool::new(false));
+        clock.now.store(
+            2 * u64::try_from(FLUSH_INTERVAL.as_millis()).unwrap(),
+            Ordering::Release,
+        );
+        let second = {
+            let (journal, done) = (Arc::clone(&journal), Arc::clone(&done));
+            std::thread::spawn(move || {
+                journal.record(&committed(2));
+                done.store(true, Ordering::Release);
+            })
+        };
+        while journal.status.waits.load(Ordering::Acquire) == 0 && !done.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        let acknowledged_early = done.load(Ordering::Acquire);
+        clock.trap(false);
+        second.join().unwrap();
+        assert!(
+            !acknowledged_early,
+            "acknowledged while the first write was overdue"
+        );
+        assert!(journal.flush(Duration::from_secs(30)));
+        assert_eq!(journal.written(), 2);
+        drop(journal);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
