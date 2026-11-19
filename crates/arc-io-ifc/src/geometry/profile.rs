@@ -86,9 +86,23 @@ impl Evaluator<'_> {
             "IFCARBITRARYPROFILEDEFWITHVOIDS" => {
                 let mut loops = vec![self.profile_loop(record, 2)?];
                 let kind = "IFCARBITRARYPROFILEDEFWITHVOIDS";
-                let inner = attr::references(record.parameters.get(3), kind)?.0;
+                // A repeated inner curve is the same hole: it is read once.
+                let (inner, _) = attr::distinct_references(
+                    &mut self.budget,
+                    record.parameters.get(3),
+                    kind,
+                    usize::MAX,
+                )?;
+                // The outer loop and every hole, each bridged twice, are capped in total.
+                let mut total = loops.first().map_or(0, Vec::len);
                 for curve in inner {
+                    self.budget.step()?;
                     loops.push(self.profile_curve(curve)?);
+                    let hole = loops.last().map_or(0, Vec::len);
+                    total = total.saturating_add(hole).saturating_add(2);
+                    if total > MAX_LOOP_VERTICES {
+                        return Err(skip(reasons::GEOMETRY_NOT_EVALUATED, kind));
+                    }
                 }
                 Ok(loops)
             }
@@ -143,7 +157,7 @@ impl Evaluator<'_> {
 
     /// A profile curve: its points in the plane, with every third coordinate zero.
     fn profile_curve(&mut self, name: u64) -> Step<Vec<P2>> {
-        let points = self.curve_points(name)?;
+        let points = self.curve_points(name, MAX_LOOP_VERTICES)?;
         if points.len() > MAX_LOOP_VERTICES {
             return Err(skip(reasons::GEOMETRY_NOT_EVALUATED, "IFCPOLYLINE"));
         }

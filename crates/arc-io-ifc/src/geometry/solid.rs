@@ -19,7 +19,7 @@ use crate::error::reasons;
 use crate::model::Record;
 
 use super::attr::{self, skip};
-use super::polygon::{P2, prepare, triangulate};
+use super::polygon::{P2, charge_triangulation, prepare, ring_vertices, triangulate};
 use super::{
     Evaluator, Flow, MAX_LOOP_VERTICES, Piece, Shape, Step, TRIANGLE_BYTES, VERTEX_BYTES, index32,
 };
@@ -48,8 +48,15 @@ impl Evaluator<'_> {
             index_loops.push((start..start + loop_.len()).collect());
             points.extend(loop_);
         }
-        let prepared = prepare(&points, index_loops)
+        let prepared = prepare(&points, index_loops, true)
             .ok_or_else(|| skip(reasons::GEOMETRY_DEGENERATE, kind))?;
+        // The caps and the sides use this one prepared ring. Its total, holes bridged twice, is capped
+        // and charged before it is triangulated.
+        let lengths: Vec<usize> = prepared.iter().map(Vec::len).collect();
+        let ring = ring_vertices(&lengths)
+            .filter(|&total| total <= MAX_LOOP_VERTICES)
+            .ok_or_else(|| skip(reasons::GEOMETRY_NOT_EVALUATED, kind))?;
+        charge_triangulation(&mut self.budget, ring)?;
         let triangles = triangulate(&points, &prepared, &mut self.budget)?
             .ok_or_else(|| skip(reasons::GEOMETRY_DEGENERATE, kind))?;
 
@@ -97,30 +104,7 @@ impl Evaluator<'_> {
             return Err(skip(reasons::GEOMETRY_DEGENERATE, kind));
         }
 
-        let top = |k: usize| k + n;
-        let mut out: Vec<[usize; 3]> = Vec::with_capacity(triangle_count);
-        for t in &triangles {
-            // The caps: the base faces down, the top faces up, for outward winding.
-            if outward {
-                out.push([t[0], t[2], t[1]]);
-                out.push([top(t[0]), top(t[1]), top(t[2])]);
-            } else {
-                out.push([t[0], t[1], t[2]]);
-                out.push([top(t[0]), top(t[2]), top(t[1])]);
-            }
-        }
-        for ring in &prepared {
-            for (k, &a) in ring.iter().enumerate() {
-                let b = ring.get((k + 1) % ring.len()).copied().unwrap_or(a);
-                if outward {
-                    out.push([a, b, top(b)]);
-                    out.push([a, top(b), top(a)]);
-                } else {
-                    out.push([a, top(b), b]);
-                    out.push([a, top(a), top(b)]);
-                }
-            }
-        }
+        let out = closed_faces(&triangles, &prepared, n, outward, triangle_count);
         let indices: Vec<[u32; 3]> = out
             .iter()
             .map(|t| Ok([index32(t[0])?, index32(t[1])?, index32(t[2])?]))
@@ -131,4 +115,40 @@ impl Evaluator<'_> {
             .map_err(Flow::Hard)?;
         Ok(Self::own(Shape::Mesh(mesh)))
     }
+}
+
+/// The triangles of a closed extrusion over the cap triangles `triangles` of `n` profile points, each
+/// ring of `prepared` giving its side quads. The points of the top are the base points plus `n`.
+fn closed_faces(
+    triangles: &[[usize; 3]],
+    prepared: &[Vec<usize>],
+    n: usize,
+    outward: bool,
+    capacity: usize,
+) -> Vec<[usize; 3]> {
+    let top = |k: usize| k + n;
+    let mut out: Vec<[usize; 3]> = Vec::with_capacity(capacity);
+    for t in triangles {
+        // The caps: the base faces down, the top faces up, for outward winding.
+        if outward {
+            out.push([t[0], t[2], t[1]]);
+            out.push([top(t[0]), top(t[1]), top(t[2])]);
+        } else {
+            out.push([t[0], t[1], t[2]]);
+            out.push([top(t[0]), top(t[2]), top(t[1])]);
+        }
+    }
+    for ring in prepared {
+        for (k, &a) in ring.iter().enumerate() {
+            let b = ring.get((k + 1) % ring.len()).copied().unwrap_or(a);
+            if outward {
+                out.push([a, b, top(b)]);
+                out.push([a, top(b), top(a)]);
+            } else {
+                out.push([a, top(b), b]);
+                out.push([a, top(a), top(b)]);
+            }
+        }
+    }
+    out
 }

@@ -21,8 +21,9 @@ use super::place::expect;
 use super::{Evaluator, Piece, Step};
 
 impl Evaluator<'_> {
-    /// The pieces of a mapped item: the pieces of the mapped representation's items, transformed.
-    pub(crate) fn mapped(&mut self, record: &Record, depth: u32) -> Step<Vec<Piece>> {
+    /// The pieces of the mapped item `name`: the pieces of the mapped representation's items,
+    /// transformed by the target operator composed with the mapping origin.
+    pub(crate) fn mapped(&mut self, name: u64, record: &Record, depth: u32) -> Step<Vec<Piece>> {
         let kind = "IFCMAPPEDITEM";
         let file = self.file;
         let source = attr::reference(record.parameters.first(), kind)?;
@@ -37,10 +38,21 @@ impl Evaluator<'_> {
             .instance(representation)
             .and_then(|i| i.records.first())
             .ok_or_else(|| skip(reasons::TARGET_MISSING, "IFCREPRESENTATION"))?;
-        let (items, _) = attr::references(rep.parameters.get(3), "IFCREPRESENTATION")?;
-        let placement = self.operator(target)? * origin;
+        let (items, _) = attr::distinct_references(
+            &mut self.budget,
+            rep.parameters.get(3),
+            "IFCREPRESENTATION",
+            usize::MAX,
+        )?;
+        let (operator, approximated) = self.operator(target)?;
+        if approximated {
+            self.log
+                .add(reasons::GEOMETRY_APPROXIMATED, kind, Some(name), 1);
+        }
+        let placement = operator * origin;
         let mut out = Vec::new();
         for item in items {
+            self.budget.step()?;
             let Some(pieces) = self.item(item, depth.saturating_add(1))? else {
                 continue;
             };

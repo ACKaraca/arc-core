@@ -203,9 +203,11 @@ pub mod reasons {
         message_id: "io-ifc-loss-trailing-bytes",
     };
 
-    /// A representation item, placement or mapping of a kind the geometry evaluation does not
-    /// implement (a boolean result, a swept disk, a curve other than a polyline); nothing is emitted
-    /// for it.
+    /// A representation item, placement, mapping or loop of a kind the geometry evaluation does not
+    /// implement (a boolean result, a swept disk, a curve other than a polyline), or one longer than
+    /// its point limit: a loop or polyline of more than 4096 points, or a face or profile whose loops
+    /// together exceed 4096 points, including the bridge points of its holes. Nothing is emitted for
+    /// it.
     pub const GEOMETRY_NOT_EVALUATED: Reason = Reason {
         code: "io.ifc.geometry_not_evaluated",
         outcome: Outcome::Dropped,
@@ -213,8 +215,9 @@ pub mod reasons {
         message_id: "io-ifc-loss-geometry-not-evaluated",
     };
     /// A geometry item is degenerate (a zero or negative depth, a zero-area profile or face, a
-    /// zero direction) or has a coordinate that is not finite after unit conversion; the item is
-    /// skipped and nothing is emitted for it.
+    /// zero direction, a scale that is not positive, a hole that is not strictly inside its outer
+    /// loop or in no other hole, or loops that touch or cross) or has a coordinate that is not finite
+    /// after unit conversion; the item is skipped and nothing is emitted for it.
     pub const GEOMETRY_DEGENERATE: Reason = Reason {
         code: "io.ifc.geometry_degenerate",
         outcome: Outcome::Dropped,
@@ -245,8 +248,9 @@ pub mod reasons {
         message_id: "io-ifc-loss-unit-assumed",
     };
     /// A geometry item is approximated: a circle is tessellated with fewer segments than its chord
-    /// tolerance asks for, or a face is not planar and is triangulated in the projection onto its
-    /// mean plane.
+    /// tolerance asks for, a face is not planar and is triangulated in the projection onto its mean
+    /// plane, or an axis of a cartesian transformation operator is parallel to an axis it must be
+    /// orthogonal to and is replaced by a perpendicular direction.
     pub const GEOMETRY_APPROXIMATED: Reason = Reason {
         code: "io.ifc.geometry_approximated",
         outcome: Outcome::Approximated,

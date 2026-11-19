@@ -1,12 +1,19 @@
 //! Reads of attributes by position, with presence and type checks. A wrong type is a skip of the
 //! item that holds the attribute, reported as `io.ifc.value_unexpected`.
 
+use std::collections::BTreeSet;
+
 use arc_base::math::{Point3, Vector2, Vector3};
 
 use crate::model::{IfcFile, Parameter, Record};
 
+use super::budget::Budget;
 use super::{Flow, Skip, Step};
 use crate::error::reasons;
+
+/// Bytes charged for one reference of a list: the entry of the vector and of the set of distinct
+/// references.
+const REFERENCE_BYTES: u64 = 32;
 
 /// A skip of the item named by `kind` because of a value of the wrong type.
 pub(crate) fn wrong(kind: &str) -> Flow {
@@ -107,24 +114,80 @@ pub(crate) fn list<'a>(parameter: Option<&'a Parameter>, kind: &str) -> Step<&'a
     }
 }
 
-/// The references of a list, with repeats removed; returns the references in order and the number
-/// of repeats.
-pub(crate) fn references(parameter: Option<&Parameter>, kind: &str) -> Step<(Vec<u64>, u64)> {
-    let mut out = Vec::new();
+/// The one reference of a list element; any other element is a skip of the item.
+fn reference_item(item: &Parameter, kind: &str) -> Step<u64> {
+    match item {
+        Parameter::Reference(name) => Ok(*name),
+        _ => Err(wrong(kind)),
+    }
+}
+
+/// Refuses a list longer than `max` before anything is built from it: longer than `array_length` is
+/// a limit error, longer than the caller's own cap is a skip of the item.
+fn check_length(budget: &Budget, len: usize, kind: &str, max: usize) -> Step<()> {
+    budget.array(len)?;
+    if len > max {
+        Err(skip(reasons::GEOMETRY_NOT_EVALUATED, kind))
+    } else {
+        Ok(())
+    }
+}
+
+/// The references of a list in their order, repeats kept. Use it where order and multiplicity are
+/// the geometry: point lists of polylines and loops, indices and bounds of a face. The list is
+/// refused when it is longer than `max` (`array_length` is checked as well) before anything is
+/// charged or built, and the cancellation token is checked per element.
+pub(crate) fn ordered_references(
+    budget: &mut Budget,
+    parameter: Option<&Parameter>,
+    kind: &str,
+    max: usize,
+) -> Step<Vec<u64>> {
+    let items = list(parameter, kind)?;
+    check_length(budget, items.len(), kind, max)?;
+    budget.charge(charge_of(items.len()))?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        budget.step()?;
+        out.push(reference_item(item, kind)?);
+    }
+    Ok(out)
+}
+
+/// The references of a list with repeats removed, in the order of their first occurrence, and the
+/// number of repeats. Use it where a repeat is meaningless: representation items, the faces of a
+/// shell, the shells of a model, the representations of a product. Same checks as
+/// [`ordered_references`].
+pub(crate) fn distinct_references(
+    budget: &mut Budget,
+    parameter: Option<&Parameter>,
+    kind: &str,
+    max: usize,
+) -> Step<(Vec<u64>, u64)> {
+    let items = list(parameter, kind)?;
+    check_length(budget, items.len(), kind, max)?;
+    budget.charge(charge_of(items.len()))?;
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::with_capacity(items.len());
     let mut repeats = 0_u64;
-    for item in list(parameter, kind)? {
-        match item {
-            Parameter::Reference(name) => {
-                if out.contains(name) {
-                    repeats = repeats.saturating_add(1);
-                } else {
-                    out.push(*name);
-                }
-            }
-            _ => return Err(wrong(kind)),
+    for item in items {
+        budget.step()?;
+        let name = reference_item(item, kind)?;
+        if seen.insert(name) {
+            out.push(name);
+        } else {
+            repeats = repeats.saturating_add(1);
         }
     }
     Ok((out, repeats))
+}
+
+/// Bytes charged for the references of a list of `len` elements: the vector and the set of
+/// distinct references.
+fn charge_of(len: usize) -> u64 {
+    u64::try_from(len)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(REFERENCE_BYTES)
 }
 
 /// The integers of a list. A value that is not an integer is a skip.

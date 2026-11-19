@@ -4,8 +4,9 @@
 //!
 //! Supported units are `IfcSIUnit` with a prefix (`LENGTHUNIT` `METRE`, `PLANEANGLEUNIT` `RADIAN`)
 //! and `IfcConversionBasedUnit` whose `IfcMeasureWithUnit` refers to an `IfcSIUnit` (for example
-//! a foot of 0.3048 metre). Other units are ignored. When no usable length unit exists, meters
-//! are assumed and reported as `io.ifc.unit_assumed`.
+//! a foot of 0.3048 metre). Other units are ignored, and so is a conversion whose factor is zero,
+//! negative or not finite. When no usable length unit exists, meters are assumed and reported as
+//! `io.ifc.unit_assumed`.
 
 use arc_base::Result;
 
@@ -179,6 +180,7 @@ impl Evaluator<'_> {
         };
         let component = attr::typed(self.file, *component, "IFCSIUNIT")?;
         let factor = value * si_factor(component)?;
-        factor.is_finite().then_some(factor)
+        // A factor that is zero, negative or not finite makes the unit unusable: meters are assumed.
+        (factor.is_finite() && factor > 0.0).then_some(factor)
     }
 }

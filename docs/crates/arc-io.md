@@ -1232,9 +1232,13 @@ evaluation. The representation items that are not listed below are not evaluated
 - Products: an instance whose sixth attribute `Representation` (position 6) refers to an
   `IfcProductDefinitionShape`. Its `ObjectPlacement` (position 5) is the placement; an omitted
   placement is the identity. The representations are the `Representations` (position 2) of the
-  shape, and the items of a representation are its `Items` (position 3). The representation
-  identifier and type (positions 1 and 2) are kept as text. The representation context and its
-  world coordinate system are not read: the coordinates of a representation are world coordinates.
+  shape, each read once, and the items of a representation are its `Items` (position 3), each
+  evaluated once. The representation identifier and type (positions 1 and 2) are kept as text: the
+  items of one representation share them (`Arc<str>`), and each is charged once per representation.
+  A representation whose type is not `IfcShapeRepresentation` (a topology representation, for
+  example) is not evaluated: it is reported as `io.ifc.geometry_not_evaluated` with its type as the
+  record kind, and nothing is emitted for it. The representation context and its world coordinate
+  system are not read: the coordinates of a representation are world coordinates.
 - Output: a `GeometryItem` per evaluated piece of a representation item, with `product` and `item`
   (the instance names of the product and of the representation item, or of the product's mapped item
   for an item of a mapped representation), `representation_identifier`, `representation_type`, `shape`
@@ -1249,7 +1253,8 @@ evaluation. The representation items that are not listed below are not evaluated
   else the first `IfcUnitAssignment` of the file. Length units are `IfcSIUnit` with `LENGTHUNIT`,
   `METRE` and an optional prefix, and `IfcConversionBasedUnit` whose `ConversionFactor` is an
   `IfcMeasureWithUnit` referring to an `IfcSIUnit`; its value times the factor of that unit is the
-  length unit. Plane angle units (`RADIAN`, or a conversion-based unit such as a degree) give
+  length unit. A factor that is zero, negative or not finite makes the unit unusable and it is ignored.
+  Plane angle units (`RADIAN`, or a conversion-based unit such as a degree) give
   `Units::radians_per_angle_unit`; no evaluated item reads an angle. Each length read (point
   coordinates, placement locations, profile dimensions, radii, depths) is multiplied by the length unit
   in meters, and a product that is not finite after the multiplication skips its item. With no usable
@@ -1260,10 +1265,11 @@ evaluation. The representation items that are not listed below are not evaluated
   reference direction is the first of (1, 0, 0) and (0, 1, 0) that is not parallel to the axis. The
   reference direction is orthogonalized against the axis, and the second axis is the cross product of
   the axis and the reference direction. A zero or parallel direction skips the item. `IfcLocalPlacement`
-  (`PlacementRelTo` 0, `RelativePlacement` 1) is composed from the top of the chain down. The chain is
-  walked iteratively with a visited set and the depth bound; a repeated placement is cut and reported
-  as `io.ifc.cycle_cut` with the record kind `IFCLOCALPLACEMENT`. Another placement kind, such as
-  `IfcGridPlacement`, is not evaluated and skips the product's items.
+  (`PlacementRelTo` 0, `RelativePlacement` 1, an `IfcAxis2Placement3D` or an `IfcAxis2Placement2D`) is
+  composed from the top of the chain down. The chain is walked iteratively with a visited set and the
+  depth bound; a repeated placement is cut and reported as `io.ifc.cycle_cut` with the record kind
+  `IFCLOCALPLACEMENT`. Another placement kind, such as `IfcGridPlacement`, is not evaluated and skips
+  the product's items.
 - Evaluated representation items, with the attribute positions of IFC2X3, IFC4 and IFC4X3:
 
 | Item | Output | Notes |
@@ -1282,6 +1288,15 @@ evaluation. The representation items that are not listed below are not evaluated
 | `IfcMappedItem` (`MappingSource` 0, `MappingTarget` 1) | the pieces of the mapped representation | `IfcRepresentationMap` (`MappingOrigin` 0, `MappedRepresentation` 1). `MappingTarget` is an `IfcCartesianTransformationOperator3D` or its `...3DnonUniform` form (`Scale` 3, `Scale2` 5, `Scale3` 6, which default to `Scale`). The map's items are composed with `MappingTarget * MappingOrigin`. |
 | `IfcPolyline` (`Points` 0) and `IfcIndexedPolyCurve` (`Points` 0, `Segments` 1) as representation items | polylines | Two or three coordinates per point; a two-dimensional point is at `z = 0`. Line segments only. |
 
+- Cartesian transformation operators (`MappingTarget` of an `IfcMappedItem`): the third axis is `Axis3`
+  (default (0, 0, 1)), normalized. The first axis is `Axis1` (default (1, 0, 0)) made orthogonal to the
+  third and normalized. The second is `Axis2` (default: the third crossed with the first) made
+  orthogonal to the third and to the first and normalized, so the basis has no shear. A given axis
+  that is parallel to an axis it must be orthogonal to is replaced by a perpendicular direction (the
+  projection of (1, 0, 0), or else of (0, 1, 0)), and the mapped item is reported as
+  `io.ifc.geometry_approximated` with the record kind `IFCMAPPEDITEM`. A `Scale`, `Scale2` or `Scale3`
+  that is not positive skips the item as `io.ifc.geometry_degenerate`; a mirror is expressed through
+  the axes, not through a negative scale.
 - Not evaluated: every other representation item, profile, curve, loop, shell or placement kind. Each
   is reported as `io.ifc.geometry_not_evaluated` with the record kind of the entity, one item per kind
   with its count, and nothing is emitted for it. This covers `IfcBooleanResult`,
@@ -1295,46 +1310,71 @@ evaluation. The representation items that are not listed below are not evaluated
   the elements are emitted solid.
 - Skips: an attribute of the wrong type skips its item and is reported as `io.ifc.value_unexpected`. An
   index outside its list, or a value that is not an index, is `io.ifc.index_invalid`. A degenerate item
-  (zero or negative depth, a loop with zero area, a zero direction, or a result that is not finite) is
-  `io.ifc.geometry_degenerate`. A mapped item whose representation reaches the same mapped item again
-  is cut and reported as `io.ifc.cycle_cut` with the record kind `IFCMAPPEDITEM`. A representation item that
-  is listed twice in one representation is evaluated once and the repeat is counted as
-  `io.ifc.duplicate_placement`. Each reason is reported once per record kind with its count.
+  (zero or negative depth, a loop with zero area, a zero direction, a scale that is not positive, a
+  region whose holes are not valid, or a result that is not finite) is `io.ifc.geometry_degenerate`. A
+  mapped item whose representation reaches the same mapped item again is cut and reported as
+  `io.ifc.cycle_cut` with the record kind `IFCMAPPEDITEM`. Each reason is reported once per record kind
+  with its count.
+- Repeats: a list where order and multiplicity are the geometry keeps its repeats: the points of an
+  `IfcPolyline` and of an `IfcPolyLoop`, the point indices of a face and the bounds of an `IfcFace`. A
+  polyline keeps a point that comes back, so `(p1, p2, p1, p3)` has four points. A closing repeat of a
+  loop (its last point the same instance as its first) is dropped. The segments of an
+  `IfcIndexedPolyCurve` drop only a repeated join point. A face loop may reuse a point instance, as a
+  face with a keyhole does. The other lists are read once, in the order of first occurrence: the
+  representation items of a representation (a representation item listed twice is evaluated once and
+  its repeat is counted as `io.ifc.duplicate_placement`), the representations of a product, the faces of
+  a face set or shell, the shells of a model and the inner curves of a profile. Those lists drop their
+  repeats without a report.
 - Shared geometry: the pieces of a representation item are computed once per file and cached by the
   item's instance name. A mapped item does not copy the pieces of its representation: each piece keeps
   its `Arc<Shape>` and receives the transform composed from the mapping. Products that map one
   representation hold the same `Arc`, and the vertices are stored once. The alternative, a copy of the
   mesh with the transform applied for each use, multiplies the stored geometry by the number of uses.
+  An item whose evaluation cut a mapping cycle is not cached: its pieces depend on the items being
+  evaluated around it, so a later reference evaluates it again.
 - Decisions: planar polygons (profiles and faces) are triangulated by an ear-clipping triangulation with
   hole bridging, implemented in the crate. The flattening triangulation of `arc-geom` was not used,
   because it drops every segment no longer than the chord tolerance; two faces that share such an edge
   could then keep different vertices and the shell would open. The triangulation keeps the input
-  vertices and checks that its triangle areas add up to the area of the loops. Vertices of face sets are
-  welded by their coordinates (the bit pattern, with the sign of zero normalized). A face that is not
-  planar within the linear tolerance is triangulated in the projection onto the mean plane of its outer
-  loop, with the original vertices, and reported as `io.ifc.geometry_approximated`.
+  vertices, and every loop point is a corner of some triangle. Before bridging, a region is refused
+  unless every hole vertex is strictly inside the outer loop and in no other hole, and no edge of one
+  loop touches an edge of another loop; the edge test is quadratic in the number of points. The holes
+  are bridged to the outer loop in order of decreasing maximum x, each from its rightmost vertex. The
+  output is checked: a ring of `n` points gives `n - 2` triangles, each counterclockwise. A loop that
+  crosses itself is not detected. Collinear points are kept in faces, so that a neighbouring face that
+  keeps the same point meets it; the profiles of extrusions drop them, and their caps and sides use the
+  same prepared ring. Vertices of face sets are welded by their coordinates (the bit pattern, with the
+  sign of zero normalized). A face that is not planar within the linear tolerance is triangulated in the
+  projection onto the mean plane of its outer loop, with the original vertices, and reported as
+  `io.ifc.geometry_approximated`.
 
 #### Bounds
 
 Every allocation is charged to one budget of the call before it is made, against `memory_bytes` minus
 `IfcFile::parsed_bytes()`: 24 bytes per vertex, 12 per triangle, 48 per entry of the vertex index, 96 per
-shape, 160 per mapped piece and 128 per placement. Each evaluated representation item, each mapped piece
-and each emitted item counts one record against `record_count`. A mesh, a polyline or a point list
-longer than `array_length` is refused, and a face set is refused by its declared list length before its
-points are read. Exceeding a limit returns `io.limit_exceeded` with the argument `limit` naming
-`memory_bytes`, `record_count` or `array_length`.
+shape, 160 per mapped piece, 128 per placement, 32 per reference of a list, the size of one emitted
+`GeometryItem` per item, the length of each representation text once per representation, and 48 per point
+copy and 48 per triangle of a triangulation, charged before the triangulation runs. Each evaluated
+representation item, each mapped piece and each emitted item counts one record against `record_count`. A
+mesh, a polyline or a point list longer than `array_length` is refused, and a face set is refused by its
+declared list length before its points are read. Exceeding a limit returns `io.limit_exceeded` with the
+argument `limit` naming `memory_bytes`, `record_count` or `array_length`.
 
 - A circle has `n = ceil(pi / acos(1 - c / r))` segments for the chord tolerance `c` (`tessellation_chord`)
   and radius `r`, at least 3 and at most 512 (`MAX_CIRCLE_SEGMENTS`). A circle that needs more is
   tessellated with 512 segments and reported as `io.ifc.geometry_approximated`.
-- A loop of more than 4096 points (`MAX_LOOP_VERTICES`), which the triangulation would process, is not
-  evaluated and is reported as `io.ifc.geometry_not_evaluated`, with the record kind of the curve, loop or
-  solid that holds it. Polylines are not triangulated and have no point limit beyond `array_length`.
+- A loop of more than 4096 points (`MAX_LOOP_VERTICES`) is not evaluated and is reported as
+  `io.ifc.geometry_not_evaluated`, with the record kind of the curve, loop or solid that holds it; the
+  list is refused before its points are built. The loops of one face or profile are capped in total as
+  well: the outer loop and every hole, each hole's two bridge points counted, together at most 4096
+  points, or the face or profile is not evaluated and is reported the same way. Polylines are not
+  triangulated and have no point limit beyond `array_length`.
 - Placement chains and mapped nesting share one depth counter, capped at the `nesting_depth` of the
   profile and at 64. A deeper nesting returns `io.limit_exceeded` with `limit` set to `nesting_depth`.
-- Cancellation is checked before each product, and every 1024 steps of the triangulation and of the
-  loops over the lists of the file; a cancelled evaluation returns `base.cancelled`. `wall_clock_seconds` is checked by the
-  parser only.
+- Cancellation is checked before each product and every 1024 steps. A step is taken per face, row, point,
+  bound, representation item, mapped item and piece of a loop over a list, and per candidate of the ear
+  search; a cancelled evaluation returns `base.cancelled`. `wall_clock_seconds` is checked by the parser
+  only.
 - The evaluation adds no error codes. Its loss reasons are listed in the table of the loss reports.
 
 ### Error codes

@@ -12,7 +12,12 @@
 //!   with a visited set, bounded by the depth limit; a repeated placement is cut and reported as
 //!   `io.ifc.cycle_cut`, and the cut placement is taken relative to the world.
 //! - `IfcCartesianTransformationOperator3D` `Axis1` 0, `Axis2` 1, `LocalOrigin` 2, `Scale` 3, `Axis3`
-//!   4, and for `...3DnonUniform` `Scale2` 5 and `Scale3` 6, which default to `Scale`.
+//!   4, and for `...3DnonUniform` `Scale2` 5 and `Scale3` 6, which default to `Scale`. The third axis
+//!   is `Axis3` (default (0, 0, 1)); the first is `Axis1` (default (1, 0, 0)) made orthogonal to the
+//!   third; the second is `Axis2` (default: third crossed with first) made orthogonal to the third and
+//!   the first. An axis parallel to one it must be orthogonal to is replaced by a perpendicular
+//!   direction and reported as approximated. A scale that is not positive skips the item: a mirror is
+//!   expressed through the axes.
 //!
 //! Every length is multiplied by the length scale of the file when it is read.
 
@@ -45,6 +50,21 @@ pub(crate) fn unit(v: Vector3, kind: &str) -> Step<Vector3> {
     } else {
         Err(skip(reasons::GEOMETRY_DEGENERATE, kind))
     }
+}
+
+/// The unit vector of `v` made orthogonal to the unit vector `z`; `None` when `v` is parallel to `z`
+/// within the tolerance.
+fn orthogonal_to(v: Vector3, z: Vector3, tolerance: f64) -> Option<Vector3> {
+    let x = v - z * v.dot(&z);
+    let norm = x.norm();
+    (norm > tolerance).then(|| x / norm)
+}
+
+/// A unit direction orthogonal to the unit vector `z`, chosen deterministically from the axes.
+fn perpendicular(z: Vector3, tolerance: f64, kind: &str) -> Step<Vector3> {
+    orthogonal_to(Vector3::x(), z, tolerance)
+        .or_else(|| orthogonal_to(Vector3::y(), z, tolerance))
+        .ok_or_else(|| skip(reasons::GEOMETRY_DEGENERATE, kind))
 }
 
 /// The first of the candidate references that is not parallel to `z`, orthogonalized against it.
@@ -213,7 +233,7 @@ impl Evaluator<'_> {
                 )));
             }
             let record = expect(file, node, kind)?;
-            let relative = self.axis3(attr::opt_reference(record.parameters.get(1), kind)?)?;
+            let relative = self.axis_any(attr::opt_reference(record.parameters.get(1), kind)?)?;
             current = attr::opt_reference(record.parameters.first(), kind)?;
             self.charge_placement()?;
             chain.push((node, relative));
@@ -226,8 +246,9 @@ impl Evaluator<'_> {
         Ok(world)
     }
 
-    /// The transform of an `IfcCartesianTransformationOperator3D` or its non-uniform form.
-    pub(crate) fn operator(&self, name: u64) -> Step<Transform3> {
+    /// The transform of an `IfcCartesianTransformationOperator3D` or its non-uniform form, and whether
+    /// an axis was replaced by a perpendicular direction (approximated).
+    pub(crate) fn operator(&self, name: u64) -> Step<(Transform3, bool)> {
         let file = self.file;
         let Some(instance) = file.instance(name) else {
             return Err(skip(
@@ -248,12 +269,35 @@ impl Evaluator<'_> {
             _ => return Err(skip(reasons::GEOMETRY_NOT_EVALUATED, kind)),
         };
         let parameter = |i: usize| record.parameters.get(i);
-        let axis1 =
-            self.unit_direction(attr::opt_reference(parameter(0), kind)?, Vector3::x(), kind)?;
-        let axis2 =
-            self.unit_direction(attr::opt_reference(parameter(1), kind)?, Vector3::y(), kind)?;
+        let tolerance = self.tol.angular;
         let axis3 =
             self.unit_direction(attr::opt_reference(parameter(4), kind)?, Vector3::z(), kind)?;
+        let mut approximated = false;
+        let axis1 = match attr::opt_reference(parameter(0), kind)? {
+            Some(name) => unit(self.direction(name)?, kind)?,
+            None => Vector3::x(),
+        };
+        let axis1 = match orthogonal_to(axis1, axis3, tolerance) {
+            Some(v) => v,
+            None => {
+                approximated = true;
+                perpendicular(axis3, tolerance, kind)?
+            }
+        };
+        let axis2 = match attr::opt_reference(parameter(1), kind)? {
+            Some(name) => {
+                let given = unit(self.direction(name)?, kind)?;
+                let v = given - axis3 * given.dot(&axis3) - axis1 * given.dot(&axis1);
+                match v.norm() {
+                    norm if norm > tolerance => v / norm,
+                    _ => {
+                        approximated = true;
+                        axis3.cross(&axis1)
+                    }
+                }
+            }
+            None => axis3.cross(&axis1),
+        };
         let origin = match attr::opt_reference(parameter(2), kind)? {
             Some(point) => self.point(point)?,
             None => Point3::origin(),
@@ -267,16 +311,16 @@ impl Evaluator<'_> {
         } else {
             (scale, scale)
         };
-        let independent = axis1.cross(&axis2).dot(&axis3).abs() > self.tol.angular;
-        if !independent || scale == 0.0 || scale2 == 0.0 || scale3 == 0.0 {
+        if !(scale > 0.0 && scale2 > 0.0 && scale3 > 0.0) {
             return Err(skip(reasons::GEOMETRY_DEGENERATE, kind));
         }
         let (a, b, c) = (axis1 * scale, axis2 * scale2, axis3 * scale3);
-        Ok(Transform3::from_matrix_unchecked(Matrix4::new(
+        let transform = Transform3::from_matrix_unchecked(Matrix4::new(
             a.x, b.x, c.x, origin.x, //
             a.y, b.y, c.y, origin.y, //
             a.z, b.z, c.z, origin.z, //
             0.0, 0.0, 0.0, 1.0,
-        )))
+        ));
+        Ok((transform, approximated))
     }
 }

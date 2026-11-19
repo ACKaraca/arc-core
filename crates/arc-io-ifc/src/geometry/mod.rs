@@ -63,10 +63,12 @@ pub struct GeometryItem {
     /// The representation item's instance name. For an item inside a mapped representation, the
     /// name of the mapped item of the product.
     pub item: u64,
-    /// The `RepresentationIdentifier` of the representation the item belongs to.
-    pub representation_identifier: Option<String>,
-    /// The `RepresentationType` of the representation the item belongs to.
-    pub representation_type: Option<String>,
+    /// The `RepresentationIdentifier` of the representation the item belongs to. Shared by every
+    /// item of the representation.
+    pub representation_identifier: Option<Arc<str>>,
+    /// The `RepresentationType` of the representation the item belongs to. Shared by every item of
+    /// the representation.
+    pub representation_type: Option<Arc<str>>,
     /// The shape, shared with every other item that uses the same representation item.
     pub shape: Arc<Shape>,
     /// The transform from the shape's coordinates to world coordinates, in meters. It may be a
@@ -145,6 +147,9 @@ pub(crate) struct Piece {
     pub(crate) transform: Transform3,
 }
 
+/// The representation identifier and type of a representation, shared by its items.
+type TextPair = (Option<Arc<str>>, Option<Arc<str>>);
+
 /// The pieces of an evaluated item, shared between every use of the item.
 pub(crate) type Pieces = Arc<Vec<Piece>>;
 
@@ -186,6 +191,11 @@ pub(crate) struct Evaluator<'f> {
     placements: BTreeMap<u64, Transform3>,
     items: BTreeMap<u64, Option<Pieces>>,
     stack: Vec<u64>,
+    /// The shared `RepresentationIdentifier` and `RepresentationType` of each representation read.
+    texts: BTreeMap<u64, TextPair>,
+    /// The number of mapping cycles cut so far. An item whose evaluation saw a cut depends on the
+    /// items being evaluated around it, so its result is not cached.
+    cuts: u64,
 }
 
 impl<'f> Evaluator<'f> {
@@ -201,6 +211,8 @@ impl<'f> Evaluator<'f> {
             placements: BTreeMap::new(),
             items: BTreeMap::new(),
             stack: Vec::new(),
+            texts: BTreeMap::new(),
+            cuts: 0,
         }
     }
 
@@ -216,8 +228,10 @@ impl<'f> Evaluator<'f> {
         }
     }
 
-    /// The pieces of the representation item `name`, evaluated once and cached. `None` when the
-    /// item is skipped (logged once) or is already being evaluated (a cycle, cut and logged).
+    /// The pieces of the representation item `name`, evaluated and cached. `None` when the item is
+    /// skipped (logged once) or is already being evaluated (a cycle, cut and logged). A result that
+    /// saw a cycle cut is returned but not cached, so a later reference to the item is evaluated
+    /// again from its own place in the file.
     pub(crate) fn item(&mut self, name: u64, depth: u32) -> Result<Option<Pieces>> {
         if let Some(cached) = self.items.get(&name) {
             return Ok(cached.clone());
@@ -225,6 +239,7 @@ impl<'f> Evaluator<'f> {
         if self.stack.contains(&name) {
             self.log
                 .add(reasons::CYCLE_CUT, "IFCMAPPEDITEM", Some(name), 1);
+            self.cuts = self.cuts.saturating_add(1);
             return Ok(None);
         }
         if depth > self.depth_limit {
@@ -232,10 +247,14 @@ impl<'f> Evaluator<'f> {
         }
         self.budget.record()?;
         self.stack.push(name);
+        let cuts_before = self.cuts;
         let step = self.evaluate(name, depth);
         self.stack.pop();
+        let cut = self.cuts != cuts_before;
         let pieces = self.settle(step, name)?.map(Arc::new);
-        self.items.insert(name, pieces.clone());
+        if !cut {
+            self.items.insert(name, pieces.clone());
+        }
         Ok(pieces)
     }
 
@@ -258,7 +277,7 @@ impl<'f> Evaluator<'f> {
     fn dispatch(&mut self, name: u64, record: &Record, depth: u32) -> Step<Vec<Piece>> {
         let kind = record.type_name.as_str();
         match kind {
-            "IFCMAPPEDITEM" => self.mapped(record, depth),
+            "IFCMAPPEDITEM" => self.mapped(name, record, depth),
             "IFCEXTRUDEDAREASOLID" => self.extrusion(record),
             "IFCTRIANGULATEDFACESET"
             | "IFCPOLYGONALFACESET"
@@ -319,6 +338,23 @@ impl<'f> Evaluator<'f> {
         self.settle(step, product)
     }
 
+    /// The identifier and type of a representation, shared by all of its items. Each is read and
+    /// charged once per representation, however many products use it.
+    fn representation_texts(&mut self, name: u64, rep: &Record) -> Result<TextPair> {
+        if let Some(pair) = self.texts.get(&name) {
+            return Ok(pair.clone());
+        }
+        let identifier = attr::text(rep.parameters.get(1), "IFCSHAPEREPRESENTATION");
+        let identifier = self.settle(identifier, name)?.flatten();
+        let identifier = shared_text(&mut self.budget, identifier)?;
+        let rtype = attr::text(rep.parameters.get(2), "IFCSHAPEREPRESENTATION");
+        let rtype = self.settle(rtype, name)?.flatten();
+        let rtype = shared_text(&mut self.budget, rtype)?;
+        let pair = (identifier, rtype);
+        self.texts.insert(name, pair.clone());
+        Ok(pair)
+    }
+
     /// The representations of a product and their evaluated items, appended to `out`.
     fn product_items(
         &mut self,
@@ -331,12 +367,17 @@ impl<'f> Evaluator<'f> {
         let Some(record) = attr::typed(file, shape, "IFCPRODUCTDEFINITIONSHAPE") else {
             return Ok(());
         };
-        let step = attr::references(record.parameters.get(2), "IFCPRODUCTDEFINITIONSHAPE");
+        let step = attr::distinct_references(
+            &mut self.budget,
+            record.parameters.get(2),
+            "IFCPRODUCTDEFINITIONSHAPE",
+            usize::MAX,
+        );
         let Some((representations, _)) = self.settle(step, shape)? else {
             return Ok(());
         };
         for representation in representations {
-            self.budget.check()?;
+            self.budget.step()?;
             let Some(rep) = file
                 .instance(representation)
                 .and_then(|i| i.records.first())
@@ -349,11 +390,22 @@ impl<'f> Evaluator<'f> {
                 );
                 continue;
             };
-            let identifier = attr::text(rep.parameters.get(1), "IFCSHAPEREPRESENTATION");
-            let identifier = self.settle(identifier, representation)?.flatten();
-            let rtype = attr::text(rep.parameters.get(2), "IFCSHAPEREPRESENTATION");
-            let rtype = self.settle(rtype, representation)?.flatten();
-            let step = attr::references(rep.parameters.get(3), "IFCSHAPEREPRESENTATION");
+            if rep.type_name != "IFCSHAPEREPRESENTATION" {
+                self.log.add(
+                    reasons::GEOMETRY_NOT_EVALUATED,
+                    &rep.type_name,
+                    Some(representation),
+                    1,
+                );
+                continue;
+            }
+            let (identifier, rtype) = self.representation_texts(representation, rep)?;
+            let step = attr::distinct_references(
+                &mut self.budget,
+                rep.parameters.get(3),
+                "IFCSHAPEREPRESENTATION",
+                usize::MAX,
+            );
             let Some((items, repeats)) = self.settle(step, representation)? else {
                 continue;
             };
@@ -364,10 +416,12 @@ impl<'f> Evaluator<'f> {
                 repeats,
             );
             for item in items {
+                self.budget.step()?;
                 let Some(pieces) = self.item(item, 0)? else {
                     continue;
                 };
                 for piece in pieces.iter() {
+                    self.budget.charge(item_bytes())?;
                     self.budget.record()?;
                     out.push(GeometryItem {
                         product,
@@ -382,6 +436,20 @@ impl<'f> Evaluator<'f> {
         }
         Ok(())
     }
+}
+
+/// Bytes charged for one emitted item.
+fn item_bytes() -> u64 {
+    u64::try_from(std::mem::size_of::<GeometryItem>()).unwrap_or(u64::MAX)
+}
+
+/// A text of a representation, shared by its items: its bytes are charged once, before the copy.
+fn shared_text(budget: &mut Budget, text: Option<String>) -> Result<Option<Arc<str>>> {
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    budget.charge(u64::try_from(text.len()).unwrap_or(u64::MAX))?;
+    Ok(Some(Arc::from(text)))
 }
 
 /// The products of the file: instance name, placement reference and product definition shape.

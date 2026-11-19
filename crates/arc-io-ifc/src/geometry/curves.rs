@@ -1,10 +1,11 @@
 //! Curves as polylines (CORE-IO-015): `IfcPolyline` and `IfcIndexedPolyCurve` with line segments,
 //! in 2D or 3D. The points are in meters. A polyline is one output shape with at least two points.
 //!
-//! `IfcIndexedPolyCurve`: `Points` 0 (an `IfcCartesianPointList2D` or `IfcCartesianPointList3D`) and
-//! `Segments` 1, an optional list of `IfcLineIndex` (a list of one-based integers). Each segment
-//! that is a line continues the polyline; a repeated join point is dropped. An `IfcArcIndex` is not
-//! evaluated, so the curve is skipped and reported.
+//! `IfcPolyline` keeps every point in order, repeats included: a point that comes back is a different
+//! place of the curve. `IfcIndexedPolyCurve`: `Points` 0 (an `IfcCartesianPointList2D` or
+//! `IfcCartesianPointList3D`) and `Segments` 1, an optional list of `IfcLineIndex` (a list of
+//! one-based integers). Each segment that is a line continues the polyline; a repeated join point is
+//! dropped. An `IfcArcIndex` is not evaluated, so the curve is skipped and reported.
 
 use arc_base::math::Point3;
 
@@ -17,7 +18,7 @@ use super::{Evaluator, Piece, Shape, Step};
 impl Evaluator<'_> {
     /// The pieces of a polyline or indexed polyline curve.
     pub(crate) fn curve(&mut self, record: &Record) -> Step<Vec<Piece>> {
-        let points = self.curve_points_of(record)?;
+        let points = self.curve_points_of(record, usize::MAX)?;
         if points.len() < 2 {
             return Err(skip(reasons::GEOMETRY_DEGENERATE, &record.type_name));
         }
@@ -31,8 +32,9 @@ impl Evaluator<'_> {
         Ok(Self::own(Shape::Polylines(vec![points])))
     }
 
-    /// The points of the curve named `name`, which may be a polyline or an indexed polyline.
-    pub(crate) fn curve_points(&mut self, name: u64) -> Step<Vec<Point3>> {
+    /// The points of the curve named `name`, which may be a polyline or an indexed polyline. A
+    /// polyline of more than `max` points is refused before its points are built.
+    pub(crate) fn curve_points(&mut self, name: u64, max: usize) -> Step<Vec<Point3>> {
         let file = self.file;
         let Some(instance) = file.instance(name) else {
             return Err(skip(reasons::TARGET_MISSING, "IFCPOLYLINE"));
@@ -40,19 +42,39 @@ impl Evaluator<'_> {
         let Some(record) = instance.records.first() else {
             return Err(skip(reasons::TARGET_MISSING, "IFCPOLYLINE"));
         };
-        self.curve_points_of(record)
+        self.curve_points_of(record, max)
     }
 
-    fn curve_points_of(&mut self, record: &Record) -> Step<Vec<Point3>> {
+    fn curve_points_of(&mut self, record: &Record, max: usize) -> Step<Vec<Point3>> {
         match record.type_name.as_str() {
             "IFCPOLYLINE" => {
                 let kind = "IFCPOLYLINE";
-                let (points, _) = attr::references(record.parameters.first(), kind)?;
-                points.into_iter().map(|p| self.point(p)).collect()
+                let names = attr::ordered_references(
+                    &mut self.budget,
+                    record.parameters.first(),
+                    kind,
+                    max,
+                )?;
+                self.points_of(&names)
             }
             "IFCINDEXEDPOLYCURVE" => self.indexed_polycurve(record),
             other => Err(skip(reasons::GEOMETRY_NOT_EVALUATED, other)),
         }
+    }
+
+    /// The points of a list of point instances, in order, with the budget charged and stepped.
+    fn points_of(&mut self, names: &[u64]) -> Step<Vec<Point3>> {
+        self.budget.charge(
+            u64::try_from(names.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(super::VERTEX_BYTES),
+        )?;
+        let mut points = Vec::with_capacity(names.len());
+        for &name in names {
+            self.budget.step()?;
+            points.push(self.point(name)?);
+        }
+        Ok(points)
     }
 
     fn indexed_polycurve(&mut self, record: &Record) -> Step<Vec<Point3>> {
@@ -77,7 +99,7 @@ impl Evaluator<'_> {
     }
 
     /// The zero-based point indices of the segments in order, joined at repeated points.
-    fn segment_order(&self, segments: &[Parameter], count: usize) -> Step<Vec<usize>> {
+    fn segment_order(&mut self, segments: &[Parameter], count: usize) -> Step<Vec<usize>> {
         let kind = "IFCINDEXEDPOLYCURVE";
         let mut order: Vec<usize> = Vec::new();
         for segment in segments {
@@ -91,6 +113,7 @@ impl Evaluator<'_> {
             }
             let indices = attr::integers(Some(value), kind)?;
             for (position, one_based) in indices.into_iter().enumerate() {
+                self.budget.step()?;
                 let zero_based = one_based
                     .checked_sub(1)
                     .and_then(|k| usize::try_from(k).ok())
@@ -128,11 +151,14 @@ impl Evaluator<'_> {
                 .unwrap_or(u64::MAX)
                 .saturating_mul(super::VERTEX_BYTES),
         )?;
-        rows.iter()
-            .map(|row| match row {
-                Parameter::List(values) => attr::point3(values, self.scale, kind),
-                _ => Err(attr::wrong(kind)),
-            })
-            .collect()
+        let mut points = Vec::with_capacity(rows.len());
+        for row in rows {
+            self.budget.step()?;
+            points.push(match row {
+                Parameter::List(values) => attr::point3(values, self.scale, kind)?,
+                _ => return Err(attr::wrong(kind)),
+            });
+        }
+        Ok(points)
     }
 }

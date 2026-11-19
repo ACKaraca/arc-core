@@ -34,7 +34,7 @@ use crate::model::{Parameter, Record};
 
 use super::attr::{self, skip};
 use super::budget::Budget;
-use super::polygon::{P2, prepare, triangulate};
+use super::polygon::{P2, charge_triangulation, prepare, ring_vertices, triangulate};
 use super::{
     Evaluator, Flow, MAX_LOOP_VERTICES, Piece, Shape, Step, TRIANGLE_BYTES, VERTEX_BYTES, index32,
 };
@@ -145,13 +145,16 @@ impl Evaluator<'_> {
             "IFCFACETEDBREP" => {
                 let shell = attr::reference(first, kind)?;
                 for face in self.shell_faces(shell)? {
+                    self.budget.step()?;
                     self.add_face(face, &mut welder, &mut deviation)?;
                 }
             }
             "IFCFACEBASEDSURFACEMODEL" | "IFCSHELLBASEDSURFACEMODEL" => {
-                let (members, _) = attr::references(first, kind)?;
+                let (members, _) =
+                    attr::distinct_references(&mut self.budget, first, kind, usize::MAX)?;
                 for member in members {
                     for face in self.shell_faces(member)? {
+                        self.budget.step()?;
                         self.add_face(face, &mut welder, &mut deviation)?;
                     }
                 }
@@ -186,6 +189,7 @@ impl Evaluator<'_> {
         let rows = attr::list(record.parameters.get(3), kind)?;
         self.budget.array(rows.len())?;
         for row in rows {
+            self.budget.step()?;
             let values = attr::integers(Some(row), kind)?;
             let [a, b, c] = values.as_slice() else {
                 return Err(skip(reasons::INDEX_INVALID, kind));
@@ -205,9 +209,14 @@ impl Evaluator<'_> {
         let coordinates = attr::reference(record.parameters.first(), kind)?;
         let points = self.point_list(coordinates)?;
         let pn = self.pn_index(record.parameters.get(3))?;
-        let faces = attr::references(record.parameters.get(2), kind)?.0;
-        self.budget.array(faces.len())?;
+        let (faces, _) = attr::distinct_references(
+            &mut self.budget,
+            record.parameters.get(2),
+            kind,
+            usize::MAX,
+        )?;
         for face in faces {
+            self.budget.step()?;
             let face_record =
                 attr::typed_first(file, face).ok_or_else(|| skip(reasons::TARGET_MISSING, kind))?;
             let mut loops = vec![corners(
@@ -249,7 +258,7 @@ impl Evaluator<'_> {
     }
 
     /// The faces of a shell, connected face set or open shell, in order.
-    fn shell_faces(&self, name: u64) -> Step<Vec<u64>> {
+    fn shell_faces(&mut self, name: u64) -> Step<Vec<u64>> {
         let file = self.file;
         let Some(instance) = file.instance(name) else {
             return Err(skip(reasons::TARGET_MISSING, "IFCCLOSEDSHELL"));
@@ -259,7 +268,13 @@ impl Evaluator<'_> {
         };
         match record.type_name.as_str() {
             "IFCCLOSEDSHELL" | "IFCOPENSHELL" | "IFCCONNECTEDFACESET" => {
-                Ok(attr::references(record.parameters.first(), &record.type_name)?.0)
+                let (faces, _) = attr::distinct_references(
+                    &mut self.budget,
+                    record.parameters.first(),
+                    &record.type_name,
+                    usize::MAX,
+                )?;
+                Ok(faces)
             }
             other => Err(skip(reasons::GEOMETRY_NOT_EVALUATED, other)),
         }
@@ -274,9 +289,16 @@ impl Evaluator<'_> {
         if record.type_name != kind {
             return Err(skip(reasons::GEOMETRY_NOT_EVALUATED, &record.type_name));
         }
-        let bounds = attr::references(record.parameters.first(), kind)?.0;
+        // Bounds keep their repeats: a repeated bound is a repeated loop, and the region is refused.
+        let bounds = attr::ordered_references(
+            &mut self.budget,
+            record.parameters.first(),
+            kind,
+            usize::MAX,
+        )?;
         let mut loops: Vec<(bool, Vec<Point3>)> = Vec::with_capacity(bounds.len());
         for bound in bounds {
+            self.budget.step()?;
             let bound_record = attr::typed_first(file, bound)
                 .ok_or_else(|| skip(reasons::TARGET_MISSING, "IFCFACEBOUND"))?;
             let outer = match bound_record.type_name.as_str() {
@@ -310,7 +332,9 @@ impl Evaluator<'_> {
         self.emit_planar(&all, welder, deviation)
     }
 
-    /// The points of an `IfcPolyLoop`, with three or more and at most [`MAX_LOOP_VERTICES`].
+    /// The points of an `IfcPolyLoop`, with three or more and at most [`MAX_LOOP_VERTICES`]. Repeats
+    /// are kept, since a face loop may reuse a point (a keyhole); only a closing repeat, whose last
+    /// point is its first, is dropped.
     fn polygon_loop(&mut self, name: u64) -> Step<Vec<Point3>> {
         let kind = "IFCPOLYLOOP";
         let file = self.file;
@@ -319,14 +343,29 @@ impl Evaluator<'_> {
         if record.type_name != kind {
             return Err(skip(reasons::GEOMETRY_NOT_EVALUATED, &record.type_name));
         }
-        let (refs, _) = attr::references(record.parameters.first(), kind)?;
-        if refs.len() > MAX_LOOP_VERTICES {
-            return Err(skip(reasons::GEOMETRY_NOT_EVALUATED, kind));
+        let mut refs = attr::ordered_references(
+            &mut self.budget,
+            record.parameters.first(),
+            kind,
+            MAX_LOOP_VERTICES,
+        )?;
+        if refs.len() > 1 && refs.first() == refs.last() {
+            refs.pop();
         }
         if refs.len() < 3 {
             return Err(skip(reasons::GEOMETRY_DEGENERATE, kind));
         }
-        refs.into_iter().map(|p| self.point(p)).collect()
+        self.budget.charge(
+            u64::try_from(refs.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(VERTEX_BYTES),
+        )?;
+        let mut points = Vec::with_capacity(refs.len());
+        for p in refs {
+            self.budget.step()?;
+            points.push(self.point(p)?);
+        }
+        Ok(points)
     }
 
     /// The triangles of a planar face given by its loops, outer loop first. The triangles are
@@ -334,6 +373,13 @@ impl Evaluator<'_> {
     /// largest distance of a point from the plane through the outer loop's first point. `None` for a
     /// loop with zero area or a region that is not valid.
     fn planar(&mut self, loops: &[Vec<Point3>]) -> Step<Option<(Vec<[Point3; 3]>, f64)>> {
+        // The total of the loops (holes included, each bridged twice) is capped before anything is
+        // copied or triangulated.
+        let lengths: Vec<usize> = loops.iter().map(Vec::len).collect();
+        let ring = ring_vertices(&lengths)
+            .filter(|&total| total <= MAX_LOOP_VERTICES)
+            .ok_or_else(|| skip(reasons::GEOMETRY_NOT_EVALUATED, "IFCFACE"))?;
+        charge_triangulation(&mut self.budget, ring)?;
         let Some(outer) = loops.first() else {
             return Ok(None);
         };
@@ -388,7 +434,7 @@ impl Evaluator<'_> {
             .iter()
             .map(|p| (*p - origin).dot(&unit_normal).abs())
             .fold(0.0_f64, f64::max);
-        let Some(prepared) = prepare(&all2, index_loops) else {
+        let Some(prepared) = prepare(&all2, index_loops, false) else {
             return Ok(None);
         };
         let Some(triangles) = triangulate(&all2, &prepared, &mut self.budget)? else {
@@ -400,5 +446,46 @@ impl Evaluator<'_> {
             .map(|t| [at(t[0]), at(t[1]), at(t[2])])
             .collect();
         Ok(Some((out, deviation)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ReadOptions, read};
+    use arc_base::{Cancel, Limits, Tolerance};
+
+    /// A triangulated face set of 1100 rows, all over the same three points.
+    fn long_face_set() -> String {
+        let rows = vec!["(1,2,3)"; 1100].join(",");
+        format!(
+            "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('ViewDefinition []'),'2;1');\n\
+FILE_NAME('faces.ifc','',(''),(''),'','','');\nFILE_SCHEMA(('IFC4'));\nENDSEC;\nDATA;\n\
+#61=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
+#60=IFCTRIANGULATEDFACESET(#61,$,.T.,({rows}),$);\nENDSEC;\nEND-ISO-10303-21;\n"
+        )
+    }
+
+    #[test]
+    fn a_cancelled_face_set_stops_between_its_rows() {
+        let text = long_face_set();
+        let output = read(
+            text.as_bytes(),
+            &mut ReadOptions::with_limits(Limits::CONSTRAINED),
+        )
+        .expect("read");
+        let file = &output.file;
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let mut evaluator =
+            Evaluator::new(file, &Limits::CONSTRAINED, &Tolerance::DEFAULT, &cancel);
+        let record = file
+            .instance(60)
+            .and_then(|i| i.records.first())
+            .expect("face set");
+        match evaluator.faces(60, record) {
+            Err(Flow::Hard(error)) => assert_eq!(error.code(), "base.cancelled"),
+            other => panic!("expected the cancelled error, got {other:?}"),
+        }
     }
 }
