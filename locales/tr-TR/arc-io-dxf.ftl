@@ -1,7 +1,6 @@
 # arc-io-dxf tarafından sahip olunan hataların ve kayıp nedenlerinin iletileri. Tanımlayıcılar
 # crates/arc-io-dxf/src/error.rs içinde kayıtlıdır. Sözlük için arc-base.ftl dosyasına bakın.
 
-io-limit-exceeded = Dosya { $limit } içe aktarma sınırını aşıyor.
 io-unsupported-version = { $version } biçim sürümü desteklenmiyor.
 io-stream-failed = Veri kaynağından okunamadı.
 io-dxf-truncated = DXF verisi beklenmedik biçimde sona eriyor.

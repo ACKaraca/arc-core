@@ -1,7 +1,6 @@
 # Messages of the errors and loss reasons owned by arc-io-ifc. Identifiers are registered in
 # crates/arc-io-ifc/src/error.rs.
 
-io-limit-exceeded = The file exceeds the import limit { $limit }.
 io-ifc-truncated = The IFC data ends before the file is complete.
 io-ifc-syntax = The IFC data is not valid physical file syntax at this position.
 io-ifc-structure-invalid = The header, data or schema section of the IFC file is missing or out of order.

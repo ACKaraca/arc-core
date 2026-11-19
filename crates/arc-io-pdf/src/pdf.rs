@@ -237,7 +237,7 @@ pub fn write_pdf(streams: &[&PlotStream], options: &mut WriteOptions<'_>) -> Res
     let index: BTreeMap<ObjectId, usize> = layers.iter().copied().zip(0..).collect();
 
     let mut gate = Gate::new(options, total);
-    let mut loss = LossLog::unbounded();
+    let mut loss = LossLog::bounded();
     let mut pages = Vec::with_capacity(streams.len());
     let mut written = 0usize;
     for stream in streams {

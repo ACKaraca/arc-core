@@ -184,6 +184,15 @@ pub mod reasons {
         message_id: "draft-dxf-loss-reference-unresolved",
     };
 
+    /// A block reference was not imported because the chain of block references through it would
+    /// be deeper than the drafting model allows.
+    pub const REFERENCE_DEPTH_EXCEEDED: Reason = Reason {
+        code: "draft.dxf.reference_depth_exceeded",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "draft-dxf-loss-reference-depth-exceeded",
+    };
+
     /// A layer, linetype or style used but not defined in the file was created with defaults.
     pub const DEFINITION_CREATED: Reason = Reason {
         code: "draft.dxf.definition_created",
@@ -247,6 +256,7 @@ pub mod reasons {
         ARRAY_EXPANDED,
         ATTRIBUTE_DROPPED,
         REFERENCE_UNRESOLVED,
+        REFERENCE_DEPTH_EXCEEDED,
         DEFINITION_CREATED,
         LINETYPE_INVALID,
         NAME_ADJUSTED,

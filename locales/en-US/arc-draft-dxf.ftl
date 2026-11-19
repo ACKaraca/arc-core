@@ -22,6 +22,7 @@ draft-dxf-loss-hatch-approximated = { $count } hatches were imported with a simp
 draft-dxf-loss-array-expanded = { $count } block reference arrays were expanded into single references.
 draft-dxf-loss-attribute-dropped = { $count } { $kind } attribute records were not imported because their block does not define the tag.
 draft-dxf-loss-reference-unresolved = { $count } block references were not imported because their block is missing or would contain itself.
+draft-dxf-loss-reference-depth-exceeded = { $count } block references were not imported because a chain of block references through them would be deeper than { $limit } levels.
 draft-dxf-loss-definition-created = { $count } { $kind } definitions used in the file were created with default values.
 draft-dxf-loss-linetype-invalid = { $count } linetypes were not imported because their pattern has no positive length.
 draft-dxf-loss-name-adjusted = { $count } { $kind } names were adjusted: { $what }.

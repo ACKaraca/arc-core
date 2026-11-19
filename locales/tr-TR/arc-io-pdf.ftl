@@ -1,7 +1,6 @@
 # arc-io-pdf tarafından sahip olunan hataların ve kayıp nedenlerinin iletileri. Tanımlayıcılar
 # crates/arc-io-pdf/src/error.rs içinde kayıtlıdır. Sözlük için arc-base.ftl dosyasına bakın.
 
-io-pdf-limit-exceeded = Çıktı { $limit } sınırını aşıyor.
 io-pdf-option-invalid = { $option } seçeneği aralığın dışında veya hatalı biçimde.
 io-pdf-stream-invalid = Çizim akışı yazılamıyor: { $what } aralığın dışında.
 io-pdf-loss-items-written = { $count } çizim öğesi değişmeden yazıldı.

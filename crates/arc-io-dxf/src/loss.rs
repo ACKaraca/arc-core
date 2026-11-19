@@ -1,11 +1,13 @@
 //! Loss reports (CORE-IO-004) of the DXF reader and writer.
 //!
 //! The types and the aggregator are shared through `arc_io_common::loss`; this module re-exports
-//! them under the crate's own path. The reason codes stay in [`crate::error`]. The DXF log is
-//! unbounded, so every distinct record kind of a file keeps its own item.
+//! them under the crate's own path. The reason codes stay in [`crate::error`]. The DXF log keeps at most
+//! `MAX_LOSS_ITEMS` distinct record kinds; the rest are folded into the overflow item of their
+//! reason and the report is marked truncated.
 
 pub use arc_io_common::loss::{
-    Argument, Direction, LossHeader, LossItem, LossReport, LossSummary, Outcome, Reason, Severity,
+    Argument, Direction, LossHeader, LossItem, LossReport, LossSummary, MAX_KIND_BYTES,
+    MAX_LOSS_ITEMS, OVERFLOW_KIND, Outcome, Reason, Severity, clip_kind,
 };
 pub(crate) use arc_io_common::loss::{LossLog, Source};
 
@@ -48,7 +50,7 @@ mod tests {
     /// so the serialized form (handles in hexadecimal) is pinned to the one the crate produced then.
     #[test]
     fn serialized_report_keeps_the_pre_move_shape() {
-        let mut log = LossLog::unbounded();
+        let mut log = LossLog::bounded();
         log.add_mapped(2);
         log.add(MAPPED, "ENTITY", Some(Source::Hex(0x1F)), 3);
         log.add(APPROXIMATED, "LINE", None, 1);
@@ -82,14 +84,19 @@ mod tests {
     }
 
     #[test]
-    fn unbounded_log_keeps_every_record_kind() {
-        let mut log = LossLog::unbounded();
+    fn log_bounds_distinct_record_kinds_and_stays_exact() {
+        let mut log = LossLog::bounded();
         for i in 0..1100u64 {
             log.add(DROPPED, &format!("K{i:04}"), Some(Source::Hex(i)), 1);
         }
         let report = log.finish(LossHeader::new("dxf", "", Direction::Import, None));
-        assert_eq!((report.items.len(), report.summary.dropped), (1100, 1100));
+        let bound = arc_io_common::loss::MAX_LOSS_ITEMS;
+        assert!(report.truncated);
+        assert_eq!(
+            (report.items.len(), report.summary.dropped),
+            (bound + 1, 1100)
+        );
     }
 
-    const PRE_MOVE_JSON: &str = r#"{"header":{"format":"dxf","version":"AC1015","direction":"import","file_name":"a.dxf","file_hash":null,"application":null,"application_version":null,"time":null,"limits":{"input_bytes":4294967296,"decompressed_bytes":17179869184,"decompression_ratio":200,"record_count":50000000,"nesting_depth":64,"string_bytes":16777216,"array_length":50000000,"memory_bytes":17179869184,"wall_clock_seconds":null}},"summary":{"mapped":5,"approximated":3,"preserved":2,"dropped":5,"failed":1},"items":[{"outcome":"approximated","severity":"warning","source_id":"FF","record_kind":"LINE","object_id":null,"reason":"t.approx","message_id":"m","arguments":{"count":3}},{"outcome":"dropped","severity":"error","source_id":"10","record_kind":"HATCH","object_id":null,"reason":"t.drop","message_id":"m","arguments":{"count":5,"n":7,"name":"x"}},{"outcome":"failed","severity":"error","source_id":"1","record_kind":"BAD","object_id":null,"reason":"t.fail","message_id":"m","arguments":{"count":1}},{"outcome":"mapped","severity":"info","source_id":"1F","record_kind":"ENTITY","object_id":null,"reason":"t.mapped","message_id":"m","arguments":{"count":3}},{"outcome":"preserved","severity":"info","source_id":null,"record_kind":null,"object_id":null,"reason":"t.pres","message_id":"m","arguments":{"count":2}}]}"#;
+    const PRE_MOVE_JSON: &str = r#"{"header":{"format":"dxf","version":"AC1015","direction":"import","file_name":"a.dxf","file_hash":null,"application":null,"application_version":null,"time":null,"limits":{"input_bytes":4294967296,"decompressed_bytes":17179869184,"decompression_ratio":200,"record_count":50000000,"nesting_depth":64,"string_bytes":16777216,"array_length":50000000,"memory_bytes":17179869184,"wall_clock_seconds":null}},"summary":{"mapped":5,"approximated":3,"preserved":2,"dropped":5,"failed":1},"items":[{"outcome":"approximated","severity":"warning","source_id":"FF","record_kind":"LINE","object_id":null,"reason":"t.approx","message_id":"m","arguments":{"count":3}},{"outcome":"dropped","severity":"error","source_id":"10","record_kind":"HATCH","object_id":null,"reason":"t.drop","message_id":"m","arguments":{"count":5,"n":7,"name":"x"}},{"outcome":"failed","severity":"error","source_id":"1","record_kind":"BAD","object_id":null,"reason":"t.fail","message_id":"m","arguments":{"count":1}},{"outcome":"mapped","severity":"info","source_id":"1F","record_kind":"ENTITY","object_id":null,"reason":"t.mapped","message_id":"m","arguments":{"count":3}},{"outcome":"preserved","severity":"info","source_id":null,"record_kind":null,"object_id":null,"reason":"t.pres","message_id":"m","arguments":{"count":2}}],"truncated":false}"#;
 }

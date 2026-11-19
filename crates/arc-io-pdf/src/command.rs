@@ -331,7 +331,7 @@ fn png(stream: &PlotStream, dpi: Option<f64>) -> Result<(Vec<u8>, LossReport)> {
     }
     let raster = arc_draft::raster::render(stream, &options)?;
     let bytes = raster.png()?;
-    let mut log = LossLog::unbounded();
+    let mut log = LossLog::bounded();
     let drawn = stream.items.len().saturating_sub(raster.skipped);
     log.add(reasons::ITEMS_WRITTEN, "item", None, drawn as u64);
     log.add(reasons::ITEMS_SKIPPED, "item", None, raster.skipped as u64);

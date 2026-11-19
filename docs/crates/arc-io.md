@@ -42,9 +42,12 @@ product could not map).
 The loss report types and the aggregator are defined once, in the `loss` module of `arc-io-common`.
 The format crates re-export them under their own paths (`arc_io_dxf::loss`, `arc_io_mesh::loss`,
 `arc_io_ifc::loss`, `arc_io_pdf::loss`) and keep their reason codes and catalogs there. The aggregator
-keeps one item per reason and record kind, with exact counts. `arc-io-mesh` and `arc-io-ifc` cap the
-distinct items at 1,024 and fold the rest into one overflow item per reason; `arc-io-dxf`, `arc-io-dwg`
-and `arc-io-pdf` keep every record kind, as they did before the types were shared.
+keeps one item per reason and record kind, with exact counts. Every format crate caps the
+distinct items (`MAX_LOSS_ITEMS`, 1,024) plus one overflow item per reason, and folds the rest into
+that overflow item. The overflow item keeps the arguments of the first folded occurrence, a record
+kind is cut to 256 bytes, and a report that folded any occurrence is marked `truncated`; its counts
+stay exact. The limit is the
+same for every reader, so a file cannot grow a report without bound.
 
 ## Dependencies
 

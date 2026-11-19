@@ -13,6 +13,7 @@
 pub mod apply;
 pub mod color;
 pub mod commands;
+mod depth;
 pub mod error;
 pub mod export;
 mod export_entities;

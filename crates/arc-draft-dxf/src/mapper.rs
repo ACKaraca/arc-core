@@ -4,9 +4,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use arc_draft::types::SpaceUnit;
+use arc_draft::validate::DEFAULT_MAX_NESTING;
 use arc_io_dxf::loss::{Argument, LossReport, Reason};
 use arc_io_dxf::{Drawing, Entity, EntityKind, Group, Handle, PreservedRecord, Value};
 
+use crate::depth::too_deep;
 use crate::error::reasons;
 use crate::plan::{
     Appearance, BlockSpec, Container, DimStyleSpec, EntitySpec, FOREIGN_ENTITY, FOREIGN_OBJECT,
@@ -80,6 +82,13 @@ pub(crate) struct Mapper<'a> {
     pub(crate) edges: BTreeMap<String, BTreeSet<String>>,
 }
 
+/// The node of a block definition in the reference graph, numbered from 1 in order of first use;
+/// names are case insensitive, as the definitions are.
+fn block_node(ids: &mut BTreeMap<String, usize>, name: &str) -> usize {
+    let next = ids.len() + 1;
+    *ids.entry(name.to_lowercase()).or_insert(next)
+}
+
 pub(crate) fn hex(handle: Option<Handle>) -> Option<String> {
     handle.map(Handle::to_hex)
 }
@@ -143,7 +152,57 @@ impl<'a> Mapper<'a> {
         self.map_tables();
         self.map_blocks();
         self.map_model_space();
+        self.limit_depth();
         self.skip_rest();
+    }
+
+    /// Drops the block references that would make a chain deeper than the drafting model allows
+    /// (see [`crate::depth`]), notes each dropped reference and takes it back out of the mapped
+    /// count.
+    fn limit_depth(&mut self) {
+        let limit = usize::try_from(DEFAULT_MAX_NESTING).unwrap_or(usize::MAX);
+        let mut ids: BTreeMap<String, usize> = BTreeMap::new();
+        let mut positions = Vec::new();
+        let mut edges = Vec::new();
+        for (at, (container, spec)) in self.entities.iter().enumerate() {
+            let Shape::Insert(insert) = &spec.shape else {
+                continue;
+            };
+            let from = match container {
+                Container::Space => 0,
+                Container::Block(name) => block_node(&mut ids, name),
+            };
+            positions.push(at);
+            edges.push((from, block_node(&mut ids, &insert.block)));
+        }
+        let flags = too_deep(ids.len() + 1, &edges, limit);
+        let mut drop_at = vec![false; self.entities.len()];
+        for (at, flag) in positions.into_iter().zip(flags) {
+            if let Some(slot) = drop_at.get_mut(at) {
+                *slot = flag;
+            }
+        }
+        if !drop_at.contains(&true) {
+            return;
+        }
+        let limit_arg = i64::from(DEFAULT_MAX_NESTING);
+        for (at, (container, spec)) in std::mem::take(&mut self.entities).into_iter().enumerate() {
+            match &spec.shape {
+                Shape::Insert(insert) if drop_at.get(at) == Some(&true) => {
+                    self.rep.note(
+                        reasons::REFERENCE_DEPTH_EXCEEDED,
+                        "INSERT",
+                        hex(spec.source),
+                        &[
+                            ("block", Argument::Text(insert.block.clone())),
+                            ("limit", Argument::Int(limit_arg)),
+                        ],
+                    );
+                    self.rep.unmap(1);
+                }
+                _ => self.entities.push((container, spec)),
+            }
+        }
     }
 
     fn setup_units(&mut self) {

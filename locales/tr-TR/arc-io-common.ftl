@@ -1,7 +1,7 @@
 # arc-io-common tarafından sahip olunan hataların iletileri. Tanımlayıcılar
 # crates/arc-io-common/src/error.rs içinde kayıtlıdır.
 
-io-limit-exceeded = Dosya içe aktarma sınırını aşıyor: { $limit }.
+io-limit-exceeded = Profilin bir sınırı aşıldı: { $limit }.
 io-zip-truncated = Arşiv beklenmedik biçimde sona eriyor.
 io-zip-end-missing = Arşivin geçerli bir sonlandırma kaydı yok.
 io-zip-structure-invalid = Arşivin yapısı tutarsız.

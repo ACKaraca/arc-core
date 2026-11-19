@@ -1,7 +1,6 @@
 # Messages of the errors and loss reasons owned by arc-io-pdf. Identifiers are registered in
 # crates/arc-io-pdf/src/error.rs.
 
-io-pdf-limit-exceeded = The output exceeds the limit { $limit }.
 io-pdf-option-invalid = The option { $option } is out of range or malformed.
 io-pdf-stream-invalid = The plot stream cannot be written: { $what } is out of range.
 io-pdf-loss-items-written = { $count } plot items were written without change.

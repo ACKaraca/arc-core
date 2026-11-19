@@ -1,7 +1,6 @@
 # arc-io-ifc tarafından sahip olunan hataların ve kayıp raporu nedenlerinin iletileri.
 # Tanımlayıcılar crates/arc-io-ifc/src/error.rs içinde kayıtlıdır.
 
-io-limit-exceeded = Dosya içe aktarma sınırını aşıyor: { $limit }.
 io-ifc-truncated = IFC verisi dosya tamamlanmadan sona eriyor.
 io-ifc-syntax = IFC verisi bu konumda geçerli bir fiziksel dosya sözdizimi değil.
 io-ifc-structure-invalid = IFC dosyasının üstbilgi, veri veya şema bölümü eksik ya da sırası hatalı.

@@ -1,7 +1,6 @@
 # Messages of the errors and loss reasons owned by arc-io-mesh. Identifiers are registered in
 # crates/arc-io-mesh/src/error.rs.
 
-io-limit-exceeded = The file exceeds the import limit { $limit }.
 io-mesh-truncated = The mesh data ends unexpectedly.
 io-mesh-value-invalid = The mesh data contains a value that is not a finite number of the expected kind.
 io-mesh-index-out-of-range = The mesh data refers to a vertex that does not exist.

@@ -23,6 +23,7 @@ draft-dxf-loss-hatch-approximated = { $count } tarama daha basit bir dolguyla i�
 draft-dxf-loss-array-expanded = { $count } blok başvurusu dizisi tek tek başvurulara açıldı.
 draft-dxf-loss-attribute-dropped = { $count } { $kind } kaydı, blokları etiketi tanımlamadığı için içe aktarılmadı.
 draft-dxf-loss-reference-unresolved = { $count } blok başvurusu, blokları bulunmadığı veya kendini içereceği için içe aktarılmadı.
+draft-dxf-loss-reference-depth-exceeded = Blok başvurularının oluşturduğu zincir { $limit } düzeyden derin olacağı için { $count } blok başvurusu içe aktarılmadı.
 draft-dxf-loss-definition-created = Dosyada kullanılan { $count } { $kind } tanımı varsayılan değerlerle oluşturuldu.
 draft-dxf-loss-linetype-invalid = { $count } çizgi tipi, deseninde pozitif uzunluk olmadığı için içe aktarılmadı.
 draft-dxf-loss-name-adjusted = { $count } { $kind } adı düzeltildi: { $what }.

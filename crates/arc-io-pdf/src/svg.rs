@@ -194,7 +194,7 @@ pub fn write_svg(stream: &PlotStream, options: &mut WriteOptions<'_>) -> Result<
     let cx = options.cx();
     let title = options.title.clone();
     let mut gate = Gate::new(options, total);
-    let mut loss = LossLog::unbounded();
+    let mut loss = LossLog::bounded();
     let mut svg = Svg {
         out: Vec::new(),
         bad: false,

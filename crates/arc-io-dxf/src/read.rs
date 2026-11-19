@@ -96,7 +96,7 @@ pub fn read(data: &[u8], options: &mut ReadOptions<'_>) -> Result<ReadOutput> {
         records: 0,
         last: Position::Line(0),
         version,
-        loss: LossLog::unbounded(),
+        loss: LossLog::bounded(),
         cancel: options.cancel.clone(),
         progress: options.progress.as_deref_mut(),
         total: size,

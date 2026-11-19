@@ -88,7 +88,7 @@ pub fn write(drawing: &Drawing, options: &mut WriteOptions<'_>) -> Result<WriteO
         next: max.map_or(1, |m| m.wrapping_add(1)),
         assigned: 0,
         raw_written: 0,
-        loss: LossLog::unbounded(),
+        loss: LossLog::bounded(),
         cancel: options.cancel.clone(),
         progress: options.progress.as_deref_mut(),
         done: 0,

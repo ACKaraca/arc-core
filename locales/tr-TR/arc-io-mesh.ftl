@@ -1,7 +1,6 @@
 # arc-io-mesh tarafından sahip olunan hataların ve kayıp raporu nedenlerinin iletileri.
 # Tanımlayıcılar crates/arc-io-mesh/src/error.rs içinde kayıtlıdır.
 
-io-limit-exceeded = Dosya içe aktarma sınırını aşıyor: { $limit }.
 io-mesh-truncated = Ağ verisi beklenmedik biçimde sona eriyor.
 io-mesh-value-invalid = Ağ verisi, beklenen türde sonlu bir sayı olmayan bir değer içeriyor.
 io-mesh-index-out-of-range = Ağ verisi, var olmayan bir köşeye başvuruyor.

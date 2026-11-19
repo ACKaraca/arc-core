@@ -99,7 +99,7 @@ Every import and export produces a loss report, also when nothing was lost.
 |---|---|
 | Header | Format, version, direction, file name and hash, application and version, time, limits profile |
 | Summary | Counts by outcome: `mapped`, `approximated`, `preserved`, `dropped`, `failed` |
-| Items | Outcome, severity, source identifier and record kind, Arc object id (if any), reason code, message identifier and arguments |
+| Items | Outcome, severity, source identifier and record kind, Arc object id (if any), reason code, message identifier and arguments. At most 1,024 distinct items plus one overflow item per reason; further record kinds are folded into that overflow item, and the report is marked `truncated` |
 
 Reports are JSON (schema in `schemas/loss-report.schema.json`) with a rendered human-readable view
 in the application and CLI. Reason codes are stable. The CLI writes the report beside the output or

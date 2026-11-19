@@ -230,6 +230,7 @@ fn export(ctx: &mut Context<'_>, p: ExportParams) -> Result<ExportResult> {
         .map_err(|e| Error::new(arc_command::error::codes::PATH_IO).with_source(e))?;
     let mut report = exported.report;
     report.items.extend(output.report.items.iter().cloned());
+    report.truncated |= output.report.truncated;
     report.summary.mapped += output.report.summary.mapped;
     report.summary.approximated += output.report.summary.approximated;
     report.summary.preserved += output.report.summary.preserved;

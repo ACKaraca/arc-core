@@ -1,8 +1,8 @@
 //! Loss reports (CORE-IO-004) of the SVG and PDF writers.
 //!
 //! The types and the aggregator are shared through `arc_io_common::loss`; this module re-exports
-//! them under the crate's own path. The reason codes stay in [`crate::error`]. The PDF log is
-//! unbounded, so every distinct plot item kind of a stream keeps its own item.
+//! them under the crate's own path. The reason codes stay in [`crate::error`]. The PDF log keeps
+//! at most `MAX_LOSS_ITEMS` distinct items and folds the rest into the overflow item of each reason.
 
 pub use arc_io_common::loss::{
     Argument, Direction, LossHeader, LossItem, LossReport, LossSummary, Outcome, Reason, Severity,
@@ -42,7 +42,7 @@ mod tests {
     /// so the serialized form is pinned to the one the crate produced then.
     #[test]
     fn serialized_report_keeps_the_pre_move_shape() {
-        let mut log = LossLog::unbounded();
+        let mut log = LossLog::bounded();
         log.add(MAPPED, "stroke", Some(Source::Text("42")), 3);
         log.add(DROPPED, "glyphs", None, 1);
         log.add_with(
@@ -66,8 +66,8 @@ mod tests {
     }
 
     #[test]
-    fn unbounded_log_keeps_every_record_kind() {
-        let mut log = LossLog::unbounded();
+    fn log_bounds_distinct_record_kinds_and_stays_exact() {
+        let mut log = LossLog::bounded();
         for i in 0..1100u64 {
             log.add(
                 DROPPED,
@@ -77,8 +77,13 @@ mod tests {
             );
         }
         let report = log.finish(LossHeader::new("pdf", "1.7", Direction::Export, None));
-        assert_eq!((report.items.len(), report.summary.dropped), (1100, 1100));
+        let bound = arc_io_common::loss::MAX_LOSS_ITEMS;
+        assert!(report.truncated);
+        assert_eq!(
+            (report.items.len(), report.summary.dropped),
+            (bound + 1, 1100)
+        );
     }
 
-    const PRE_MOVE_JSON: &str = r#"{"header":{"format":"pdf","version":"1.7","direction":"export","file_name":null,"file_hash":null,"application":null,"application_version":null,"time":null,"limits":null},"summary":{"mapped":3,"approximated":0,"preserved":2,"dropped":3,"failed":1},"items":[{"outcome":"dropped","severity":"error","source_id":"obj-7","record_kind":"glyphs","object_id":null,"reason":"t.drop","message_id":"m","arguments":{"count":3}},{"outcome":"failed","severity":"error","source_id":"z","record_kind":"bad","object_id":null,"reason":"t.fail","message_id":"m","arguments":{"count":1}},{"outcome":"mapped","severity":"info","source_id":"42","record_kind":"stroke","object_id":null,"reason":"t.mapped","message_id":"m","arguments":{"count":3}},{"outcome":"preserved","severity":"info","source_id":null,"record_kind":null,"object_id":null,"reason":"t.pres","message_id":"m","arguments":{"count":2}}]}"#;
+    const PRE_MOVE_JSON: &str = r#"{"header":{"format":"pdf","version":"1.7","direction":"export","file_name":null,"file_hash":null,"application":null,"application_version":null,"time":null,"limits":null},"summary":{"mapped":3,"approximated":0,"preserved":2,"dropped":3,"failed":1},"items":[{"outcome":"dropped","severity":"error","source_id":"obj-7","record_kind":"glyphs","object_id":null,"reason":"t.drop","message_id":"m","arguments":{"count":3}},{"outcome":"failed","severity":"error","source_id":"z","record_kind":"bad","object_id":null,"reason":"t.fail","message_id":"m","arguments":{"count":1}},{"outcome":"mapped","severity":"info","source_id":"42","record_kind":"stroke","object_id":null,"reason":"t.mapped","message_id":"m","arguments":{"count":3}},{"outcome":"preserved","severity":"info","source_id":null,"record_kind":null,"object_id":null,"reason":"t.pres","message_id":"m","arguments":{"count":2}}],"truncated":false}"#;
 }

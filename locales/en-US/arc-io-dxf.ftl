@@ -1,7 +1,6 @@
 # Messages of the errors and loss reasons owned by arc-io-dxf. Identifiers are registered in
 # crates/arc-io-dxf/src/error.rs.
 
-io-limit-exceeded = The file exceeds the import limit { $limit }.
 io-unsupported-version = The format version { $version } is not supported.
 io-stream-failed = The data could not be read from its source.
 io-dxf-truncated = The DXF data ends unexpectedly.

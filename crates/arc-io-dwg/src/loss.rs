@@ -2,7 +2,8 @@
 //!
 //! The types and the aggregator are shared through `arc_io_common::loss`. The DWG reader reports
 //! with the DXF crate's types, which re-export the shared ones, so its items name the same types.
-//! The log is unbounded, as the DXF log is, and merges the property names of partial records.
+//! The log is bounded like the DXF log (`arc_io_common::loss::MAX_LOSS_ITEMS` distinct items), and
+//! merges the property names of partial records.
 
 pub(crate) use arc_io_common::loss::LossLog;
 
@@ -50,7 +51,7 @@ mod tests {
     /// so the serialized form is pinned to the one the crate produced then.
     #[test]
     fn serialized_report_keeps_the_pre_move_shape() {
-        let mut log = LossLog::unbounded();
+        let mut log = LossLog::bounded();
         log.add_mapped(3);
         log.add_with(
             DROPPED,
@@ -78,11 +79,11 @@ mod tests {
         );
     }
 
-    const PRE_MOVE_JSON: &str = r#"{"header":{"format":"dwg","version":"R2018","direction":"import","file_name":null,"file_hash":null,"application":null,"application_version":null,"time":null,"limits":null},"summary":{"mapped":3,"approximated":3,"preserved":0,"dropped":7,"failed":0},"items":[{"outcome":"approximated","severity":"warning","source_id":null,"record_kind":null,"object_id":null,"reason":"t.approx","message_id":"m","arguments":{"count":1}},{"outcome":"dropped","severity":"error","source_id":null,"record_kind":"ENTITY","object_id":null,"reason":"t.drop","message_id":"m","arguments":{"count":7,"name":"x"}},{"outcome":"approximated","severity":"warning","source_id":null,"record_kind":"LWPOLYLINE","object_id":null,"reason":"t.partial","message_id":"m","arguments":{"count":2,"properties":"color, transparency"}}]}"#;
+    const PRE_MOVE_JSON: &str = r#"{"header":{"format":"dwg","version":"R2018","direction":"import","file_name":null,"file_hash":null,"application":null,"application_version":null,"time":null,"limits":null},"summary":{"mapped":3,"approximated":3,"preserved":0,"dropped":7,"failed":0},"items":[{"outcome":"approximated","severity":"warning","source_id":null,"record_kind":null,"object_id":null,"reason":"t.approx","message_id":"m","arguments":{"count":1}},{"outcome":"dropped","severity":"error","source_id":null,"record_kind":"ENTITY","object_id":null,"reason":"t.drop","message_id":"m","arguments":{"count":7,"name":"x"}},{"outcome":"approximated","severity":"warning","source_id":null,"record_kind":"LWPOLYLINE","object_id":null,"reason":"t.partial","message_id":"m","arguments":{"count":2,"properties":"color, transparency"}}],"truncated":false}"#;
 
     #[test]
     fn partial_names_of_a_kind_are_merged_and_bounded() {
-        let mut log = LossLog::unbounded();
+        let mut log = LossLog::bounded();
         log.add_partial(reasons::ENTITY_PARTIAL, "LWPOLYLINE", &["color"]);
         log.add_partial(
             reasons::ENTITY_PARTIAL,
@@ -110,7 +111,7 @@ mod tests {
             "n24", "n25", "n26", "n27", "n28", "n29", "n30", "n31", "n32", "n33", "n34", "n35",
             "n36", "n37", "n38", "n39",
         ];
-        let mut log = LossLog::unbounded();
+        let mut log = LossLog::bounded();
         log.add_partial(reasons::ENTITY_PARTIAL, "HATCH", &NAMES);
         let report = log.finish(header());
         let Some(Argument::Text(text)) = report

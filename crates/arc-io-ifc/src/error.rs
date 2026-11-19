@@ -25,12 +25,9 @@ fn clamp(value: u64) -> i64 {
 pub mod codes {
     use arc_base::{Category, ErrorCode};
 
-    /// A limit of the caller's limits profile was exceeded; the argument `limit` names it.
-    pub const LIMIT_EXCEEDED: ErrorCode = ErrorCode {
-        code: "io.limit_exceeded",
-        category: Category::LimitExceeded,
-        message_id: "io-limit-exceeded",
-    };
+    /// A limit of the caller's limits profile was exceeded; the argument `limit` names it. The
+    /// code and its message are the ones of `arc-io-common`, shared by every reader and writer.
+    pub use arc_io_common::error::codes::LIMIT_EXCEEDED;
     /// The input ends inside a comment, a string, a parameter list or a record.
     pub const IFC_TRUNCATED: ErrorCode = ErrorCode {
         code: "io.ifc.truncated",
@@ -82,7 +79,6 @@ pub mod codes {
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
-        LIMIT_EXCEEDED,
         IFC_TRUNCATED,
         IFC_SYNTAX,
         IFC_STRUCTURE_INVALID,

@@ -4,12 +4,13 @@
   "title": "Arc interchange loss report",
   "description": "The report every arc-io-* import and export returns, also when nothing was lost. Fields are specified in docs/architecture/interchange.md, section Loss reports (CORE-IO-004).",
   "type": "object",
-  "required": ["header", "summary", "items"],
+  "required": ["header", "summary", "items", "truncated"],
   "additionalProperties": false,
   "properties": {
     "header": { "$ref": "#/$defs/header" },
     "summary": { "$ref": "#/$defs/summary" },
-    "items": { "type": "array", "items": { "$ref": "#/$defs/item" } }
+    "items": { "type": "array", "items": { "$ref": "#/$defs/item" } },
+    "truncated": { "type": "boolean", "description": "True when some occurrences were folded into an overflow item (record_kind \"(overflow)\"), in a format crate's log or in the aggregation of a mapping report; counts stay exact. The overflow item keeps the arguments of the first occurrence folded into it." }
   },
   "$defs": {
     "count": { "type": "integer", "minimum": 0 },

@@ -18,6 +18,23 @@ pub const MAX_LOSS_ITEMS: usize = 1024;
 /// counts of the two then merge, which is harmless.
 pub const OVERFLOW_KIND: &str = "(overflow)";
 
+/// The most bytes of a record kind kept as a loss key. A kind comes from the file being read, so
+/// a longer one is cut, on a character boundary, before it becomes a key or an item.
+pub const MAX_KIND_BYTES: usize = 256;
+
+/// `kind` cut to at most [`MAX_KIND_BYTES`] bytes, on a character boundary.
+#[must_use]
+pub fn clip_kind(kind: &str) -> &str {
+    if kind.len() <= MAX_KIND_BYTES {
+        return kind;
+    }
+    let mut end = MAX_KIND_BYTES;
+    while end > 0 && !kind.is_char_boundary(end) {
+        end -= 1;
+    }
+    kind.get(..end).unwrap_or_default()
+}
+
 /// The most property names one merged partial item lists; the names beyond are summarized as
 /// "and more".
 pub const MAX_MERGED_NAMES: usize = 32;
@@ -181,10 +198,13 @@ impl LossHeader {
 pub struct LossReport {
     /// What was transferred.
     pub header: LossHeader,
-    /// Counts by outcome.
+    /// Counts by outcome. Exact, also when `truncated` is set.
     pub summary: LossSummary,
     /// The items, ordered by reason code and record kind.
     pub items: Vec<LossItem>,
+    /// Whether some occurrences were folded into an overflow item, so the items do not name
+    /// every record kind. The counts in `summary` and in the overflow items stay exact.
+    pub truncated: bool,
 }
 
 impl LossReport {
@@ -233,42 +253,22 @@ struct Entry {
 /// Collects items while reading or writing.
 ///
 /// Items are keyed by reason code and then by record kind, so a lookup of an existing item borrows
-/// the kind and allocates nothing. The default log is bounded by [`MAX_LOSS_ITEMS`]; [`Self::unbounded`]
-/// keeps every distinct record kind.
-#[derive(Debug)]
+/// the kind and allocates nothing. The log keeps at most [`MAX_LOSS_ITEMS`] distinct items; a
+/// record kind beyond that is counted in the overflow item of its reason, and the report is marked
+/// truncated. Every format crate uses this log, so no file can grow a report without bound.
+#[derive(Debug, Default)]
 pub struct LossLog {
     items: BTreeMap<&'static str, BTreeMap<String, Entry>>,
     distinct: usize,
-    max_items: usize,
+    folded: bool,
     mapped: u64,
 }
 
-impl Default for LossLog {
-    fn default() -> Self {
-        Self::bounded()
-    }
-}
-
 impl LossLog {
-    /// A log that keeps at most [`MAX_LOSS_ITEMS`] distinct items.
+    /// An empty log.
     #[must_use]
     pub fn bounded() -> Self {
-        Self::with_limit(MAX_LOSS_ITEMS)
-    }
-
-    /// A log that keeps every distinct record kind.
-    #[must_use]
-    pub fn unbounded() -> Self {
-        Self::with_limit(usize::MAX)
-    }
-
-    fn with_limit(max_items: usize) -> Self {
-        Self {
-            items: BTreeMap::new(),
-            distinct: 0,
-            max_items,
-            mapped: 0,
-        }
+        Self::default()
     }
 
     /// Counts `count` records carried into the target without a loss item of their own.
@@ -339,15 +339,18 @@ impl LossLog {
         kind: &str,
         arguments: Vec<(String, Argument)>,
     ) -> Option<&mut Entry> {
+        let kind = clip_kind(kind);
         let known = self
             .items
             .get(reason.code)
             .is_some_and(|by_kind| by_kind.contains_key(kind));
-        let within = known || self.distinct < self.max_items;
+        let within = known || self.distinct < MAX_LOSS_ITEMS;
         let (key, arguments) = if within {
             (kind, arguments)
         } else {
-            (OVERFLOW_KIND, Vec::new())
+            // The overflow item keeps the arguments of the first occurrence folded into it.
+            self.folded = true;
+            (OVERFLOW_KIND, arguments)
         };
         let by_kind = self.items.entry(reason.code).or_default();
         if !by_kind.contains_key(key) {
@@ -423,6 +426,7 @@ impl LossLog {
             header,
             summary,
             items,
+            truncated: self.folded,
         }
     }
 }
@@ -431,7 +435,7 @@ impl LossLog {
 mod tests {
     use super::*;
     /// The JSON of the sample report, captured from the OBJ copy before the move.
-    const MESH_SAMPLE: &str = r#"{"header":{"format":"obj","version":"","direction":"import","file_name":"a.obj","file_hash":null,"application":null,"application_version":null,"time":null,"limits":{"input_bytes":4294967296,"decompressed_bytes":17179869184,"decompression_ratio":200,"record_count":50000000,"nesting_depth":64,"string_bytes":16777216,"array_length":50000000,"memory_bytes":17179869184,"wall_clock_seconds":null}},"summary":{"mapped":5,"approximated":3,"preserved":2,"dropped":6,"failed":1},"items":[{"outcome":"approximated","severity":"warning","source_id":"9","record_kind":"normal","object_id":null,"reason":"t.approx","message_id":"m","arguments":{"count":3}},{"outcome":"dropped","severity":"error","source_id":null,"record_kind":"color","object_id":null,"reason":"t.drop","message_id":"m","arguments":{"attribute":"color","count":5}},{"outcome":"dropped","severity":"error","source_id":"4","record_kind":"usemtl","object_id":null,"reason":"t.drop","message_id":"m","arguments":{"count":1,"n":7,"name":"x"}},{"outcome":"failed","severity":"error","source_id":"1","record_kind":"bad","object_id":null,"reason":"t.fail","message_id":"m","arguments":{"count":1}},{"outcome":"mapped","severity":"info","source_id":"12","record_kind":"element","object_id":null,"reason":"t.mapped","message_id":"m","arguments":{"count":3}},{"outcome":"preserved","severity":"info","source_id":null,"record_kind":null,"object_id":null,"reason":"t.pres","message_id":"m","arguments":{"count":2}}]}"#;
+    const MESH_SAMPLE: &str = r#"{"header":{"format":"obj","version":"","direction":"import","file_name":"a.obj","file_hash":null,"application":null,"application_version":null,"time":null,"limits":{"input_bytes":4294967296,"decompressed_bytes":17179869184,"decompression_ratio":200,"record_count":50000000,"nesting_depth":64,"string_bytes":16777216,"array_length":50000000,"memory_bytes":17179869184,"wall_clock_seconds":null}},"summary":{"mapped":5,"approximated":3,"preserved":2,"dropped":6,"failed":1},"items":[{"outcome":"approximated","severity":"warning","source_id":"9","record_kind":"normal","object_id":null,"reason":"t.approx","message_id":"m","arguments":{"count":3}},{"outcome":"dropped","severity":"error","source_id":null,"record_kind":"color","object_id":null,"reason":"t.drop","message_id":"m","arguments":{"attribute":"color","count":5}},{"outcome":"dropped","severity":"error","source_id":"4","record_kind":"usemtl","object_id":null,"reason":"t.drop","message_id":"m","arguments":{"count":1,"n":7,"name":"x"}},{"outcome":"failed","severity":"error","source_id":"1","record_kind":"bad","object_id":null,"reason":"t.fail","message_id":"m","arguments":{"count":1}},{"outcome":"mapped","severity":"info","source_id":"12","record_kind":"element","object_id":null,"reason":"t.mapped","message_id":"m","arguments":{"count":3}},{"outcome":"preserved","severity":"info","source_id":null,"record_kind":null,"object_id":null,"reason":"t.pres","message_id":"m","arguments":{"count":2}}],"truncated":false}"#;
 
     const MAPPED: Reason = Reason {
         code: "t.mapped",
@@ -543,11 +547,75 @@ mod tests {
     }
 
     #[test]
-    fn unbounded_log_keeps_every_kind() {
-        let mut log = LossLog::unbounded();
-        for i in 0..1100u64 {
+    fn report_is_not_truncated_below_the_bound() {
+        let mut log = LossLog::bounded();
+        for i in 0..MAX_LOSS_ITEMS as u64 {
             log.add(DROPPED, &format!("K{i:04}"), None, 1);
         }
-        assert_eq!(log.finish(header("a.obj")).items.len(), 1100);
+        let report = log.finish(header("a.obj"));
+        assert!(!report.truncated);
+        assert_eq!(report.items.len(), MAX_LOSS_ITEMS);
+    }
+
+    #[test]
+    fn truncated_report_keeps_exact_counts_for_known_kinds() {
+        let mut log = LossLog::bounded();
+        for i in 0..MAX_LOSS_ITEMS as u64 {
+            log.add(DROPPED, &format!("K{i:04}"), None, 1);
+        }
+        // A kind already in the log keeps its own item even after the bound is reached.
+        log.add(DROPPED, "K0000", None, 2);
+        log.add(DROPPED, "late", None, 5);
+        let report = log.finish(header("a.obj"));
+        assert!(report.truncated);
+        assert_eq!(report.summary.dropped, MAX_LOSS_ITEMS as u64 + 7);
+        assert_eq!(report.items.len(), MAX_LOSS_ITEMS + 1);
+    }
+
+    #[test]
+    fn overflow_item_keeps_the_arguments_of_the_first_folded_occurrence() {
+        let mut log = LossLog::bounded();
+        for i in 0..MAX_LOSS_ITEMS as u64 {
+            log.add(DROPPED, &format!("K{i:04}"), None, 1);
+        }
+        log.add_with(
+            DROPPED,
+            "late",
+            None,
+            1,
+            vec![("limit".to_owned(), Argument::Text("max_items".to_owned()))],
+        );
+        log.add_with(
+            DROPPED,
+            "later",
+            None,
+            1,
+            vec![("limit".to_owned(), Argument::Text("other".to_owned()))],
+        );
+        let report = log.finish(header("a.obj"));
+        let overflow = report
+            .items
+            .iter()
+            .find(|i| i.record_kind.as_deref() == Some(OVERFLOW_KIND));
+        assert_eq!(
+            overflow.and_then(|i| i.arguments.get("limit")),
+            Some(&Argument::Text("max_items".to_owned()))
+        );
+        assert_eq!(
+            overflow.and_then(|i| i.arguments.get("count")),
+            Some(&Argument::Int(2))
+        );
+    }
+
+    #[test]
+    fn a_long_record_kind_is_cut_on_a_character_boundary() {
+        let long = "a".repeat(MAX_KIND_BYTES - 1) + "\u{e9}tail";
+        let clipped = clip_kind(&long);
+        assert_eq!(clipped.len(), MAX_KIND_BYTES - 1);
+        assert_eq!(clip_kind("short"), "short");
+        let mut log = LossLog::bounded();
+        log.add(DROPPED, &long, None, 1);
+        let report = log.finish(header("a.obj"));
+        assert_eq!(report.items[0].record_kind.as_deref(), Some(clipped));
     }
 }

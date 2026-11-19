@@ -126,6 +126,10 @@ reader's report, use the shared types; its log stays unbounded, so its output do
 to `arc-io-common` lets the DWG reader merge the property names of partial records with the shared log.
 `arc-io-ifc` to `arc-io-common` was recorded above.
 
+Amendment (2026-11-19): the DXF, PDF and DWG logs described above as unbounded are bounded like the
+mesh and IFC logs, at 1,024 distinct items plus one overflow item per reason, and their reports are
+marked `truncated`; the unbounded log was removed from `arc-io-common`.
+
 ## Amendment: DWG reader over a wrapped library
 
 `arc-io-dwg` is classed `layer(4)` and has one same-layer edge, `arc-io-dwg` to `arc-io-dxf`, in

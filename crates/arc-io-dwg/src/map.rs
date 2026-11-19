@@ -47,7 +47,7 @@ impl<'a, 'q> Mapper<'a, 'q> {
             progress,
             total,
             records: 0,
-            loss: LossLog::unbounded(),
+            loss: LossLog::bounded(),
         }
     }
 

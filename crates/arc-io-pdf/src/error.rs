@@ -24,12 +24,9 @@ pub(crate) fn stream(what: &'static str) -> Error {
 pub mod codes {
     use arc_base::{Category, ErrorCode};
 
-    /// A limit of the caller's limits profile was exceeded; the argument `limit` names it.
-    pub const LIMIT_EXCEEDED: ErrorCode = ErrorCode {
-        code: "io.limit_exceeded",
-        category: Category::LimitExceeded,
-        message_id: "io-pdf-limit-exceeded",
-    };
+    /// A limit of the caller's limits profile was exceeded; the argument `limit` names it. The
+    /// code and its message are the ones of `arc-io-common`, shared by every reader and writer.
+    pub use arc_io_common::error::codes::LIMIT_EXCEEDED;
     /// An option is out of range or malformed; the argument `option` names it.
     pub const OPTION_INVALID: ErrorCode = ErrorCode {
         code: "io.pdf.option_invalid",
@@ -60,7 +57,6 @@ pub mod codes {
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
-        LIMIT_EXCEEDED,
         OPTION_INVALID,
         STREAM_INVALID,
         RASTER_UNAVAILABLE,

@@ -30,12 +30,9 @@ fn clamp(value: u64) -> i64 {
 pub mod codes {
     use arc_base::{Category, ErrorCode};
 
-    /// A limit of the caller's limits profile was exceeded; the argument `limit` names it.
-    pub const LIMIT_EXCEEDED: ErrorCode = ErrorCode {
-        code: "io.limit_exceeded",
-        category: Category::LimitExceeded,
-        message_id: "io-limit-exceeded",
-    };
+    /// A limit of the caller's limits profile was exceeded; the argument `limit` names it. The
+    /// code and its message are the ones of `arc-io-common`, shared by every reader and writer.
+    pub use arc_io_common::error::codes::LIMIT_EXCEEDED;
     /// The input ends inside a record, a line, a list or a declared element.
     pub const MESH_TRUNCATED: ErrorCode = ErrorCode {
         code: "io.mesh.truncated",
@@ -112,7 +109,6 @@ pub mod codes {
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
-        LIMIT_EXCEEDED,
         MESH_TRUNCATED,
         MESH_VALUE_INVALID,
         MESH_INDEX_OUT_OF_RANGE,

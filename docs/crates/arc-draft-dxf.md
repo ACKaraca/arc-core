@@ -107,7 +107,7 @@ the unit of the space as `$INSUNITS` and the unit of each block in its block rec
 | STYLE | `core.draft.text_style` | Font file name without directory and extension, height, width factor, oblique angle (limited to 85 degrees), backwards and upside-down flags, vertical flag; shape files are skipped |
 | DIMSTYLE | `core.draft.dim_style` | Name and the variables 40, 41, 42, 44, 140, 144, 147 (to `overall_scale`, `arrow_size`, `extension_offset`, `extension_beyond`, `text_height`, `measurement_scale`, `text_gap`) and 271 (`precision`); other variables stay in the neutral model |
 | BLOCK with its entities | `core.draft.block` and the entities it owns | Base point (x, y), unit, `ATTDEF` as attribute definitions (tag, prompt, default, constant, invisible, preset, position); the `*Model_Space` block contributes its entities to the model space, `*Paper_Space` blocks, external references and the anonymous blocks of dimensions that nothing inserts are not imported |
-| INSERT | `core.draft.block_ref` | Position, per-axis scale (a zero or non-finite scale becomes 1), rotation, attribute values for tags the block defines; an array (columns and rows) is expanded into single references; a reference to a missing block, or one that would make a block contain itself, is not imported |
+| INSERT | `core.draft.block_ref` | Position, per-axis scale (a zero or non-finite scale becomes 1), rotation, attribute values for tags the block defines; an array (columns and rows) is expanded into single references; a reference to a missing block, or one that would make a block contain itself, is not imported; a reference whose level exceeds the drafting model's nesting limit is not imported (see [Nesting limit](#nesting-limit)) |
 | VPORT, VIEW, UCS, APPID, classes, other tables and sections | none | Listed in the report as skipped tables; the OBJECTS section (dictionaries, layouts, groups) is counted in one item |
 
 ### Entities
@@ -191,8 +191,29 @@ APPID, DIMSTYLE (each with its standard entry) and `BLOCK_RECORD`, the blocks `*
 
 ### Loss reasons
 
-Items of the mapping are listed one per occurrence (up to 4096 items, then aggregated per reason
-and kind); items of the reader and writer of `arc-io-dxf` are merged into the same report.
+Items of the mapping are listed one per occurrence, up to 4096 items. Further occurrences are
+aggregated per reason and record kind, up to 4096 such items; beyond that, kinds share one overflow
+item per reason. The overflow item keeps the arguments of the first occurrence folded into it, and
+a record kind named by the file is cut to 256 bytes before it is used. Items of the reader and
+writer of `arc-io-dxf` are merged into the same report. A report that folded occurrences is marked
+`truncated`; its counts stay exact. The bound on the mapping report is therefore 4096 items, 4096
+aggregated items and one overflow item per reason.
+
+### Nesting limit
+
+The drafting model rejects a transaction in which a chain of block references is deeper than
+`arc_draft::validate::DEFAULT_MAX_NESTING` (64). The level of a reference is the number of
+references on the longest chain ending at it, the reference included, where a chain may start at
+any root: the model space, or a block that nothing references. The depths are taken over the kept
+references only. Before any
+object is applied, the mapping computes the level of every block reference over the reference graph
+(Kahn's order, no recursion; a reference on a cycle is refused earlier, see the INSERT row). Each
+reference whose level exceeds the limit is dropped and reported once (`draft.dxf.reference_depth_exceeded`,
+argument `limit`); its block definition is still created. Every kept reference has a level no
+greater than the limit, so the import completes. Arrays are dropped cell by cell, and the count of
+the item counts the references that were not created. The DWG reader returns the same neutral
+drawing, so a DWG file mapped through this plan follows the same rule; no command of this crate
+reads DWG files.
 
 | Reason | Outcome |
 |---|---|
@@ -215,6 +236,7 @@ and kind); items of the reader and writer of `arc-io-dxf` are merged into the sa
 | `draft.dxf.array_expanded` | `approximated` |
 | `draft.dxf.attribute_dropped` | `dropped` |
 | `draft.dxf.reference_unresolved` | `failed` |
+| `draft.dxf.reference_depth_exceeded` | `dropped` |
 | `draft.dxf.definition_created` | `mapped` |
 | `draft.dxf.linetype_invalid` | `failed` |
 | `draft.dxf.name_adjusted` | `approximated` |
@@ -238,4 +260,6 @@ Unit tests for the color table, units and message registry; integration tests th
 registry and invoker (one transaction and undo, unit conversion, loss reports, limits,
 cancellation, roots and permissions, every surface, name reuse, block cycles and arrays); a
 property test that exports random documents of the mapped kinds, imports the result into an empty
-space and compares the content, and its reverse for hand-built neutral drawings.
+space and compares the content, and its reverse for hand-built neutral drawings. The nesting limit
+is tested on chains of 64 and 65 references (the deepest one dropped, exactly one item), on a wide
+graph with shared sub-blocks, and through the import command, which must complete.

@@ -1,7 +1,7 @@
 # Messages of the errors owned by arc-io-common. Identifiers are registered in
 # crates/arc-io-common/src/error.rs.
 
-io-limit-exceeded = The file exceeds the import limit { $limit }.
+io-limit-exceeded = A limit of the profile was exceeded: { $limit }.
 io-zip-truncated = The archive ends unexpectedly.
 io-zip-end-missing = The archive has no valid end record.
 io-zip-structure-invalid = The archive structure is inconsistent.
