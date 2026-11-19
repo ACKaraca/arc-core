@@ -35,6 +35,7 @@ app-instance-busy = The running application did not answer in time.
 app-instance-invalid-path = A file name cannot be sent to the running application because it is not valid text.
 app-instance-message-too-large = Too many files were given to send to the running application.
 app-setting-automation-enabled = Allows other programs to control the application through the local automation socket.
+app-setting-automation-grants = The automation clients and their grants, kept in the user settings and not edited here.
 app-automation-failed = The automation socket could not be started.
 app-automation-client-invalid = The client name is empty, too long or contains control characters.
 app-recent-too-many-pinned = No more files can be pinned.

@@ -20,6 +20,7 @@ mod mcp;
 mod query;
 mod run;
 mod socket;
+mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
@@ -42,6 +43,10 @@ pub use query::MAX_PAGE;
 pub use socket::{
     ConnectionObserver, HANDSHAKE_TIMEOUT, LocalSocket, MAX_CLIENT_NAME_BYTES, MAX_CLIENTS,
     MAX_CONNECTIONS, MAX_HANDSHAKE_BYTES, MAX_HANDSHAKING, NoObserver, SocketConfig, SocketStop,
+};
+pub use view::{
+    DEFAULT_DISPLAY_MODE, DEFAULT_SIZE, DEFAULT_VIEW, MAX_INLINE_BYTES, MAX_PIXELS, MAX_SECTIONS,
+    MAX_SIDE, ViewRenderer, ViewRequest, base64,
 };
 
 use crate::context::{Clock, FixedClock, Probe, ProgressSink, Session};
@@ -94,6 +99,7 @@ pub const METHODS: &[&str] = &[
     "query.references",
     "selection.get",
     "selection.set",
+    "view.render",
 ];
 
 /// The protocol methods of later capabilities, answered with code -32001.
@@ -113,7 +119,6 @@ pub const LATER_METHODS: &[&str] = &[
     "view.list",
     "view.get",
     "view.setCamera",
-    "view.render",
 ];
 
 /// How much a log record matters.
@@ -229,6 +234,7 @@ pub struct Server<'a> {
     config: ServerConfig,
     log: &'a dyn Log,
     recorder: Option<&'a Recorder>,
+    renderer: Option<&'a dyn ViewRenderer>,
 }
 
 impl std::fmt::Debug for Server<'_> {
@@ -486,7 +492,16 @@ impl<'a> Server<'a> {
             config,
             log,
             recorder: None,
+            renderer: None,
         }
+    }
+
+    /// Attaches the renderer of `view.render` and the MCP `render_view` tool. Without one both
+    /// answer `cmd.render.unavailable`.
+    #[must_use]
+    pub fn with_view_renderer(mut self, renderer: &'a dyn ViewRenderer) -> Self {
+        self.renderer = Some(renderer);
+        self
     }
 
     /// Records every `command.run` that succeeds, of every session, into `recorder`
@@ -743,6 +758,7 @@ impl<'a> Server<'a> {
             "query.objects" | "query.references" | "query.diagnostics" | "query.history" => {
                 self.read_method(session, method, params)
             }
+            "view.render" => self.view_render(session, params),
             _ => Err(Error::new(codes::PROTOCOL_METHOD_UNKNOWN)
                 .with_arg("method", method)
                 .into()),
@@ -1025,7 +1041,7 @@ impl<'a> Reader<'_, 'a> {
             "arc.ping" => Ok(json!({})),
             "arc.capabilities" => Ok(capabilities()),
             "command.list" | "command.describe" | "command.validate" | "query.objects"
-            | "query.references" | "query.diagnostics" | "query.history" => {
+            | "query.references" | "query.diagnostics" | "query.history" | "view.render" => {
                 server.query(&session, method, params)
             }
             "event.subscribe" | "event.unsubscribe" => self.hub.subscribe(

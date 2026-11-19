@@ -2,30 +2,24 @@
 //! to a PNG file inside the write roots.
 //!
 //! `render <file> --output <png> [--view <name>] [--width <n>] [--height <n>]` opens the
-//! package read-only, extracts points and lines with [`extract_sample`], zooms the default view
-//! (orthographic, looking down −z with +y up) to the extents of the drawn objects, renders
-//! through `arc-gpu` on the best adapter (a software adapter when nothing better exists) and
-//! writes the image as PNG through [`Roots::create_write`]. The sample set defines no named
-//! views, so `--view` accepts only `default`.
+//! package read-only, extracts points and lines with [`extract_sample`] and renders the default
+//! view through [`arc_app::render`], which the protocol's `view.render` shares. The sample set
+//! defines no named views, so `--view` accepts only `default`.
 
 use std::ffi::OsString;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arc_base::math::{Point3, Vector3};
-use arc_base::{Color, Error, Limits, ObjectId, Tolerance};
+use arc_app::render::{Rendered, render as render_snapshot};
+use arc_base::math::Point3;
+use arc_base::{Color, Error, Limits};
 use arc_command::Roots;
 use arc_command::error::codes;
 use arc_command::headless::{Exit, Product};
 use arc_doc::package::{Mode, Package};
 use arc_doc::{DocumentConfig, LoadOptions, Object, Snapshot, Value};
-use arc_geom::view::{Projection, ViewFrame};
-use arc_gpu::{
-    Gpu, GpuSettings, LineItem, LinePath, LineStyle, LineWidth, RenderItem, RenderSettings,
-    Renderer, Scene, SceneLimits,
-};
-use image::{ExtendedColorType, ImageEncoder};
+use arc_gpu::{LineItem, LinePath, LineStyle, LineWidth, RenderItem};
 use serde_json::json;
 
 /// The width of drawn points and lines in pixels.
@@ -36,9 +30,6 @@ pub const INK: [u8; 4] = [40, 40, 40, 255];
 const DEFAULT_SIZE: (u32, u32) = (800, 600);
 /// The only view of the sample set.
 pub const DEFAULT_VIEW: &str = "default";
-/// The extents are fitted with this much room around them.
-const MARGIN: f64 = 1.1;
-
 /// The parsed arguments.
 #[derive(Debug, Default)]
 struct Options {
@@ -169,42 +160,6 @@ pub fn extract_sample(snapshot: &Snapshot, object: &Object) -> Vec<RenderItem> {
     }
 }
 
-/// The smallest box around the points of the line items, or `None` when nothing is drawn.
-fn extents(changes: &[(ObjectId, Vec<RenderItem>)]) -> Option<(Point3, Point3)> {
-    let points = changes
-        .iter()
-        .flat_map(|(_, items)| items)
-        .flat_map(|item| {
-            let RenderItem::Lines(line) = item else {
-                return Vec::new();
-            };
-            let origin = line.origin;
-            line.paths
-                .iter()
-                .flat_map(|path| &path.points)
-                .map(|[x, y, z]| origin + Vector3::new(f64::from(*x), f64::from(*y), f64::from(*z)))
-                .collect()
-        });
-    points.fold(None, |bounds, p| {
-        Some(match bounds {
-            None => (p, p),
-            Some((min, max)) => (min.inf(&p), max.sup(&p)),
-        })
-    })
-}
-
-/// The default view looking down −z at `center`, `height` model units tall.
-fn top_view(center: Point3, height: f64) -> arc_base::Result<ViewFrame> {
-    ViewFrame::new(
-        center + Vector3::new(0.0, 0.0, height.max(1.0)),
-        center,
-        Vector3::y(),
-        Projection::Orthographic { height },
-        1e-3,
-        1e3,
-    )
-}
-
 /// Runs `render` with `args` (after the subcommand) and writes its JSON result to `stdout`.
 ///
 /// # Errors
@@ -239,52 +194,22 @@ pub fn render<W: Write>(
         DocumentConfig::default(),
     )?;
     let snapshot = document.snapshot();
-    let changes: Vec<(ObjectId, Vec<RenderItem>)> = snapshot
-        .iter()
-        .map(|(_, object)| (object.id, extract_sample(&snapshot, object)))
-        .filter(|(_, items)| !items.is_empty())
-        .collect();
-    let objects = changes.len();
-    let extents = extents(&changes);
-
-    let gpu = Gpu::new(&GpuSettings::default())?;
-    let mut scene = Scene::new(&gpu, SceneLimits::DEFAULT)?;
-    scene.update(changes)?;
-    let aspect = f64::from(width.max(1)) / f64::from(height.max(1));
-    let frame = match extents {
-        Some((min, max)) => {
-            let center = min + (max - min) / 2.0;
-            let radius = (max - min).norm() / 2.0;
-            arc_gpu::navigation::zoom_to_sphere(
-                &top_view(center, 1.0)?,
-                &center,
-                radius * MARGIN,
-                aspect,
-                &Tolerance::DEFAULT,
-            )?
-        }
-        None => top_view(Point3::origin(), 10.0)?,
-    };
-    let settings = RenderSettings {
-        background: Color::WHITE,
-        ..RenderSettings::DEFAULT
-    };
-    let image =
-        Renderer::new(&gpu).render_to_image(&mut scene, &frame, width, height, &settings)?;
+    let Rendered {
+        png,
+        objects,
+        adapter,
+    } = render_snapshot(&snapshot, extract_sample, width, height)?;
 
     let io = |_| Error::new(codes::PATH_IO).with_detail("reason", "other");
     let mut writer = BufWriter::new(roots.create_write(&output)?);
-    image::codecs::png::PngEncoder::new(&mut writer)
-        .write_image(&image.rgba8, width, height, ExtendedColorType::Rgba8)
-        .map_err(|_| Error::new(codes::PATH_IO).with_detail("reason", "other"))?;
+    writer.write_all(&png).map_err(io)?;
     writer.flush().map_err(io)?;
-    let report = gpu.report();
     let result = json!({
         "view": DEFAULT_VIEW,
         "width": width,
         "height": height,
         "objects": objects,
-        "adapter": {"name": report.name, "software": report.software, "fallback": report.fallback},
+        "adapter": adapter,
     });
     writeln!(stdout, "{result}")
         .and_then(|()| stdout.flush())

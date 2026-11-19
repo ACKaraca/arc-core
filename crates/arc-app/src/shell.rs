@@ -1760,6 +1760,7 @@ fn parse_setting(ty: &SettingType, text: &str) -> Option<SettingValue> {
             .filter(|v| v.is_finite())
             .map(SettingValue::Float),
         SettingType::Text | SettingType::Choice(_) => Some(SettingValue::Text(text.to_owned())),
+        SettingType::Internal => None,
     }
 }
 

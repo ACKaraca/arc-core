@@ -3,12 +3,14 @@
 //! binary and its tests use it through this package as before.
 //!
 //! [`run`] is the program: the product subcommand `render` (module [`render`]) and the shared
-//! subcommands of [`arc_command::headless::run`].
+//! subcommands of [`arc_command::headless::run_with_renderer`], which serves `view.render` with
+//! the same renderer.
 
 use std::ffi::OsString;
 use std::io::{BufRead, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use arc_app::render::SnapshotRenderer;
 use arc_command::error::codes;
 use arc_command::headless::{self, Exit, Product};
 
@@ -32,7 +34,8 @@ where
 {
     let mut args: Vec<OsString> = args.into_iter().collect();
     if args.first().and_then(|a| a.to_str()) != Some("render") {
-        return headless::run(args, product, stdin, stdout, stderr);
+        let renderer = SnapshotRenderer::new(render::extract_sample);
+        return headless::run_with_renderer(args, product, Some(&renderer), stdin, stdout, stderr);
     }
     args.remove(0);
     let outcome = catch_unwind(AssertUnwindSafe(|| {

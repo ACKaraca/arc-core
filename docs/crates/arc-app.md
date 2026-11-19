@@ -46,8 +46,8 @@ default settings and workspaces, product branding, About content and installers.
 
 | Kind | Crates |
 |---|---|
-| Arc | All lower crates as needed; `arc-ui`, `arc-gpu`, `arc-command`, `arc-doc`, `arc-hub-api` |
-| Third-party | `winit`, `muda`, `rfd`, `tokio`, `tracing-subscriber`, `fluent-bundle`, `minidumper`, `crash-handler`, `sentry`, `reqwest`, Velopack client; `wasm-bindgen`, `web-sys` and `js-sys` (browser target only, generated glue) |
+| Arc | All lower crates as needed; `arc-ui`, `arc-gpu` and `arc-geom` (features `window` and `render`), `arc-command`, `arc-doc`, `arc-hub-api` |
+| Third-party | `image` (feature `render`, PNG encoding); `winit`, `muda`, `rfd`, `tokio`, `tracing-subscriber`, `fluent-bundle`, `minidumper`, `crash-handler`, `sentry`, `reqwest`, Velopack client; `wasm-bindgen`, `web-sys` and `js-sys` (browser target only, generated glue) |
 
 ## Test strategy
 
@@ -265,33 +265,70 @@ reports, Hub) are added in later parts behind settings that default to off.
 
 - The setting `automation.enabled` is a truth value, off by default, settable in the user scope. A
   locked value (CORE-APP-013) refuses writes, so a system that locks it off keeps it off.
-- `Automation::sync(store, dir, registry, name, version)` applies the effective value. On: binds a
-  `LocalSocket` named `automation` in `dir` and serves the automation protocol on a thread the
-  module owns. Off: ends that thread, closes its connections and drops the socket, which removes
-  the socket and token files. `Automation::start` and `stop` do the same without the setting;
-  dropping an `Automation` stops it. The reference shell calls `sync` from its event loop when the
-  effective value changes, with the directory `automation` in the user data directory.
-- The served registry is the product's command registry and the served document set is empty:
-  document commands answer with an unknown-document error until the shell publishes its open
-  documents to the serving thread. Server-side log records go to `tracing` by event name only,
-  never by detail, since some details are client labels.
+- The setting `automation.grants` is registered with the internal setting type: the system scope
+  can lock it (a locked key refuses `grant` and `revoke` with `app.settings.locked`), but it is not
+  resolved or edited through the settings store and is hidden from the settings editor.
+- `Automation::sync(store, dir, product, renderer)` applies the effective value. On: binds a
+  client-table socket (`LocalSocket::bind_clients`) named `automation` in `dir` and serves the
+  product's commands on a thread the module owns, with one client per stored grant. Off: stops that
+  thread, which closes the connections and removes the socket and the token files. `start` and
+  `stop` do the same without the setting; dropping an `Automation` stops it. The reference shells
+  call `sync` from their event loop when the effective value changes, with the directory
+  `automation` in the user data directory and the product's renderer.
 - Grants are stored in the user settings file as `automation.grants`, an array of tables
   `{ client = "<label>", permissions = ["read", ...] }`. A label is 1 to 64 bytes with no control
   characters; `grant` replaces an earlier grant of the label, and an empty permission set or
   `revoke` removes it. Malformed entries and repeated labels are skipped on read.
-- The socket's ceiling is the union of the granted permissions, read when the socket starts.
-  Decision: the union is the only ceiling `arc-command` can take, since every connection of a
-  socket shares one ceiling and one token. The rejected alternative keeps the ceiling empty, which
-  fails closed but makes the grants unusable; the union gives every holder of the token the
-  granted permissions, which the same user can already do, since the token file is readable by
-  that user alone.
-- Not provided, and why: the connected-client list and the per-client permissions. `arc-command`
-  reports neither a client's label after `arc.initialize` nor connection open and close events,
-  and gives every connection the same ceiling and token. The additions that would complete the row
-  are: a per-connection callback after `arc.initialize` with the connection identifier and
-  `client_name`; a connection-closed callback; a per-connection ceiling or permission hook on
-  `Server`; and a token per client. Until then, grants are recorded and shown but not enforced per
-  client.
+- Each stored grant is a client of the table. The application chooses the client's identifier
+  (`client-<n>`, unique for the life of the switch) and sends it as `clientName` in the handshake; the
+  client's token is the content of the file `automation@client-<n>.token` in the socket directory,
+  which `Automation::clients` reports as `token_path`. The label, the identifier and the permissions
+  are shown; the token is never shown, logged or put in an error.
+- `Automation::grant` and `Automation::revoke` change the settings and the running socket at once,
+  with no restart. `grant` on a label that has a client removes that client first, which closes its
+  connections and refuses its old token, then adds a client with the new permissions and a new token
+  (replacement). `revoke` removes the client, closes its connections and removes its token file; its
+  next request is not answered and a new connection with its old token is `cmd.socket.unauthorized`.
+  Other clients are not affected.
+- The socket's server ceiling is every permission class, so a client's grant is the ceiling that
+  applies (the connection runs with the intersection, as the socket specification says). Rejected:
+  the union of all grants as one ceiling, which the single-token socket used; it lets one client's
+  permissions reach another client's connections.
+- The connection model: the socket's `ConnectionObserver` records each connection that passes its
+  handshake (its identifier, the client's label, its client identifier and permissions) and forgets
+  it when it closes. The model is one mutex-protected snapshot that the observer updates on the
+  socket's threads and `connections()` and `clients()` copy on the UI thread; the observer never
+  calls the socket. `subscribe()` returns a channel that gets a message after each change; messages
+  coalesce, so a reader re-reads the snapshot each time. A test blocks on that channel.
+- A serving error (the listener fails) clears the running state: the socket handle is released, the
+  files are removed when the serving thread ends, the model forgets the clients and connections,
+  and `failure()` reports `app.automation.failed`. A failed `start` (for example `cmd.socket.directory`
+  when the directory is not private) records its code as the failure and leaves no files. `sync`
+  with the switch on starts again after either, since `start` joins the ended thread first.
+- The served documents: `sync` serves none, so document commands answer with an unknown-document
+  error until the shell publishes its open documents to the serving thread. `start` takes the
+  documents, which the tests use. Server-side log records go to `tracing` by event name only, never
+  by detail, since some details are client labels.
+- Not provided yet: the panel that shows the clients and connections in the window (the model is
+  readable; the window does not draw it), and grants from the window (the `grant` and `revoke`
+  methods exist, the editor does not call them).
+
+### View rendering (CORE-CMD-026, feature `render`)
+
+- The module `render` (feature `render`, on with `window`) renders the default view of a snapshot
+  headless: the product's extractor draws each object (`Extract`, a function from a snapshot object
+  to render items), the view is zoomed to the drawn objects, shaded on white through `arc-gpu` on
+  the adapter its selection rules choose, and encoded as PNG. `render::render` returns the PNG, the
+  number of objects drawn and the adapter (`name`, `software`, `fallback`).
+- `SnapshotRenderer::new(extract)` implements `arc_command::ViewRenderer` for that drawing. It
+  accepts the view `default` and the display mode `shaded`, and refuses a camera and section planes
+  with `cmd.render.unsupported` (detail `feature`), since nothing draws them yet.
+- The product attaches its renderer with `ProductBuilder::view_renderer`; the windowed shell
+  attaches `SnapshotRenderer` over its extractor, so the automation socket answers `view.render`.
+  `arc-shell-cli` attaches it to the `serve` and `mcp` subcommands. The renderer runs on the
+  thread of the session that asked.
+- Feature `render` adds the dependencies `arc-gpu`, `arc-geom` and `image` (PNG encoding, the
+  workspace entry with the `png` feature only). `arc-app` is layer 6, above `arc-gpu` (layer 5).
 
 ### Reference CLI (CORE-APP-026)
 
@@ -328,11 +365,11 @@ runner.
   enlarged by 10 %; with nothing drawn it is centered on the origin, 10 m tall. The sample set
   defines no named views, so `--view` accepts only `default`; another name is `cmd.cli.usage`
   with reason `unknown_view`.
-- The image is `--width` × `--height` pixels (default 800 × 600, decimal `u32`), rendered in
-  the shaded mode on a white background by `arc-gpu` on the adapter its selection rules choose,
-  which falls back to a software adapter when nothing better exists. The PNG (8-bit RGBA) is
-  written through `Roots::create_write`, so `--output` must lie inside a write root
-  (`cmd.path.outside_roots`, exit 5, without one).
+- The image is `--width` × `--height` pixels (default 800 × 600, decimal `u32`), drawn by
+  `arc_app::render` (see [View rendering](#view-rendering-core-cmd-026-feature-render)) on the
+  adapter its selection rules choose, which falls back to a software adapter when nothing better
+  exists. The PNG (8-bit RGBA) is written through `Roots::create_write`, so `--output` must lie
+  inside a write root (`cmd.path.outside_roots`, exit 5, without one).
 - Standard output is one JSON object: `view`, `width`, `height`, `objects` (the number of
   objects drawn) and `adapter` (`name`, `software`, `fallback`). Errors are reported like the
   runner's, with the same exit codes; `gpu.*` errors map by their categories.
@@ -353,7 +390,7 @@ The codes `arc-app` owns; messages are in `locales/en-US/arc-app.ftl`.
 | `app.settings.locked` | `permission_denied` | A write or reset outside the system scope names a key that the system scope locks |
 | `app.managed.read_failed` | `io` | The system settings file exists but cannot be read; the application does not start |
 | `app.managed.untrusted` | `permission_denied` | On Unix, the system settings file or its folder is not owned by uid 0, is not a regular file, or is writable by group or other users; the application does not start |
-| `app.automation.failed` | `failed_operation` | The automation socket's serving thread cannot be started |
+| `app.automation.failed` | `failed_operation` | The automation socket's serving thread cannot be started, or it ends with an error (recorded as the failure) |
 | `app.automation.client_invalid` | `invalid_input` | A client label is empty, longer than 64 bytes or contains control characters |
 | `app.managed.invalid` | `corrupt_data` | The system settings file is larger than 1 MiB, not UTF-8 or not valid TOML; the application does not start |
 | `app.settings_file.read_failed` | `io` | An existing settings file cannot be read |

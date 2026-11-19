@@ -22,6 +22,7 @@ tracing-subscriber = { workspace = true }
 unic-langid = { workspace = true }
 arc-geom = { workspace = true, optional = true }
 arc-gpu = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
 arc-ui = { workspace = true, optional = true, features = ["viewport"] }
 egui-wgpu = { workspace = true, optional = true }
 egui-winit = { workspace = true, optional = true }
@@ -34,7 +35,14 @@ muda = { workspace = true, optional = true }
 [features]
 # The windowed shell: frame composition over `arc-ui` and `arc-gpu`, menus and dialogs, and the
 # `winit` event loop. Off by default, so the window-free build stays light.
+# Headless view rendering of a document (the `render` module): the GPU layer and PNG encoding.
+render = [
+  "dep:arc-geom",
+  "dep:arc-gpu",
+  "dep:image",
+]
 window = [
+  "render",
   "dep:arc-geom",
   "dep:arc-gpu",
   "dep:arc-ui",

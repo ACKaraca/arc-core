@@ -25,7 +25,7 @@ use serde_json::{Map, Value, json};
 use crate::context::{Clock, Session};
 use crate::error::codes;
 use crate::macros::{self, MacroStep, Recorder, parse_macro};
-use crate::protocol::{Log, LogLevel, McpConfig, Server, ServerConfig, errors};
+use crate::protocol::{Log, LogLevel, McpConfig, Server, ServerConfig, ViewRenderer, errors};
 use crate::registry::Registry;
 use crate::roots::Roots;
 use crate::schema::parse_params;
@@ -224,6 +224,24 @@ pub fn run<R, W, E>(
     product: &Product,
     stdin: R,
     stdout: W,
+    stderr: E,
+) -> Exit
+where
+    R: BufRead,
+    W: Write + Send,
+    E: Write + Send,
+{
+    run_with_renderer(args, product, None, stdin, stdout, stderr)
+}
+
+/// [`run`] with a renderer for `view.render` and the MCP `render_view` tool of the protocol
+/// subcommands (`serve`, `mcp`). Without one those answer `cmd.render.unavailable`.
+pub fn run_with_renderer<R, W, E>(
+    args: impl IntoIterator<Item = OsString>,
+    product: &Product,
+    renderer: Option<&dyn ViewRenderer>,
+    stdin: R,
+    stdout: W,
     mut stderr: E,
 ) -> Exit
 where
@@ -233,7 +251,7 @@ where
 {
     let args: Vec<OsString> = args.into_iter().collect();
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        execute(args, product, stdin, stdout, &mut stderr)
+        execute(args, product, renderer, stdin, stdout, &mut stderr)
     }));
     let failure = match outcome {
         Ok(Ok(exit)) => return exit,
@@ -453,6 +471,7 @@ impl<E: Write + Send> Log for StderrLog<E> {
 fn execute<R, W, E>(
     args: Vec<OsString>,
     product: &Product,
+    renderer: Option<&dyn ViewRenderer>,
     stdin: R,
     mut stdout: W,
     stderr: &mut E,
@@ -496,10 +515,9 @@ where
         }
     }
     let session = session(&config, &limits);
-    let mut server = Server::new(&product.registry, &documents, config, &log);
-    if record_file.is_some() {
-        server = server.with_recorder(&recorder);
-    }
+    let recording = record_file.is_some().then_some(&recorder);
+    let server = Server::new(&product.registry, &documents, config, &log);
+    let server = attached(server, recording, renderer);
     let call = |method: &str, params: Value| server.call(method, params).map_err(failure);
     let name = || -> Result<String, Failure> {
         o.positional
@@ -563,6 +581,22 @@ where
         .and_then(|()| stdout.flush())
         .map_err(io_failure)?;
     Ok(exit)
+}
+
+/// The server with the recorder and the renderer the run was given, when there are any.
+fn attached<'a>(
+    server: Server<'a>,
+    recorder: Option<&'a Recorder>,
+    renderer: Option<&'a dyn ViewRenderer>,
+) -> Server<'a> {
+    let server = match recorder {
+        Some(recorder) => server.with_recorder(recorder),
+        None => server,
+    };
+    match renderer {
+        Some(renderer) => server.with_view_renderer(renderer),
+        None => server,
+    }
 }
 
 /// Serves the automation protocol, or the Model Context Protocol on the first document, over

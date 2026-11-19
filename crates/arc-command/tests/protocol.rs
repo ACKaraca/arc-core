@@ -504,10 +504,11 @@ fn conformance(c: &mut Client) {
     );
     let r = c.call(&request(43, "command.cancel", json!({"id": 30})));
     assert_eq!(r["result"], json!({"cancelled": false}));
-    let r = c.call(&request(44, "view.render", json!({})));
+    // No renderer is attached to this conformance server, so the method answers unavailable.
+    let r = c.call(&request(44, "view.render", json!({"document": "main"})));
     assert_eq!(
         (error_code(&r), data_code(&r)),
-        (-32001, "cmd.protocol.method_unsupported")
+        (-32001, "cmd.render.unavailable")
     );
     let r = c.call(&request(46, "query.compare", json!({})));
     assert_eq!(error_code(&r), -32001);

@@ -150,7 +150,7 @@ fn fixed_tools() -> Vec<Value> {
         ),
         tool(
             "render_view",
-            "Renders a view to an image; answers cmd.render.unavailable when no renderer is attached.",
+            "Renders the document's view to a PNG image; answers cmd.render.unavailable when no renderer is attached.",
             object_schema(
                 &json!({
                     "view": {"type": "string"},
@@ -355,6 +355,9 @@ impl Session<'_, '_> {
             arguments.insert("document".into(), json!(document));
             Value::Object(arguments)
         };
+        if call.name == "render_view" {
+            return Ok(self.render_view(&arguments));
+        }
         let server = self.server;
         let outcome =
             match call.name.as_str() {
@@ -363,10 +366,6 @@ impl Session<'_, '_> {
                 "query_objects" => server.call("query.objects", with_document(arguments)),
                 "get_diagnostics" => server.call("query.diagnostics", with_document(arguments)),
                 "get_object" => self.get_object(arguments),
-                "render_view" => Err(errors::error_object(
-                    &Error::new(codes::RENDER_UNAVAILABLE),
-                    Map::new(),
-                )),
                 name => {
                     let Some(spec) = server.registry.iter().find(|s| {
                         s.exposure().contains(&Surface::Mcp) && tool_name(s.id()) == name
@@ -387,6 +386,32 @@ impl Session<'_, '_> {
             "content": [{"type": "text", "text": value.to_string()}],
             "isError": is_error,
         }))
+    }
+
+    /// `render_view`: `view.render` of the served document, inline. The image is an MCP image
+    /// content item, followed by a text item with its size.
+    fn render_view(&self, arguments: &Map<String, Value>) -> Value {
+        let mut params = Map::new();
+        params.insert("document".into(), json!(self.config.document));
+        for key in ["view", "width", "height"] {
+            if let Some(value) = arguments.get(key) {
+                params.insert(key.into(), value.clone());
+            }
+        }
+        match self.server.call("view.render", Value::Object(params)) {
+            Ok(image) => json!({
+                "content": [
+                    {"type": "image", "data": image["data"], "mimeType": image["mimeType"]},
+                    {"type": "text", "text": json!({"width": image["width"],
+                        "height": image["height"], "bytes": image["bytes"]}).to_string()},
+                ],
+                "isError": false,
+            }),
+            Err(error) => {
+                let value = error.get("data").cloned().unwrap_or(error);
+                json!({"content": [{"type": "text", "text": value.to_string()}], "isError": true})
+            }
+        }
     }
 
     /// `get_object`: `query.objects` with one identifier, answering the object itself.

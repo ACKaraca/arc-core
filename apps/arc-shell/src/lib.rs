@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use arc_app::product::{Entry, Extractor, FileType, Product, ProductBuilder};
+use arc_app::render::SnapshotRenderer;
 use arc_app::shell::{
     self, CommandLinePanel, DiagnosticsPanelView, LogPanel, OutlinerPanel, PropertiesPanel,
     SettingsPanel, ShellConfig, ViewportPanel,
@@ -99,6 +100,14 @@ pub fn extract_sample(snapshot: &Snapshot, object: &Object, _: &Cancel) -> Resul
     })
 }
 
+/// The render items of a sample object for the view renderer: those of [`extract_sample`], which
+/// nothing cancels here.
+fn draw_sample(snapshot: &Snapshot, object: &Object) -> Vec<RenderItem> {
+    extract_sample(snapshot, object, &Cancel::new())
+        .map(|extraction| extraction.items)
+        .unwrap_or_default()
+}
+
 fn entry(id: &str, label: Message, make: fn() -> Box<dyn shell::Panel>) -> Entry {
     Entry {
         id: id.into(),
@@ -188,6 +197,8 @@ pub fn product(clock: Arc<dyn Clock>, owner: LockOwner) -> Result<Product> {
         ],
         factory: Arc::new(|| -> extract::Extractor { shell::extractor(extract_sample) }),
     })?;
+    // The automation socket serves `view.render` with the same drawing as the window.
+    builder.view_renderer(Arc::new(SnapshotRenderer::new(draw_sample)));
     builder.build(clock, owner)
 }
 

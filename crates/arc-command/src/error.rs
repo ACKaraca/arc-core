@@ -407,6 +407,25 @@ pub mod codes {
         category: Category::Unsupported,
         message_id: "cmd-render-unavailable",
     };
+    /// The requested width, height or pixel count is above the bound; the detail `limit` names it.
+    pub const RENDER_SIZE_EXCEEDED: ErrorCode = ErrorCode {
+        code: "cmd.render.size_exceeded",
+        category: Category::LimitExceeded,
+        message_id: "cmd-render-size-exceeded",
+    };
+    /// The image cannot be returned inline; the detail `limit` names the bound. A write to a path
+    /// in a write root has no such bound beyond the file system.
+    pub const RENDER_TOO_LARGE: ErrorCode = ErrorCode {
+        code: "cmd.render.too_large",
+        category: Category::LimitExceeded,
+        message_id: "cmd-render-too-large",
+    };
+    /// The renderer cannot draw a feature of the request; the detail `feature` names it.
+    pub const RENDER_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "cmd.render.unsupported",
+        category: Category::Unsupported,
+        message_id: "cmd-render-unsupported",
+    };
     /// A transparent command cannot run now; the detail `reason` says why.
     pub const TRANSPARENT_REFUSED: ErrorCode = ErrorCode {
         code: "cmd.transparent.refused",
@@ -487,6 +506,9 @@ pub mod codes {
         SOCKET_DIRECTORY,
         SOCKET_IO,
         RENDER_UNAVAILABLE,
+        RENDER_SIZE_EXCEEDED,
+        RENDER_TOO_LARGE,
+        RENDER_UNSUPPORTED,
         TRANSPARENT_REFUSED,
         MACRO_INPUT_MISSING,
     ];

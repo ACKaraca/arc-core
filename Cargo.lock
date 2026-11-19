@@ -93,6 +93,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "fluent-bundle",
+ "image",
  "muda",
  "proptest",
  "rfd",
@@ -302,10 +303,10 @@ dependencies = [
 name = "arc-shell-cli"
 version = "0.1.0"
 dependencies = [
+ "arc-app",
  "arc-base",
  "arc-command",
  "arc-doc",
- "arc-geom",
  "arc-gpu",
  "arc-shell-sample",
  "image",

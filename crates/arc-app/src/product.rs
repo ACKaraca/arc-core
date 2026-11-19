@@ -13,9 +13,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arc_base::{Error, Result};
-use arc_command::Clock;
 use arc_command::Registry;
 use arc_command::headless;
+use arc_command::{Clock, ViewRenderer};
 use arc_doc::TypeRegistry;
 use arc_doc::graph::Evaluators;
 use arc_doc::package::LockOwner;
@@ -97,7 +97,6 @@ pub struct FileType {
 
 /// A product as the application runs it: the headless product and the application-only
 /// registrations.
-#[derive(Debug)]
 pub struct Product {
     core: headless::Product,
     settings: SettingsRegistry,
@@ -105,9 +104,26 @@ pub struct Product {
     panels: Vec<Entry>,
     tools: Vec<Entry>,
     extractors: Vec<Extractor>,
+    view_renderer: Option<Arc<dyn ViewRenderer>>,
+}
+
+impl std::fmt::Debug for Product {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Product")
+            .field("core", &self.core)
+            .field("settings", &self.settings)
+            .field("view_renderer", &self.view_renderer.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Product {
+    /// The renderer of `view.render` and of the automation socket, when the product has one.
+    #[must_use]
+    pub fn view_renderer(&self) -> Option<Arc<dyn ViewRenderer>> {
+        self.view_renderer.clone()
+    }
+
     /// The part the headless runner takes: name, version, types, evaluators, commands, clock
     /// and edit-lock owner.
     #[must_use]
@@ -165,6 +181,7 @@ pub struct ProductBuilder {
     panels: Vec<Entry>,
     tools: Vec<Entry>,
     extractors: Vec<Extractor>,
+    view_renderer: Option<Arc<dyn ViewRenderer>>,
 }
 
 impl std::fmt::Debug for ProductBuilder {
@@ -211,6 +228,7 @@ impl ProductBuilder {
             panels: Vec::new(),
             tools: Vec::new(),
             extractors: Vec::new(),
+            view_renderer: None,
         }
     }
 
@@ -288,6 +306,12 @@ impl ProductBuilder {
         add_entry(&mut self.tools, tool)
     }
 
+    /// Attaches the renderer of the product's views: `view.render` on the protocol and the
+    /// automation socket. A product without one answers `cmd.render.unavailable`.
+    pub fn view_renderer(&mut self, renderer: Arc<dyn ViewRenderer>) {
+        self.view_renderer = Some(renderer);
+    }
+
     /// Registers an extractor. Its types are checked by [`ProductBuilder::build`], so types
     /// may be registered later.
     ///
@@ -332,6 +356,7 @@ impl ProductBuilder {
             panels: self.panels,
             tools: self.tools,
             extractors: self.extractors,
+            view_renderer: self.view_renderer,
         })
     }
 }

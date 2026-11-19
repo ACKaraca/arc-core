@@ -79,6 +79,29 @@ Alternatives rejected:
 - Per-client grants inside the protocol (a `permissions` argument at the handshake). A client would
   then name its own ceiling, which the host must control.
 
+## Amendment: view rendering over the protocol
+
+`view.render` is served by the protocol and the Model Context Protocol endpoint (`render_view`)
+when the host attaches a renderer ([specification](../crates/arc-command.md#view-rendering-as-implemented)).
+The message shape is additive: a new method with the parameters `document`, `view`, `width`,
+`height`, `displayMode`, `camera`, `sections` and `path`, answered with either the base64 PNG
+(`data`) or the path it was written to. The MCP tool answers an `image` content item, which MCP
+defines for images; it is the one tool whose content is not a text item of the JSON result.
+
+Decisions:
+
+- The image is inline base64 by default, within the message limit and at most 12 MiB of PNG, and
+  written to a path only with the `file_write` permission inside a write root. Inline keeps a
+  session self-contained; the file variant serves images too large for the message.
+- A renderer is attached by the host; the protocol does not know the GPU layer.
+
+Alternatives rejected:
+
+- A binary frame after the JSON line. The framing is line-delimited JSON, and a second framing for
+  one method would complicate every client.
+- Image URLs served by the socket. They would need a second listener or a fetch method, and the
+  socket serves no files.
+
 ## Alternatives considered
 
 - **Content-Length header framing.** Robust for embedded newlines, but JSON never contains raw

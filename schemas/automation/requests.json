@@ -375,6 +375,51 @@
         "objects"
       ],
       "additionalProperties": true
+    },
+    "view.render": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "displayMode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "camera": {
+          "type": "object"
+        },
+        "sections": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object"
+          }
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "document"
+      ],
+      "additionalProperties": true
     }
   }
 }

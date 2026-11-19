@@ -61,6 +61,10 @@ pub enum SettingType {
     Text,
     /// A text equal to one of the listed choices.
     Choice(&'static [&'static str]),
+    /// A value the owning feature reads and writes itself, such as a table or an array. It is
+    /// registered so that a system lock applies to it, is never resolved or edited through the
+    /// store, and has no value that `accepts` admits.
+    Internal,
 }
 
 /// A typed setting value.
@@ -225,7 +229,7 @@ impl SettingsRegistry {
         if self.settings.contains_key(key) {
             return Err(Error::new(codes::SETTINGS_DUPLICATE_KEY).with_arg("key", key));
         }
-        if !setting.ty.accepts(&setting.default) {
+        if setting.ty != SettingType::Internal && !setting.ty.accepts(&setting.default) {
             return Err(Error::new(codes::SETTINGS_DEFAULT_MISMATCH).with_arg("key", key));
         }
         self.settings.insert(key, setting);
@@ -388,6 +392,13 @@ impl SettingsStore {
             .registry
             .get(key)
             .ok_or_else(|| Error::new(codes::SETTINGS_UNKNOWN_KEY).with_arg("key", key))?;
+        if setting.ty == SettingType::Internal {
+            return Ok(Effective {
+                value: setting.default.clone(),
+                source: Scope::Default,
+                issues: Vec::new(),
+            });
+        }
         let mut issues = Vec::new();
         for scope in Scope::LAYERS {
             let Some(raw) = self.layers.get(&scope).and_then(|t| lookup(t, key)) else {
@@ -454,6 +465,22 @@ impl SettingsStore {
             return Err(conflict());
         }
         table.insert(leaf.to_owned(), value.to_toml());
+        Ok(())
+    }
+
+    /// Checks that `key` may be written in `scope`: `app.settings.locked` when the system scope
+    /// locks it and `scope` is not the system scope.
+    ///
+    /// # Errors
+    /// `app.settings.unknown_key` and `app.settings.locked`.
+    pub fn check_writable(&self, scope: Scope, key: &str) -> Result<()> {
+        let setting = self
+            .registry
+            .get(key)
+            .ok_or_else(|| Error::new(codes::SETTINGS_UNKNOWN_KEY).with_arg("key", key))?;
+        if scope != Scope::System && self.locked.contains(setting.key) {
+            return Err(locked_error(key, scope));
+        }
         Ok(())
     }
 

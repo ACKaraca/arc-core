@@ -1141,6 +1141,53 @@
         "objects"
       ],
       "additionalProperties": false
+    },
+    "view.render": {
+      "type": "object",
+      "properties": {
+        "mimeType": {
+          "const": "image/png"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "data": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mimeType",
+        "width",
+        "height",
+        "bytes"
+      ],
+      "anyOf": [
+        {
+          "required": [
+            "data"
+          ]
+        },
+        {
+          "required": [
+            "path"
+          ]
+        }
+      ],
+      "additionalProperties": false
     }
   }
 }

@@ -90,7 +90,7 @@ pub use prompt::{
     Accept, Answer, Feedback, KeywordOption, Message, Point, PointDims, Prompt, PromptInput,
     PromptMachine, PromptSequence, PromptSession, PromptState, PromptStep, Step,
 };
-pub use protocol::{Log, LogLevel, NoLog, Server, ServerConfig};
+pub use protocol::{Log, LogLevel, NoLog, Server, ServerConfig, ViewRenderer, ViewRequest};
 pub use registry::{CATALOG_FORMAT, CATALOG_VERSION, Registry, Resolved, Via};
 pub use roots::Roots;
 pub use schema::{Violation, ViolationKind, parse_params};

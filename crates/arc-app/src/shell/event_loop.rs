@@ -650,13 +650,12 @@ impl Handler {
             return;
         }
         self.automation_applied = Some(enabled);
-        let product = self.app.product().headless();
+        let product = self.app.product();
         if let Err(e) = self.automation.sync(
             self.app.settings(),
             dir,
-            product.registry.clone(),
-            &product.name,
-            &product.version,
+            product.headless(),
+            product.view_renderer(),
         ) {
             self.shell.error(e);
         }

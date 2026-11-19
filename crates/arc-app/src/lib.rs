@@ -17,6 +17,8 @@ pub mod logging;
 pub mod managed;
 pub mod product;
 pub mod recent;
+#[cfg(feature = "render")]
+pub mod render;
 pub mod settings;
 pub mod settings_editor;
 pub mod settings_file;

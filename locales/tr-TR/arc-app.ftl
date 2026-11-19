@@ -35,6 +35,7 @@ app-instance-busy = Çalışan uygulama zamanında yanıt vermedi.
 app-instance-invalid-path = Geçerli metin olmadığı için bir dosya adı çalışan uygulamaya gönderilemiyor.
 app-instance-message-too-large = Çalışan uygulamaya gönderilmek için çok fazla dosya verildi.
 app-setting-automation-enabled = Diğer programların yerel otomasyon soketi üzerinden uygulamayı denetlemesine izin verir.
+app-setting-automation-grants = Otomasyon istemcileri ve yetkileri; kullanıcı ayarlarında tutulur, burada düzenlenmez.
 app-automation-failed = Otomasyon soketi başlatılamadı.
 app-automation-client-invalid = İstemci adı boş, çok uzun ya da denetim karakterleri içeriyor.
 app-recent-too-many-pinned = Daha fazla dosya sabitlenemez.

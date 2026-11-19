@@ -508,9 +508,11 @@ the process that owns stdin and stdout is the [headless runner](#headless-runner
   `arc.capabilities` returns the same `capabilities`; `arc.ping` returns `{}`.
 - `arc.shutdown` cancels running and waiting commands, waits until each is answered, answers
   `null` and ends the session; nothing after it is read. The end of the input stream cancels
-  the same way. The documented methods of later capabilities (documents, views, and the
-  methods `query.object`, `query.compare`, `query.derived`, `selection.add` and
-  `selection.remove`) are -32001 (`cmd.protocol.method_unsupported`).
+  the same way. The documented methods of later capabilities (documents, `view.list`,
+  `view.get`, `view.setCamera`, and the methods `query.object`, `query.compare`,
+  `query.derived`, `selection.add` and `selection.remove`) are -32001
+  (`cmd.protocol.method_unsupported`). `view.render` is served when a renderer is attached
+  ([View rendering](#view-rendering-as-implemented)).
 
 ### Command methods
 
@@ -587,7 +589,8 @@ A code named in the table takes precedence over its category.
 
 `schemas/automation/requests.json` and `schemas/automation/responses.json` describe the
 messages of the methods above (JSON Schema draft 2020-12 with `$id`). The conformance tests
-validate every request they send and every message the server writes against them.
+validate every request they send and every message the server writes against them. `view.render` is among them: its response
+schema is the inline form (`data`) or the file form (`path`) of [View rendering](#view-rendering-as-implemented).
 
 ### Read and write roots
 
@@ -651,7 +654,8 @@ validate every request they send and every message the server writes against the
 The module `headless` (feature `headless`, which enables the `arc-doc` package; off in the
 WebAssembly build) implements CORE-CMD-031 after the
 [headless CLI conventions](../architecture/commands-and-automation.md#headless-cli-conventions).
-`headless::run(args, product, stdin, stdout, stderr)` is the whole program: `args` without the
+`headless::run(args, product, stdin, stdout, stderr)` is the whole program (with
+`headless::run_with_renderer`, which adds the renderer of `view.render`): `args` without the
 program name, a `Product` (name, version, object types, evaluators, command registry, clock and
 the edit-lock owner) and the three streams; it returns an `Exit` and never panics (a contained
 fault is exit 70). A product's `main` passes the process arguments and streams and returns the
@@ -795,6 +799,9 @@ gives `validate <file>` the package check, so parameter validation is the separa
 | `cmd.socket.directory` | `invalid_input` | The socket directory is not a private directory of the user, or its owner is not the owner of the token file; the detail `reason` says why |
 | `cmd.socket.io` | `io` | The system refused an operation on the socket or its token; the detail `reason` says which |
 | `cmd.render.unavailable` | `unsupported` | No renderer is attached, so a view cannot be rendered |
+| `cmd.render.size_exceeded` | `limit_exceeded` | The requested width, height or pixel count is above the bound; the detail `limit` names it (`side` or `pixels`) |
+| `cmd.render.too_large` | `limit_exceeded` | The image cannot be returned inline; the detail `limit` names the bound (`inline_bytes` or `message_bytes`) |
+| `cmd.render.unsupported` | `unsupported` | The renderer does not draw a feature of the request; the detail `feature` names it (`view`, `display_mode`, `camera` or `sections`) |
 
 ## Model Context Protocol endpoint and local socket as implemented
 
@@ -833,10 +840,11 @@ surface; it defaults to `automation`, so nothing else changes.
 | `query_objects` | optional `types`, `ids`, `owner`, `fields`, `limit`, `cursor` | `query.objects` |
 | `get_object` | `id`, optional `fields` | the one object of `query.objects` for `id`, or `doc.object.not_found` |
 | `get_diagnostics` | optional `severity`, `limit`, `cursor` | `query.diagnostics` |
-| `render_view` | optional `view`, `width`, `height` | always `cmd.render.unavailable`: no renderer is attached to this layer (view rendering, CORE-CMD-026, is not provided) |
+| `render_view` | optional `view`, `width`, `height` | `view.render` of the served document, inline; the result is an MCP `image` content item (PNG, base64) and a text item with `width`, `height` and `bytes`. `cmd.render.unavailable` without a renderer |
 
 - **Results**: a call answers `content` with one text item, the JSON text of the result, and
-  `isError`. A failure of the call, including `cmd.permission_denied` for an edit command, is
+  `isError` (`render_view` is the exception: its content is the image and its size, see
+  [View rendering](#view-rendering-as-implemented)). A failure of the call, including `cmd.permission_denied` for an edit command, is
   `isError: true` with the protocol's error data (`code`, `category`, `messageId`,
   `arguments`, `details`) as the text, as MCP asks for errors of tools; an unknown tool or
   malformed arguments are JSON-RPC errors (-32602).
@@ -917,6 +925,73 @@ after [ADR-0010](../adr/0010-automation-protocol-transport.md).
   `serve_observed` with a `NoObserver`.
 - **Platforms**: Unix domain sockets on Linux and macOS. Named pipes for Windows are not
   provided: `bind` there is `cmd.socket.unsupported` (after the enabled check).
+
+## View rendering as implemented
+
+The module `protocol::view` implements CORE-CMD-026: the method `view.render` and the MCP tool
+`render_view`. arc-command cannot depend on the GPU layer, so the renderer is the host's:
+
+- `ViewRenderer` (`Send + Sync`) has one method, `render(&ViewRequest) -> Result<Vec<u8>, Error>`,
+  which returns PNG bytes. `ViewRequest` holds the document as a `Snapshot`, the view name, width,
+  height, display mode, the camera (a JSON object, or none) and the section planes (JSON objects).
+- `Server::with_view_renderer(&dyn ViewRenderer)` attaches it. `headless::run_with_renderer` does
+  the same for the `serve` and `mcp` subcommands; `headless::run` attaches none.
+- Without a renderer `view.render` and `render_view` answer `cmd.render.unavailable`, after the
+  read permission check.
+
+`view.render` parameters (object; `document` is required):
+
+| Parameter | Type | Default and bounds |
+|---|---|---|
+| `document` | string | a document the server holds (`cmd.document.unknown` otherwise) |
+| `view` | string | `default`; 1 to 64 bytes, no control characters |
+| `width`, `height` | integer | 800 and 600; 1 to 4096 each, `width` times `height` at most 8,388,608 |
+| `displayMode` | string | `shaded`; 1 to 64 bytes, no control characters |
+| `camera` | object | absent; any object is passed to the renderer |
+| `sections` | array of objects | absent; at most 16 |
+| `path` | string | absent: the image is returned inline. Present: the image is written to `path` |
+
+Checks, in this order, before the renderer runs: the `read` permission (`cmd.permission_denied`);
+the renderer is attached (`cmd.render.unavailable`, before the parameters are read); the shape of the parameters
+(`cmd.protocol.invalid_params`, with the reason `width`, `height`, `view`, `display_mode`,
+`camera`, `sections` or the decoder's message); the size bounds (`cmd.render.size_exceeded`, detail
+`limit`: `side` or `pixels`). The file variant also needs the `file_write` permission
+(`cmd.permission_denied`, detail `permission`) and a write root: without any, `cmd.path.outside_roots`.
+The document must be held (`cmd.document.unknown`). Then the renderer runs. The file is created
+through `Roots::create_write`, so a path outside the write roots is `cmd.path.outside_roots` after
+the render; no file is created then.
+
+Results:
+
+- Inline: `{"mimeType": "image/png", "width", "height", "bytes", "data"}`, `data` the base64 of the
+  PNG. An image over 12 MiB (`MAX_INLINE_BYTES`, whose base64 text is 16 MiB) or whose text does
+  not fit the message limit with its envelope is `cmd.render.too_large`.
+- File: `{"path", "mimeType": "image/png", "width", "height", "bytes"}`; the path is echoed as given.
+
+`render_view` maps its `view`, `width` and `height` arguments to `view.render` of the served
+document and answers the image as an MCP `image` item (`data`, `mimeType`), then a text item with
+`width`, `height` and `bytes`. It never writes a file.
+
+Decisions:
+
+- The renderer is a trait the host attaches, not a dependency: arc-command sits below the GPU
+  layer (`xtask/layers.toml`). Rejected: a feature that links `arc-gpu` into this crate, which
+  breaks the layer table.
+- Camera and sections are passed through as JSON objects and checked for shape only; the renderer
+  decides what it draws and refuses the rest with `cmd.render.unsupported`. Rejected: fixing a camera
+  schema now, before any renderer draws one.
+- Bounds are checked before rendering, and the inline limit after it, since the PNG size is known
+  only then. Rejected: a byte budget before rendering, which would need a size estimate per
+  renderer.
+- The file variant checks the write root before rendering only when no write root exists. Rejected:
+  a separate root check that duplicates the native path checks of `Roots`; the write stays the one
+  place that decides.
+- `view.render` runs on the thread of the session that asked, as the queries do. Rejected: a run
+  queue entry, which would make the render cancellable but would serialize it with commands.
+  Shortcut: a render of a large image blocks the reader of its session until it finishes;
+  upgrade it when renders become long enough to need cancellation.
+- Base64 is encoded here (RFC 4648, standard alphabet, padded) since no encoding crate is in the
+  technology baseline.
 
 ## Queries, events, selection and preview as implemented
 

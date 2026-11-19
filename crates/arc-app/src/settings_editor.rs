@@ -7,7 +7,7 @@ use std::path::Path;
 use arc_base::Result;
 
 use crate::locale::Localizer;
-use crate::settings::{Issue, Scope, SettingValue, SettingsStore};
+use crate::settings::{Issue, Scope, SettingType, SettingValue, SettingsStore};
 use crate::settings_file;
 
 /// One line of the editor.
@@ -35,6 +35,7 @@ pub fn rows(store: &SettingsStore) -> Vec<Row> {
     store
         .registry()
         .iter()
+        .filter(|setting| setting.ty != SettingType::Internal)
         .filter_map(|setting| {
             // Every key comes from the registry, so resolution cannot fail.
             let effective = store.get(setting.key).ok()?;
