@@ -6,30 +6,22 @@
 //! cannot reach, so it is not registered there: [`bind_command`] returns its specification with
 //! the links the product loaded, and the product registers it.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use arc_base::id::Identifier;
 use arc_base::math::Vector3;
 use arc_base::{Error, ObjectId, Result};
 use arc_command::{CommandSpec, Context, IdParam};
 use arc_doc::link::{LINK_TYPE, Links};
-use arc_doc::{FieldPath, GeometryBytes, Snapshot, Value};
+use arc_doc::{FieldPath, GeometryBytes, Header, Value};
 use arc_geom::Curve2;
 use arc_geom::encoding::GeomCodec;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::clip::{Piece, cut, keeps};
-use crate::commands::{
-    Created, create, create_entity, expect, field_invalid, point2, spec, values_of,
-};
-use crate::display::{DisplayOptions, boundary_loop, decode_curve, members};
+use crate::bind::{self, Input};
+use crate::commands::{Created, create_entity, expect, field_invalid, point2, spec, values_of};
 use crate::error::codes;
-use crate::external::{self, unit_of};
-use crate::types::{
-    self, BLOCK, BLOCK_REF, CONTAINERS, EXTERNAL_REF, LAYER, LINETYPE, SpaceUnit, entity, layer,
-    table,
-};
+use crate::external::{self, WorkBudget, unit_of};
+use crate::types::{self, BLOCK_REF, CONTAINERS, EXTERNAL_REF, SpaceUnit, entity, table};
 
 /// Parameters of `core.draft.external_ref.create`.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -155,176 +147,71 @@ pub(crate) fn set_clip_spec() -> CommandSpec {
 /// The specification of `core.draft.external_ref.bind`, with the loaded links of the document.
 ///
 /// The command runs in one transaction, so one undo restores the placed reference and removes
-/// everything it created. It copies the point and curve entities of the linked space into a new
-/// block definition, named after the space (renamed when the name is taken), together with the
-/// layers and linetypes they use (renamed with the link's file name as prefix when their names
-/// exist in the host). It replaces the placed reference with a block reference that has the same
-/// insertion transform and common fields, and deletes the link object when no other placed
-/// reference uses it.
+/// everything it created. It copies the linked space into a new block definition, named after the
+/// space (or `<file name>-<space name>`, with a counter, when the name is taken), and replaces the
+/// placed reference with a block reference that has its insertion transform and common fields.
+/// The link object is deleted when no other placed reference uses it.
 ///
-/// A clip boundary is applied to the copied geometry (the block references of this crate do not
-/// clip), so the copies are the parts inside it. Other entity types are refused, with
-/// `draft.external_ref.bind_unsupported`.
+/// Every entity type of the space is copied with its values. The definitions an entity refers to
+/// (layers, linetypes, text, dimension, leader and table styles, hatch patterns) and the blocks it
+/// places are copied once each, recursively; a name the host holds is taken under the
+/// `<file name>-<name>` prefix. Each reference of a copy names its host copy; a reference to an
+/// object that is not copied is cleared and reported. A clip boundary cuts curves and keeps the
+/// other entities whose insertion or anchor point is inside it. Placed references nested in the
+/// space are not copied, and are reported. The copy is bounded by `budget` and the document's
+/// record limit; an over-large space is refused before anything is created.
 pub fn bind_command(links: Links) -> CommandSpec {
+    bind_command_with_budget(links, WorkBudget::default())
+}
+
+/// As [`bind_command`], with the work bounds of the copy given by `budget`.
+pub fn bind_command_with_budget(links: Links, budget: WorkBudget) -> CommandSpec {
     spec("core.draft.external_ref.bind", move |ctx, p: Bind| {
-        bind(ctx, &links, p)
+        bind(ctx, &links, budget, p)
     })
 }
 
-/// The entity types that bind copies.
-const BIND_KINDS: &[&str] = &[
-    types::POINT,
-    types::LINE,
-    types::RAY,
-    types::CONSTRUCTION_LINE,
-    types::CIRCLE,
-    types::ARC,
-    types::ELLIPSE,
-    types::ELLIPTICAL_ARC,
-    types::POLYLINE,
-    types::SPLINE,
-];
-
-/// A name that is not in `taken`: `name`, else `stem-name`, else `stem-name-2`, and so on.
-fn unique_name(taken: &mut BTreeSet<String>, stem: &str, name: &str) -> String {
-    let mut candidate = name.to_owned();
-    let mut n = 2;
-    if taken.contains(&candidate) {
-        candidate = format!("{stem}-{name}");
-    }
-    while taken.contains(&candidate) {
-        candidate = format!("{stem}-{name}-{n}");
-        n += 1;
-    }
-    taken.insert(candidate.clone());
-    candidate
+/// A problem a bind reports without refusing: a count of one kind of loss.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Problem {
+    /// The stable code, as the error catalog names it.
+    pub code: String,
+    /// The number of occurrences.
+    pub count: u64,
 }
 
-/// The file name of a link's path without its directory and extension.
-fn stem_of(path: &str) -> String {
-    let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
-    if stem.is_empty() {
-        "linked".to_owned()
-    } else {
-        stem.to_owned()
-    }
-}
-
-/// The names of the objects of type `key` in `snapshot`.
-fn names_of(snapshot: &Snapshot, key: &str) -> BTreeSet<String> {
-    snapshot
-        .iter_type(key)
-        .map(|objects| {
-            objects
-                .filter_map(|(_, object)| match object.values.first() {
-                    Some(Some(Value::String(name))) => Some(name.clone()),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// The copies of the layers and linetypes the bound entities use, by their linked identifiers.
-struct Styles<'a> {
-    linked: &'a Snapshot,
-    stem: String,
-    layers: BTreeMap<ObjectId, ObjectId>,
-    linetypes: BTreeMap<ObjectId, ObjectId>,
-    taken_layers: BTreeSet<String>,
-    taken_linetypes: BTreeSet<String>,
-}
-
-impl Styles<'_> {
-    /// The host copy of the linked layer `id`, created on first use.
-    fn layer(&mut self, ctx: &mut Context<'_>, id: ObjectId) -> Result<ObjectId> {
-        if let Some(copy) = self.layers.get(&id) {
-            return Ok(*copy);
-        }
-        let mut values = values_of(self.linked, id)?;
-        let name = match values.get(layer::NAME) {
-            Some(Some(Value::String(name))) => name.clone(),
-            _ => return Err(Error::new(codes::FIELD_INVALID).with_arg("field", "name")),
-        };
-        let stem = self.stem.clone();
-        values[layer::NAME] = Some(Value::String(unique_name(
-            &mut self.taken_layers,
-            &stem,
-            &name,
-        )));
-        if let Some(linetype) = types::reference_at(&values, layer::LINETYPE) {
-            let copy = self.linetype(ctx, linetype)?;
-            values[layer::LINETYPE] = Some(Value::Reference(copy));
-        }
-        let copy = create(ctx, LAYER, None, values)?;
-        self.layers.insert(id, copy);
-        Ok(copy)
-    }
-
-    /// The host copy of the linked linetype `id`, created on first use.
-    fn linetype(&mut self, ctx: &mut Context<'_>, id: ObjectId) -> Result<ObjectId> {
-        if let Some(copy) = self.linetypes.get(&id) {
-            return Ok(*copy);
-        }
-        let mut values = values_of(self.linked, id)?;
-        let name = match values.first() {
-            Some(Some(Value::String(name))) => name.clone(),
-            _ => return Err(Error::new(codes::FIELD_INVALID).with_arg("field", "name")),
-        };
-        let stem = self.stem.clone();
-        values[0] = Some(Value::String(unique_name(
-            &mut self.taken_linetypes,
-            &stem,
-            &name,
-        )));
-        let copy = create(ctx, LINETYPE, None, values)?;
-        self.linetypes.insert(id, copy);
-        Ok(copy)
-    }
-
-    /// The values of a linked entity with its layer and linetype replaced by host copies, and
-    /// the common fields kept.
-    fn common(
-        &mut self,
-        ctx: &mut Context<'_>,
-        values: &[Option<Value>],
-    ) -> Result<Vec<Option<Value>>> {
-        let mut common: Vec<Option<Value>> = values.iter().take(entity::KIND).cloned().collect();
-        if let Some(Some(Value::Reference(id))) = common.get(entity::LAYER).cloned() {
-            let copy = self.layer(ctx, id)?;
-            common[entity::LAYER] = Some(Value::Reference(copy));
-        }
-        if let Some(Some(Value::Reference(id))) = common.get(entity::LINETYPE).cloned() {
-            let copy = self.linetype(ctx, id)?;
-            common[entity::LINETYPE] = Some(Value::Reference(copy));
-        }
-        Ok(common)
-    }
-}
-
-/// The entity type a curve becomes, and the values of its geometry. Every entity holds its
-/// geometry in the kind slot, as the commands that create entities do.
-fn curve_entity(curve: &Curve2) -> (&'static str, Vec<(usize, Value)>) {
-    let geometry = || vec![(entity::KIND, Value::Geometry(GeometryBytes(curve.encode())))];
-    match curve {
-        Curve2::Segment(_) => (types::LINE, geometry()),
-        Curve2::Ray(_) => (types::RAY, geometry()),
-        Curve2::Line(_) => (types::CONSTRUCTION_LINE, geometry()),
-        Curve2::Circle(_) => (types::CIRCLE, geometry()),
-        Curve2::Arc(_) => (types::ARC, geometry()),
-        Curve2::Ellipse(_) => (types::ELLIPSE, geometry()),
-        Curve2::EllipticalArc(_) => (types::ELLIPTICAL_ARC, geometry()),
-        Curve2::Polyline(_) => (types::POLYLINE, geometry()),
-        Curve2::Nurbs(nurbs) => (types::SPLINE, crate::spline::values(nurbs, &[])),
-    }
+/// The result of `core.draft.external_ref.bind`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct Bound {
+    /// The block reference that replaces the placed reference.
+    pub id: IdParam,
+    /// The block definition that holds the copies.
+    pub block: IdParam,
+    /// Entities copied into the block definitions, after the clip.
+    pub entities: u64,
+    /// Block definitions copied, the bound one not among them.
+    pub blocks: u64,
+    /// Layers, linetypes, styles and hatch patterns copied.
+    pub definitions: u64,
+    /// Dimension chains copied.
+    pub chains: u64,
+    /// Entities kept whole by the clip (zero without a clip).
+    pub clip_kept_whole: u64,
+    /// Entities left out by the clip (zero without a clip).
+    pub clip_dropped: u64,
+    /// Curves cut by the clip (zero without a clip).
+    pub clip_cut: u64,
+    /// Placed references nested in the space that were not copied.
+    pub external_references_not_copied: u64,
+    /// The losses that did not refuse the bind.
+    pub problems: Vec<Problem>,
 }
 
 #[expect(
     clippy::too_many_lines,
-    reason = "one transaction: the styles, the block, its entities and the replaced reference"
+    reason = "one transaction: the plan, its writes, the block reference and the report"
 )]
-fn bind(ctx: &mut Context<'_>, links: &Links, p: Bind) -> Result<Created> {
+fn bind(ctx: &mut Context<'_>, links: &Links, budget: WorkBudget, p: Bind) -> Result<Bound> {
     let limits = *ctx.limits();
     let snapshot = ctx.txn()?.snapshot().clone();
     let reference = p.reference.0;
@@ -350,116 +237,34 @@ fn bind(ctx: &mut Context<'_>, links: &Links, p: Bind) -> Result<Created> {
         .unwrap_or("model")
         .to_owned();
     let unit: SpaceUnit = unit_of(linked, space);
-
-    // Refuse before changing anything: every entity must be a kind bind copies.
-    let tolerance = DisplayOptions::default().tolerance;
-    let mut entities: Vec<(ObjectId, i64, &'static str)> = Vec::new();
-    for member in members(linked, space) {
-        let key = linked
-            .resolve(member)
-            .ok()
-            .and_then(|h| linked.type_key(h))
-            .map(|k| k.as_str().to_owned())
-            .unwrap_or_default();
-        let Some(kind) = BIND_KINDS.iter().copied().find(|known| *known == key) else {
-            return Err(Error::new(codes::EXTERNAL_BIND_UNSUPPORTED).with_arg("type", key));
-        };
-        let values = values_of(linked, member)?;
-        let order = match values.get(entity::DRAW_ORDER) {
-            Some(Some(Value::I64(order))) => *order,
-            _ => 0,
-        };
-        entities.push((member, order, kind));
-    }
-    entities.sort_by_key(|(id, order, _)| (*order, *id));
     let clip = match placed.get(external::CLIP) {
-        Some(Some(Value::Geometry(bytes))) => {
-            let polyline = external::clip_polyline(&bytes.0)?;
-            Some(
-                boundary_loop(&polyline, &tolerance)
-                    .map_err(|_| Error::new(codes::EXTERNAL_CLIP_INVALID))?,
-            )
-        }
+        Some(Some(Value::Geometry(bytes))) => Some(external::clip_polyline(&bytes.0)?),
         _ => None,
     };
-
-    let block_names = names_of(&snapshot, BLOCK);
-    let block_name = {
-        let mut taken = block_names;
-        unique_name(&mut taken, &stem, &space_name)
-    };
-    let mut styles = Styles {
-        linked,
-        stem: stem.clone(),
-        layers: BTreeMap::new(),
-        linetypes: BTreeMap::new(),
-        taken_layers: names_of(&snapshot, LAYER),
-        taken_linetypes: names_of(&snapshot, LINETYPE),
-    };
     let block_values = vec![
-        Some(Value::String(block_name)),
+        Some(Value::String(space_name)),
         Some(point2([0.0, 0.0])),
         Some(Value::Enum(unit.code())),
         None,
         Some(Value::List(Vec::new())),
     ];
-    let block = create(ctx, BLOCK, None, block_values)?;
-
-    for (member, _, kind) in entities {
-        let values = values_of(linked, member)?;
-        // Each copy: the entity type and its values after the common fields.
-        let copies: Vec<(&'static str, Vec<(usize, Value)>)> = match &clip {
-            None => {
-                let all = values
-                    .iter()
-                    .enumerate()
-                    .skip(entity::KIND)
-                    .filter_map(|(i, v)| v.clone().map(|v| (i, v)))
-                    .collect();
-                vec![(kind, all)]
-            }
-            Some(boundary) if kind == types::POINT => match values.get(entity::KIND) {
-                Some(Some(Value::Point2(p))) if keeps(*p, boundary, true, &tolerance)? => {
-                    vec![(types::POINT, vec![(entity::KIND, Value::Point2(*p))])]
-                }
-                _ => Vec::new(),
-            },
-            Some(boundary) => {
-                let curve = decode_curve(values.get(entity::KIND))?;
-                let mut out = Vec::new();
-                for piece in cut(&curve, boundary, true, &tolerance)? {
-                    if let Piece::Curve(c) = piece {
-                        let (copy_key, mut kind_values) = curve_entity(&c);
-                        if copy_key == types::POLYLINE
-                            && let Some(Some(flag)) = values.get(entity::CONTINUOUS_PATTERN)
-                        {
-                            kind_values.push((entity::CONTINUOUS_PATTERN, flag.clone()));
-                        }
-                        out.push((copy_key, kind_values));
-                    }
-                }
-                out
-            }
-        };
-        if copies.is_empty() {
-            continue;
-        }
-        let common = styles.common(ctx, &values)?;
-        for (copy_key, kind_values) in copies {
-            let mut vals = types::defaults(snapshot.registry(), copy_key);
-            for (i, value) in common.iter().enumerate() {
-                if let Some(slot) = vals.get_mut(i) {
-                    *slot = value.clone();
-                }
-            }
-            for (i, value) in kind_values {
-                if let Some(slot) = vals.get_mut(i) {
-                    *slot = Some(value);
-                }
-            }
-            create(ctx, copy_key, Some(block), vals)?;
-        }
-    }
+    let plan = bind::plan(
+        linked,
+        &snapshot,
+        space,
+        Input {
+            stem: &stem,
+            block: block_values,
+            clip,
+            budget,
+            max_objects: limits.record_count,
+        },
+    )?;
+    let counts = plan.counts;
+    let tally = plan.tally();
+    let external = plan.external;
+    let written = bind::write(ctx, &plan)?;
+    let block = written.ids[plan.top];
 
     // The placed reference becomes a block reference with the same transform and common fields.
     let mut block_ref = types::defaults(snapshot.registry(), BLOCK_REF);
@@ -470,7 +275,7 @@ fn bind(ctx: &mut Context<'_>, links: &Links, p: Bind) -> Result<Created> {
     block_ref[entity::REF_POSITION] = placed.get(entity::REF_POSITION).cloned().flatten();
     block_ref[entity::REF_SCALE] = placed.get(entity::REF_SCALE).cloned().flatten();
     block_ref[entity::REF_ROTATION] = placed.get(entity::REF_ROTATION).cloned().flatten();
-    block_ref[entity::REF_ATTRIBUTES] = Some(Value::Map(BTreeMap::new()));
+    block_ref[entity::REF_ATTRIBUTES] = Some(Value::Map(std::collections::BTreeMap::new()));
     let txn = ctx.txn()?;
     txn.delete(reference)?;
     let others = txn.snapshot().referrers(link).any(|r| {
@@ -483,18 +288,64 @@ fn bind(ctx: &mut Context<'_>, links: &Links, p: Bind) -> Result<Created> {
     if !others {
         txn.delete(link)?;
     }
-    let inserted = create(ctx, BLOCK_REF, Some(placed_owner), block_ref)?;
+    let inserted: ObjectId = ctx.new_id();
+    ctx.txn()?.create(
+        BLOCK_REF,
+        inserted,
+        Header {
+            owner: Some(placed_owner),
+            ..Header::default()
+        },
+        block_ref,
+    )?;
     ctx.txn()?.apply_delete_rules(&limits)?;
     ctx.set_selection_after(vec![inserted]);
-    Ok(Created {
+
+    let mut problems = Vec::new();
+    if written.cleared > 0 {
+        problems.push(Problem {
+            code: codes::EXTERNAL_BIND_REFERENCE_CLEARED.code.to_owned(),
+            count: written.cleared,
+        });
+    }
+    if external > 0 {
+        problems.push(Problem {
+            code: codes::EXTERNAL_BIND_NOT_COPIED.code.to_owned(),
+            count: external,
+        });
+    }
+    Ok(Bound {
         id: IdParam(inserted),
+        block: IdParam(block),
+        entities: tally.entities,
+        blocks: tally.blocks.saturating_sub(1),
+        definitions: tally.definitions,
+        chains: tally.chains,
+        clip_kept_whole: counts.kept_whole,
+        clip_dropped: counts.dropped,
+        clip_cut: counts.cut,
+        external_references_not_copied: external,
+        problems,
     })
+}
+
+/// The file name of a link's path without its directory and extension.
+fn stem_of(path: &str) -> String {
+    let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+    if stem.is_empty() {
+        "linked".to_owned()
+    } else {
+        stem.to_owned()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bind::unique_name;
     use arc_geom::{Polyline2, PolylineVertex};
+    use std::collections::BTreeSet;
 
     #[test]
     fn stems_and_unique_names() {

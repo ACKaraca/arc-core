@@ -1315,28 +1315,49 @@ drafting types refer to it and do not register it.
 | `core.draft.external_ref.set_clip` | Sets the `clip` of `objects` to a closed polyline of at most 10,000 vertices (same error), or removes it with `null`. |
 | `core.draft.external_ref.bind` | Not registered by `register_commands`: `external_commands::bind_command(links)` returns its specification with the loaded links, and the product registers it. |
 
-The bind command runs in one transaction, so one undo restores everything it changed:
+The bind command runs in one transaction, so one undo restores everything it changed. It is
+planned, then written:
 
-1. It refuses, before any change, a linked space with an entity that is not a point or a curve
-   (`draft.external_ref.bind_unsupported`, argument `type`).
-2. It creates a block definition named after the linked space: the space's name when free, else
-   `<file name>-<space name>`, then with a counter. Its base point is `(0, 0)` and its unit is the unit
-   of the linked space.
-3. It copies the layers and linetypes the copied entities use. A name that exists in the host is
-   renamed `<file name>-<name>` (with a counter if that is taken too). Copied values are kept, except
-   the names and the references to copied layers and linetypes.
-4. It copies each entity into the block with its values and draw order. A clip boundary is applied
-   first: each curve is cut with `clip::cut` and each piece becomes an entity of the type of its
-   curve, holding its geometry in the kind slot as the creating commands do; points are kept when
-   inside. Block references of this crate do not clip, so the clip
-   boundary itself is not kept.
-5. It creates a block reference with the placed reference's common fields, `position`, `scale` and
-   `rotation`, and deletes the placed reference. The link object is deleted when no other placed
-   reference names it.
+1. **Plan.** It reads the linked space and decides every object of the copy, without changing the
+   host. It reaches the space's entities, the blocks they place (recursively, each block once, with
+   a visited set and the display nesting limit), and the definitions they refer to. A definition is
+   a layer, linetype, text style, dimension style, leader style, table style or hatch pattern. A
+   dimension chain is copied when one of its members is. Placed external references nested in the
+   space are not copied (see decision 18).
+2. **Budget.** The plan is refused before anything is created when it needs more objects than
+   `WorkBudget::primitives`, more objects than the document's record limit, or more work than
+   `WorkBudget::work` (one unit for each object, and the clip vertices for each curve cut). The
+   refusal is `draft.external_ref.budget_exceeded`. `bind_command_with_budget` takes the bounds;
+   `bind_command` uses `WorkBudget::default()`.
+3. **Names.** The block definition is named after the linked space: the space's name when free,
+   else `<file name>-<space name>`, then with a counter. Each copied definition and block keeps its
+   name when the host has no object of its type with that name; otherwise it is copied under
+   `<file name>-<name>`, with a counter if that is taken too.
+4. **Clip.** When the placed reference has a clip boundary, it applies to the entities of the space
+   (not to the content of the blocks they place). A curve is cut with `clip::cut`, and each piece
+   becomes an entity of the type of its curve. A point and every other kind is kept whole when its
+   anchor is inside the boundary, and dropped otherwise. The anchor is the insertion point of a text,
+   rich text, block reference, array and table, the position of a multileader, the line position of
+   a dimension, the first point of a leader, the pick point of a hatch (otherwise the lower corner of
+   its first loop), and the lower corner of a wipeout. A kind with no anchor is kept.
+5. **Write.** Every copy gets its host identifier before the first object is created, so a reference
+   between two copies names the host copy whatever the order of creation. Each reference of a copy
+   is remapped: a reference to a copied object names its copy, and any other reference is cleared,
+   the field becomes absent, a list element or map entry is dropped, and a record whose references
+   were all cleared is dropped from its list. Each cleared reference is counted in one problem,
+   `draft.external_ref.bind_reference_cleared`, in the result. No copy keeps an identifier of the
+   linked document.
+6. **Result.** It creates a block reference with the placed reference's common fields,
+   `position`, `scale` and `rotation`, deletes the placed reference, and deletes the link object when
+   no other placed reference names it. The result reports the counts of copied entities, blocks,
+   definitions and chains, the clip's kept, dropped and cut counts, the placed references not copied
+   and the problems. The transaction commit runs the validators: a copy that fails them aborts the
+   whole bind with nothing changed.
 
 For an unclipped reference, the block reference draws the same geometry and colors as the reference
-had, so the display lists agree in shape and color. Identifiers, layers (copies) and the list
-structure differ.
+had, so the display lists agree in shape and color. Identifiers and the list structure differ. A
+clipped reference draws the copies that the clip keeps, which can differ from the cut of the
+reference: a text kept whole is not cut.
 
 ### Decisions
 
@@ -1361,12 +1382,15 @@ Where the specification was silent:
    on the active path and reporting it at once, which is cheaper but reports before the limit.
 8. The default space is the first model space in identifier order. Rejected: an error for drawings
    with more than one model space, since a drawing can legitimately hold several.
-9. Bind copies points and curves only. Rejected: copying every entity type, which needs the references
-   of text, dimension, hatch, table and nested block styles remapped to host objects; the refusal
-   names the first type it meets.
-10. Bind applies a clip by cutting the copies. Rejected: refusing bind for clipped references, which
-   would make the clip feature unusable with bind; and keeping the clip on the block reference, which
-   would need a new field on `core.draft.block_ref` (a versioned type change).
+9. Bind copies every entity type of the crate. Rejected: copying points and curves only, and
+   refusing the other types, which left text, dimension, hatch, table and nested block references
+   unbound. Remapping references needs every copy created with its host identifier, so the copies
+   are allocated first (decision 19).
+10. Bind applies a clip by cutting the curves of the copies, and keeps or drops the other entities
+   by their anchor. Rejected: refusing bind for clipped references, which would make the clip feature
+   unusable with bind; exploding the other entities to curves, which changes what the block holds
+   and what a user can edit; and keeping the clip on the block reference, which would need a new
+   field on `core.draft.block_ref` (a versioned type change).
 11. Bind is not registered by `register_commands`. Rejected: a command that reads links from a global
    store, since a command receives only its document. The product passes its links to
    `bind_command`.
@@ -1388,6 +1412,23 @@ Where the specification was silent:
    boundary holds.
 17. A linked primitive's appearance sources are `Object` when they came from a linked layer. Rejected:
    keeping `Layer` sources, which a viewport override of a host layer matches by identifier.
+18. Placed external references nested in the linked space are not copied, and are counted in the
+   result. Rejected: binding them recursively, and copying them as placed references. A placed
+   reference names its link by a path relative to the linked drawing's location; the host cannot
+   show that the same relative path resolves to the same file from its own location, and the crate
+   has no location of the host. The rest of the bind goes ahead.
+19. Identifiers are allocated for all copies before any object is created, and each object is then
+   created with its references remapped. Rejected: creating the definitions in dependency order and
+   the entities after them, which needs a topological order of entity references (a dimension may
+   refer to a line that is created later) and a second pass to repair references. The transaction
+   does not resolve references when it creates an object, so the allocation gives the same result
+   without the order.
+20. A bind problem (a cleared reference, a placed reference not copied) is reported in the result
+   and does not fail the command. Rejected: a refusal, which would stop binding any space with a
+   reference to an object outside it, such as a dimension whose target a clip removed.
+21. The bind of a space with a reference from a copy to a copied curve that the clip cut is cleared,
+   because the pieces of a cut curve are new objects that no reference names. Rejected: pointing the
+   reference at the first piece, which would pick one of several objects as the target.
 
 ## Error codes
 
@@ -1452,7 +1493,9 @@ The codes of every part of the crate:
 | `draft.external_ref.no_links` | `unsupported` | A placed external reference is listed without loaded links and draws nothing |
 | `draft.external_ref.space_invalid` | `not_found` | The linked drawing holds no space that the placed reference names, or no model space |
 | `draft.external_ref.clip_invalid` | `invalid_input` | A clip boundary of an external reference is not a closed polyline, or has more than 10,000 vertices |
-| `draft.external_ref.bind_unsupported` | `unsupported` | Binding meets an entity of a type it does not copy (argument `type`) |
+| `draft.external_ref.bind_unsupported` | `unsupported` | Reserved (never returned): binding copies every entity type of the crate; the code is kept because codes are never reused |
+| `draft.external_ref.bind_reference_cleared` | `failed_operation` | A bind result's problem (a count, not a refusal): references of copies were cleared because their targets are not copied |
+| `draft.external_ref.bind_not_copied` | `failed_operation` | A bind result's problem (a count, not a refusal): placed references nested in the linked space were not copied |
 | `draft.external_ref.budget_exceeded` | `limit_exceeded` | The expansions, primitives or work units of one display build are used up; the placed reference draws nothing |
 | `draft.external_ref.partial` | `failed_operation` | Some entities of a linked drawing could not be drawn in a placed reference (a warning) |
 | `draft.hatch.boundary_invalid` | `invalid_input` | A stored hatch loop is not a closed circle, ellipse or polyline, a hatch has no loop, or a boundary object cannot bound a region |

@@ -44,6 +44,7 @@ mod annotation_commands;
 mod annotation_display;
 pub mod appearance;
 pub mod array;
+mod bind;
 pub mod clip;
 pub mod commands;
 pub mod dimension;

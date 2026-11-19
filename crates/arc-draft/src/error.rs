@@ -369,12 +369,29 @@ pub mod codes {
         category: Category::FailedOperation,
         message_id: "draft-external-ref-partial",
     };
-    /// Binding would copy an entity of a type that binding does not copy; the argument `type`
-    /// names it.
+    /// Reserved: binding copies every entity type the crate defines, so no bind returns this
+    /// code. The code is kept because error codes are never reused; its argument `type` would
+    /// name the type.
     pub const EXTERNAL_BIND_UNSUPPORTED: ErrorCode = ErrorCode {
         code: "draft.external_ref.bind_unsupported",
         category: Category::Unsupported,
         message_id: "draft-external-ref-bind-unsupported",
+    };
+
+    /// A bind left a reference of a copy cleared, because its target is not copied. Reported as a
+    /// problem of the result (a count); the bind does not fail.
+    pub const EXTERNAL_BIND_REFERENCE_CLEARED: ErrorCode = ErrorCode {
+        code: "draft.external_ref.bind_reference_cleared",
+        category: Category::FailedOperation,
+        message_id: "draft-external-ref-bind-reference-cleared",
+    };
+
+    /// A bind did not copy placed references nested in the linked space. Reported as a problem of
+    /// the result (a count); the bind does not fail.
+    pub const EXTERNAL_BIND_NOT_COPIED: ErrorCode = ErrorCode {
+        code: "draft.external_ref.bind_not_copied",
+        category: Category::FailedOperation,
+        message_id: "draft-external-ref-bind-not-copied",
     };
 
     /// A stored hatch loop is not a closed circle, ellipse or polyline, the hatch has no loop, or
@@ -589,6 +606,8 @@ pub mod codes {
         EXTERNAL_SPACE_INVALID,
         EXTERNAL_CLIP_INVALID,
         EXTERNAL_BIND_UNSUPPORTED,
+        EXTERNAL_BIND_REFERENCE_CLEARED,
+        EXTERNAL_BIND_NOT_COPIED,
         EXTERNAL_PARTIAL,
         EXTERNAL_BUDGET_EXCEEDED,
     ];
