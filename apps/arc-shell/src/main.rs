@@ -11,9 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_app::application::{AppConfig, Application};
+use arc_app::managed;
 use arc_app::recent::RecentFiles;
 use arc_app::shell::UserFiles;
 use arc_app::shell::event_loop::{self, Startup};
+use arc_app::single_instance::{Acquisition, SingleInstance};
 use arc_base::id::{IdGenerator, RandomSource, TimeSource};
 use arc_base::{Error, Limits};
 use arc_command::Clock;
@@ -90,6 +92,20 @@ fn data_dir() -> PathBuf {
     base.join("arc-shell")
 }
 
+/// The administrator's settings file. It is read from a fixed system location only: a path from
+/// the environment would let a user choose a file that locks nothing.
+fn managed_settings_path() -> PathBuf {
+    if cfg!(target_os = "windows") {
+        PathBuf::from(env(&["PROGRAMDATA"], "C:\\ProgramData"))
+            .join("arc-shell")
+            .join("managed-settings.toml")
+    } else if cfg!(target_os = "macos") {
+        PathBuf::from("/Library/Application Support/arc-shell/managed-settings.toml")
+    } else {
+        PathBuf::from("/etc/arc-shell/managed-settings.toml")
+    }
+}
+
 /// Runs the shell; the error is the start-up failure as a line for standard error.
 fn start() -> Result<(), String> {
     let fail = |e: Error| arc_shell::describe(&e, None);
@@ -113,6 +129,21 @@ fn start() -> Result<(), String> {
                 .with_source(e),
         )
     })?;
+    // A running instance takes the files and this start ends; without a channel the shell starts
+    // as the only instance.
+    let files: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    let instance = match SingleInstance::acquire(&dir.join("instance"), &files) {
+        Ok(Acquisition::Forwarded) => return Ok(()),
+        Ok(Acquisition::Primary(instance)) => Some(instance),
+        Err(e) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "{}",
+                arc_shell::describe(&e, Some(&localizer))
+            );
+            None
+        }
+    };
     let product = arc_shell::product(Arc::new(SystemClock), owner).map_err(with)?;
     let recent_path = dir.join("recent.toml");
     let (recent, _) =
@@ -132,7 +163,13 @@ fn start() -> Result<(), String> {
         recent,
     };
     let mut app = Application::new(product, config);
-    let files: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    if let Err(e) = managed::apply(app.settings_mut(), &managed_settings_path()) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "{}",
+            arc_shell::describe(&e, Some(&localizer))
+        );
+    }
     for file in &files {
         // A file that cannot be opened is reported and the shell still starts.
         if let Err(e) = app.open(file) {
@@ -161,6 +198,8 @@ fn start() -> Result<(), String> {
         }),
         os_locales,
         log_dir: Some(dir.join("logs")),
+        instance,
+        automation_dir: Some(dir.join("automation")),
     });
     result.map_err(with)
 }

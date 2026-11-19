@@ -119,6 +119,7 @@ pub fn product(clock: Arc<dyn Clock>, owner: LockOwner) -> Result<Product> {
         .with_commands(arc_shell_sample::registry()?);
     arc_app::commands::register(builder.commands_mut())?;
     shell::prefs::register_settings(&mut builder)?;
+    arc_app::automation::register_settings(&mut builder)?;
     builder.file_type(FileType {
         extension: "arc".into(),
         message_id: "shell-file-arc".into(),

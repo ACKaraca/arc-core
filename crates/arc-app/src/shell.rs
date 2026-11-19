@@ -1861,7 +1861,7 @@ impl Panel for SettingsPanel {
                     continue;
                 };
                 // Values above the user scope's reach are shown, not edited.
-                let editable = row.scope >= Scope::User;
+                let editable = row.scope >= Scope::User && !row.locked;
                 ui.horizontal(|ui| {
                     ui.add_enabled_ui(editable, |ui| {
                         self.row(ui, &row, &setting.ty, cx.localize, cx.actions);

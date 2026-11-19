@@ -25,6 +25,8 @@ pub struct Row {
     pub message_id: &'static str,
     /// Stored values that resolution skipped, highest scope first.
     pub issues: Vec<Issue>,
+    /// Whether the system scope locks the key; a locked key cannot be edited outside it.
+    pub locked: bool,
 }
 
 /// Every registered setting, ordered by key.
@@ -43,6 +45,7 @@ pub fn rows(store: &SettingsStore) -> Vec<Row> {
                 scope: setting.scope,
                 message_id: setting.message_id,
                 issues: effective.issues,
+                locked: store.is_locked(setting.key),
             })
         })
         .collect()

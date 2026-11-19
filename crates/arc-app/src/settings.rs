@@ -4,7 +4,7 @@
 //! table per scope and resolves a key to its effective value and the scope that supplied it.
 //! Keys are dotted; in a table, `ui.language` is the key `language` of the table `ui`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use arc_base::{Error, Result};
 use toml::{Table, Value};
@@ -140,6 +140,8 @@ pub enum IssueKind {
     TypeMismatch,
     /// The scope is above the highest scope the setting allows.
     ScopeNotAllowed,
+    /// The key is locked by the system scope, so this scope's value is ignored.
+    Locked,
 }
 
 /// A stored value that resolution skipped.
@@ -160,6 +162,7 @@ impl Issue {
         let code = match self.kind {
             IssueKind::TypeMismatch => codes::SETTINGS_TYPE_MISMATCH,
             IssueKind::ScopeNotAllowed => codes::SETTINGS_SCOPE_NOT_ALLOWED,
+            IssueKind::Locked => codes::SETTINGS_LOCKED,
         };
         Error::new(code)
             .with_arg("key", self.key.as_str())
@@ -180,9 +183,15 @@ pub struct Effective {
 
 const MAX_SEGMENTS: usize = 8;
 
+/// The top-level table of the system (managed) settings file that holds the lock list. Keys
+/// under it are not settings.
+pub const MANAGED_TABLE: &str = "managed";
+
 fn key_is_valid(key: &str) -> bool {
     let segments: Vec<&str> = key.split('.').collect();
+    let reserved = segments.first() == Some(&MANAGED_TABLE);
     segments.len() <= MAX_SEGMENTS
+        && !reserved
         && segments.iter().all(|s| {
             s.starts_with(|c: char| c.is_ascii_lowercase())
                 && s.chars()
@@ -301,6 +310,7 @@ fn lookup<'a>(table: &'a Table, key: &str) -> Option<&'a Value> {
 pub struct SettingsStore {
     registry: SettingsRegistry,
     layers: BTreeMap<Scope, Table>,
+    locked: BTreeSet<&'static str>,
 }
 
 impl SettingsStore {
@@ -310,7 +320,30 @@ impl SettingsStore {
         Self {
             registry,
             layers: BTreeMap::new(),
+            locked: BTreeSet::new(),
         }
+    }
+
+    /// Locks the registered keys in `keys` (managed settings, CORE-APP-013): their value comes
+    /// from the system scope only, and writes below that scope are refused. Keys the registry
+    /// does not know are not locked; they are returned, in order, so the caller can log them.
+    pub fn lock<'k>(&mut self, keys: impl IntoIterator<Item = &'k str>) -> Vec<String> {
+        let mut unknown = Vec::new();
+        for key in keys {
+            match self.registry.get(key) {
+                Some(setting) => {
+                    self.locked.insert(setting.key);
+                }
+                None => unknown.push(key.to_owned()),
+            }
+        }
+        unknown
+    }
+
+    /// Whether `key` is locked by the system scope.
+    #[must_use]
+    pub fn is_locked(&self, key: &str) -> bool {
+        self.locked.contains(key)
     }
 
     /// The registry.
@@ -352,7 +385,9 @@ impl SettingsStore {
             let Some(raw) = self.layers.get(&scope).and_then(|t| lookup(t, key)) else {
                 continue;
             };
-            let kind = if scope > setting.scope && scope != Scope::System {
+            let kind = if scope != Scope::System && self.locked.contains(setting.key) {
+                IssueKind::Locked
+            } else if scope > setting.scope && scope != Scope::System {
                 IssueKind::ScopeNotAllowed
             } else if let Some(value) = setting.ty.read(raw) {
                 return Ok(Effective {
@@ -391,6 +426,9 @@ impl SettingsStore {
                 .with_arg("key", key)
                 .with_arg("scope", scope.as_str()));
         }
+        if scope != Scope::System && self.locked.contains(setting.key) {
+            return Err(locked_error(key, scope));
+        }
         if !setting.ty.accepts(&value) {
             return Err(Error::new(codes::SETTINGS_TYPE_MISMATCH).with_arg("key", key));
         }
@@ -415,16 +453,26 @@ impl SettingsStore {
     /// value was removed. Parent tables left empty are removed too.
     ///
     /// # Errors
-    /// `app.settings.unknown_key`.
+    /// `app.settings.unknown_key` and `app.settings.locked` (a locked key outside the system
+    /// scope).
     pub fn reset(&mut self, scope: Scope, key: &str) -> Result<bool> {
-        if self.registry.get(key).is_none() {
+        let Some(setting) = self.registry.get(key) else {
             return Err(Error::new(codes::SETTINGS_UNKNOWN_KEY).with_arg("key", key));
+        };
+        if scope != Scope::System && self.locked.contains(setting.key) {
+            return Err(locked_error(key, scope));
         }
         let Some(table) = self.layers.get_mut(&scope) else {
             return Ok(false);
         };
         Ok(remove(table, key))
     }
+}
+
+fn locked_error(key: &str, scope: Scope) -> Error {
+    Error::new(codes::SETTINGS_LOCKED)
+        .with_arg("key", key)
+        .with_arg("scope", scope.as_str())
 }
 
 fn remove(table: &mut Table, key: &str) -> bool {

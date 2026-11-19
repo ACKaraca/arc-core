@@ -147,8 +147,117 @@ reports, Hub) are added in later parts behind settings that default to off.
   included, for which the caller's predicate says the file is missing, and returns the paths.
 - The list is its own TOML file (`entries = [{ path, pinned }]`) written through the settings-file
   functions. On load, malformed items and duplicates are skipped, surplus pins become unpinned and
-  the bound is applied. Paths that are not UTF-8 are not persisted. Thumbnails are not part of
-  this model.
+  the bound is applied. Paths that are not UTF-8 are not persisted.
+
+#### Thumbnails (CORE-APP-007)
+
+- A thumbnail is a PNG file in a directory the caller chooses (beside the list in the user data
+  directory). The file name is `<hash>.png`, where `<hash>` is the 64-bit FNV-1a hash of the path
+  as bytes, written in 16 lowercase hexadecimal digits. The file never holds the path and is never
+  in the settings file.
+- The caller supplies the PNG bytes when a document is saved or closed; the crate does not render.
+  The bytes are checked for the PNG signature and an `IHDR` header: at most 64 KiB and 256 pixels
+  on each side, both at least one pixel.
+- `get` returns `None` for a missing file, one over the byte limit, or one without a valid header;
+  an absent thumbnail is not an error. `put` writes through a temporary file and a rename.
+- `remove` deletes one thumbnail. `sweep` deletes every thumbnail file whose hash no entry of the
+  list produces, so evicted, removed and pruned entries lose their files; the caller runs it after
+  saving the list. Files whose names are not thumbnail names are left alone.
+- The list itself is not changed by thumbnails: an entry has no thumbnail field.
+
+### Managed settings (CORE-APP-013)
+
+- The administrator file is `managed-settings.toml` in a fixed system location: `/etc/arc-shell/`
+  on Linux, `/Library/Application Support/arc-shell/` on macOS and `%PROGRAMDATA%\arc-shell\` on
+  Windows. The reference shell reads it at start; no environment variable or argument changes the
+  path, because a user-chosen file could lock nothing.
+- Its top-level values are the system scope. The table `managed` holds the lock list,
+  `managed.locked`, an array of setting keys. The table is reserved: no setting key starts with
+  `managed`.
+- A locked key takes its value from the system scope only. A value in the user, workspace or
+  document scope is skipped with an issue of kind `locked`, which resolution reports like the other
+  issues. A locked key without a system value takes its default.
+- `set` and `reset` in a scope other than the system scope fail with `app.settings.locked`, which
+  names the key. The settings editor row carries `locked`, and the windowed editor disables the
+  row's edit controls.
+- Lock-list entries that are not registered keys, that are not text, or a `locked` value that is
+  not an array are ignored and logged with `tracing` at warning level. Only the key is logged.
+- The file is read, never written or renamed. A missing file applies nothing. A file that is too
+  large, not UTF-8 or not TOML is an error and none of it is applied.
+- Decisions: a malformed file applies nothing, and the shell reports the error and starts; the
+  rejected alternative was refusing to start, which would block users on a damaged file. A
+  reset in the user scope of a locked key is refused too; the rejected alternative allowed it,
+  since it only removes a value that is ignored anyway, but the rule is one check for all writes.
+  A malformed file is not set aside, unlike user files; renaming inside a system directory needs
+  rights the application does not have.
+- Known gap: the reference shell logs the ignored entries before the log subscriber exists, so
+  those records are not written. Logging is installed when the event loop starts.
+
+### Single instance (CORE-APP-008)
+
+- `SingleInstance::acquire(dir, args)` returns `Acquisition::Primary(instance)` or
+  `Acquisition::Forwarded`. The channel is `instance.sock` in `dir`, a Unix domain socket. `dir` is
+  created with mode 0700 when missing. An existing `dir` is refused (`app.instance.directory`) when
+  it is a symbolic link, is not a directory, has any group or other permission, or when the socket
+  this process creates in it has another owner.
+- A start first connects and writes one line, `{"paths":[...]}`, of absolute paths, then closes its
+  write side. A running instance that accepts the line makes the start `Forwarded`; the caller
+  exits. Each argument is made absolute with `std::path::absolute` before it is sent. An argument
+  that is not UTF-8 is an error.
+- No listener, or a socket file that refuses connections, is a stale socket: it is removed only
+  after the connection failed, and the start becomes the instance. A socket file that is another
+  kind of file is left alone and the start fails with `app.instance.io`. A running instance that
+  accepts the connection but does not take the write within the 500 ms deadline gives
+  `app.instance.busy`.
+- `SingleInstance::poll` accepts at most eight connections per call. Each connection has one
+  deadline of 500 ms for its line. A line longer than 64 KiB without a newline, a line that is not
+  JSON, a `paths` value that is not an array, or more than 64 paths drops that message only; the
+  next one is read normally. Relative entries inside an accepted message are skipped.
+- The receiving side opens each path with `Application::open`, so the application's own checks
+  apply. The reference shell polls every 250 ms while its listener exists; a forwarded file
+  therefore opens within a quarter of a second.
+- Non-Unix: `acquire` returns `Primary` and `poll` returns nothing, so the application starts
+  normally. Windows named pipes are open.
+- Decisions: a start with no file arguments also forwards and exits, so a second launch focuses
+  the running instance's open flow; the rejected alternative starts a second instance without
+  files. Paths are made absolute without resolving symbolic links, which needs no file to exist;
+  the rejected alternative canonicalizes, which fails for a path that was removed and resolves
+  links the user did not name. Polling is a timer; the rejected alternative is a wake-up from a
+  listener thread, which needs a cross-thread queue into the single-threaded event loop.
+- Shortcut: `std` offers no connect timeout for Unix sockets, so connecting to a listener whose
+  backlog is full can wait. Upgrade when a non-blocking connect is available.
+
+### Automation switch (CORE-APP-020)
+
+- The setting `automation.enabled` is a truth value, off by default, settable in the user scope. A
+  locked value (CORE-APP-013) refuses writes, so a system that locks it off keeps it off.
+- `Automation::sync(store, dir, registry, name, version)` applies the effective value. On: binds a
+  `LocalSocket` named `automation` in `dir` and serves the automation protocol on a thread the
+  module owns. Off: ends that thread, closes its connections and drops the socket, which removes
+  the socket and token files. `Automation::start` and `stop` do the same without the setting;
+  dropping an `Automation` stops it. The reference shell calls `sync` from its event loop when the
+  effective value changes, with the directory `automation` in the user data directory.
+- The served registry is the product's command registry and the served document set is empty:
+  document commands answer with an unknown-document error until the shell publishes its open
+  documents to the serving thread. Server-side log records go to `tracing` by event name only,
+  never by detail, since some details are client labels.
+- Grants are stored in the user settings file as `automation.grants`, an array of tables
+  `{ client = "<label>", permissions = ["read", ...] }`. A label is 1 to 64 bytes with no control
+  characters; `grant` replaces an earlier grant of the label, and an empty permission set or
+  `revoke` removes it. Malformed entries and repeated labels are skipped on read.
+- The socket's ceiling is the union of the granted permissions, read when the socket starts.
+  Decision: the union is the only ceiling `arc-command` can take, since every connection of a
+  socket shares one ceiling and one token. The rejected alternative keeps the ceiling empty, which
+  fails closed but makes the grants unusable; the union gives every holder of the token the
+  granted permissions, which the same user can already do, since the token file is readable by
+  that user alone.
+- Not provided, and why: the connected-client list and the per-client permissions. `arc-command`
+  reports neither a client's label after `arc.initialize` nor connection open and close events,
+  and gives every connection the same ceiling and token. The additions that would complete the row
+  are: a per-connection callback after `arc.initialize` with the connection identifier and
+  `client_name`; a connection-closed callback; a per-connection ceiling or permission hook on
+  `Server`; and a token per client. Until then, grants are recorded and shown but not enforced per
+  client.
 
 ### Reference CLI (CORE-APP-026)
 
@@ -207,6 +316,11 @@ The codes `arc-app` owns; messages are in `locales/en-US/arc-app.ftl`.
 | `app.settings.type_mismatch` | `invalid_input` | A value does not satisfy its setting's type or range (also reported as an issue by resolution) |
 | `app.settings.scope_not_allowed` | `invalid_input` | A value is in a scope above the setting's highest scope, or in the default scope (also reported as an issue) |
 | `app.settings.path_conflict` | `conflict` | A parent key of a setting holds a non-table value, or the key holds a table |
+| `app.settings.locked` | `permission_denied` | A write or reset outside the system scope names a key that the system scope locks |
+| `app.managed.read_failed` | `io` | The system settings file exists but cannot be read |
+| `app.automation.failed` | `failed_operation` | The automation socket's serving thread cannot be started |
+| `app.automation.client_invalid` | `invalid_input` | A client label is empty, longer than 64 bytes or contains control characters |
+| `app.managed.invalid` | `corrupt_data` | The system settings file is larger than 1 MiB, not UTF-8 or not valid TOML; nothing from it is applied |
 | `app.settings_file.read_failed` | `io` | An existing settings file cannot be read |
 | `app.settings_file.write_failed` | `io` | A settings file cannot be written |
 | `app.settings_file.malformed` | `corrupt_data` | A settings file is not UTF-8 TOML; it was set aside |
@@ -221,6 +335,14 @@ The codes `arc-app` owns; messages are in `locales/en-US/arc-app.ftl`.
 | `app.macro.write_failed` | `io` | A recorded macro cannot be written to the chosen file |
 | `app.recent.not_found` | `not_found` | A path is not in the recent-files list |
 | `app.recent.too_many_pinned` | `limit_exceeded` | A fifty-first entry is pinned |
+| `app.thumbnail.too_large` | `limit_exceeded` | A thumbnail exceeds 64 KiB or 256 pixels on a side |
+| `app.thumbnail.invalid` | `invalid_input` | A thumbnail is not a PNG image header |
+| `app.thumbnail.io` | `io` | A thumbnail file cannot be written, read as a directory or removed |
+| `app.instance.directory` | `permission_denied` | The instance directory is a symbolic link, not a directory, open to other users, or owned by another user than the socket |
+| `app.instance.io` | `io` | The single-instance socket cannot be created, connected, configured or read |
+| `app.instance.busy` | `conflict` | A running instance exists but did not take the message within the deadline |
+| `app.instance.invalid_path` | `invalid_input` | A file argument is not valid UTF-8 and cannot be sent |
+| `app.instance.message_too_large` | `limit_exceeded` | More than 64 file arguments, or a message above 64 KiB |
 | `app.product.invalid_id` | `invalid_input` | A panel, tool or extractor identifier is not a dotted key, or a file extension is malformed or can neither be opened nor saved |
 | `app.product.duplicate` | `conflict` | A panel, tool, extractor or file extension is registered twice |
 | `app.product.unknown_type` | `not_found` | An extractor names an object type that is not registered |

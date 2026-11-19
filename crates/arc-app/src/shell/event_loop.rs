@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use arc_base::{Error, Result};
 use arc_gpu::{Gpu, wgpu};
@@ -26,8 +26,14 @@ use winit::window::{Window, WindowId};
 use super::platform::{self, Done, FileDialogs, NativeDialogs, NativeMenu};
 use super::{FrameInput, Request, Shell, ShellConfig, UserFiles, WindowModel, prefs};
 use crate::application::{Application, TabId};
+use crate::automation::{self, Automation};
 use crate::codes;
 use crate::locale::Localizer;
+use crate::settings::SettingValue;
+use crate::single_instance::SingleInstance;
+
+/// How often a running instance looks for the files other starts forward.
+const FORWARD_POLL: Duration = Duration::from_millis(250);
 use crate::window_state::{Monitor, Placement, WindowStates, rescale};
 
 /// The identifier of the main window in the window-state file.
@@ -54,6 +60,10 @@ pub struct Startup {
     /// The log directory: the subscriber is installed from the log settings once the user
     /// settings are loaded. `None` installs none.
     pub log_dir: Option<PathBuf>,
+    /// The single-instance listener of this process, polled for forwarded files.
+    pub instance: Option<SingleInstance>,
+    /// The directory of the automation socket; `None` keeps the automation switch unavailable.
+    pub automation_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for Startup {
@@ -106,6 +116,10 @@ pub fn run(startup: Startup) -> Result<()> {
         floating: Vec::new(),
         failure: None,
         started: Instant::now(),
+        instance: startup.instance,
+        automation: Automation::new(),
+        automation_dir: startup.automation_dir,
+        automation_applied: None,
     };
     event_loop.run_app(&mut handler).map_err(window_error)?;
     handler.failure.map_or(Ok(()), Err)
@@ -147,6 +161,13 @@ struct Handler {
     floating: Vec<Open>,
     failure: Option<Error>,
     started: Instant,
+    /// The single-instance listener; files other starts forward are opened here.
+    instance: Option<SingleInstance>,
+    /// The automation socket and the directory it lives in.
+    automation: Automation,
+    automation_dir: Option<PathBuf>,
+    /// The effective value of the automation switch the socket was last applied for.
+    automation_applied: Option<bool>,
 }
 
 fn monitors(event_loop: &ActiveEventLoop) -> (Vec<Monitor>, usize) {
@@ -580,11 +601,64 @@ impl ApplicationHandler for Handler {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.receive_forwarded();
+        self.apply_automation();
         if self.shell.busy() {
             self.request_redraw_all();
             event_loop.set_control_flow(ControlFlow::Poll);
+        } else if self.instance.is_some() {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FORWARD_POLL));
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
+        }
+    }
+}
+
+impl Handler {
+    /// Opens the files other starts forwarded, through the application's open flow. Paths are
+    /// not logged.
+    fn receive_forwarded(&mut self) {
+        let paths = match &self.instance {
+            Some(instance) => instance.poll(),
+            None => return,
+        };
+        if paths.is_empty() {
+            return;
+        }
+        for path in &paths {
+            if let Err(e) = self.app.open(path) {
+                self.shell.error(e);
+            }
+        }
+        self.request_redraw_all();
+    }
+
+    /// Starts or stops the automation socket when the effective value of its switch changed since
+    /// the last attempt. A failure is shown once; the next change tries again.
+    fn apply_automation(&mut self) {
+        let Some(dir) = &self.automation_dir else {
+            return;
+        };
+        let enabled = matches!(
+            self.app
+                .settings()
+                .get(automation::ENABLED)
+                .map(|e| e.value),
+            Ok(SettingValue::Bool(true))
+        );
+        if self.automation_applied == Some(enabled) {
+            return;
+        }
+        self.automation_applied = Some(enabled);
+        let product = self.app.product().headless();
+        if let Err(e) = self.automation.sync(
+            self.app.settings(),
+            dir,
+            product.registry.clone(),
+            &product.name,
+            &product.version,
+        ) {
+            self.shell.error(e);
         }
     }
 }

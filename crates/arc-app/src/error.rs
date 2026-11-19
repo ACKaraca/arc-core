@@ -43,6 +43,12 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "app-settings-scope-not-allowed",
     };
+    /// A key is locked by the system scope, so a value outside that scope cannot be written.
+    pub const SETTINGS_LOCKED: ErrorCode = ErrorCode {
+        code: "app.settings.locked",
+        category: Category::PermissionDenied,
+        message_id: "app-settings-locked",
+    };
     /// A value cannot be stored because a parent key holds a non-table value.
     pub const SETTINGS_PATH_CONFLICT: ErrorCode = ErrorCode {
         code: "app.settings.path_conflict",
@@ -72,6 +78,19 @@ pub mod codes {
         code: "app.settings_file.too_large",
         category: Category::LimitExceeded,
         message_id: "app-settings-file-too-large",
+    };
+    /// The system (managed) settings file exists but cannot be read.
+    pub const MANAGED_READ_FAILED: ErrorCode = ErrorCode {
+        code: "app.managed.read_failed",
+        category: Category::Io,
+        message_id: "app-managed-read-failed",
+    };
+    /// The system (managed) settings file is too large, not UTF-8 or not valid TOML. It is not
+    /// applied and nothing is renamed.
+    pub const MANAGED_INVALID: ErrorCode = ErrorCode {
+        code: "app.managed.invalid",
+        category: Category::CorruptData,
+        message_id: "app-managed-invalid",
     };
     /// A malformed settings file could not be renamed aside.
     pub const FILE_SET_ASIDE_FAILED: ErrorCode = ErrorCode {
@@ -120,6 +139,67 @@ pub mod codes {
         code: "app.macro.write_failed",
         category: Category::Io,
         message_id: "app-macro-write-failed",
+    };
+    /// The instance directory is a symbolic link, is not a directory, is open to other users or
+    /// has another owner than the socket this process creates in it.
+    pub const INSTANCE_DIRECTORY: ErrorCode = ErrorCode {
+        code: "app.instance.directory",
+        category: Category::PermissionDenied,
+        message_id: "app-instance-directory",
+    };
+    /// The single-instance channel cannot be created, connected or read.
+    pub const INSTANCE_IO: ErrorCode = ErrorCode {
+        code: "app.instance.io",
+        category: Category::Io,
+        message_id: "app-instance-io",
+    };
+    /// A running instance exists but did not take the message in time.
+    pub const INSTANCE_BUSY: ErrorCode = ErrorCode {
+        code: "app.instance.busy",
+        category: Category::Conflict,
+        message_id: "app-instance-busy",
+    };
+    /// A file argument is not valid UTF-8 and cannot be sent to the running instance.
+    pub const INSTANCE_INVALID_PATH: ErrorCode = ErrorCode {
+        code: "app.instance.invalid_path",
+        category: Category::InvalidInput,
+        message_id: "app-instance-invalid-path",
+    };
+    /// Too many file arguments, or a message above the size limit.
+    pub const INSTANCE_MESSAGE_TOO_LARGE: ErrorCode = ErrorCode {
+        code: "app.instance.message_too_large",
+        category: Category::LimitExceeded,
+        message_id: "app-instance-message-too-large",
+    };
+    /// The automation socket cannot start its serving thread.
+    pub const AUTOMATION_FAILED: ErrorCode = ErrorCode {
+        code: "app.automation.failed",
+        category: Category::FailedOperation,
+        message_id: "app-automation-failed",
+    };
+    /// A client label is empty, too long or contains control characters.
+    pub const AUTOMATION_CLIENT_INVALID: ErrorCode = ErrorCode {
+        code: "app.automation.client_invalid",
+        category: Category::InvalidInput,
+        message_id: "app-automation-client-invalid",
+    };
+    /// A thumbnail is larger than the byte or pixel bound.
+    pub const THUMBNAIL_TOO_LARGE: ErrorCode = ErrorCode {
+        code: "app.thumbnail.too_large",
+        category: Category::LimitExceeded,
+        message_id: "app-thumbnail-too-large",
+    };
+    /// A thumbnail is not a PNG image.
+    pub const THUMBNAIL_INVALID: ErrorCode = ErrorCode {
+        code: "app.thumbnail.invalid",
+        category: Category::InvalidInput,
+        message_id: "app-thumbnail-invalid",
+    };
+    /// A thumbnail file cannot be written, read as a directory or removed.
+    pub const THUMBNAIL_IO: ErrorCode = ErrorCode {
+        code: "app.thumbnail.io",
+        category: Category::Io,
+        message_id: "app-thumbnail-io",
     };
     /// A path is not in the recent-files list.
     pub const RECENT_NOT_FOUND: ErrorCode = ErrorCode {
@@ -198,6 +278,9 @@ pub mod codes {
         SETTINGS_TYPE_MISMATCH,
         SETTINGS_SCOPE_NOT_ALLOWED,
         SETTINGS_PATH_CONFLICT,
+        SETTINGS_LOCKED,
+        MANAGED_READ_FAILED,
+        MANAGED_INVALID,
         FILE_READ_FAILED,
         FILE_WRITE_FAILED,
         FILE_MALFORMED,
@@ -209,6 +292,16 @@ pub mod codes {
         LOCALE_FALLBACK_MISSING,
         LOG_INVALID_CONFIG,
         LOG_IO,
+        THUMBNAIL_TOO_LARGE,
+        THUMBNAIL_INVALID,
+        THUMBNAIL_IO,
+        INSTANCE_DIRECTORY,
+        INSTANCE_IO,
+        INSTANCE_BUSY,
+        INSTANCE_INVALID_PATH,
+        INSTANCE_MESSAGE_TOO_LARGE,
+        AUTOMATION_FAILED,
+        AUTOMATION_CLIENT_INVALID,
         RECENT_NOT_FOUND,
         RECENT_TOO_MANY_PINNED,
         PRODUCT_INVALID_ID,
