@@ -705,7 +705,11 @@ fn collect_events(
     time: f64,
     pressed: bool,
 ) -> Vec<ViewEvent> {
-    let free = |p: Pos2| rect.contains(p) && !blocked.is_some_and(|b| b.contains(p));
+    // A menu, dialog or popup above the viewport takes the click: the viewport sees a press only
+    // where its own layer is the topmost.
+    let layer = ui.layer_id();
+    let on_top = |p: Pos2| ui.ctx().layer_id_at(p).is_none_or(|top| top == layer);
+    let free = |p: Pos2| rect.contains(p) && !blocked.is_some_and(|b| b.contains(p)) && on_top(p);
     let to_px = |p: Pos2| {
         [
             f64::from(p.x - rect.min.x) * ppp,
@@ -715,9 +719,11 @@ fn collect_events(
     let focused = response.has_focus();
     let hovered = response.hovered() || response.contains_pointer();
     let pointer = ui.input(|i| i.pointer.latest_pos());
-    ui.input(|i| {
-        i.events
-            .iter()
+    // The events are copied out first: asking the context for the layer under a point while the
+    // input is borrowed would wait on itself.
+    let raw = ui.input(|i| i.events.clone());
+    {
+        raw.iter()
             .filter_map(|e| match *e {
                 Event::PointerMoved(p) if pressed || rect.contains(p) => {
                     Some(ViewEvent::Moved(to_px(p)))
@@ -769,7 +775,7 @@ fn collect_events(
                 _ => None,
             })
             .collect()
-    })
+    }
 }
 
 /// The accessible description: the selection count, then the prompt text when a command is

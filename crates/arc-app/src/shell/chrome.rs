@@ -574,14 +574,14 @@ pub fn toggle_views(
 
 /// The cursor text of the status bar: the drawing coordinates, or a placeholder.
 #[must_use]
-pub fn cursor_text(cursor: Option<[f64; 2]>, localize: &dyn Localize) -> String {
+pub fn cursor_text(cursor: Option<[f64; 2]>, digits: usize, localize: &dyn Localize) -> String {
     match cursor {
         Some([x, y]) => resolve(
             localize,
             STATUS_CURSOR.message_id,
             &[
-                ("x", Value::Text(format!("{x:.3}"))),
-                ("y", Value::Text(format!("{y:.3}"))),
+                ("x", Value::Text(format!("{x:.digits$}"))),
+                ("y", Value::Text(format!("{y:.digits$}"))),
             ],
         ),
         None => STATUS_NO_CURSOR.text(localize),

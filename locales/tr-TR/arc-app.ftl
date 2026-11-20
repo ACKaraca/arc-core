@@ -24,6 +24,7 @@ app-locale-catalog-too-large = { $tag } için ileti kataloğu çok büyük.
 app-locale-fallback-missing = Yedek dil { $tag } için katalog eksik.
 app-log-invalid-config = { $field } günlük ayarı geçerli değil.
 app-log-io = Günlük dosyasına yazılamadı.
+app-file-none-chosen = Dosya seçilmedi.
 app-macro-write-failed = Makro dosyaya yazılamadı.
 app-recent-not-found = { $path } dosyası son kullanılanlar arasında yok.
 app-thumbnail-too-large = Önizleme resmi izin verilen boyuttan büyük.

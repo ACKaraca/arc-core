@@ -50,6 +50,12 @@ pub trait Interaction: Send {
     /// What the shell shows this frame.
     fn output(&self) -> InteractionOutput;
 
+    /// A change of the view the controller asked for since the last call (a zoom command), taken
+    /// once. It changes the camera only, never the document.
+    fn take_view(&mut self) -> Option<ViewRequest> {
+        None
+    }
+
     /// The tab of the controller is closing: the shell calls this once, before the tab's
     /// document is closed and the controller is dropped. It is the last call of the controller,
     /// so an undo group it began or a prompt it left open is ended here. The context's
@@ -61,6 +67,24 @@ pub trait Interaction: Send {
     /// Not called when a close is cancelled or fails. Closing a tab through
     /// [`Application::close`] directly, without the shell, drops the controller without this call.
     fn closing(&mut self, _cx: &InteractionContext<'_>) {}
+}
+
+/// A change of the camera a controller asks for. Corners are model coordinates in drawing units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ViewRequest {
+    /// Frame everything in the viewport's scene.
+    Extents,
+    /// Return to the camera before the last request.
+    Previous,
+    /// Frame the rectangle between two corners.
+    Window {
+        /// One corner.
+        a: [f64; 2],
+        /// The opposite corner.
+        b: [f64; 2],
+    },
+    /// Scale the view about its center by a factor above zero.
+    Scale(f64),
 }
 
 /// The dynamic input panel a controller asks for: its prompt message and fields.
@@ -89,6 +113,11 @@ pub struct InteractionOutput {
     pub overlays: Vec<ProductOverlay>,
     /// The dynamic input panel, when point input is active.
     pub dynamic: Option<DynamicOutput>,
+    /// The model point the pointer resolves to (snap step, ortho, object snap), in drawing units:
+    /// the status bar shows it and the crosshair sits on it. `None` shows the pointer itself.
+    pub cursor: Option<[f64; 2]>,
+    /// The digits after the decimal point of the status bar coordinates; `None` for the default.
+    pub precision: Option<usize>,
     /// The objects the controller has selected; the viewport highlights them and its selected
     /// count is their number.
     pub selection: Vec<ObjectId>,

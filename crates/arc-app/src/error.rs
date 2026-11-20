@@ -141,6 +141,12 @@ pub mod codes {
         category: Category::Io,
         message_id: "app-log-io",
     };
+    /// A file dialog returned no file: the user cancelled it, or no dialog service answered.
+    pub const NO_FILE_CHOSEN: ErrorCode = ErrorCode {
+        code: "app.file.none_chosen",
+        category: Category::Cancelled,
+        message_id: "app-file-none-chosen",
+    };
     /// A recorded macro could not be written to its file.
     pub const MACRO_WRITE_FAILED: ErrorCode = ErrorCode {
         code: "app.macro.write_failed",

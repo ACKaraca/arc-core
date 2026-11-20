@@ -227,7 +227,13 @@ pub(crate) fn prompt_text(prompt: &Prompt, localize: &dyn Localize) -> String {
         .iter()
         .map(|(k, v)| (k.as_str(), Value::Text(v.clone())))
         .collect();
-    resolve(localize, &prompt.message.id, &args)
+    let mut text = resolve(localize, &prompt.message.id, &args);
+    // A product that shows the default of the prompt (the remembered value, in the units the
+    // person reads) names it in the message argument `default`.
+    if let Some(default) = prompt.message.args.get("default") {
+        text.push_str(&format!(" <{default}>"));
+    }
+    text
 }
 
 /// The keyword options of `prompt` as buttons; the answer of a click.

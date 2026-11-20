@@ -15,7 +15,7 @@ const TITLE: Message = Message {
 const ENTRY: Message = Message {
     message_id: "app-recovery-entry",
 };
-const UNTITLED: Message = Message {
+pub(super) const UNTITLED: Message = Message {
     message_id: "app-recovery-untitled",
 };
 const UNREADABLE: Message = Message {

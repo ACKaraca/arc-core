@@ -24,6 +24,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 use super::platform::{self, Done, FileDialogs, NativeDialogs, NativeMenu};
+use super::prompts::UNTITLED;
 use super::{FrameInput, Request, Shell, ShellConfig, UserFiles, WindowModel, prefs};
 use crate::application::{Application, TabId};
 use crate::automation::{self, Automation};
@@ -108,6 +109,7 @@ pub fn run(startup: Startup) -> Result<()> {
         os_locales: startup.os_locales,
         gpu: startup.gpu,
         title: startup.title,
+        shown_title: String::new(),
         states,
         states_path: startup.window_states,
         menu: platform::native_menu(),
@@ -152,6 +154,8 @@ struct Handler {
     os_locales: Vec<String>,
     gpu: Gpu,
     title: String,
+    /// The title the main window shows now.
+    shown_title: String,
     states: WindowStates,
     states_path: Option<PathBuf>,
     menu: Box<dyn NativeMenu>,
@@ -412,6 +416,7 @@ impl Handler {
         }
     }
 
+    #[allow(clippy::too_many_lines, reason = "one frame of the window")]
     fn redraw(&mut self, event_loop: &ActiveEventLoop, id: WindowId) {
         let device = self.gpu.device().clone();
         let queue = self.gpu.queue().clone();
@@ -447,6 +452,13 @@ impl Handler {
             let key = w.key.clone();
             self.shell.frame_window(&mut self.app, &ctx, input, &key)
         };
+        if main {
+            let wanted = Self::window_title(&self.app, &self.localizer, &self.title);
+            if wanted != self.shown_title {
+                w.window.set_title(&wanted);
+                self.shown_title = wanted;
+            }
+        }
         let mut full = out.full;
         w.egui
             .handle_platform_output(&w.window, full.platform_output);
@@ -531,6 +543,20 @@ impl Handler {
         self.sync_windows(event_loop);
     }
 
+    /// The title of the main window: the active document's file name, a mark for unsaved
+    /// changes, and the product's name.
+    fn window_title(app: &Application, localizer: &Localizer, product: &str) -> String {
+        let tab = app.active().and_then(|t| app.tab(t).ok());
+        tab.map_or_else(
+            || product.to_owned(),
+            |t| {
+                let name = t.title().unwrap_or_else(|| UNTITLED.text(localizer));
+                let mark = if t.is_dirty() { "*" } else { "" };
+                format!("{mark}{name} - {product}")
+            },
+        )
+    }
+
     fn request_redraw_all(&self) {
         for w in self.window.iter().chain(&self.floating) {
             w.window.request_redraw();
@@ -549,8 +575,16 @@ impl Handler {
                 self.shell.save_recent(&self.app);
                 event_loop.exit();
             }
+            // The dialog library cannot tell a cancel from a missing dialog service, so both read
+            // as a neutral line instead of silence.
+            Ok(Done::Cancelled)
+                if matches!(request, Request::OpenDialog | Request::SaveDialog(_)) =>
+            {
+                let error = Error::new(crate::error::codes::NO_FILE_CHOSEN);
+                self.shell.report(&self.app, error);
+            }
             Ok(_) => {}
-            Err(e) => self.shell.error(e),
+            Err(e) => self.shell.report(&self.app, e),
         }
         self.shell.save_recent(&self.app);
         if let Some(w) = &self.window {

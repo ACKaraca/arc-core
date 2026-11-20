@@ -27,7 +27,9 @@ pub mod prefs;
 pub mod prompts;
 
 pub use chrome::{ChoiceState, DisplayProbe, ShellAction, StatusToggle, ToolItem};
-pub use interaction::{DynamicOutput, Interaction, InteractionContext, InteractionOutput};
+pub use interaction::{
+    DynamicOutput, Interaction, InteractionContext, InteractionOutput, ViewRequest,
+};
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -307,6 +309,8 @@ pub struct View {
     pending: bool,
     /// The model point under the pointer in drawing units, for the status bar.
     cursor: Option<[f64; 2]>,
+    /// The digits of the status bar coordinates.
+    cursor_digits: usize,
     /// The revision of the document when the view was made; while the document is still at it
     /// the view frames the drawing once its scene is known.
     frame_revision: u64,
@@ -314,6 +318,8 @@ pub struct View {
     framed: bool,
     /// Frame the camera on the drawing in the next viewport pass.
     zoom_extents: bool,
+    /// The cameras before the zoom requests of the product, the last one on top.
+    previous: Vec<ViewFrame>,
     /// Frames still wanted after the viewport went clean: the last rendered frame is registered
     /// as a texture by a redraw that follows the render.
     settle: std::cell::Cell<u8>,
@@ -801,9 +807,11 @@ impl Shell {
             diagnostics: DiagnosticsPanel::default(),
             pending: false,
             cursor: None,
+            cursor_digits: 3,
             frame_revision: document.snapshot().revision(),
             framed: false,
             zoom_extents: false,
+            previous: Vec::new(),
             settle: std::cell::Cell::new(0),
             console: Vec::new(),
         })
@@ -987,6 +995,9 @@ impl Shell {
             active
                 .and_then(|t| self.views.get(&t))
                 .and_then(|v| v.cursor),
+            active
+                .and_then(|t| self.views.get(&t))
+                .map_or(3, |v| v.cursor_digits),
             input.localize,
         );
         if let (Some(probe), Some(tab)) = (&self.display, active) {
@@ -1618,7 +1629,7 @@ fn frame_drawing(
     match arc_gpu::navigation::zoom_to_sphere(
         camera,
         &center,
-        (radius * 1.1).max(1.0),
+        radius * 1.1,
         aspect,
         &Tolerance::DEFAULT,
     ) {
@@ -1631,6 +1642,68 @@ fn frame_drawing(
             *requested = false;
             actions.push(Action::Error(e));
         }
+    }
+}
+
+/// The screen position of the viewport pixel `px`, in logical points.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a position in logical points, far inside the range of f32"
+)]
+fn point_at(rect: egui::Rect, px: [f64; 2], ppp: f64) -> egui::Pos2 {
+    egui::Pos2::new(
+        rect.min.x + (px[0] / ppp) as f32,
+        rect.min.y + (px[1] / ppp) as f32,
+    )
+}
+
+/// Applies a view request of the product to the camera: the framing itself is the zoom-extents pass.
+fn apply_view(
+    request: ViewRequest,
+    camera: &mut ViewFrame,
+    previous: &mut Vec<ViewFrame>,
+    zoom_extents: &mut bool,
+    size: [u32; 2],
+    actions: &mut Vec<Action>,
+) {
+    /// The most cameras kept for the Previous form.
+    const KEPT: usize = 32;
+    if request == ViewRequest::Previous {
+        if let Some(last) = previous.pop() {
+            *camera = last;
+        }
+        return;
+    }
+    if previous.len() >= KEPT {
+        previous.remove(0);
+    }
+    previous.push(*camera);
+    let aspect = f64::from(size[0].max(1)) / f64::from(size[1].max(1));
+    let next = match request {
+        ViewRequest::Extents | ViewRequest::Previous => {
+            *zoom_extents = true;
+            return;
+        }
+        ViewRequest::Window { a, b } => {
+            let (w, h) = ((a[0] - b[0]).abs(), (a[1] - b[1]).abs());
+            // The sphere that frames the window: the fit takes the larger of the two directions.
+            let height = h.max(w / aspect);
+            let center = Point3::new((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, camera.target().z);
+            arc_gpu::navigation::zoom_to_sphere(
+                camera,
+                &center,
+                height / 2.0 * aspect.min(1.0),
+                aspect,
+                &Tolerance::DEFAULT,
+            )
+        }
+        ViewRequest::Scale(factor) => {
+            arc_gpu::navigation::zoom_at(camera, factor, &camera.target())
+        }
+    };
+    match next {
+        Ok(frame) => *camera = frame,
+        Err(e) => actions.push(Action::Error(e)),
     }
 }
 
@@ -1701,6 +1774,8 @@ impl Panel for ViewportPanel {
             frame_revision,
             framed,
             zoom_extents,
+            previous,
+            cursor_digits,
             ..
         } = view;
         let session =
@@ -1775,14 +1850,36 @@ impl Panel for ViewportPanel {
             // The user's own navigation settles the framing.
             *framed = true;
         }
+        if let Some(request) = interaction.as_deref_mut().and_then(|c| c.take_view()) {
+            apply_view(
+                request,
+                camera,
+                previous,
+                zoom_extents,
+                out.size,
+                cx.actions,
+            );
+            *framed = true;
+            ui.ctx().request_repaint();
+        }
+        // The pointer the controller resolved (snap step, ortho, object snap) is where the
+        // crosshair sits and what the status bar reads.
+        let resolved = frame.as_ref().and_then(|f| f.cursor);
+        *cursor_digits = frame.as_ref().and_then(|f| f.precision).unwrap_or(3);
+        let ppp = f64::from(ui.ctx().pixels_per_point());
+        let at = resolved
+            .filter(|_| out.pointer_model.is_some())
+            .and_then(|[x, y]| out.projection.model_to_pixel(&Point3::new(x, y, 0.0)))
+            .map(|px| point_at(out.response.rect, px, ppp));
         cube_and_crosshair(
             ui,
             &out.response.rect,
             camera,
             (cx.localize, cx.colors),
+            at,
             cx.actions,
         );
-        *cursor = out.pointer_model.map(|p| [p.x, p.y]);
+        *cursor = out.pointer_model.map(|p| resolved.unwrap_or([p.x, p.y]));
         *hover = out.hover;
         let overlay = (!out.overlay.primitives.is_empty()).then_some(out.overlay);
         let revision = cx
@@ -1823,6 +1920,7 @@ fn cube_and_crosshair(
     rect: &egui::Rect,
     camera: &mut ViewFrame,
     (localize, colors): (&dyn Localize, &Colors),
+    at: Option<egui::Pos2>,
     actions: &mut Vec<Action>,
 ) {
     let cube = ViewCubeInput {
@@ -1851,6 +1949,7 @@ fn cube_and_crosshair(
         && let Some(pointer) = ui.input(|i| i.pointer.latest_pos())
         && rect.contains(pointer)
     {
+        let pointer = at.filter(|p| rect.contains(*p)).unwrap_or(pointer);
         arc_ui::paint_crosshair(ui, *rect, colors, pointer);
     }
 }
