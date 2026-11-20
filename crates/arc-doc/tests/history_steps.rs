@@ -419,3 +419,35 @@ fn restore_erased_skips_objects_the_erase_created_and_deleted_itself() {
     assert_eq!(done.value, 1);
     assert_eq!(state(&doc.snapshot()), BTreeMap::from([(2, 20)]));
 }
+
+#[test]
+fn restore_erased_looks_past_a_record_that_only_removed_its_own_temporaries() {
+    let doc = document();
+    create(&doc, 1, 1, None, "make");
+    delete(&doc, 1, "erase-a");
+    // A later record creates a temporary object and deletes it: it erased nothing that existed.
+    let name = command("temporary");
+    doc.submit(move |txn| {
+        txn.meta_mut().command = name.clone();
+        txn.meta_mut().label = name;
+        txn.create(
+            KEY,
+            id(2),
+            Header::default(),
+            vec![Some(Value::I64(2)), None],
+        )
+        .map(drop)?;
+        txn.delete(id(2))
+    })
+    .wait()
+    .unwrap();
+    assert_eq!(state(&doc.snapshot()), BTreeMap::new());
+
+    // The search continues past it to the real erase of A.
+    let done = doc
+        .restore_erased(command("oops"), command("oops"))
+        .wait()
+        .unwrap();
+    assert_eq!(done.value, 1);
+    assert_eq!(state(&doc.snapshot()), BTreeMap::from([(1, 1)]));
+}

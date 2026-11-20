@@ -1008,11 +1008,13 @@ occurred when the thread was descheduled.
   the next step first (`StepSummary`: last transaction, transaction count and the opaque command
   and label texts). `restore_erased(command, label)` commits a normal transaction that re-creates,
   with their original identifiers, headers and values, the objects deleted by the newest ordinary
-  record (`normal` or `link_reload`, among the last 10,000) that deleted anything, and only that
-  one: when all its objects are live again the result is zero and no older erase is touched; when
-  some are live, the rest return, last deletion first so owners return before their children. An
-  object that the same record created before deleting it never existed before that record and is
-  not restored. It returns the number of
+  record (`normal` or `link_reload`, among the last 10,000) that erased something, and only that
+  one: when all its erased objects are live again the result is zero and no older erase is touched;
+  when some are live, the rest return, last deletion first so owners return before their children.
+  A record erased something when it deletes an object that existed before it; a record that only
+  creates and deletes its own temporaries is skipped, and the search continues to older records.
+  An object that the same record created before deleting it never existed before that record and
+  is not restored. It returns the number of
   objects restored (zero when there is none), joins an open group, undoes like any step and, as a normal commit, clears the redo stack.
   References and owner relations that the erase cleared in surviving objects are not restored.
   Objects that cannot return consistently (a reference to an object deleted since, an owner that

@@ -542,11 +542,13 @@ impl Document {
 
     /// Re-creates, with their original identifiers, the objects deleted by the newest ordinary
     /// transaction (`normal` or `link_reload`, among the last [`MAX_RESTORE_SCAN`] journal
-    /// records) that deleted anything, without undoing later transactions. Only that record is
-    /// considered: when all its deleted objects are live again (the erase was undone, or already
-    /// restored) the value is zero and an older erase is never touched; when only some are live,
-    /// the rest are restored. It is a normal commit with `command` and `label` as its opaque
-    /// texts: undoable like any step, and it clears the redo stack. The value is the number of
+    /// records) that erased something, without undoing later transactions. A transaction erased
+    /// something when it deleted an object that existed before it; one that only created and
+    /// deleted its own temporaries is skipped. Only that record is considered: when all its
+    /// erased objects are live again (the erase was undone, or already restored) the value is
+    /// zero and an older erase is never touched; when only some are live, the rest are restored.
+    /// It is a normal commit with `command` and `label` as its opaque texts: undoable like any
+    /// step, and it clears the redo stack. The value is the number of
     /// objects restored, zero when there is nothing to restore. An object the same record created
     /// and then deleted is not restored, since it did not exist before. The references and owner
     /// relations the erase cleared in surviving objects are not restored. Fails, changing
@@ -880,26 +882,37 @@ fn summarize<'a>(
         .collect()
 }
 
-/// The operations that re-create the objects the newest ordinary record that deleted anything
+/// The operations that re-create the objects the newest ordinary record that erased something
 /// deleted and that are not live, last deletion first so owners return before their children.
-/// An object the same record created before deleting it never existed before the record, so
-/// its deletion is not restored.
+/// A record erased something when it deletes an object that existed before it; a record that
+/// only creates and deletes its own temporaries is skipped, and the search continues to older
+/// records.
 fn last_erased(journal: &Journal, base: &Snapshot) -> Option<Vec<crate::op::Op>> {
-    let record = journal
+    let deleted = journal
         .iter()
         .rev()
         .take(MAX_RESTORE_SCAN)
         .map(crate::journal::JournalEntry::record)
         .filter(|record| matches!(record.kind, TxnKind::Normal | TxnKind::LinkReload))
-        .find(|record| {
-            record
-                .ops
-                .iter()
-                .any(|op| matches!(op, crate::op::Op::Delete { .. }))
+        .find_map(|record| {
+            let erased = erased_objects(&record.ops);
+            (!erased.is_empty()).then_some(erased)
         })?;
+    let ops: Vec<_> = deleted
+        .into_iter()
+        .rev()
+        .filter(|op| base.resolve(op.id()).is_err())
+        .map(crate::op::Op::inverse)
+        .collect();
+    (!ops.is_empty()).then_some(ops)
+}
+
+/// The deletions in `ops` of objects that existed before the record. An object the record
+/// created before deleting it never existed before it, so its deletion is not an erase.
+fn erased_objects(ops: &[crate::op::Op]) -> Vec<&crate::op::Op> {
     let mut created = std::collections::BTreeSet::new();
     let mut deleted = Vec::new();
-    for op in &record.ops {
+    for op in ops {
         match op {
             crate::op::Op::Create { .. } => {
                 created.insert(op.id());
@@ -908,11 +921,5 @@ fn last_erased(journal: &Journal, base: &Snapshot) -> Option<Vec<crate::op::Op>>
             _ => {}
         }
     }
-    let ops: Vec<_> = deleted
-        .into_iter()
-        .rev()
-        .filter(|op| base.resolve(op.id()).is_err())
-        .map(crate::op::Op::inverse)
-        .collect();
-    (!ops.is_empty()).then_some(ops)
+    deleted
 }

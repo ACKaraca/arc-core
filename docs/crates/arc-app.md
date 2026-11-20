@@ -588,9 +588,10 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
   falsely clean. Undoing back to the saved state is a new revision, so the tab stays dirty. A
   new document is clean until edited; a recovered document is dirty until saved.
 - A silent commit (`Context::commit_silently`) counts as a modification: it is a committed
-  transaction, so the revision moves and a clean package tab becomes dirty. Hosts get no flag for
-  it (only the declared undo behavior), so a close prompt can appear after bookkeeping that the user
-  did not make; this is a known gap, not a designed rule.
+  transaction, so the revision moves and a clean package tab becomes dirty. The rows it adds are
+  document content: a package closed without saving them would lose them, so the close prompt is
+  correct even though the user made no edit. Hosts get no flag that tells such a commit from an
+  edit (only the declared undo behavior).
 - The title is the file name, or none for a document never saved, which the shell names. `activate`, `move_tab` (the position is clamped) and `close` manage the
   order; the tab opened last becomes active, and closing the active tab activates the next one,
   else the previous one.
@@ -803,9 +804,11 @@ it is registered. Without a registration the shell behaves as before.
   quitting), after the close is decided and any save it makes has succeeded, and before the tab
   leaves the application. The tab's document is still open then, and `cx.document()` works. The
   controller is dropped afterwards, so `closing` is the place to end state it left open, such as
-  an undo group it began. A cancelled or failed close does not call it. A change made in
-  `closing` is not part of the save of that close. Closing a tab with `Application::close` without
-  the shell drops the controller without this call.
+  an undo group it began. A cancelled or failed close does not call it. The hook must not commit
+  a change to the document: it runs after any save, so the change is not in the saved file. On the
+  save path the tab's recovery journal is closed, not discarded, and a change committed in the hook
+  leaves a record that keeps the journal for recovery on the next start. Closing a tab with
+  `Application::close` without the shell drops the controller without this call.
 - `InteractionOutput`: `status` (a `LineStatus`: active, answers, selection, repeatable), `prompt`
   (a `Prompt`, which labels the command panel), `options` (a `PromptControls` for the tool option
   bar: keyword buttons and parameter fields), `history` (lines shown above the field, at most 16,

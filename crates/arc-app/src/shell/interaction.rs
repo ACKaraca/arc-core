@@ -53,8 +53,10 @@ pub trait Interaction: Send {
     /// The tab of the controller is closing: the shell calls this once, before the tab's
     /// document is closed and the controller is dropped. It is the last call of the controller,
     /// so an undo group it began or a prompt it left open is ended here. The context's
-    /// [`InteractionContext::document`] still works. A change the controller makes here is not
-    /// part of a save made by the close, because the save has already happened.
+    /// [`InteractionContext::document`] still works. The hook must not commit a change to the
+    /// document: it runs after any save, so the change would not be in the saved file. On the
+    /// save path the tab's recovery journal is closed, not discarded; a change committed here
+    /// leaves a record in it, which keeps the journal for recovery on the next start.
     ///
     /// Not called when a close is cancelled or fails. Closing a tab through
     /// [`Application::close`] directly, without the shell, drops the controller without this call.
