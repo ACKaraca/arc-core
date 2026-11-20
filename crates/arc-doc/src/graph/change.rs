@@ -7,7 +7,7 @@ use arc_base::ObjectId;
 
 use crate::op::Op;
 use crate::registry::TypeRegistry;
-use crate::relationship::{ReferenceField, references};
+use crate::relationship::{Reference, ReferenceField, changed_references, references};
 use crate::schema::{PathSegment, TypeKey};
 use crate::snapshot::{Change, Object, Snapshot, WorkingSet};
 
@@ -163,16 +163,29 @@ impl ChangeSet {
         before: Option<(&TypeKey, &Arc<Object>)>,
         after: Option<(&TypeKey, &Arc<Object>)>,
     ) {
-        let held =
-            |side: Option<(&TypeKey, &Arc<Object>)>| -> BTreeSet<(ObjectId, ReferenceField)> {
-                side.map(|(type_key, object)| {
-                    references(registry, type_key.as_str(), object)
-                        .into_iter()
-                        .map(|reference| (reference.target, reference.field))
-                        .collect()
-                })
+        let held = |found: Vec<Reference<'_>>| -> BTreeSet<(ObjectId, ReferenceField)> {
+            found
+                .into_iter()
+                .map(|reference| (reference.target, reference.field))
+                .collect()
+        };
+        let all = |side: Option<(&TypeKey, &Arc<Object>)>| {
+            side.map(|(type_key, object)| references(registry, type_key.as_str(), object))
                 .unwrap_or_default()
-            };
+        };
+        let (before, after) = match (before, after) {
+            (Some((_, old)), Some((_, new))) if Arc::ptr_eq(old, new) => return,
+            // Unchanged fields hold the same references on both sides, so they cancel in the
+            // symmetric difference and need not be walked.
+            (Some((old_key, old)), Some((type_key, new)))
+                if old_key == type_key
+                    && old.version.major == new.version.major
+                    && old.values.len() == new.values.len() =>
+            {
+                changed_references(registry, type_key.as_str(), old, new)
+            }
+            (before, after) => (all(before), all(after)),
+        };
         let (before, after) = (held(before), held(after));
         for (target, _) in before.symmetric_difference(&after) {
             self.referrers.insert(*target);
@@ -214,4 +227,153 @@ fn modified_parts(
         }
     }
     Some(Changed::Parts { header, aspects })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arc_base::id::Identifier;
+
+    use super::*;
+    use crate::registry::TypeRegistry;
+    use crate::schema::{
+        Cardinality, FieldDecl, OnCopy, OnDelete, ReferenceSpec, RelationshipRule, Schema,
+        SchemaVersion, Strength, TypeDecl, Value, ValueType,
+    };
+    use crate::snapshot::{Header, Snapshot, WorkingSet};
+
+    fn id(n: u128) -> ObjectId {
+        ObjectId::from_u128(n)
+    }
+
+    #[test]
+    fn only_targets_whose_reference_changed_have_changed_referrers() {
+        let reference = ValueType::Reference(ReferenceSpec {
+            targets: Vec::new(),
+            rule: RelationshipRule {
+                strength: Strength::Associative,
+                on_delete: OnDelete::Clear,
+                on_copy: OnCopy::ShareTarget,
+                cardinality: Cardinality::Many { max: 100 },
+            },
+        });
+        let schema = Schema::new(
+            SchemaVersion::new(1, 0),
+            vec![
+                FieldDecl::new("n", ValueType::I64),
+                FieldDecl::new("refs", ValueType::List(Box::new(reference))),
+            ],
+        );
+        let mut registry = TypeRegistry::new();
+        registry
+            .register(TypeDecl::new(TypeKey::new("test.a").unwrap(), schema))
+            .unwrap();
+        let refs = |targets: &[u128]| {
+            Some(Value::List(
+                targets.iter().map(|n| Value::Reference(id(*n))).collect(),
+            ))
+        };
+        let values = |n: i64, targets: &[u128]| vec![Some(Value::I64(n)), refs(targets)];
+        let mut set = WorkingSet::new(&Snapshot::empty(Arc::new(registry)));
+        let object = Object::new(
+            id(100),
+            SchemaVersion::new(1, 0),
+            Header::default(),
+            values(0, &[1, 2]),
+        );
+        let handle = set.create("test.a", object).unwrap();
+        let base = set.current().clone();
+        let targets = |set: &WorkingSet| -> Vec<u128> {
+            ChangeSet::from_commit(set, &[])
+                .referrer_targets()
+                .map(|t| t.as_u128())
+                .collect()
+        };
+
+        let mut set = WorkingSet::new(&base);
+        set.replace_values(handle, values(1, &[1, 2])).unwrap();
+        assert!(targets(&set).is_empty(), "a move changes no references");
+        // Fields compare by position: the entry at the same position changed from 2 to 3.
+        set.replace_values(handle, values(1, &[1, 3])).unwrap();
+        assert_eq!(targets(&set), [2, 3]);
+    }
+
+    #[test]
+    fn the_diff_reports_owner_and_changed_fields_only() {
+        let optional = |name: &str| FieldDecl {
+            optional: true,
+            ..FieldDecl::new(
+                name,
+                ValueType::Reference(ReferenceSpec {
+                    targets: Vec::new(),
+                    rule: RelationshipRule {
+                        strength: Strength::Associative,
+                        on_delete: OnDelete::Clear,
+                        on_copy: OnCopy::ShareTarget,
+                        cardinality: Cardinality::Optional,
+                    },
+                }),
+            )
+        };
+        let schema = Schema::new(SchemaVersion::new(1, 0), vec![optional("a"), optional("b")]);
+        let mut registry = TypeRegistry::new();
+        registry
+            .register(TypeDecl::new(TypeKey::new("test.two").unwrap(), schema))
+            .unwrap();
+        let reference = |n: Option<u128>| n.map(|n| Value::Reference(id(n)));
+        let header = |owner: u128| Header {
+            owner: Some(id(owner)),
+            ..Header::default()
+        };
+        let object = |owner: u128, a: Option<u128>, b: Option<u128>| {
+            Object::new(
+                id(100),
+                SchemaVersion::new(1, 0),
+                header(owner),
+                vec![reference(a), reference(b)],
+            )
+        };
+        let mut set = WorkingSet::new(&Snapshot::empty(Arc::new(registry)));
+        let handle = set
+            .create("test.two", object(1, Some(10), Some(20)))
+            .unwrap();
+        let base = set.current().clone();
+        let targets = |set: &WorkingSet| -> Vec<u128> {
+            ChangeSet::from_commit(set, &[])
+                .referrer_targets()
+                .map(|t| t.as_u128())
+                .collect()
+        };
+        let edit = |owner: u128, a: Option<u128>, b: Option<u128>| {
+            let mut set = WorkingSet::new(&base);
+            set.replace_header(handle, header(owner)).unwrap();
+            set.replace_values(handle, vec![reference(a), reference(b)])
+                .unwrap();
+            targets(&set)
+        };
+        // The owner moves and field a changes; field b is equal.
+        assert_eq!(edit(2, Some(11), Some(20)), [1, 2, 10, 11]);
+        // A present reference becomes absent, the other field unchanged.
+        assert_eq!(edit(1, None, Some(20)), [10]);
+        // Both fields hold 30 in the base of this case: only one changes, the target is reported.
+        let mut shared = WorkingSet::new(&base);
+        shared
+            .replace_values(handle, vec![reference(Some(30)), reference(Some(30))])
+            .unwrap();
+        let base = shared.current().clone();
+        let mut set = WorkingSet::new(&base);
+        set.replace_values(handle, vec![reference(Some(31)), reference(Some(30))])
+            .unwrap();
+        assert_eq!(targets(&set), [30, 31]);
+        let mut set = WorkingSet::new(&base);
+        set.replace_values(handle, vec![reference(Some(30)), reference(Some(31))])
+            .unwrap();
+        assert_eq!(targets(&set), [30, 31]);
+        // One of two fields holding the same target becomes absent: the target is reported.
+        let mut set = WorkingSet::new(&base);
+        set.replace_values(handle, vec![None, reference(Some(30))])
+            .unwrap();
+        assert_eq!(targets(&set), [30]);
+    }
 }

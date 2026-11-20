@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 897b54e1c67894b861b5d7f96655f4ca312662e46c465ebb1f1515eb82399c1d # shrinks to Create, Delete, Draw, Rename (issue 110)
+cc 2791e4515c671e85a2a524bcd0037840561dcaf755117cf6af9689828322d6a4 # shrinks to setup = [Create(0.0)], probe = Rename([0], "n"), undo_first = false

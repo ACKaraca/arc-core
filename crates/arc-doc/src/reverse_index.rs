@@ -498,6 +498,83 @@ mod tests {
         assert_eq!(set.current().referrers(id(3)).count(), 100_000 / 7 + 2);
     }
 
+    /// A registry with `test.a`: a number and a list of references.
+    fn list_registry() -> Arc<crate::registry::TypeRegistry> {
+        use crate::schema::{
+            Cardinality, FieldDecl, OnCopy, OnDelete, ReferenceSpec, RelationshipRule, Schema,
+            SchemaVersion, Strength, TypeDecl, TypeKey, ValueType,
+        };
+        let reference = ValueType::Reference(ReferenceSpec {
+            targets: Vec::new(),
+            rule: RelationshipRule {
+                strength: Strength::Associative,
+                on_delete: OnDelete::Clear,
+                on_copy: OnCopy::ShareTarget,
+                cardinality: Cardinality::Many { max: 100 },
+            },
+        });
+        let schema = Schema::new(
+            SchemaVersion::new(1, 0),
+            vec![
+                FieldDecl::new("n", ValueType::I64),
+                FieldDecl::new("refs", ValueType::List(Box::new(reference))),
+            ],
+        );
+        let mut registry = crate::registry::TypeRegistry::new();
+        registry
+            .register(TypeDecl::new(TypeKey::new("test.a").unwrap(), schema))
+            .unwrap();
+        Arc::new(registry)
+    }
+
+    #[test]
+    fn snapshots_keep_their_own_referrers_across_changes() {
+        use crate::schema::{SchemaVersion, Value};
+        use crate::snapshot::{Header, Snapshot, WorkingSet};
+
+        let refs = |targets: &[u128]| {
+            Some(Value::List(
+                targets.iter().map(|n| Value::Reference(id(*n))).collect(),
+            ))
+        };
+        let mut set = WorkingSet::new(&Snapshot::empty(list_registry()));
+        let object = |n: u128, targets: &[u128]| {
+            Object::new(
+                id(n),
+                SchemaVersion::new(1, 0),
+                Header::default(),
+                vec![Some(Value::I64(0)), refs(targets)],
+            )
+        };
+        let a = set.create("test.a", object(100, &[1, 2])).unwrap();
+        set.create("test.a", object(101, &[2])).unwrap();
+        let first = set.current().clone();
+
+        let mut set = WorkingSet::new(&first);
+        // A reference change, a create and a delete in one working set.
+        set.replace_values(a, vec![Some(Value::I64(0)), refs(&[2, 3])])
+            .unwrap();
+        set.create("test.a", object(102, &[1])).unwrap();
+        let b = first.resolve(id(101)).unwrap();
+        set.delete(b).unwrap();
+        let second = set.current().clone();
+
+        let sources = |snapshot: &Snapshot, target: u128| -> Vec<u128> {
+            snapshot
+                .referrers(id(target))
+                .map(|r| r.source.as_u128())
+                .collect()
+        };
+        assert_eq!(sources(&first, 1), [100]);
+        assert_eq!(sources(&first, 2), [100, 101]);
+        assert_eq!(sources(&first, 3), Vec::<u128>::new());
+        assert_eq!(first.reference_count(), 3);
+        assert_eq!(sources(&second, 1), [102]);
+        assert_eq!(sources(&second, 2), [100]);
+        assert_eq!(sources(&second, 3), [100]);
+        assert_eq!(second.reference_count(), 3);
+    }
+
     proptest! {
         #[test]
         fn the_index_behaves_like_an_ordered_set(

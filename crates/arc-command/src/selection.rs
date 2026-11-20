@@ -7,6 +7,7 @@
 //! prompt answers and in invocation parameters. They are expanded from the session when the
 //! command is invoked. Identifiers of objects that no longer exist are dropped when a list is read.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_base::{Error, ObjectId, Result};
@@ -49,6 +50,14 @@ fn live(ids: &[ObjectId], snapshot: &Snapshot) -> Vec<ObjectId> {
         .collect()
 }
 
+/// `ids` without repeated identifiers, each kept at its first position, in `O(k)`.
+fn first_occurrences(ids: Vec<ObjectId>) -> Vec<ObjectId> {
+    let mut seen = HashSet::with_capacity(ids.len());
+    let mut kept = ids;
+    kept.retain(|id| seen.insert(*id));
+    kept
+}
+
 impl Selections {
     fn lists(&self) -> std::sync::MutexGuard<'_, Lists> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
@@ -72,12 +81,7 @@ impl Selections {
     /// stored without duplicates, in order, and live ones only.
     pub(crate) fn record(&self, ids: &[ObjectId], snapshot: &Snapshot) {
         let mut lists = self.lists();
-        let mut current = Vec::with_capacity(ids.len());
-        for id in live(ids, snapshot) {
-            if !current.contains(&id) {
-                current.push(id);
-            }
-        }
+        let current = first_occurrences(live(ids, snapshot));
         lists.previous = std::mem::replace(&mut lists.current, current);
         lists.previous = live(&lists.previous, snapshot);
     }
@@ -175,4 +179,19 @@ pub(crate) fn expand(
         *value = Value::Array(expanded);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use arc_base::id::Identifier;
+
+    use super::*;
+
+    #[test]
+    fn repeated_identifiers_keep_their_first_position() {
+        let id = ObjectId::from_u128;
+        let ids = vec![id(3), id(1), id(3), id(2), id(1), id(3)];
+        assert_eq!(first_occurrences(ids), vec![id(3), id(1), id(2)]);
+        assert!(first_occurrences(Vec::new()).is_empty());
+    }
 }

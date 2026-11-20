@@ -110,6 +110,89 @@ fn command(step: &Step, ids: &[String]) -> (&'static str, Value) {
     }
 }
 
+/// One scenario of the property: run `setup`, optionally undo once, then preview and really run
+/// `probe` and compare.
+fn preview_equals_run(setup: &[Step], probe: &Step, undo_first: bool) -> Result<(), TestCaseError> {
+    let registry = registry();
+    let documents = BTreeMap::from([("d".to_owned(), document())]);
+    let server = Server::new(&registry, &documents, config(), &NoLog);
+    let doc = &documents["d"];
+    let mut ids: Vec<String> = Vec::new();
+    for step in setup {
+        let (name, params) = command(step, &ids);
+        if let Ok(a) = run(&server, name, &params, false) {
+            ids.extend(
+                a["summary"]["created"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_owned()),
+            );
+            for gone in a["summary"]["deleted"].as_array().unwrap() {
+                ids.retain(|id| id != gone.as_str().unwrap());
+            }
+        }
+    }
+    if undo_first {
+        // Leave something on the redo stack, which a preview must keep.
+        doc.undo().wait().unwrap();
+    }
+    let (name, params) = command(probe, &ids);
+    let before = doc.snapshot();
+    let steps = state(doc);
+    let preview = run(&server, name, &params, true);
+    let after = doc.snapshot();
+    prop_assert_eq!(differences(&before, &after), vec![], "objects changed");
+    prop_assert!(before.ptr_eq(&after));
+    prop_assert_eq!(state(doc), steps.clone());
+    let actual = run(&server, name, &params, false);
+    match (preview, actual) {
+        (Ok(p), Ok(a)) => {
+            prop_assert_eq!(&p["preview"], &json!(true));
+            prop_assert_eq!(&a["preview"], &json!(false));
+            prop_assert_eq!(&p["summary"], &a["summary"]);
+            prop_assert_eq!(&p["value"], &a["value"]);
+            prop_assert_eq!(&p["command"], &a["command"]);
+            prop_assert_eq!(&p["diagnostics"], &a["diagnostics"]);
+            prop_assert_eq!(&p["baseRevision"], &json!(before.revision()));
+            prop_assert_eq!(&p["revision"], &json!(before.revision()));
+            // The summary is the net effect of the run's journal record: every object whose
+            // state changed is named, created and deleted objects are exactly the ones that
+            // came or went, and an object named as modified whose state is unchanged was
+            // written with the value it already had (a recorded, undoable no-op write).
+            let changed: Vec<String> = differences(&before, &doc.snapshot())
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            let listed = |k: &str| -> Vec<String> {
+                a["summary"][k]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_owned())
+                    .collect()
+            };
+            let (created, modified, deleted) =
+                (listed("created"), listed("modified"), listed("deleted"));
+            for id in &changed {
+                prop_assert!(
+                    created.contains(id) || modified.contains(id) || deleted.contains(id),
+                    "{id} changed but the summary does not name it"
+                );
+            }
+            for id in created.iter().chain(&deleted) {
+                prop_assert!(
+                    changed.contains(id),
+                    "{id} is created or deleted but unchanged"
+                );
+            }
+        }
+        (Err(p), Err(a)) => prop_assert_eq!(p, a),
+        (p, a) => prop_assert!(false, "preview {p:?} but run {a:?}"),
+    }
+    Ok(())
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 40, ..ProptestConfig::default() })]
 
@@ -122,58 +205,7 @@ proptest! {
         probe in step(),
         undo_first in any::<bool>(),
     ) {
-        let registry = registry();
-        let documents = BTreeMap::from([("d".to_owned(), document())]);
-        let server = Server::new(&registry, &documents, config(), &NoLog);
-        let doc = &documents["d"];
-        let mut ids: Vec<String> = Vec::new();
-        for step in &setup {
-            let (name, params) = command(step, &ids);
-            if let Ok(a) = run(&server, name, &params, false) {
-                ids.extend(a["summary"]["created"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()));
-                for gone in a["summary"]["deleted"].as_array().unwrap() {
-                    ids.retain(|id| id != gone.as_str().unwrap());
-                }
-            }
-        }
-        if undo_first {
-            // Leave something on the redo stack, which a preview must keep.
-            doc.undo().wait().unwrap();
-        }
-        let (name, params) = command(&probe, &ids);
-        let before = doc.snapshot();
-        let steps = state(doc);
-        let preview = run(&server, name, &params, true);
-        let after = doc.snapshot();
-        prop_assert_eq!(differences(&before, &after), vec![], "objects changed");
-        prop_assert!(before.ptr_eq(&after));
-        prop_assert_eq!(state(doc), steps.clone());
-        let actual = run(&server, name, &params, false);
-        match (preview, actual) {
-            (Ok(p), Ok(a)) => {
-                prop_assert_eq!(&p["preview"], &json!(true));
-                prop_assert_eq!(&a["preview"], &json!(false));
-                prop_assert_eq!(&p["summary"], &a["summary"]);
-                prop_assert_eq!(&p["value"], &a["value"]);
-                prop_assert_eq!(&p["command"], &a["command"]);
-                prop_assert_eq!(&p["diagnostics"], &a["diagnostics"]);
-                prop_assert_eq!(&p["baseRevision"], &json!(before.revision()));
-                prop_assert_eq!(&p["revision"], &json!(before.revision()));
-                // The summary is what the real run changed.
-                let changed = differences(&before, &doc.snapshot());
-                let mut named: Vec<String> = ["created", "modified", "deleted"]
-                    .iter()
-                    .flat_map(|k| a["summary"][*k].as_array().unwrap().clone())
-                    .map(|v| v.as_str().unwrap().to_owned())
-                    .collect();
-                let mut changed: Vec<String> = changed.iter().map(ToString::to_string).collect();
-                named.sort();
-                changed.sort();
-                prop_assert_eq!(named, changed);
-            }
-            (Err(p), Err(a)) => prop_assert_eq!(p, a),
-            (p, a) => prop_assert!(false, "preview {p:?} but run {a:?}"),
-        }
+        preview_equals_run(&setup, &probe, undo_first)?;
     }
 }
 
@@ -323,4 +355,16 @@ fn previews_are_not_recorded_in_macros() {
     assert_eq!(recorder.len(), 0);
     run(&server, "test.item.create", &create, false).unwrap();
     assert_eq!(recorder.len(), 1);
+}
+
+/// Issue 110: a rename to the name an object already has is a recorded modification that leaves
+/// the object's state as it was, so the summary names it as modified and no state difference
+/// shows. Preview and run agree on it.
+#[test]
+fn a_rename_to_the_current_name_is_reported_as_modified_by_preview_and_run() {
+    // Draw names its objects "s".
+    let setup = [Step::Create(1.0), Step::Delete(0), Step::Draw(3)];
+    for undo_first in [false, true] {
+        preview_equals_run(&setup, &Step::Rename(vec![0, 1], "s".into()), undo_first).unwrap();
+    }
 }
