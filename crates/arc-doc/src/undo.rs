@@ -20,6 +20,23 @@
 //!   members must carry the outermost group's identifier in their metadata.
 //!   [`UndoManager::fail_group`] rolls back the transactions committed since the innermost open
 //!   group began, with one transaction of kind `undo_of(last member)` that forms no step.
+//! - **Batches** ([`UndoManager::undo_many`], [`UndoManager::redo_many`]): the top `count` steps
+//!   undo or redo in one transaction, so a batch is subject to the transaction limits and a very
+//!   large one fails atomically where single steps would succeed. An undo batch kind is
+//!   `undo_of(last transaction of the deepest step it undoes)` and moves each step to the redo
+//!   stack, so a redo steps back one at a time; a redo batch of two or more steps forms one new
+//!   undo step, which the limits never evict themselves (older steps go first, as the same number
+//!   of single redos would evict them). The depth of a batch is session state:
+//!   the caller declares it with [`UndoManager::expect_depth`] when it prepares the transaction,
+//!   and [`UndoManager::committed`] refuses a report that names another step than the declared
+//!   one. A journal reader sees a batch as one undo record named after its deepest step; stacks,
+//!   depths and marks are never stored, and reopening or recovering a document replays the
+//!   journal's operations and starts with empty stacks.
+//! - **Marks** ([`UndoManager::set_mark`]): a named position, the top undo step at the time. A
+//!   mark survives later commits and is invalid once its step leaves the undo stack (undone,
+//!   trimmed, or the history cut); a mark on an empty stack is invalid once a step is trimmed.
+//!   [`UndoManager::steps_to_mark`] counts the steps above it. Marks are session state; nothing
+//!   about them is journaled or stored.
 //! - **Coalescing**: within a gesture ([`UndoManager::begin_gesture`]), consecutive
 //!   transactions reported with the same coalesce key form one step; the journal keeps every
 //!   record.
@@ -45,6 +62,12 @@ use crate::txn::{Txn, TxnKind, TxnLimits, TxnMeta};
 
 /// The default number of undo steps.
 pub const DEFAULT_UNDO_STEPS: usize = 1_000;
+
+/// The most marks a manager holds.
+pub const MAX_MARKS: usize = 64;
+
+/// The longest mark name in bytes.
+pub const MAX_MARK_NAME_BYTES: usize = 128;
 
 /// The default memory budget of the undo stack, 1 GiB.
 pub const DEFAULT_UNDO_MEMORY_BYTES: u64 = 1 << 30;
@@ -118,6 +141,20 @@ pub struct UndoManager {
     next_gesture: u64,
     /// The last member of a rolled-back group whose rollback has not been reported yet.
     rollback: Option<TransactionId>,
+    marks: Vec<(String, Mark)>,
+    /// The depth of the undo or redo batch prepared and not yet reported.
+    expected: Option<usize>,
+    /// The steps dropped from the oldest end of the undo stack by the limits.
+    trimmed: u64,
+}
+
+/// A position in the undo stack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Mark {
+    /// The first transaction of the step on top when the mark was set; `None` for an empty stack.
+    step: Option<TransactionId>,
+    /// `UndoManager::trimmed` when the mark was set.
+    trimmed: u64,
 }
 
 impl UndoManager {
@@ -253,15 +290,39 @@ impl UndoManager {
         meta: TxnMeta,
         limits: TxnLimits,
     ) -> Result<Option<Txn>> {
+        if self.undo.is_empty() {
+            self.outside_group()?;
+            return Ok(None);
+        }
+        self.undo_many(1, journal, base, meta, limits).map(Some)
+    }
+
+    /// The transaction that undoes the top `count` undo steps at once on `base`: the inverses
+    /// of their operations, newest step first, in one transaction of kind `undo_of(last
+    /// transaction of the deepest step)`. All or nothing: the stacks change only when the
+    /// transaction is committed and reported. Fails with `doc.undo.sequence_invalid` inside an
+    /// open group or when `count` is zero or exceeds the undo stack, and with the codes of
+    /// [`UndoManager::undo`].
+    pub fn undo_many(
+        &self,
+        count: usize,
+        journal: &Journal,
+        base: &Snapshot,
+        meta: TxnMeta,
+        limits: TxnLimits,
+    ) -> Result<Txn> {
         self.outside_group()?;
-        let Some(step) = self.undo.back() else {
-            return Ok(None);
-        };
-        let Some(last) = step.txns.last() else {
-            return Ok(None);
-        };
-        let ops = inverse_ops(journal, &step.txns)?;
-        prepare(base, meta, limits, TxnKind::UndoOf(*last), &ops).map(Some)
+        if count == 0 || count > self.undo.len() {
+            return Err(sequence("the step count is out of range"));
+        }
+        let mut ops = Vec::new();
+        let mut deepest = None;
+        for step in self.undo.iter().rev().take(count) {
+            ops.extend(inverse_ops(journal, &step.txns)?);
+            deepest = step.txns.last();
+        }
+        let last = *deepest.ok_or_else(|| sequence("the step is empty"))?;
+        prepare(base, meta, limits, TxnKind::UndoOf(last), &ops)
     }
 
     /// The transaction that redoes the top redo step on `base` by applying its original
@@ -274,18 +335,112 @@ impl UndoManager {
         meta: TxnMeta,
         limits: TxnLimits,
     ) -> Result<Option<Txn>> {
-        self.outside_group()?;
-        let Some(step) = self.redo.last() else {
+        if self.redo.is_empty() {
+            self.outside_group()?;
             return Ok(None);
-        };
-        let Some(last) = step.txns.last() else {
-            return Ok(None);
-        };
-        let mut ops = Vec::new();
-        for id in &step.txns {
-            ops.extend(entry(journal, *id)?.record().ops.iter().cloned());
         }
-        prepare(base, meta, limits, TxnKind::RedoOf(*last), &ops).map(Some)
+        self.redo_many(1, journal, base, meta, limits).map(Some)
+    }
+
+    /// The transaction that redoes the top `count` redo steps at once, like
+    /// [`UndoManager::undo_many`], with kind `redo_of(last transaction of the deepest step)`;
+    /// once committed it forms one new undo step.
+    pub fn redo_many(
+        &self,
+        count: usize,
+        journal: &Journal,
+        base: &Snapshot,
+        meta: TxnMeta,
+        limits: TxnLimits,
+    ) -> Result<Txn> {
+        self.outside_group()?;
+        if count == 0 || count > self.redo.len() {
+            return Err(sequence("the step count is out of range"));
+        }
+        let mut ops = Vec::new();
+        let mut deepest = None;
+        for step in self.redo.iter().rev().take(count) {
+            for id in &step.txns {
+                ops.extend(entry(journal, *id)?.record().ops.iter().cloned());
+            }
+            deepest = step.txns.last();
+        }
+        let last = *deepest.ok_or_else(|| sequence("the step is empty"))?;
+        prepare(base, meta, limits, TxnKind::RedoOf(last), &ops)
+    }
+
+    /// Declares that the next reported `undo_of` or `redo_of` transaction is a batch of `depth`
+    /// steps, as prepared by [`UndoManager::undo_many`] or [`UndoManager::redo_many`]. Without
+    /// a declaration a report must be of the top step. The declaration is consumed by the next
+    /// report.
+    pub fn expect_depth(&mut self, depth: usize) {
+        self.expected = Some(depth);
+    }
+
+    /// Sets the mark `name` at the top of the undo stack, replacing a mark of that name, and
+    /// stops later transactions from coalescing into the top step. Fails with
+    /// `doc.undo.sequence_invalid` inside an open group, for an empty or longer than
+    /// [`MAX_MARK_NAME_BYTES`] name, or when [`MAX_MARKS`] valid marks exist.
+    pub fn set_mark(&mut self, name: &str) -> Result<()> {
+        self.outside_group()?;
+        if name.is_empty() || name.len() > MAX_MARK_NAME_BYTES {
+            return Err(sequence("the mark name is empty or too long"));
+        }
+        let valid: Vec<_> = std::mem::take(&mut self.marks)
+            .into_iter()
+            .filter(|(_, mark)| self.mark_depth(mark).is_some())
+            .collect();
+        self.marks = valid;
+        self.marks.retain(|(n, _)| n != name);
+        if self.marks.len() >= MAX_MARKS {
+            return Err(sequence("too many marks"));
+        }
+        if let Some(top) = self.undo.back_mut() {
+            top.coalesce = None;
+        }
+        let mark = Mark {
+            step: self.undo.back().and_then(|step| step.txns.first().copied()),
+            trimmed: self.trimmed,
+        };
+        self.marks.push((name.to_owned(), mark));
+        Ok(())
+    }
+
+    /// Removes the mark `name`; true when it existed.
+    pub fn clear_mark(&mut self, name: &str) -> bool {
+        let before = self.marks.len();
+        self.marks.retain(|(n, _)| n != name);
+        self.marks.len() != before
+    }
+
+    /// The names of the marks that are still valid, in the order they were set.
+    pub fn marks(&self) -> impl Iterator<Item = &str> + '_ {
+        self.marks
+            .iter()
+            .filter(|(_, mark)| self.mark_depth(mark).is_some())
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// The number of undo steps above the mark `name`: what [`UndoManager::undo_many`] undoes to
+    /// return to it (zero when the stack is at the mark). Fails with `doc.undo.sequence_invalid`
+    /// when the mark is not set or no longer valid.
+    pub fn steps_to_mark(&self, name: &str) -> Result<usize> {
+        self.marks
+            .iter()
+            .find(|(n, _)| n == name)
+            .and_then(|(_, mark)| self.mark_depth(mark))
+            .ok_or_else(|| sequence("the mark is not set or no longer valid"))
+    }
+
+    fn mark_depth(&self, mark: &Mark) -> Option<usize> {
+        match mark.step {
+            None => (mark.trimmed == self.trimmed).then_some(self.undo.len()),
+            Some(first) => self
+                .undo
+                .iter()
+                .rev()
+                .position(|step| step.txns.first() == Some(&first)),
+        }
     }
 
     /// Reports the committed transaction `txn`, already appended to `journal`, with the
@@ -309,6 +464,7 @@ impl UndoManager {
         txn: TransactionId,
         coalesce: Option<&str>,
     ) -> Result<()> {
+        let depth = self.expected.take().unwrap_or(1).max(1);
         let entry = entry(journal, txn)?;
         let record = entry.record();
         let bytes = entry.memory_bytes();
@@ -345,13 +501,22 @@ impl UndoManager {
                     self.rollback = None;
                     return Ok(());
                 }
-                if self.undo.back().and_then(|step| step.txns.last()) != Some(&target) {
-                    return Err(sequence("the undo is not of the top undo step"));
+                if self
+                    .undo
+                    .iter()
+                    .rev()
+                    .nth(depth - 1)
+                    .and_then(|step| step.txns.last())
+                    != Some(&target)
+                {
+                    return Err(sequence("the undo is not of the prepared steps"));
                 }
-                if let Some(mut step) = self.undo.pop_back() {
-                    self.undo_bytes = self.undo_bytes.saturating_sub(step.bytes);
-                    step.coalesce = None;
-                    self.redo.push(step);
+                for _ in 0..depth {
+                    if let Some(mut step) = self.undo.pop_back() {
+                        self.undo_bytes = self.undo_bytes.saturating_sub(step.bytes);
+                        step.coalesce = None;
+                        self.redo.push(step);
+                    }
                 }
                 // A transaction after an undo never joins an older step.
                 if let Some(top) = self.undo.back_mut() {
@@ -359,13 +524,26 @@ impl UndoManager {
                 }
             }
             TxnKind::RedoOf(target) => {
-                if self.redo.last().and_then(|step| step.txns.last()) != Some(&target) {
-                    return Err(sequence("the redo is not of the top redo step"));
+                if self
+                    .redo
+                    .iter()
+                    .rev()
+                    .nth(depth - 1)
+                    .and_then(|step| step.txns.last())
+                    != Some(&target)
+                {
+                    return Err(sequence("the redo is not of the prepared steps"));
                 }
-                self.redo.pop();
+                self.redo.truncate(self.redo.len().saturating_sub(depth));
                 let mut step = Step::default();
                 step.push(txn, bytes);
-                self.push_undo(step);
+                self.undo_bytes = self.undo_bytes.saturating_add(step.bytes);
+                self.undo.push_back(step);
+                if depth > 1 {
+                    self.trim_keeping_last();
+                } else {
+                    self.trim();
+                }
             }
             TxnKind::Merge | TxnKind::Migration => {}
         }
@@ -386,6 +564,20 @@ impl UndoManager {
         self.trim();
     }
 
+    /// [`UndoManager::trim`] that never drops the newest step, so a redo batch larger than the
+    /// budget costs older steps only, as the same number of single redos would.
+    fn trim_keeping_last(&mut self) {
+        while self.undo.len() > 1
+            && (self.undo.len() > self.limits.steps || self.undo_bytes > self.limits.memory_bytes)
+        {
+            let Some(step) = self.undo.pop_front() else {
+                break;
+            };
+            self.undo_bytes = self.undo_bytes.saturating_sub(step.bytes);
+            self.trimmed = self.trimmed.saturating_add(1);
+        }
+    }
+
     /// Drops the oldest steps while the stack exceeds a limit.
     fn trim(&mut self) {
         while self.undo.len() > self.limits.steps || self.undo_bytes > self.limits.memory_bytes {
@@ -393,6 +585,7 @@ impl UndoManager {
                 break;
             };
             self.undo_bytes = self.undo_bytes.saturating_sub(step.bytes);
+            self.trimmed = self.trimmed.saturating_add(1);
         }
     }
 }

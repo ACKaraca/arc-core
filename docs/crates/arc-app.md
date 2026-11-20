@@ -598,7 +598,8 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
 - `invoke(tab, session, invocation)` runs a product command on the tab's document; on a
   read-only tab the `edit` class is removed from the session, so editing commands fail with
   `cmd.permission_denied`. `undo(tab)` and `redo(tab)` step the document's undo history and
-  wait for the step; they return false when there was nothing to step.
+  wait for the step; they return false when there was nothing to step. `undo_many(tab, count)` and
+  `redo_many(tab, count)` step several at once in one transaction ([`Document::undo_many`]).
 
 ### Open and save flows (CORE-APP-004)
 

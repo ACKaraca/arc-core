@@ -88,6 +88,31 @@ fn an_unchanged_base_is_replayed_and_undo_works_after_recovery() {
 }
 
 #[test]
+fn recovery_after_an_undo_batch_rebuilds_the_state_with_empty_stacks() {
+    let dir = TempDir::new("rec-batch");
+    let root = dir.path("app");
+    let base_path = dir.path("model.arc");
+    write_base(&base_path, &initial(), 1);
+    let (document, base) = open(&base_path);
+    let journal = protect(&document, &root, 1, Some(base));
+    for (i, v) in [(1, 10), (2, 20), (6, 60), (1, 11)] {
+        set(&document, i, v);
+    }
+    assert!(document.undo_many(3).wait().unwrap().value);
+    let expected = state(&document.snapshot());
+    assert_eq!(expected.get(&1), Some(&10));
+    assert!(journal.flush(WAIT));
+    assert_eq!(journal.written(), 5);
+    drop(document);
+    drop(journal);
+    let recovered = recover_one(&root, 2);
+    assert_eq!(recovered.replayed, 5);
+    assert_eq!(state(&recovered.document.snapshot()), expected);
+    // The stacks are session state: nothing to undo or redo after recovery.
+    assert!(!recovered.document.can_undo() && !recovered.document.can_redo());
+}
+
+#[test]
 fn a_changed_base_recovers_from_the_copy_as_a_new_document() {
     let dir = TempDir::new("rec-changed");
     let root = dir.path("app");

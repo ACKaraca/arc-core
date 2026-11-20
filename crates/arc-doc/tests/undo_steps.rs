@@ -126,6 +126,25 @@ impl Doc {
         txn.map(|txn| self.commit(txn, None).unwrap()).is_some()
     }
 
+    /// Prepares and commits a batch of `count` steps, declaring `declare` as its depth.
+    fn batch(&mut self, undo: bool, count: usize, declare: Option<usize>) -> Result<TransactionId> {
+        let meta = self.meta();
+        let base = self.snapshot();
+        let limits = TxnLimits::default();
+        let txn = if undo {
+            self.undo
+                .undo_many(count, &self.journal, &base, meta, limits)
+        } else {
+            self.undo
+                .redo_many(count, &self.journal, &base, meta, limits)
+        }
+        .unwrap();
+        if let Some(depth) = declare {
+            self.undo.expect_depth(depth);
+        }
+        self.commit(txn, None)
+    }
+
     fn fail_group(&mut self) -> bool {
         let meta = self.meta();
         let txn = self
@@ -463,4 +482,84 @@ fn undo_of_a_thousand_modifications_stays_within_budget() {
     }
     eprintln!("undo of 1,000 modifications, worst of 20: {worst:?}");
     assert!(worst < std::time::Duration::from_millis(50));
+}
+
+/// Three edits, the middle one two transactions in a group, the last two coalesced in a gesture.
+fn mixed() -> Doc {
+    let mut doc = Doc::new(UndoLimits::default());
+    doc.edit(None, |txn| whole(txn, 1, &[10]));
+    doc.undo.begin_group("\"g\"");
+    doc.edit(None, |txn| set(txn, 1, 1));
+    doc.edit(None, |txn| whole(txn, 2, &[20]));
+    doc.undo.end_group().unwrap();
+    doc.undo.begin_gesture();
+    doc.edit(Some("k"), |txn| set(txn, 1, 2));
+    doc.edit(Some("k"), |txn| set(txn, 1, 3));
+    doc.undo.end_gesture();
+    doc
+}
+
+#[test]
+fn a_batch_over_groups_and_coalesced_steps_equals_single_undos_and_redo_returns() {
+    let (mut single, mut batch) = (mixed(), mixed());
+    let start = batch.snapshot();
+    assert_eq!(batch.steps().0, vec![1, 2, 2]);
+    for _ in 0..3 {
+        assert!(single.undo());
+    }
+    batch.batch(true, 3, Some(3)).unwrap();
+    assert!(differences(&single.snapshot(), &batch.snapshot()).is_empty());
+    assert!(single.snapshot().is_empty() && batch.steps() == (vec![], vec![2, 2, 1]));
+    for _ in 0..3 {
+        assert!(single.redo());
+    }
+    batch.batch(false, 3, Some(3)).unwrap();
+    assert!(differences(&single.snapshot(), &start).is_empty());
+    assert!(differences(&batch.snapshot(), &start).is_empty());
+    assert_eq!(batch.steps(), (vec![1], vec![]));
+    // The batch redo is one step; its undo returns to the empty document.
+    assert!(batch.undo());
+    assert!(batch.snapshot().is_empty());
+}
+
+#[test]
+fn a_report_that_does_not_match_the_prepared_batch_is_refused_and_changes_nothing() {
+    for declare in [None, Some(1), Some(3)] {
+        let mut doc = mixed();
+        let steps = doc.steps();
+        let error = doc.batch(true, 2, declare).unwrap_err();
+        assert_eq!(error.code(), "doc.undo.sequence_invalid", "{declare:?}");
+        assert_eq!(doc.steps(), steps);
+    }
+    // A redo report of the wrong depth, and an undo report of a deeper step than the top.
+    let mut doc = mixed();
+    doc.batch(true, 3, Some(3)).unwrap();
+    let steps = doc.steps();
+    assert!(doc.batch(false, 2, Some(1)).is_err());
+    assert_eq!(doc.steps(), steps);
+    // The declaration is consumed by one report.
+    let mut doc = mixed();
+    doc.batch(true, 2, Some(2)).unwrap();
+    assert!(doc.undo());
+}
+
+#[test]
+fn a_redo_batch_larger_than_the_budget_costs_older_steps_not_itself() {
+    let mut doc = Doc::new(UndoLimits::default());
+    for n in 1..=4 {
+        doc.edit(None, |txn| whole(txn, n, &[100 + n]));
+    }
+    let total = doc.undo.undo_memory_bytes();
+    doc.batch(true, 3, Some(3)).unwrap();
+    doc.undo.set_limits(UndoLimits {
+        steps: 1_000,
+        memory_bytes: total / 2,
+    });
+    assert_eq!(doc.steps().0, vec![1]);
+    doc.batch(false, 3, Some(3)).unwrap();
+    // The older step went; the batch step stays and can be undone.
+    assert_eq!(doc.steps().0, vec![1]);
+    assert!(doc.undo());
+    // Only the first edit (a whole and its part) remains.
+    assert_eq!(doc.snapshot().iter().count(), 2);
 }

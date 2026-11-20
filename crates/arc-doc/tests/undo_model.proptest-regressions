@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 85c183b0979f6ecd2f7af18dd6c219ec63bc367757bd84869be7f448806bc147 # shrinks to actions = [Commit([Create(0)], None), Commit([Create(0), Create(0)], None), Undo, Limits(1, 300), Redo]

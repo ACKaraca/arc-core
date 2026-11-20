@@ -983,6 +983,39 @@ occurred when the thread was descheduled.
   phase 0, where nothing but the session's commands writes the document; refusing such an undo
   as a conflict is CORE-DOC-024. Reporting a transaction that is not in the journal, or an undo
   or redo that is not of the step on top of its stack, fails with `doc.undo.sequence_invalid`.
+- **Batches, marks and restoring erased objects.** `Document::undo_many(count)` and
+  `redo_many(count)` (`UndoManager::undo_many` and `redo_many`) step the top `count` steps in one
+  transaction: one journal record, one revision, one event, all or nothing. Being one transaction, a
+  batch is subject to the transaction limits: a very large batch fails atomically with the limit
+  error where single steps would succeed. A `count` of zero or above the stack, or an open group,
+  fails with `doc.undo.sequence_invalid`. An undo batch is kind `undo_of(last transaction of the
+  deepest step)` and moves every step to the redo stack, so a redo steps back one at a time; a redo
+  batch of two or more steps forms one undo step, which the undo limits never evict themselves
+  (older steps go first).
+  The document declares the depth of a prepared batch to the manager (`expect_depth`), and
+  `committed` refuses a report that names another step than the declared one (a report with no
+  declaration must be of the top step), leaving the stacks unchanged. Stacks, batch depths and
+  marks are session state: nothing about them is stored, a journal reader sees a batch as one undo
+  record named after its deepest step, and reopening or recovering a document replays the
+  journal's operations and starts with empty stacks. `set_mark(name)` records
+  the top undo step, `undo_to_mark(name)` undoes every step above it (false at the mark),
+  `clear_mark` and `marks` manage them; at most 64 marks of at most 128 bytes. A mark survives later
+  commits and becomes invalid when its step leaves the undo stack (undone, trimmed by the limits,
+  history cut); a mark on an empty stack is invalid once a step is trimmed. Redo creates new
+  transactions, so a mark does not survive an undo past it. Marks are session state, never
+  journaled or stored. `undo_step_list(limit)` and `redo_step_list(limit)` describe the stacks,
+  the next step first (`StepSummary`: last transaction, transaction count and the opaque command
+  and label texts). `restore_erased(command, label)` commits a normal transaction that re-creates,
+  with their original identifiers, headers and values, the objects deleted by the newest ordinary
+  record (`normal` or `link_reload`, among the last 10,000) that deleted anything, and only that
+  one: when all its objects are live again the result is zero and no older erase is touched; when
+  some are live, the rest return, last deletion first so owners return before their children. It returns the number of
+  objects restored (zero when there is none), joins an open group, undoes like any step and, as a normal commit, clears the redo stack.
+  References and owner relations that the erase cleared in surviving objects are not restored.
+  Objects that cannot return consistently (a reference to an object deleted since, an owner that
+  is gone, a schema version that changed) fail the commit with its code and change nothing. A
+  group is a property of the journal (records carry the group identifier), so nothing is stored
+  for marks or groups beyond what a record already holds.
 - **Groups.** `begin_group(id)` opens a group, nested in the open ones; `group()` is the
   identifier of the outermost, which every transaction committed while it is open must carry in
   its metadata (`doc.undo.sequence_invalid` otherwise). The transactions of the outermost group

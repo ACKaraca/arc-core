@@ -459,6 +459,23 @@ impl Application {
         Ok(self.tab(id)?.document.redo().wait()?.value)
     }
 
+    /// Undoes the top `count` undo steps of tab `id`'s document in one transaction
+    /// ([`Document::undo_many`]); all or nothing, one notification.
+    ///
+    /// # Errors
+    /// `app.document.unknown` and the errors of [`Document::undo_many`].
+    pub fn undo_many(&self, id: TabId, count: usize) -> Result<bool> {
+        Ok(self.tab(id)?.document.undo_many(count).wait()?.value)
+    }
+
+    /// Redoes the top `count` redo steps of tab `id`'s document, like [`Application::undo_many`].
+    ///
+    /// # Errors
+    /// `app.document.unknown` and the errors of [`Document::redo_many`].
+    pub fn redo_many(&self, id: TabId, count: usize) -> Result<bool> {
+        Ok(self.tab(id)?.document.redo_many(count).wait()?.value)
+    }
+
     fn document_config(&mut self, session: SessionId) -> DocumentConfig {
         DocumentConfig {
             ids: (self.id_generators)(),

@@ -795,6 +795,11 @@ that record, so a concurrent commit by another writer does not change the answer
 - An undo or redo record names the record it reverses. A record that names no command (a redo
   does not) is followed to the record it reverses, up to 64 links, so an undo after a redo
   reports the command the redo restored. They take no `expectedRevision` and no `preview`.
+- In process only, module `history` also offers `list(document, session, limit)` (`read`
+  permission; the command and message identifiers and transaction count of up to 1,000 steps of
+  each stack, the next to step first) and `step_many(document, session, direction, count)` (`edit`
+  permission; `Document::undo_many` or `redo_many`, answering the revision). The protocol has no
+  method for either.
 - With nothing to step over, `cmd.history.empty` (detail `operation`: `undo` or `redo`) and the
   stacks are unchanged. Inside an open undo group the document's own `doc.undo.sequence_invalid`
   is returned.

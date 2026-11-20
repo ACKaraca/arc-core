@@ -63,7 +63,7 @@ pub use compare::{ChangeKind, Comparison, FieldChange, ObjectChange, compare, co
 pub use descriptor::descriptor;
 pub use diagnostic::{CollectingSink, Diagnostic, DiagnosticSink, Origin};
 pub use diagnostics::{DiagnosticsList, DiagnosticsSnapshot};
-pub use document::{Document, DocumentConfig};
+pub use document::{Document, DocumentConfig, MAX_RESTORE_SCAN, StepSummary};
 pub use events::{Event, EventBus, EventKind, Subscription};
 pub use executor::{Completed, DryRun, Pending, SubmitOptions};
 pub use graph::{
@@ -101,6 +101,6 @@ pub use subkey::SubKey;
 pub use txn::{
     MAX_OPERATIONS, MAX_SAVEPOINTS, Txn, TxnKind, TxnLimits, TxnMeta, TxnParts, TxnSavepoint,
 };
-pub use undo::{Step, UndoLimits, UndoManager};
+pub use undo::{MAX_MARK_NAME_BYTES, MAX_MARKS, Step, UndoLimits, UndoManager};
 pub use validate::DocumentValidator;
 pub use version::{NewerMajor, ReadOnlyReason};

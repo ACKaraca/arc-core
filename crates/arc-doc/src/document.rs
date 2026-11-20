@@ -35,7 +35,7 @@ use crate::record::TxnRecord;
 use crate::registry::TypeRegistry;
 use crate::scheduler::{Priority, Scheduler, default_workers};
 use crate::snapshot::{Snapshot, SnapshotCell};
-use crate::txn::{Txn, TxnLimits};
+use crate::txn::{Txn, TxnKind, TxnLimits};
 #[cfg(feature = "package")]
 use crate::undo::prepare;
 use crate::undo::{UndoLimits, UndoManager};
@@ -454,6 +454,122 @@ impl Document {
         })
     }
 
+    /// Undoes the top `count` undo steps in one transaction ([`UndoManager::undo_many`]): all
+    /// or nothing, one commit, one notification. The batch is one transaction, so it is subject
+    /// to the transaction limits: a very large batch fails atomically with the limit error where
+    /// single steps would succeed. Fails with `doc.undo.sequence_invalid` for a
+    /// `count` of zero or above the undo stack, or inside an open group.
+    pub fn undo_many(&self, count: usize) -> Pending<bool> {
+        self.undo_job(true, move |history, base, meta, limits| {
+            let History { journal, undo, .. } = history;
+            let txn = undo.undo_many(count, journal, base, meta, limits)?;
+            undo.expect_depth(count);
+            Ok(Some(txn))
+        })
+    }
+
+    /// Redoes the top `count` redo steps in one transaction ([`UndoManager::redo_many`]); the
+    /// redo forms one undo step. Fails like [`Document::undo_many`].
+    pub fn redo_many(&self, count: usize) -> Pending<bool> {
+        self.undo_job(true, move |history, base, meta, limits| {
+            let History { journal, undo, .. } = history;
+            let txn = undo.redo_many(count, journal, base, meta, limits)?;
+            undo.expect_depth(count);
+            Ok(Some(txn))
+        })
+    }
+
+    /// Sets the undo mark `name` at the top of the undo stack in submission order
+    /// ([`UndoManager::set_mark`]).
+    pub fn set_mark(&self, name: impl Into<String>) -> Pending<()> {
+        let name = name.into();
+        self.undo_control(move |undo| undo.set_mark(&name))
+    }
+
+    /// Removes the undo mark `name` in submission order; the value is true when it existed.
+    pub fn clear_mark(&self, name: impl Into<String>) -> Pending<bool> {
+        let name = name.into();
+        self.undo_control(move |undo| Ok(undo.clear_mark(&name)))
+    }
+
+    /// Undoes every step above the undo mark `name` in one transaction; the value is false when
+    /// the stack is already at the mark. Fails with `doc.undo.sequence_invalid` when the mark is
+    /// not set or no longer valid, or inside an open group.
+    pub fn undo_to_mark(&self, name: impl Into<String>) -> Pending<bool> {
+        let name = name.into();
+        self.undo_job(true, move |history, base, meta, limits| {
+            let History { journal, undo, .. } = history;
+            match undo.steps_to_mark(&name)? {
+                0 => Ok(None),
+                count => {
+                    let txn = undo.undo_many(count, journal, base, meta, limits)?;
+                    undo.expect_depth(count);
+                    Ok(Some(txn))
+                }
+            }
+        })
+    }
+
+    /// The names of the valid undo marks, in the order they were set.
+    #[must_use]
+    pub fn marks(&self) -> Vec<String> {
+        lock(&self.shared.history)
+            .undo
+            .marks()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Up to `limit` steps of the undo stack, the one [`Document::undo`] undoes first.
+    #[must_use]
+    pub fn undo_step_list(&self, limit: usize) -> Vec<StepSummary> {
+        let history = lock(&self.shared.history);
+        summarize(&history.journal, history.undo.undo_steps().rev(), limit)
+    }
+
+    /// Up to `limit` steps of the redo stack, the one [`Document::redo`] redoes first.
+    #[must_use]
+    pub fn redo_step_list(&self, limit: usize) -> Vec<StepSummary> {
+        let history = lock(&self.shared.history);
+        summarize(&history.journal, history.undo.redo_steps().rev(), limit)
+    }
+
+    /// Re-creates, with their original identifiers, the objects deleted by the newest ordinary
+    /// transaction (`normal` or `link_reload`, among the last [`MAX_RESTORE_SCAN`] journal
+    /// records) that deleted anything, without undoing later transactions. Only that record is
+    /// considered: when all its deleted objects are live again (the erase was undone, or already
+    /// restored) the value is zero and an older erase is never touched; when only some are live,
+    /// the rest are restored. It is a normal commit with `command` and `label` as its opaque
+    /// texts: undoable like any step, and it clears the redo stack. The value is the number of objects restored, zero when there is nothing to
+    /// restore. The references and owner relations the erase cleared in surviving objects are not
+    /// restored. Fails, changing nothing, with the codes of the commit when the objects cannot
+    /// return consistently (for example `doc.reference.dangling` when one references an object
+    /// deleted since) or `doc.undo.state_mismatch` when a type's schema version changed.
+    pub fn restore_erased(&self, command: String, label: String) -> Pending<usize> {
+        self.on_executor(move |core| {
+            let restored = std::cell::Cell::new(0);
+            let open: Open<'_> = Box::new(|history, base, mut meta, limits| {
+                meta.command = command;
+                meta.label = label;
+                let Some(ops) = last_erased(&history.journal, base) else {
+                    return Ok(None);
+                };
+                restored.set(ops.len());
+                crate::undo::prepare(base, meta, limits, TxnKind::Normal, &ops).map(Some)
+            });
+            let done = core.transact(Report::Undo(None), false, open, |_| Ok(()))?;
+            Ok(match done {
+                Some(done) => Completed {
+                    value: restored.get(),
+                    snapshot: done.snapshot,
+                    txn_id: done.txn_id,
+                    diagnostics: done.diagnostics,
+                },
+                None => core.nothing(0),
+            })
+        })
+    }
+
     /// Opens an undo group `id` in submission order ([`UndoManager::begin_group`]): the
     /// transactions of later jobs carry the outermost group's identifier and form one step when
     /// the outermost group ends.
@@ -717,4 +833,67 @@ impl Drop for Document {
     fn drop(&mut self) {
         self.close();
     }
+}
+
+/// The most journal records [`Document::restore_erased`] searches.
+pub const MAX_RESTORE_SCAN: usize = 10_000;
+
+/// One step of the undo or redo stack, as the lists describe it. The texts are the opaque
+/// command and label of the step's last transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepSummary {
+    /// The last transaction of the step.
+    pub last: arc_base::TransactionId,
+    /// The number of transactions in the step.
+    pub transactions: usize,
+    /// The command text of the last transaction.
+    pub command: String,
+    /// The label text of the last transaction.
+    pub label: String,
+}
+
+fn summarize<'a>(
+    journal: &Journal,
+    steps: impl Iterator<Item = &'a crate::undo::Step>,
+    limit: usize,
+) -> Vec<StepSummary> {
+    steps
+        .take(limit)
+        .filter_map(|step| {
+            let last = *step.transactions().last()?;
+            let record = journal.get(last)?.record();
+            Some(StepSummary {
+                last,
+                transactions: step.transactions().len(),
+                command: record.command.clone(),
+                label: record.label.clone(),
+            })
+        })
+        .collect()
+}
+
+/// The operations that re-create the objects the newest ordinary record that deleted anything
+/// deleted and that are not live, last deletion first so owners return before their children.
+fn last_erased(journal: &Journal, base: &Snapshot) -> Option<Vec<crate::op::Op>> {
+    let record = journal
+        .iter()
+        .rev()
+        .take(MAX_RESTORE_SCAN)
+        .map(crate::journal::JournalEntry::record)
+        .filter(|record| matches!(record.kind, TxnKind::Normal | TxnKind::LinkReload))
+        .find(|record| {
+            record
+                .ops
+                .iter()
+                .any(|op| matches!(op, crate::op::Op::Delete { .. }))
+        })?;
+    let ops: Vec<_> = record
+        .ops
+        .iter()
+        .rev()
+        .filter(|op| matches!(op, crate::op::Op::Delete { .. }))
+        .filter(|op| base.resolve(op.id()).is_err())
+        .map(crate::op::Op::inverse)
+        .collect();
+    (!ops.is_empty()).then_some(ops)
 }
