@@ -17,7 +17,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::codes;
+use crate::registry::NameFlags;
 use crate::roots::Roots;
+use crate::selection::{LastHook, Selections};
 use crate::spec::{Permission, Surface};
 
 /// Progress is forwarded only once a command has run this long (CORE-CMD-008).
@@ -63,6 +65,10 @@ pub struct Session {
     /// The file roots; commands reach files only through [`Context::open_read`] and
     /// [`Context::create_write`].
     pub roots: Roots,
+    /// The current and previous selection of the session ([`crate::selection`]).
+    pub(crate) selection: Selections,
+    /// The product's answer for the keyword `last`, if it gave one.
+    pub(crate) last: Option<LastHook>,
 }
 
 impl fmt::Debug for Session {
@@ -86,7 +92,51 @@ impl Session {
             clock: Arc::new(FixedClock(0)),
             units: Vec::new(),
             roots: Roots::none(),
+            selection: Selections::default(),
+            last: None,
         }
+    }
+
+    /// Gives the keyword `last` its meaning: `hook` returns the objects the product names as the
+    /// last one (for example the last created object), live or not. Without a hook, `last` fails
+    /// with `cmd.selection.unavailable`.
+    #[must_use]
+    pub fn with_last_objects(
+        mut self,
+        hook: impl Fn(&Snapshot) -> Vec<ObjectId> + Send + Sync + 'static,
+    ) -> Self {
+        self.last = Some(Arc::new(hook));
+        self
+    }
+
+    /// The current selection of the session, live objects only, in order. Clones of the session
+    /// share it.
+    #[must_use]
+    pub fn current_selection(&self, snapshot: &Snapshot) -> Vec<ObjectId> {
+        self.selection.current(snapshot)
+    }
+
+    /// The selection before the current one, live objects only.
+    #[must_use]
+    pub fn previous_selection(&self, snapshot: &Snapshot) -> Vec<ObjectId> {
+        self.selection.previous(snapshot)
+    }
+
+    /// Makes `ids` the current selection and the current one the previous selection. The list is
+    /// bounded by the session's `array_length` (the names of the same list kind in prompts) and
+    /// holds each identifier once, in order.
+    ///
+    /// # Errors
+    ///
+    /// `cmd.params.limit_exceeded` (detail `limit`, `array_length`) when `ids` is longer.
+    pub fn record_selection(&self, ids: &[ObjectId], snapshot: &Snapshot) -> Result<()> {
+        if u64::try_from(ids.len()).unwrap_or(u64::MAX) > self.limits.array_length {
+            return Err(
+                Error::new(codes::PARAMS_LIMIT_EXCEEDED).with_detail("limit", "array_length")
+            );
+        }
+        self.selection.record(ids, snapshot);
+        Ok(())
     }
 }
 
@@ -161,7 +211,9 @@ pub struct Context<'a> {
     cancel: &'a Cancel,
     progress: Option<&'a dyn ProgressSink>,
     start: u64,
+    flags: NameFlags,
     pub(crate) selection_after: Option<Vec<ObjectId>>,
+    pub(crate) selection_request: Option<Vec<ObjectId>>,
 }
 
 impl fmt::Debug for Context<'_> {
@@ -197,8 +249,24 @@ impl<'a> Context<'a> {
             cancel,
             progress,
             start: session.clock.now_unix_millis(),
+            flags: NameFlags::default(),
             selection_after: None,
+            selection_request: None,
         }
+    }
+
+    /// Sets the flags of the name the invocation was called by ([`NameFlags`]).
+    pub(crate) fn with_flags(mut self, flags: NameFlags) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    /// The flags of the name the invocation was called by: the ones a product's name resolver
+    /// set, or the defaults for an identifier, an alias or a localized name. The crate does not
+    /// interpret them.
+    #[must_use]
+    pub fn name_flags(&self) -> NameFlags {
+        self.flags
     }
 
     /// The document state: the transaction's candidate, or the snapshot a query reads.
@@ -231,6 +299,25 @@ impl<'a> Context<'a> {
     /// Sets the selection to restore after the command, recorded in the transaction.
     pub fn set_selection_after(&mut self, ids: Vec<ObjectId>) {
         self.selection_after = Some(ids);
+    }
+
+    /// Asks for `ids` to become the session's current selection, and the current one the
+    /// previous selection, once the command succeeds (not on a dry run). It works for any command:
+    /// a read-only one, or one with a transaction. The change is session state: it creates no
+    /// journal record and no undo step, and the outcome reports it ([`crate::Outcome::selection`]).
+    ///
+    /// # Errors
+    ///
+    /// `cmd.params.limit_exceeded` (detail `limit`, `array_length`) when `ids` is longer than the
+    /// session's limit; nothing is requested then.
+    pub fn set_selection(&mut self, ids: Vec<ObjectId>) -> Result<()> {
+        if u64::try_from(ids.len()).unwrap_or(u64::MAX) > self.session.limits.array_length {
+            return Err(
+                Error::new(codes::PARAMS_LIMIT_EXCEEDED).with_detail("limit", "array_length")
+            );
+        }
+        self.selection_request = Some(ids);
+        Ok(())
     }
 
     /// The session.
@@ -319,6 +406,42 @@ impl<'a> Context<'a> {
             );
         }
         self.session.roots.create_write(path)
+    }
+
+    /// Creates `path` exclusively inside the session's write roots and returns it open for
+    /// writing, without truncation or a reopen by path ([`Roots::create_new`]); the session
+    /// needs the class `file_write`. An existing name, a link included, is an error.
+    ///
+    /// # Errors
+    ///
+    /// `cmd.permission_denied` (detail `permission`) and the errors of [`Roots::create_new`].
+    pub fn create_new(&self, path: &std::path::Path) -> Result<std::fs::File> {
+        if !self.session.permissions.contains(&Permission::FileWrite) {
+            return Err(
+                Error::new(codes::PERMISSION_DENIED).with_detail("permission", "file_write")
+            );
+        }
+        self.session.roots.create_new(path)
+    }
+
+    /// Replaces the file at `target` with the regular file at `temporary`, both in one
+    /// directory inside the session's write roots ([`Roots::replace_file`]); the session needs
+    /// the class `file_write`. Together with [`Context::create_new`] this is an atomic save.
+    ///
+    /// # Errors
+    ///
+    /// `cmd.permission_denied` (detail `permission`) and the errors of [`Roots::replace_file`].
+    pub fn replace_file(
+        &self,
+        temporary: &std::path::Path,
+        target: &std::path::Path,
+    ) -> Result<()> {
+        if !self.session.permissions.contains(&Permission::FileWrite) {
+            return Err(
+                Error::new(codes::PERMISSION_DENIED).with_detail("permission", "file_write")
+            );
+        }
+        self.session.roots.replace_file(temporary, target)
     }
 
     /// The quantity of `param` in `dimension`. A number is taken in SI base units; a text is

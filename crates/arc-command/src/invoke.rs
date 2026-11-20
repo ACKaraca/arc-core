@@ -26,14 +26,16 @@ use serde_json::{Value, json};
 
 use crate::context::{Context, ProgressSink, Session};
 use crate::error::codes;
-use crate::registry::Registry;
+use crate::registry::{NameFlags, Registry};
 use crate::schema;
+use crate::selection;
 use crate::spec::{CommandSpec, UndoBehavior};
 
 /// One call of a command.
 #[derive(Clone)]
 pub struct Invocation {
-    /// The command identifier or an alias.
+    /// The command identifier, an alias, a localized name or a name a product's resolver owns
+    /// (see [`Registry::resolve`]).
     pub command: String,
     /// The parameters, a JSON object.
     pub params: Value,
@@ -95,6 +97,9 @@ pub struct Outcome {
     pub coalesce: Option<String>,
     /// The commit's diagnostics, and a deprecation warning when an alias was deprecated.
     pub diagnostics: Vec<Diagnostic>,
+    /// The selection the command set with [`Context::set_selection`], now the session's current
+    /// selection; `None` when it set none, or for a dry run.
+    pub selection: Option<Vec<ObjectId>>,
 }
 
 /// What a dry run returns: the outcome as a run on the same snapshot would give it, and the
@@ -220,7 +225,7 @@ impl<'r> Invoker<'r> {
         &self,
         document: &Document,
         session: &Session,
-        invocation: Invocation,
+        mut invocation: Invocation,
         dry: bool,
     ) -> Result<Preview> {
         let resolved = self
@@ -231,6 +236,7 @@ impl<'r> Invoker<'r> {
             .into_iter()
             .collect();
         let spec = resolved.spec;
+        let flags = resolved.flags;
         if !spec.exposure().contains(&session.surface) {
             return Err(Error::new(codes::NOT_EXPOSED).with_arg("command", spec.id()));
         }
@@ -247,6 +253,14 @@ impl<'r> Invoker<'r> {
                 .with_arg("command", spec.id())
                 .with_detail("permission", name));
         }
+        // Keywords of identifier lists (`selection`, `previous`, `last`) stand for the session's
+        // identifiers, so they are expanded before the schema check sees the parameters.
+        selection::expand(
+            spec.params_schema(),
+            &mut invocation.params,
+            session,
+            &document.snapshot(),
+        )?;
         let violations = spec.validate(&invocation.params, &session.limits)?;
         if !violations.is_empty() {
             return Err(schema::invalid(&violations));
@@ -256,14 +270,27 @@ impl<'r> Invoker<'r> {
         }
         let coalesce = spec.coalesce().map(str::to_owned);
         let command = spec.id().to_owned();
-        let (value, revision, txn_id, more, ops) = match spec.undo() {
-            UndoBehavior::Undoable => run_in_txn(document, session, invocation, spec, dry)?,
+        let (value, revision, txn_id, more, ops, requested) = match spec.undo() {
+            UndoBehavior::Undoable => run_in_txn(document, session, invocation, spec, flags, dry)?,
             UndoBehavior::NotUndoable | UndoBehavior::UndoControl => {
                 let snapshot = document.snapshot();
-                let value = run_on_snapshot(&snapshot, session, &invocation, &spec)?;
-                (value, snapshot.revision(), None, Vec::new(), Vec::new())
+                let (value, requested) =
+                    run_on_snapshot(&snapshot, session, &invocation, &spec, flags)?;
+                (
+                    value,
+                    snapshot.revision(),
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    requested,
+                )
             }
         };
+        // The selection is session state: applied after the command succeeded, never journaled.
+        let selection = if dry { None } else { requested };
+        if let Some(ids) = &selection {
+            session.record_selection(ids, &document.snapshot())?;
+        }
         diagnostics.extend(more);
         Ok(Preview {
             outcome: Outcome {
@@ -273,6 +300,7 @@ impl<'r> Invoker<'r> {
                 txn_id,
                 coalesce,
                 diagnostics,
+                selection,
             },
             ops,
         })
@@ -284,7 +312,8 @@ fn run_on_snapshot(
     session: &Session,
     invocation: &Invocation,
     spec: &CommandSpec,
-) -> Result<Value> {
+    flags: NameFlags,
+) -> Result<(Value, Option<Vec<ObjectId>>)> {
     let probe = crate::context::Probe {
         snapshot,
         selection: &invocation.selection,
@@ -300,19 +329,29 @@ fn run_on_snapshot(
         invocation.seed,
         &invocation.cancel,
         invocation.progress.as_deref(),
-    );
+    )
+    .with_flags(flags);
     let value = spec.call(&mut context, invocation.params.clone());
     let value = value.and_then(|value| context.checkpoint().map(|()| value));
-    value.map_err(map_error)
+    let requested = context.selection_request.take();
+    value.map(|value| (value, requested)).map_err(map_error)
 }
 
-type Ran = (Value, u64, Option<TransactionId>, Vec<Diagnostic>, Vec<Op>);
+type Ran = (
+    Value,
+    u64,
+    Option<TransactionId>,
+    Vec<Diagnostic>,
+    Vec<Op>,
+    Option<Vec<ObjectId>>,
+);
 
 fn run_in_txn(
     document: &Document,
     session: &Session,
     invocation: Invocation,
     spec: Arc<CommandSpec>,
+    flags: NameFlags,
     dry: bool,
 ) -> Result<Ran> {
     let session = session.clone();
@@ -344,33 +383,39 @@ fn run_in_txn(
             invocation.seed,
             &invocation.cancel,
             invocation.progress.as_deref(),
-        );
+        )
+        .with_flags(flags);
         let value = spec.call(&mut context, invocation.params)?;
         context.checkpoint()?;
         let selection_after = context.selection_after.take();
+        let requested = context.selection_request.take();
         drop(context);
         if let Some(ids) = selection_after {
             let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
             txn.meta_mut().selection_after = serde_json::to_string(&ids).ok();
         }
-        Ok(value)
+        Ok((value, requested))
     };
     if dry {
         let done = document.dry_run(job).wait().map_err(map_error)?;
+        let (value, requested) = done.value.value;
         return Ok((
-            done.value.value,
+            value,
             done.snapshot.revision(),
             None,
             done.diagnostics,
             done.value.ops,
+            requested,
         ));
     }
     let completed = document.submit(job).wait().map_err(map_error)?;
+    let (value, requested) = completed.value;
     Ok((
-        completed.value,
+        value,
         completed.snapshot.revision(),
         completed.txn_id,
         completed.diagnostics,
         Vec::new(),
+        requested,
     ))
 }

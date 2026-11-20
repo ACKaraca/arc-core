@@ -15,7 +15,7 @@ use std::sync::Arc;
 use arc_base::{Error, Result};
 use arc_command::Registry;
 use arc_command::headless;
-use arc_command::{Clock, ViewRenderer};
+use arc_command::{Clock, Session, ViewRenderer};
 use arc_doc::graph::Evaluators;
 use arc_doc::package::LockOwner;
 use arc_doc::{Document, DocumentConfig, TypeRegistry};
@@ -96,11 +96,12 @@ pub struct FileType {
 }
 
 /// The reader of a product's own format: the document of a file, made with the configuration the
-/// application gives a document.
-type NativeOpen = dyn Fn(&Path, DocumentConfig) -> Result<Document> + Send + Sync;
+/// application gives a document, and the session to run product commands with.
+type NativeOpen = dyn Fn(&Path, DocumentConfig, &Session) -> Result<Document> + Send + Sync;
 
-/// The writer of a product's own format: a document to a file.
-type NativeSave = dyn Fn(&Document, &Path) -> Result<()> + Send + Sync;
+/// The writer of a product's own format: a document to a file, with the session to run product
+/// commands with. The session's write roots contain the file's directory.
+type NativeSave = dyn Fn(&Document, &Path, &Session) -> Result<()> + Send + Sync;
 
 /// A product's own file format, opened and saved by the product's functions instead of the
 /// package format. Registered with [`ProductBuilder::opener`] for one extension.
@@ -110,12 +111,28 @@ pub struct NativeFormat {
 }
 
 impl NativeFormat {
-    /// A format whose files `open` reads into a document (it gets the configuration the
-    /// application makes for a document: identifiers, session and limits) and whose documents
-    /// `save` writes to a path. The application never saves a native document to a package.
+    /// A format whose files `open` reads into a document and whose documents `save` writes to a
+    /// path. The application never saves a native document to a package.
+    ///
+    /// What the callbacks receive:
+    ///
+    /// - `open` gets the path of the file, the configuration the application makes for a document,
+    ///   and a session. The session is the application's session (see
+    ///   [`Application::set_session`](crate::application::Application::set_session)) with its read
+    ///   roots replaced by the directory subtree that contains the file. Nothing else in it is
+    ///   changed.
+    /// - `save` gets the document, the path of an existing, empty temporary file beside the target,
+    ///   and a session with the same construction: its write roots are the directory subtree
+    ///   containing the target, and its read roots too. The application created the temporary file
+    ///   exclusively before the call. After `save` returns `Ok`, the application renames the file
+    ///   over the target with the roots' replace operation; after an error it removes the file and
+    ///   the target stays as it was. `save` writes the temporary path itself, by its own means.
+    ///
+    /// A command run with `arc_command::Invoker` and the session can access files only inside those
+    /// subtrees, through the same checks as any other command.
     pub fn new(
-        open: impl Fn(&Path, DocumentConfig) -> Result<Document> + Send + Sync + 'static,
-        save: impl Fn(&Document, &Path) -> Result<()> + Send + Sync + 'static,
+        open: impl Fn(&Path, DocumentConfig, &Session) -> Result<Document> + Send + Sync + 'static,
+        save: impl Fn(&Document, &Path, &Session) -> Result<()> + Send + Sync + 'static,
     ) -> Self {
         Self {
             open: Box::new(open),
@@ -124,8 +141,13 @@ impl NativeFormat {
     }
 
     /// Reads the document at `path`.
-    pub(crate) fn read(&self, path: &Path, config: DocumentConfig) -> Result<Document> {
-        (self.open)(path, config)
+    pub(crate) fn read(
+        &self,
+        path: &Path,
+        config: DocumentConfig,
+        session: &Session,
+    ) -> Result<Document> {
+        (self.open)(path, config, session)
     }
 
     /// The save function, shared with the tabs that opened this format.

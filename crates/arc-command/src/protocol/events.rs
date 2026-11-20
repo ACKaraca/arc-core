@@ -20,14 +20,16 @@ use serde_json::{Map, Value, json};
 
 use super::encode::Summary;
 use super::{Answer, Failure, Server, decode, invalid_params, limit, text};
+use crate::context::Session;
 use crate::error::codes;
 use crate::spec::Permission;
 
 /// The most notifications a session holds for its client.
 pub const EVENT_QUEUE: usize = 256;
 
-/// The most objects a selection holds.
-pub const MAX_SELECTED: usize = 10_000;
+/// The most objects a `selection.changed` event lists; a longer selection is reported with its
+/// count and `truncated`. The bound of a selection itself is the session's `array_length`.
+pub const EVENT_OBJECTS: usize = 1_000;
 
 /// The most sub-object keys of one selected object, and the longest key in bytes.
 const MAX_SUB_KEYS: usize = 1024;
@@ -266,11 +268,17 @@ impl Hub {
 
     /// Replaces the selection of `document` by `ids` (the live ones) after a command, and
     /// reports it.
-    pub(super) fn selection_after(&self, document: &str, snapshot: &Snapshot, ids: Vec<ObjectId>) {
+    pub(super) fn selection_after(
+        &self,
+        document: &str,
+        snapshot: &Snapshot,
+        ids: Vec<ObjectId>,
+        limit: usize,
+    ) {
         let list: Vec<Selected> = ids
             .into_iter()
             .filter(|id| snapshot.resolve(*id).is_ok())
-            .take(MAX_SELECTED)
+            .take(limit)
             .map(|id| Selected {
                 id,
                 keys: Vec::new(),
@@ -280,7 +288,8 @@ impl Hub {
     }
 
     fn store_selection(&self, document: &str, revision: u64, list: Vec<Selected>, source: &str) {
-        let objects = objects_json(&list);
+        let count = list.len();
+        let objects = objects_json(&list[..count.min(EVENT_OBJECTS)]);
         lock(&self.selection).insert(document.to_owned(), list);
         if lock(&self.subs)
             .get(document)
@@ -291,6 +300,8 @@ impl Hub {
                 "document": document,
                 "revision": revision,
                 "source": source,
+                "count": count,
+                "truncated": count > EVENT_OBJECTS,
                 "objects": objects,
             }));
         }
@@ -394,14 +405,15 @@ impl Hub {
     pub(super) fn selection_set(
         &self,
         server: &Server<'_>,
-        permissions: &BTreeSet<Permission>,
+        session: &Session,
         params: Map<String, Value>,
     ) -> Answer {
         const METHOD: &str = "selection.set";
-        require_read(permissions, METHOD)?;
+        require_read(&session.permissions, METHOD)?;
         let p: SetParams = decode(METHOD, params)?;
         let snapshot = server.document(&p.document)?.snapshot();
-        if p.objects.len() > MAX_SELECTED {
+        let bound = usize::try_from(session.limits.array_length).unwrap_or(usize::MAX);
+        if p.objects.len() > bound {
             return Err(limit("selection"));
         }
         let mut list: Vec<Selected> = Vec::new();
@@ -445,6 +457,9 @@ impl Hub {
             ))));
         }
         let answer = selection_json(&p.document, snapshot.revision(), &list);
+        // The session's selection follows the document's, so keywords see what the client set.
+        let ids: Vec<ObjectId> = list.iter().map(|s| s.id).collect();
+        session.record_selection(&ids, &snapshot)?;
         self.store_selection(&p.document, snapshot.revision(), list, "client");
         Ok(answer)
     }

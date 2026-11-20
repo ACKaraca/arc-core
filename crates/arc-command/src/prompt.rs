@@ -1177,7 +1177,7 @@ impl PromptSession {
                         None => None,
                     }
                 }
-                _ => read(accept, text, &self.session),
+                _ => read(accept, text, &self.session, snapshot),
             };
             match read_result {
                 Some(Ok(input)) => match admit(accept, &input, snapshot, &self.session) {
@@ -1260,7 +1260,12 @@ fn quantity(text: &str, session: &Session, dimension: Dimension) -> Result<Quant
 }
 
 /// Reads typed text as one accepted kind: `None` when the text does not have that kind's form.
-fn read(accept: &Accept, text: &str, session: &Session) -> Option<Result<PromptInput>> {
+fn read(
+    accept: &Accept,
+    text: &str,
+    session: &Session,
+    snapshot: &Snapshot,
+) -> Option<Result<PromptInput>> {
     Some(match accept {
         // Points are read by `coordinates::read`, which needs the session's point entry.
         Accept::Point { .. } => return None,
@@ -1274,12 +1279,24 @@ fn read(accept: &Accept, text: &str, session: &Session) -> Option<Result<PromptI
             .ok()
             .map(PromptInput::Pick)
             .map(Ok)?,
-        Accept::Selection { .. } => text
-            .split(|c: char| c == ',' || c.is_whitespace())
-            .filter(|s| !s.is_empty())
-            .map(|s| ObjectId::from_str(s).ok())
-            .collect::<Option<Vec<_>>>()
-            .map(|ids| Ok(PromptInput::Selection(ids)))?,
+        // Identifiers, or the keywords of the session's selection (`selection`, `previous`, `last`).
+        Accept::Selection { .. } => {
+            let mut ids = Vec::new();
+            for word in text
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|s| !s.is_empty())
+            {
+                if crate::selection::is_keyword(word) {
+                    match crate::selection::keyword_ids(word, session, snapshot) {
+                        Ok(found) => ids.extend(found),
+                        Err(error) => return Some(Err(error)),
+                    }
+                } else {
+                    ids.push(ObjectId::from_str(word).ok()?);
+                }
+            }
+            Ok(PromptInput::Selection(ids))
+        }
         Accept::Text { .. } => Ok(PromptInput::Text(text.to_owned())),
         Accept::Keyword { .. } => return None,
     })

@@ -57,6 +57,7 @@ cmd-preview-unsupported = The command controls undo and cannot run as a preview.
 cmd-preview-rollback-failed = The preview could not be rolled back and remains as an undoable step.
 cmd-query-cursor-invalid = The cursor does not belong to this query.
 cmd-query-cursor-stale = The document changed since revision { $expected }; the cursor is no longer valid.
+cmd-selection-unavailable = The session has no objects for the selection keyword { $keyword }.
 cmd-selection-unknown = { $count } selected objects do not exist in the document.
 cmd-roots-invalid = A file root is not an existing folder.
 cmd-path-rejected = The path is not acceptable.

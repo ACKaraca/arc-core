@@ -12,7 +12,9 @@ use arc_app::application::{AppConfig, Application, TabId};
 use arc_app::product::{FileType, NativeFormat, Product, ProductBuilder};
 use arc_app::recent::RecentFiles;
 use arc_base::{Error, IdGenerator, Limits};
-use arc_command::{FixedClock, Invocation, Permission, Session, Surface};
+use arc_command::{
+    CommandSpec, FixedClock, Invocation, Invoker, Permission, Session, Surface, UndoBehavior,
+};
 use arc_doc::graph::Evaluators;
 use arc_doc::package::LockOwner;
 use arc_doc::{Document, DocumentConfig, Snapshot};
@@ -73,7 +75,7 @@ fn format_with(
     let types = Arc::new(arc_shell_sample::types().unwrap());
     let reader = Arc::clone(&calls);
     NativeFormat::new(
-        move |path: &Path, config: DocumentConfig| {
+        move |path: &Path, config: DocumentConfig, _session: &Session| {
             reader.opens.fetch_add(1, Ordering::SeqCst);
             let text = std::fs::read_to_string(path).map_err(|_| failure())?;
             if text != MARKER {
@@ -85,7 +87,7 @@ fn format_with(
                 config,
             )
         },
-        move |document: &Document, path: &Path| {
+        move |document: &Document, path: &Path, _session: &Session| {
             calls.saves.fetch_add(1, Ordering::SeqCst);
             save(document, path)
         },
@@ -460,6 +462,84 @@ fn a_failed_native_save_leaves_the_file_intact_and_the_tab_dirty() {
         "the original is untouched"
     );
     assert!(app.tab(tab).unwrap().is_dirty());
+    assert!(
+        temporary_files(&dir.0).is_empty(),
+        "no temporary file is left"
+    );
+}
+
+/// The parameter of the product command a native save runs.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WriteParams {
+    path: String,
+}
+
+/// A native save that runs a product command with the session its callback receives: the command
+/// writes the temporary file it is given through the write roots of that session.
+#[test]
+fn a_native_save_runs_a_product_command_with_the_scoped_session() {
+    let dir = TempDir::new("scoped");
+    let mut commands = arc_shell_sample::registry().unwrap();
+    commands
+        .register(
+            CommandSpec::new(
+                "sample.file.write",
+                "sample-file-write",
+                "sample-file-write-description",
+                |context, params: WriteParams| -> arc_base::Result<()> {
+                    let mut file = context.create_write(Path::new(&params.path))?;
+                    std::io::Write::write_all(&mut file, MARKER.as_bytes()).map_err(|_| failure())
+                },
+            )
+            .with_undo(UndoBehavior::NotUndoable)
+            .with_permissions([Permission::FileWrite]),
+        )
+        .unwrap();
+    let save_commands = commands.clone();
+    let format = NativeFormat::new(
+        |path: &Path, _config: DocumentConfig, session: &Session| {
+            // The file's directory is the read root the opening session sees.
+            if session.roots.read_roots().is_empty() {
+                return Err(failure());
+            }
+            let text = std::fs::read_to_string(path).map_err(|_| failure())?;
+            if text != MARKER {
+                return Err(failure());
+            }
+            Document::open(
+                Snapshot::empty(Arc::new(arc_shell_sample::types().unwrap())),
+                Arc::new(Evaluators::new()),
+                DocumentConfig::default(),
+            )
+        },
+        move |document: &Document, path: &Path, session: &Session| {
+            let invocation = Invocation::new("sample.file.write", json!({ "path": path }));
+            Invoker::new(&save_commands)
+                .invoke(document, session, invocation)
+                .map(drop)
+        },
+    );
+    let mut builder = ProductBuilder::new("fake", "0.1.0")
+        .with_types(arc_shell_sample::types().unwrap())
+        .with_commands(commands);
+    builder
+        .file_type(FileType {
+            extension: "sample".into(),
+            message_id: "shell-file-arc".into(),
+            open: true,
+            save: true,
+        })
+        .unwrap();
+    builder.opener("sample", format).unwrap();
+    let product = builder.build(Arc::new(FixedClock(0)), owner()).unwrap();
+    let mut app = app(product, &dir.join("data"));
+    let file = dir.join("drawing.sample");
+    std::fs::write(&file, MARKER).unwrap();
+    let tab = app.open(&file).unwrap();
+    edit(&app, tab);
+    app.save(tab).unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), MARKER);
     assert!(
         temporary_files(&dir.0).is_empty(),
         "no temporary file is left"

@@ -310,6 +310,12 @@ pub mod codes {
         category: Category::Conflict,
         message_id: "cmd-query-cursor-stale",
     };
+    /// A selection keyword (`last`) names objects the session has no answer for.
+    pub const SELECTION_UNAVAILABLE: ErrorCode = ErrorCode {
+        code: "cmd.selection.unavailable",
+        category: Category::NotFound,
+        message_id: "cmd-selection-unavailable",
+    };
     /// A selected identifier names no object of the document.
     pub const SELECTION_UNKNOWN: ErrorCode = ErrorCode {
         code: "cmd.selection.unknown",
@@ -524,6 +530,7 @@ pub mod codes {
         PREVIEW_ROLLBACK_FAILED,
         QUERY_CURSOR_INVALID,
         QUERY_CURSOR_STALE,
+        SELECTION_UNAVAILABLE,
         SELECTION_UNKNOWN,
         ROOTS_INVALID,
         PATH_REJECTED,

@@ -36,7 +36,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
-pub use events::{EVENT_QUEUE, EVENTS, MAX_SELECTED};
+pub use events::{EVENT_OBJECTS, EVENT_QUEUE, EVENTS};
 pub use framing::{PipeReader, PipeWriter, pipe};
 pub use mcp::{MCP_FIXED_TOOLS, MCP_VERSIONS, McpConfig, tool_name};
 pub use query::MAX_PAGE;
@@ -215,14 +215,12 @@ impl ServerConfig {
 
     /// A command session of this configuration granted `permissions`.
     fn session(&self, permissions: BTreeSet<Permission>) -> Session {
-        Session {
-            surface: self.surface,
-            permissions,
-            limits: self.limits,
-            clock: Arc::clone(&self.clock),
-            units: self.units.clone(),
-            roots: self.roots.clone(),
-        }
+        let mut session = Session::new(self.surface, permissions);
+        session.limits = self.limits;
+        session.clock = Arc::clone(&self.clock);
+        session.units = self.units.clone();
+        session.roots = self.roots.clone();
+        session
     }
 
     fn max_line(&self) -> usize {
@@ -1079,7 +1077,7 @@ impl<'a> Reader<'_, 'a> {
             ),
             "selection.get" => self.hub.selection_get(server, &session.permissions, params),
             "selection.set" => {
-                let answer = self.hub.selection_set(server, &session.permissions, params);
+                let answer = self.hub.selection_set(server, &session, params);
                 // Like a run's events, the selection event precedes the answer.
                 self.hub.pump(true);
                 answer

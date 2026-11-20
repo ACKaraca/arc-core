@@ -104,8 +104,13 @@ impl Server<'_> {
             return self.preview(document, session, invocation);
         }
         let outcome = self.invoke(document, session, invocation, true)?;
-        if let (Some(hub), Some(ids)) = (hub, selection_after(document, outcome.txn_id)) {
-            hub.selection_after(doc_id, &document.snapshot(), ids);
+        let after = outcome
+            .selection
+            .clone()
+            .or_else(|| selection_after(document, outcome.txn_id));
+        let limit = usize::try_from(session.limits.array_length).unwrap_or(usize::MAX);
+        if let (Some(hub), Some(ids)) = (hub, after) {
+            hub.selection_after(doc_id, &document.snapshot(), ids, limit);
         }
         let extra = Extra {
             summary: Summary::of_transaction(document, outcome.txn_id),

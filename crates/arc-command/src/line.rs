@@ -508,6 +508,11 @@ fn text_to(kind: &Kind, text: &str, quoted: bool) -> Option<Value> {
 fn convert(raw: &Raw, kind: &Kind) -> Option<Value> {
     match raw {
         Raw::Json(value) => Some(value.clone()),
+        // A selection keyword given for a list of identifiers stands for the whole list; the
+        // invoker expands it from the session.
+        Raw::Bare(text) if matches!(kind, Kind::Array(_)) && crate::selection::is_keyword(text) => {
+            Some(Value::Array(vec![Value::String(text.clone())]))
+        }
         Raw::Bare(text) => text_to(kind, text, false),
         Raw::Quoted(text) => text_to(kind, text, true),
         Raw::List(items) => {
@@ -530,6 +535,9 @@ fn convert(raw: &Raw, kind: &Kind) -> Option<Value> {
 pub struct ParsedLine {
     /// The command identifier.
     pub command: String,
+    /// The name to invoke the command with ([`Resolved::call_name`]): the typed name for a name a
+    /// product's resolver owns, which carries the resolver's flags to the run, else the identifier.
+    pub invoke_as: String,
     /// How the typed name was resolved.
     pub via: Via,
     /// The span of the typed name.
@@ -598,6 +606,7 @@ pub fn parse_line(
     let resolved = registry
         .resolve(&name, localized)
         .map_err(|e| at(e, name_span))?;
+    let invoke_as = resolved.call_name(&name).to_owned();
     let spec = resolved.spec;
     let root = spec.params_schema();
     let properties = root.get("properties").and_then(Value::as_object);
@@ -664,6 +673,7 @@ pub fn parse_line(
         .collect();
     Ok(Some(ParsedLine {
         command: spec.id().to_owned(),
+        invoke_as,
         via: resolved.via,
         name_span,
         params,
@@ -736,10 +746,18 @@ fn format_value(value: &Value, kind: &Kind, depth: usize) -> String {
 pub fn format_line(registry: &Registry, invocation: &Invocation) -> Result<String> {
     let resolved = registry.resolve(&invocation.command, &BTreeMap::new())?;
     let spec = resolved.spec;
+    // Always the identifier: a typed product name would be resolved again on replay, by whatever
+    // resolver exists then. The flags of the name are not recorded (the line grammar has no place
+    // for them, and the macro format is not versioned for them).
+    let head = spec.id().to_owned();
     let Value::Object(params) = &invocation.params else {
         return Err(Error::new(codes::LINE_VALUE));
     };
-    let mut line = spec.id().to_owned();
+    let mut line = if is_bare_safe(&head) {
+        head
+    } else {
+        quote(&head)
+    };
     let mut names: Vec<&String> = params.keys().collect();
     names.sort();
     for name in names {
@@ -1001,6 +1019,10 @@ pub fn complete_in(
         return Completion::default();
     };
     let spec: &CommandSpec = &resolved.spec;
+    // A command the command line does not expose offers no parameter names or values.
+    if !spec.exposure().contains(&Surface::CommandLine) {
+        return Completion::default();
+    }
     let root = spec.params_schema();
     if let Some((param, value)) = partial.split_once('=') {
         let (offset, found) = value_candidates(&param_kind(root, param), value, snapshot);

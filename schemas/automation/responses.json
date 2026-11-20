@@ -681,6 +681,13 @@
         },
         "objects": {
           "$ref": "#/$defs/selected"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -688,7 +695,9 @@
         "document",
         "revision",
         "source",
-        "objects"
+        "objects",
+        "count",
+        "truncated"
       ],
       "additionalProperties": false
     },

@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_base::error::Value;
 use arc_base::{DocumentId, Error, IdGenerator, Limits, Result, SessionId};
-use arc_command::{Invocation, Invoker, Outcome, Permission, Session};
+use arc_command::{Clock, Invocation, Invoker, Outcome, Permission, Roots, Session, Surface};
 use arc_doc::package::recovery::{self, BaseFile, Orphan, RecoverOptions, RecoveryJournal};
 use arc_doc::package::{Access, Metadata, Mode, Package, ReadOnlyCause};
 use arc_doc::{Document, DocumentConfig, LoadOptions};
@@ -262,6 +262,7 @@ pub struct Application {
     id_generators: Box<dyn FnMut() -> IdGenerator + Send>,
     ids: IdGenerator,
     recent: RecentFiles,
+    session: Session,
     tabs: Vec<Tab>,
     active: Option<TabId>,
     next_tab: u64,
@@ -283,6 +284,7 @@ impl Application {
     #[must_use]
     pub fn new(product: Product, mut config: AppConfig) -> Self {
         let ids = (config.id_generators)();
+        let session = default_session(Arc::clone(&product.headless().clock));
         Self {
             settings: SettingsStore::new(product.settings().clone()),
             product,
@@ -291,10 +293,39 @@ impl Application {
             id_generators: config.id_generators,
             ids,
             recent: config.recent,
+            session,
             tabs: Vec::new(),
             active: None,
             next_tab: 0,
         }
+    }
+
+    /// Sets the session that the callbacks of the product's own file formats receive (see
+    /// [`NativeFormat::new`]). The default grants read, edit, file read and file write on the
+    /// user-interface surface, with the product's clock. The session's surface, permissions,
+    /// limits and clock are taken from it; its roots are not: they are replaced for each file, as
+    /// the application has no roots policy of its own.
+    pub fn set_session(&mut self, session: Session) {
+        self.session = session;
+    }
+
+    /// The session for a file at `path`: the application's session with the file's directory
+    /// subtree as its read root, and as its write root when `write` is set. A relative path is
+    /// resolved against the current directory first.
+    ///
+    /// # Errors
+    /// `cmd.roots.invalid` when the directory does not exist; `app.file.unsupported_type` for a
+    /// path without a parent directory; `cmd.path.io` when the current directory is unknown.
+    fn native_session(&self, path: &Path, write: bool) -> Result<Session> {
+        let path = absolute(path)?;
+        let directory = path.parent().ok_or_else(|| unsupported_path(&path))?;
+        let mut session = self.session.clone();
+        session.roots = if write {
+            Roots::new([directory], [directory])?
+        } else {
+            Roots::new([directory], Vec::<&Path>::new())?
+        };
+        Ok(session)
     }
 
     /// The product.
@@ -570,7 +601,8 @@ impl Application {
     fn open_native(&mut self, path: &Path, format: Arc<NativeFormat>) -> Result<TabId> {
         let session = self.ids.generate();
         let config = self.document_config(session);
-        let document = format.read(path, config)?;
+        let scoped = self.native_session(path, false)?;
+        let document = format.read(path, config, &scoped)?;
         let revision = document.snapshot().revision();
         self.recent.touch(path);
         Ok(self.push(Tab {
@@ -652,9 +684,10 @@ impl Application {
                 .and_then(|t| t.path.clone())
                 .ok_or_else(no_path)?;
             self.require_type(&path, true)?;
+            let scoped = self.native_session(&path, true)?;
             let tab = self.tabs.get_mut(at).ok_or_else(no_path)?;
             let revision = tab.document.snapshot().revision();
-            write_native(&format, &tab.document, &path)?;
+            write_native(&format, &scoped, &tab.document, &path)?;
             tab.saved_revision = Some(revision);
             self.recent.touch(&path);
             return Ok(());
@@ -790,7 +823,8 @@ impl Application {
             return Err(unsupported_path(target));
         }
         let revision = tab.document.snapshot().revision();
-        write_native(format, &tab.document, target)?;
+        let scoped = self.native_session(target, true)?;
+        write_native(format, &scoped, &tab.document, target)?;
         let tab = self.tabs.get_mut(at).ok_or_else(no_path)?;
         if let Some(journal) = tab.journal.take() {
             journal.discard();
@@ -962,30 +996,85 @@ fn same_file(a: &Path, b: &Path) -> bool {
     a == b || identity(a) == identity(b)
 }
 
-/// Writes a native document to `target` through the writer of `format`. The writer gets a
-/// temporary path beside the target; on success the file is renamed over the target, on failure
-/// the temporary file is removed and the target is left as it was. The rename is a plain rename on
-/// every platform: the package writer's retry on Windows is not shared with this crate.
-fn write_native(format: &NativeFormat, document: &Document, target: &Path) -> Result<()> {
+/// Writes a native document to `target` through the writer of `format`. The writer receives the
+/// path of an existing, empty temporary file beside the target: the application creates it
+/// exclusively inside the write roots of `session` before the writer runs, so no existing file is
+/// written. On success the file is renamed over the target with the roots' `replace_file`; on
+/// failure it is removed and the target is left as it was.
+fn write_native(
+    format: &NativeFormat,
+    session: &Session,
+    document: &Document,
+    target: &Path,
+) -> Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let name = target.file_name().map_or_else(
-        || "document".to_owned(),
-        |n| n.to_string_lossy().into_owned(),
-    );
-    let temp = target.with_file_name(format!(
-        ".{name}.{}.{}.tmp",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let result = (format.writer())(document, &temp).and_then(|()| {
-        std::fs::rename(&temp, target).map_err(|_| {
-            Error::new(arc_command::error::codes::PATH_IO).with_detail("reason", "rename")
-        })
-    });
+    let target = absolute(target)?;
+    let temp = reserve_temporary(session, &target, || NEXT.fetch_add(1, Ordering::Relaxed))?;
+    let result = (format.writer())(document, &temp, session)
+        .and_then(|()| session.roots.replace_file(&temp, &target));
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
     result
+}
+
+/// Creates the temporary file beside `target` exclusively and returns its path. The name is
+/// `.<name>.<process id>.<number>.tmp`, with the numbers `next` gives; a name taken by a stale
+/// file of a process that crashed is tried with the next number, at most eight names.
+fn reserve_temporary(
+    session: &Session,
+    target: &Path,
+    mut next: impl FnMut() -> u64,
+) -> Result<PathBuf> {
+    const ATTEMPTS: usize = 8;
+    let name = target.file_name().map_or_else(
+        || "document".to_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    for _ in 0..ATTEMPTS {
+        let temp = target.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), next()));
+        match session.roots.create_new(&temp) {
+            Ok(file) => {
+                drop(file);
+                return Ok(temp);
+            }
+            Err(error) if is_exists(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(Error::new(arc_command::error::codes::PATH_IO).with_detail("reason", "exists"))
+}
+
+/// True for the error of an existing name (`cmd.path.io`, reason `exists`).
+fn is_exists(error: &Error) -> bool {
+    error.code() == arc_command::error::codes::PATH_IO.code
+        && matches!(error.details().get("reason"), Some(Value::Text(reason)) if reason == "exists")
+}
+
+/// `path` as an absolute path: itself when absolute, else joined to the current directory.
+fn absolute(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|dir| dir.join(path))
+        .map_err(|_| Error::new(arc_command::error::codes::PATH_IO).with_detail("reason", "other"))
+}
+
+/// The application's default session: read, edit and file access on the user-interface surface,
+/// with the product's clock.
+fn default_session(clock: Arc<dyn Clock>) -> Session {
+    let mut session = Session::new(
+        Surface::Ui,
+        [
+            Permission::Read,
+            Permission::Edit,
+            Permission::FileRead,
+            Permission::FileWrite,
+        ],
+    );
+    session.clock = clock;
+    session
 }
 
 fn unsupported_path(path: &Path) -> Error {
@@ -1002,4 +1091,71 @@ fn path_arg(path: &Path) -> Value {
 
 fn tab_arg(id: TabId) -> Value {
     i64::try_from(id.0).unwrap_or(i64::MAX).into()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic, reason = "tests")]
+
+    use super::*;
+    use arc_command::Roots;
+
+    /// A directory with a short name, removed when dropped.
+    struct Dir(PathBuf);
+
+    impl Dir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("arc-app-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn session_in(dir: &Path) -> Session {
+        let mut session = default_session(Arc::new(arc_command::FixedClock(0)));
+        session.roots = Roots::new([dir], [dir]).unwrap();
+        session
+    }
+
+    /// A stale temporary file of an earlier process is skipped: the next number is taken.
+    #[test]
+    fn a_stale_temporary_name_is_skipped_up_to_eight_names() {
+        let dir = Dir::new("stale");
+        let target = dir.0.join("doc.sample");
+        let session = session_in(&dir.0);
+        let pid = std::process::id();
+        for number in [5, 6] {
+            std::fs::write(dir.0.join(format!(".doc.sample.{pid}.{number}.tmp")), "").unwrap();
+        }
+        let mut numbers = 5..;
+        let temp = reserve_temporary(&session, &target, || numbers.next().unwrap()).unwrap();
+        assert_eq!(temp, dir.0.join(format!(".doc.sample.{pid}.7.tmp")));
+        assert!(temp.is_file());
+        // Eight stale names in a row: the save fails instead of looping.
+        for number in 8..16 {
+            std::fs::write(dir.0.join(format!(".doc.sample.{pid}.{number}.tmp")), "").unwrap();
+        }
+        let mut numbers = 8..;
+        let error = reserve_temporary(&session, &target, || numbers.next().unwrap()).unwrap_err();
+        assert_eq!(error.code(), "cmd.path.io");
+    }
+
+    /// A relative path resolves against the current directory, so the roots are absolute.
+    #[test]
+    fn a_relative_path_is_resolved_before_the_roots_are_derived() {
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(
+            absolute(Path::new("doc.sample")).unwrap(),
+            here.join("doc.sample")
+        );
+        let absolute_path = here.join("x.sample");
+        assert_eq!(absolute(&absolute_path).unwrap(), absolute_path);
+    }
 }

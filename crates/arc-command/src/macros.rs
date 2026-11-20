@@ -507,7 +507,7 @@ fn run_step(
             params.insert(param.clone(), value.clone());
         }
     }
-    let mut invocation = Invocation::new(parsed.command, Value::Object(params));
+    let mut invocation = Invocation::new(parsed.invoke_as, Value::Object(params));
     let now = document.snapshot().revision();
     invocation.seed = adjusted_seed(step.seed, step.revision, now, content);
     invocation.selection.clone_from(&step.selection);

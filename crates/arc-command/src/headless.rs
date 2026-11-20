@@ -716,14 +716,12 @@ fn config(o: &Options, product: &Product) -> Result<ServerConfig, Failure> {
 
 /// A command session granted the whole ceiling of `config`, as [`Server::call`] uses.
 fn session(config: &ServerConfig, limits: &Limits) -> Session {
-    Session {
-        surface: Surface::Automation,
-        permissions: config.ceiling.clone(),
-        limits: *limits,
-        clock: Arc::clone(&config.clock),
-        units: config.units.clone(),
-        roots: config.roots.clone(),
-    }
+    let mut session = Session::new(Surface::Automation, config.ceiling.clone());
+    session.limits = *limits;
+    session.clock = Arc::clone(&config.clock);
+    session.units = config.units.clone();
+    session.roots = config.roots.clone();
+    session
 }
 
 /// Refuses a recording the session could not express, before anything is saved.

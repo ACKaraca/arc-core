@@ -109,6 +109,9 @@ pub type Runner<'r> = &'r mut dyn FnMut(Invocation) -> Result<Outcome>;
 #[derive(Debug, Default)]
 pub struct CommandLine {
     active: Option<PromptSession>,
+    /// The name the active prompt session's command was called by, so the run keeps the flags
+    /// of a name a product's resolver owns.
+    name: Option<String>,
     last: Option<LastCommand>,
     entry: PointEntry,
 }
@@ -136,6 +139,7 @@ impl CommandLine {
     /// accepted (or, when it accepted none, the line's last point) and its settings. A cancelled
     /// command keeps the points it accepted.
     fn retire(&mut self) {
+        self.name = None;
         if let Some(session) = self.active.take() {
             self.entry = session.carry();
         }
@@ -210,14 +214,15 @@ impl CommandLine {
         }
     }
 
-    /// Records a command completed elsewhere (a menu entry or a tool) as the last command;
-    /// transparent and unknown commands are not recorded.
+    /// Records a command completed elsewhere (a menu entry or a tool) as the last command; the
+    /// identifier is stored, or the name when a product's resolver owns it. Transparent and
+    /// unknown commands are not recorded.
     pub fn record(&mut self, registry: &Registry, command: &str, params: &Value) {
         if let Ok(resolved) = registry.resolve(command, &BTreeMap::new())
             && !resolved.spec.is_transparent()
         {
             self.last = Some(LastCommand {
-                command: resolved.spec.id().to_owned(),
+                command: resolved.call_name(command).to_owned(),
                 params: params.clone(),
             });
         }
@@ -234,7 +239,7 @@ impl CommandLine {
         invocation.selection = target.selection.to_vec();
         invocation.seed = target.seed;
         let outcome = runner(invocation)?;
-        self.record(target.registry, &outcome.command, &params);
+        self.record(target.registry, command, &params);
         Ok(Submitted::Ran(outcome))
     }
 
@@ -256,8 +261,9 @@ impl CommandLine {
                 Err(error)
             }
             Feedback::Done(invocation) => {
+                let command = self.name.clone().unwrap_or(invocation.command);
                 self.retire();
-                self.run(target, &invocation.command, invocation.params, runner)
+                self.run(target, &command, invocation.params, runner)
             }
         }
     }
@@ -279,7 +285,9 @@ impl CommandLine {
         match step {
             LineStep::Start { command, preset } => {
                 self.retire();
-                let spec = Arc::clone(&target.registry.resolve(command, target.localized)?.spec);
+                let resolved = target.registry.resolve(command, target.localized)?;
+                self.name = Some(resolved.call_name(command).to_owned());
+                let spec = Arc::clone(&resolved.spec);
                 let snapshot = target.document.snapshot();
                 let (session, feedback) = PromptSession::start_with_entry(
                     spec,
@@ -313,7 +321,7 @@ impl CommandLine {
                 if parsed.missing.is_empty() {
                     return self.run(
                         target,
-                        &parsed.command,
+                        &parsed.invoke_as,
                         Value::Object(parsed.params),
                         runner,
                     );
@@ -321,7 +329,7 @@ impl CommandLine {
                 self.drive(
                     target,
                     LineStep::Start {
-                        command: &parsed.command,
+                        command: &parsed.invoke_as,
                         preset: parsed.params,
                     },
                     runner,
@@ -399,7 +407,7 @@ impl CommandLine {
         if blocked {
             return Err(refused("group_open"));
         }
-        let mut invocation = Invocation::new(spec.id(), Value::Object(parsed.params));
+        let mut invocation = Invocation::new(parsed.invoke_as, Value::Object(parsed.params));
         invocation.selection = target.selection.to_vec();
         invocation.seed = target.seed;
         Ok(Submitted::Ran(runner(invocation)?))

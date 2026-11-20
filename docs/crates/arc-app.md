@@ -622,13 +622,19 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
   `app.product.duplicate`) and must not be the package extension declared with
   `ProductBuilder::package_extension`. `ProductBuilder::build` fails with `app.product.invalid_id`
   for an opener whose extension has no declared file type.
-- `NativeFormat::new(open, save)`: `open(path, config)` reads the file and returns an
+- `NativeFormat::new(open, save)`: `open(path, config, session)` reads the file and returns an
   `arc_doc::Document` (the application passes the document configuration: identifiers, session
-  and limits). `save(document, path)` writes a document to a file. The writer does not get the
-  target path: it gets a temporary path beside the target, and the application renames that file
-  over the target when the writer succeeds and removes it when the writer fails. The rename is a
-  plain rename on every platform (the package writer's retry on Windows is not shared with this
-  crate), so a target held by another process may fail the save with the file untouched.
+  and limits). `save(document, path, session)` writes a document to a file. What the callbacks
+  receive is in [Native session](#native-session).
+- A save creates an empty temporary file beside the target before `save` runs: exclusively, with
+  `Roots::create_new`, inside the session's write roots, under a name
+  `.<name>.<process id>.<number>.tmp`. A name taken by a stale file is tried with the next number,
+  at most eight names, then the save fails with `cmd.path.io` (reason `exists`). `save` receives the
+  path of that existing, empty file, not the target, and writes it by its own means. On success the
+  application renames the file over the target with `Roots::replace_file`; on failure it removes
+  the temporary file and the target stays as it was. A relative target is resolved against the
+  current directory first.
+  session they are given, so the helper has no reason to be public.
 - `open(path)` with a registered extension calls the product's `open`; the package reader is the
   default for every other extension. The file must still be a declared file type that opens. A
   path already open in a tab activates it: two paths name the same file when their canonical
@@ -646,6 +652,24 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
   changes). A package document is refused with `app.file.unsupported_type` and nothing is
   written. A native tab saved to a package target is refused with the same error.
 - `save_as` refuses a target that another tab holds (`app.document.held`), and writes nothing.
+
+### Native session
+
+- The session the callbacks receive is the application's session (`Application::set_session`;
+  default: the user-interface surface, the `read`, `edit`, `file_read` and `file_write` classes, and
+  the product's clock) with its read roots replaced: the read root is the directory subtree that
+  contains the file. For `save` the write root is that same directory subtree, and the read root
+  too. Surface, permissions, limits and clock come from the application's session; roots never do.
+  The application has no roots policy of its own, so the file's directory is the policy.
+- `set_session` is therefore a trust point for the surface, the permission classes, the limits and
+  the clock of product commands run by the native callbacks. It is not a trust point for roots.
+- A relative path is resolved against the current directory before the directory is taken. The
+  directory must exist (`cmd.roots.invalid` otherwise); a path without a parent is
+  `app.file.unsupported_type`.
+- A command run through `arc_command::Invoker` with the session can reach files only inside those
+  subtrees, through the same checks as any other file access.
+- The application's own writer helper is not exported: products reach files through the session
+  they are given, so the helper has no reason to be public.
 
 ### Read-only and lock banners (CORE-APP-005)
 

@@ -149,17 +149,34 @@ impl Roots {
         native::create_write(self, parent, Path::new(name))
     }
 
-    /// Reserves `path` as a new file inside a write root: the file is created exclusively, so
-    /// nothing, a link included, may exist under the name, and no existing file is opened or
-    /// truncated. The parent directory is resolved and must lie in a write root; a path under a
-    /// directory that does not exist is `cmd.path.outside_roots` unless the deepest existing
-    /// ancestor lies inside a root. The file stays as an empty placeholder: the caller fills
-    /// the path. Returns the resolved path.
+    /// Creates `path` as a new file inside a write root and returns it open for writing. The
+    /// file is created exclusively, so nothing, a link included, may exist under the name, and no
+    /// existing file is opened or truncated. The parent directory is resolved through the same
+    /// checks as [`Roots::create_write`] and must lie in a write root.
     ///
     /// # Errors
     ///
     /// `cmd.path.rejected`, `cmd.path.too_long`, `cmd.path.outside_roots`, `cmd.path.not_found`
     /// or `cmd.path.io` (reason `exists` when the name is taken, `denied` or `other`).
+    pub fn create_new(&self, path: &Path) -> Result<File> {
+        check_text(path, self)?;
+        let name = match path.components().next_back() {
+            Some(std::path::Component::Normal(name)) => name,
+            _ => return Err(rejected("not_a_file_name")),
+        };
+        let parent = path.parent().ok_or_else(|| rejected("not_a_file_name"))?;
+        let parent = canonical(self, parent, true)?;
+        native::create_new(self, &parent, Path::new(name))
+    }
+
+    /// Reserves `path` as a new file inside a write root and drops the handle: the file stays as an
+    /// empty placeholder that the caller fills by path. The parent is resolved once, before the
+    /// file is created, and the resolved path is returned. Prefer [`Roots::create_new`], which
+    /// keeps the handle.
+    ///
+    /// # Errors
+    ///
+    /// As [`Roots::create_new`].
     pub fn reserve(&self, path: &Path) -> Result<PathBuf> {
         check_text(path, self)?;
         let name = match path.components().next_back() {
@@ -167,7 +184,39 @@ impl Roots {
             _ => return Err(rejected("not_a_file_name")),
         };
         let parent = path.parent().ok_or_else(|| rejected("not_a_file_name"))?;
-        native::reserve(self, parent, Path::new(name))
+        // The parent is canonicalized once, before the file exists: nothing can fail after the
+        // create, so no placeholder is left behind.
+        let parent = canonical(self, parent, true)?;
+        drop(native::create_new(self, &parent, Path::new(name))?);
+        Ok(parent.join(name))
+    }
+
+    /// Replaces the file at `target` with the regular file at `temporary`, both in the same
+    /// directory, which must lie in a write root. The rename is made relative to the directory
+    /// handle the checks opened (`renameat` on Unix; on Windows the rename is retried a few times
+    /// while another process holds the target), so a file cannot be moved across the roots. A link
+    /// at `temporary` is refused; a link at `target` is replaced as a directory entry and its
+    /// destination is not written.
+    ///
+    /// # Errors
+    ///
+    /// `cmd.path.rejected` with reason `different_directory` when the parents differ, and the name
+    /// checks (`not_a_file_name`). For `temporary`: on Unix, `not_a_file` for anything that is not
+    /// a regular file, a link included; on Windows, `link` for a symbolic link or junction and
+    /// `not_a_file` for any other non-regular file or reparse point. Also `cmd.path.too_long`,
+    /// `cmd.path.outside_roots`, `cmd.path.not_found` or `cmd.path.io`.
+    pub fn replace_file(&self, temporary: &Path, target: &Path) -> Result<()> {
+        check_text(temporary, self)?;
+        check_text(target, self)?;
+        if temporary.parent() != target.parent() {
+            return Err(rejected("different_directory"));
+        }
+        let (Some(from), Some(to), Some(parent)) =
+            (temporary.file_name(), target.file_name(), target.parent())
+        else {
+            return Err(rejected("not_a_file_name"));
+        };
+        native::replace(self, parent, Path::new(from), Path::new(to))
     }
 
     /// Checks that [`Roots::create_write`] would accept `path` for a macro or another file the
@@ -341,7 +390,11 @@ mod native {
         Err(outside())
     }
 
-    pub(super) fn reserve(_: &Roots, _: &Path, _: &Path) -> Result<PathBuf> {
+    pub(super) fn create_new(_: &Roots, _: &Path, _: &Path) -> Result<File> {
+        Err(outside())
+    }
+
+    pub(super) fn replace(_: &Roots, _: &Path, _: &Path, _: &Path) -> Result<()> {
         Err(outside())
     }
 }
@@ -353,7 +406,7 @@ mod native {
     use std::path::{Component, Path, PathBuf};
 
     use arc_base::{Error, Result};
-    use rustix::fs::{CWD, Mode, OFlags, openat};
+    use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, openat, renameat, statat};
     use rustix::io::Errno;
 
     use super::{Roots, canonical, exists_error, io_error, outside, rejected};
@@ -457,10 +510,21 @@ mod native {
         create_canonical(roots, &canonical(roots, parent, true)?, name, false)
     }
 
-    pub(super) fn reserve(roots: &Roots, parent: &Path, name: &Path) -> Result<PathBuf> {
+    pub(super) fn create_new(roots: &Roots, parent: &Path, name: &Path) -> Result<File> {
+        create_canonical(roots, parent, name, true)
+    }
+
+    /// Renames `from` to `to` inside the directory `parent`, both relative to the handle of that
+    /// directory, after checking that `from` is a regular file and not a link.
+    pub(super) fn replace(roots: &Roots, parent: &Path, from: &Path, to: &Path) -> Result<()> {
         let parent = canonical(roots, parent, true)?;
-        drop(create_canonical(roots, &parent, name, true)?);
-        Ok(parent.join(name))
+        let root = roots.holder(&parent, true).ok_or_else(outside)?;
+        let dir = walk(root, &parent)?;
+        let stat = statat(&dir, from, AtFlags::SYMLINK_NOFOLLOW).map_err(open_error)?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+            return Err(rejected("not_a_file"));
+        }
+        renameat(&dir, from, &dir, to).map_err(|e| io_error(&e.into()))
     }
 
     #[cfg(test)]
@@ -612,13 +676,12 @@ mod native {
 
     /// Creates the file exclusively under the held directory chain; nothing may exist under the
     /// name, a link included.
-    pub(super) fn reserve(roots: &Roots, parent: &Path, name: &Path) -> Result<PathBuf> {
-        let parent = canonical(roots, parent, true)?;
+    pub(super) fn create_new(roots: &Roots, parent: &Path, name: &Path) -> Result<File> {
         let root = roots
-            .holder(&parent, true)
+            .holder(parent, true)
             .ok_or_else(outside)?
             .to_path_buf();
-        let held = hold_chain(&root, &parent)?;
+        let held = hold_chain(&root, parent)?;
         let target = parent.join(name);
         let created = options(true, true).open(&target);
         drop(held);
@@ -626,8 +689,58 @@ mod native {
             ErrorKind::AlreadyExists => exists_error(),
             _ => io_error(&e),
         })?;
-        plain(&file, false)?;
-        Ok(target)
+        // A file that is not a plain file is removed again, so a refusal leaves nothing behind.
+        if let Err(error) = plain(&file, false) {
+            drop(file);
+            let _ = fs::remove_file(&target);
+            return Err(error);
+        }
+        Ok(file)
+    }
+
+    /// Renames `from` over `to` inside the held directory chain of `parent`. A transient refusal
+    /// (another process holds the target open) is retried a few times with a growing pause.
+    pub(super) fn replace(roots: &Roots, parent: &Path, from: &Path, to: &Path) -> Result<()> {
+        const ATTEMPTS: u32 = 5;
+        let parent = canonical(roots, parent, true)?;
+        let root = roots
+            .holder(&parent, true)
+            .ok_or_else(outside)?
+            .to_path_buf();
+        let held = hold_chain(&root, &parent)?;
+        let (source, target) = (parent.join(from), parent.join(to));
+        let meta = fs::symlink_metadata(&source).map_err(|e| io_error(&e))?;
+        if meta.file_type().is_symlink() {
+            return Err(rejected("link"));
+        }
+        if !meta.is_file() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(rejected("not_a_file"));
+        }
+        let mut attempt = 0;
+        let result = loop {
+            match fs::rename(&source, &target) {
+                Ok(()) => break Ok(()),
+                Err(e) if attempt + 1 < ATTEMPTS && is_transient(&e) => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10 * u64::from(attempt)));
+                }
+                Err(e) => break Err(io_error(&e)),
+            }
+        };
+        drop(held);
+        result
+    }
+
+    /// The refusals of a target that another process holds: access denied, a sharing or a lock
+    /// violation.
+    fn is_transient(error: &std::io::Error) -> bool {
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        const ERROR_LOCK_VIOLATION: i32 = 33;
+        matches!(
+            error.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+        )
     }
 
     pub(super) fn create_write(roots: &Roots, parent: &Path, name: &Path) -> Result<File> {
@@ -708,6 +821,63 @@ mod native {
             );
             assert!(accepted.is_ok());
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod link_tests {
+    use std::fs;
+
+    use super::*;
+
+    /// A directory inside the root that is a link to a directory outside: neither the new file
+    /// nor the replacement reaches the outside, and the temporary file stays where it was.
+    #[test]
+    fn replace_and_create_through_a_linked_directory_are_refused() {
+        let base = std::env::temp_dir().join(format!("arc-roots-rep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (root, outside) = (base.join("root"), base.join("outside"));
+        fs::create_dir_all(root.join("real")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(root.join("real").join("t.tmp"), "T").unwrap();
+        fs::write(outside.join("t.tmp"), "OUT").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let roots = Roots::new([&root], [&root]).unwrap();
+        let code = |r: Result<()>| r.unwrap_err().code().to_owned();
+        let through = root.join("link");
+        assert_eq!(
+            code(roots.replace_file(&through.join("t.tmp"), &through.join("doc"))),
+            "cmd.path.outside_roots"
+        );
+        assert_eq!(
+            code(roots.create_new(&through.join("new.txt")).map(drop)),
+            "cmd.path.outside_roots"
+        );
+        let outside_names: Vec<_> = fs::read_dir(&outside)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        let kept = fs::read_to_string(outside.join("t.tmp"));
+        let _ = fs::remove_dir_all(&base);
+        assert_eq!(outside_names.len(), 1, "a file appeared or moved outside");
+        assert_eq!(kept.unwrap(), "OUT");
+    }
+
+    /// The new file of a plain exclusive create is open and writable, and a second create of the
+    /// same name is refused as existing.
+    #[test]
+    fn create_new_returns_the_open_file_once() {
+        let base = std::env::temp_dir().join(format!("arc-roots-new-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let roots = Roots::new([&base], [&base]).unwrap();
+        let path = base.join("one.txt");
+        let mut file = roots.create_new(&path).unwrap();
+        std::io::Write::write_all(&mut file, b"x").unwrap();
+        drop(file);
+        let again = roots.create_new(&path).map(drop).unwrap_err();
+        let _ = fs::remove_dir_all(&base);
+        assert_eq!(again.code(), "cmd.path.io");
     }
 }
 

@@ -1138,6 +1138,7 @@ impl Shell {
                         txn_id: None,
                         coalesce: None,
                         diagnostics: Vec::new(),
+                        selection: None,
                     });
                 }
                 if log.len() >= MAX_LOG {

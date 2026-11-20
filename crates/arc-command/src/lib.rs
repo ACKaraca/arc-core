@@ -11,8 +11,8 @@
 //!   and enabled predicates (CORE-CMD-003, CORE-CMD-005, CORE-CMD-008, [`context`]);
 //! - guarded execution through `arc-doc` transactions with permission checks (CORE-CMD-004,
 //!   CORE-CMD-007, [`invoke`]);
-//! - the registry with deprecated and user aliases, name resolution and the command catalog
-//!   (CORE-CMD-009, CORE-CMD-010, [`registry`]);
+//! - the registry with deprecated and user aliases, a product's name resolver, name resolution
+//!   and the command catalog (CORE-CMD-009, CORE-CMD-010, [`registry`]);
 //! - prompt machines with typed inputs, defaults, keyword options, back, cancel and previews
 //!   (CORE-CMD-011, [`prompt`]);
 //! - command-line parsing with inline positional and named parameters, the canonical line form
@@ -70,6 +70,7 @@ pub mod protocol;
 pub mod registry;
 pub mod roots;
 pub mod schema;
+pub mod selection;
 pub mod spec;
 
 pub use command_line::{
@@ -93,7 +94,9 @@ pub use prompt::{
     Step,
 };
 pub use protocol::{Log, LogLevel, NoLog, Server, ServerConfig, ViewRenderer, ViewRequest};
-pub use registry::{CATALOG_FORMAT, CATALOG_VERSION, Registry, Resolved, Via};
+pub use registry::{
+    CATALOG_FORMAT, CATALOG_VERSION, NameFlags, NameMatch, NameResolver, Registry, Resolved, Via,
+};
 pub use roots::Roots;
 pub use schema::{Violation, ViolationKind, parse_params};
 pub use spec::{CommandSpec, Disabled, Permission, Predicate, Surface, UndoBehavior};

@@ -130,7 +130,7 @@ parsing and repeat (CORE-CMD-011, CORE-CMD-013, CORE-CMD-015) are described in t
   selection, the session, identifiers and random numbers from a generator seeded with the
   invocation's seed mixed with the revision of the snapshot the command runs on (so repeated
   invocations in one document never repeat identifiers), the session clock, cancellation and
-  progress, and the selection to restore afterward.
+  progress, the selection to restore afterward, and the name flags of the call (`name_flags`).
 - An enabled predicate reads a `Probe` (snapshot, selection, session) and returns a `Disabled`
   reason: a message identifier with arguments. `cmd.disabled` carries the reason's identifier in
   the detail `reason` and its arguments as further details. `CommandSpec::enabled` is public
@@ -138,9 +138,8 @@ parsing and repeat (CORE-CMD-011, CORE-CMD-013, CORE-CMD-015) are described in t
 
 ### Guarded execution
 
-`Invoker::invoke` is the only entry point. It resolves the name (identifier or alias; a
-deprecated alias adds a `cmd.alias.deprecated` warning to the outcome's diagnostics), then checks
-in order: exposure on the session's surface (`cmd.not_exposed`), permission classes
+`Invoker::invoke` is the only entry point. It resolves the name (see the resolution order under
+the registry), then checks in order: exposure on the session's surface (`cmd.not_exposed`), permission classes
 (`cmd.permission_denied`, detail `permission`), parameter limits and schema, and the enabled
 predicate. An `undoable` command runs as a job of `Document::submit`: the predicate is evaluated
 on the job's base snapshot, the transaction metadata is filled (`command`: canonical JSON
@@ -155,8 +154,43 @@ Commands that are not `undoable` run on the latest snapshot with the same checks
 unwind boundary. The outcome holds the result, the revision, the transaction identifier, the
 coalesce key to report to the undo manager, and the diagnostics.
 
+The name flags of a product name (see the registry) reach the context of `run` and of the enabled
+predicate's command; a command reads them with `Context::name_flags`. The crate does not interpret
+them.
+
 Progress reaches the invocation's sink only once the session clock shows 300 ms
 (`PROGRESS_DELAY_MILLIS`) since the command started; fractions are clamped to `[0, 1]`.
+
+### Session selection
+
+- A session holds its current and previous selection (`Session::current_selection`,
+  `Session::previous_selection`, both live objects only, in order; a stored identifier of an object
+  that no longer exists is dropped when read). Clones of a session share the state. Recording
+  (`Session::record_selection`) makes the current selection the previous one and the new list the
+  current one; each identifier is kept once.
+- A command sets the selection with `Context::set_selection(ids)`, which works for read-only
+  commands and for commands with a transaction. The request is applied after the command
+  succeeds, never on a dry run, and it creates no journal record and no undo step, and no revision.
+  The outcome reports it (`Outcome::selection`). `Context::set_selection_after` keeps its meaning:
+  the selection a transaction restores on undo or redo, which a transaction records; it does not
+  change the session's selection.
+- The bound of a selection is the session's `Limits::array_length`, the same bound prompts use for
+  lists of objects. A longer list fails with `cmd.params.limit_exceeded` (detail `limit`, value
+  `array_length`).
+- Keywords: `selection` (the current selection), `previous` (the previous one) and `last` stand for
+  identifier lists wherever a parameter is a list of identifiers (`format: uuid` items, directly or
+  in `anyOf`/`oneOf`). They are accepted in typed lines (a bare word for the whole list, or an item
+  of a list), in selection prompt answers (among other identifiers, separated by commas or spaces),
+  and in invocation parameters, including the protocol's `command.run`. The invoker expands them from
+  the session before the parameters are validated, so the published parameter schema does not list
+  them. `last` is the product's hook, `Session::with_last_objects`: without a hook it fails with
+  `cmd.selection.unavailable` (detail `keyword`).
+- Protocol: the hub's selection of a document is the one the protocol passes to commands. A
+  `selection.set` and a command's `set_selection` both record it in the session that made the
+  request. Keywords read the session of the invocation, so two connections see each other's
+  selections only through the events they receive. A `selection.changed` event carries `count`,
+  `truncated` and at most `EVENT_OBJECTS` (1000) objects; `selection.get` answers the whole
+  selection, bounded by `array_length`.
 
 ### Registry and catalog
 
@@ -169,6 +203,40 @@ Progress reaches the invocation's sink only once the session clock shows 300 ms
   deprecated alias, a user alias, and the localized names. This layer has no localization: the
   caller passes a map from identifier to localized name taken from the active catalog, compared
   case-insensitively; a name shared by several commands is `cmd.name.ambiguous`.
+- Resolution order, for a typed name with surrounding whitespace removed: (1) a registered
+  command identifier, after ASCII lowercasing, which the product's resolver can never shadow;
+  (2) the product's name resolver; (3) a deprecated alias, then a user alias; (4) the localized
+  names, compared case-insensitively. The transparent prefix of the command line is taken off the
+  line before any name is resolved.
+- A product registers one name resolver with `Registry::set_name_resolver(resolver) -> Result<()>`
+  (`NameResolver::new`, a function from the typed name, with case as typed, to
+  `Option<NameMatch>`). Every caller that resolves names through the registry consults it: the
+  command line (`parse_line`, `complete`, `Start` and transparent lines), `Invoker::invoke` and
+  `dry_run`, the protocol's `command.run`, `command.describe` and `command.validate`, macro
+  recording and playback, and the headless runner. A match is a `NameMatch` with a command
+  identifier and `NameFlags` (`no_dialogs`, `builtin_only`), which the command reads from its
+  context and gives its own meaning. A match that names an unregistered identifier fails with
+  `cmd.unknown`, with the typed name as argument. The resolution reports `Via::Product` and the
+  flags in `Resolved`.
+- Alias rule: a user or deprecated alias whose text the resolver owns can never be used. Adding
+  such an alias fails with `cmd.duplicate` and changes nothing, and `set_name_resolver` fails with
+  `cmd.duplicate` when a registered alias is owned by the resolver it would install, keeping the
+  earlier resolver. An alias is therefore never silently dead.
+- The resolver cannot widen exposure: the invoker refuses a command that the caller's surface does
+  not expose with `cmd.not_exposed`, exactly as for an identifier, and `command.describe` refuses
+  it the same way.
+- Re-invocation: a command line keeps a product name, as typed, through its prompt and for
+  transparent lines (`ParsedLine::invoke_as`, `Resolved::call_name`), so the run gets the flags.
+  The last command stores the identifier, with the same rule for product names. A recorded macro
+  line always names the identifier, which replays without any resolver. The name flags are not
+  recorded: a replay runs with default flags, since the line grammar has no place for them and the
+  macro format is not versioned for them.
+- Deprecated aliases: `Invoker::invoke` (and so the protocol's `command.run`) adds a
+  `cmd.alias.deprecated` warning to the outcome's diagnostics when the call names a deprecated
+  alias. The command line and macro playback resolve the alias themselves and pass the identifier,
+  so they add no warning.
+- Completion: `complete` offers parameter names and values only for a command exposed on the
+  command line surface; a command not exposed there offers none.
 - Iteration is in identifier order. The catalog is a JSON object
   `{"format": "arc-command-catalog", "version": 1, "commands": [...]}` with one entry per exposed
   command in identifier order: `id`, `label`, `description`, `category`, `keywords`, `params`,
@@ -706,7 +774,29 @@ schema is the inline form (`data`) or the file form (`path`) of [View rendering]
   Commands reach files only through `Context::open_read` (class `file_read` or `file_write`)
   and `Context::create_write` (class `file_write`); a missing class is
   `cmd.permission_denied`.
-- `reserve(path)` is the first step of package creation (`--create`). It creates the file at
+- `create_new(path)` creates a new regular file inside a write root and returns it open for
+  writing, without truncation and without a reopen by path. It is exclusive (`O_EXCL` and
+  no-follow, or `create_new` on Windows): an existing name, a link included, is `cmd.path.io`
+  with reason `exists`, and nothing is opened or truncated. The parent is checked like
+  `create_write`. `Context::create_new` adds the class `file_write`.
+- `replace_file(temporary, target)` renames the regular file at `temporary` over `target`. Both
+  must have the same parent, which must lie in a write root (`cmd.path.rejected`, reason
+  `different_directory`, otherwise). On Unix the rename is `renameat` relative to the directory
+  handle the checks opened, so it cannot leave the roots; a `temporary` that is not a regular
+  file, a link included, is refused with reason `not_a_file`. On Windows the rename is made under
+  the held directory chain and retried four times, with a pause of 10 ms, 20 ms, 30 ms and 40 ms,
+  while the target is held open by another process (access denied, sharing or lock violation); a
+  `temporary` that is a symbolic link or junction is refused with reason `link`, and any other
+  non-regular file or reparse point with `not_a_file`.
+  A link at `target` is replaced as a directory entry and its destination is not written.
+  `Context::replace_file` adds the class `file_write`. Together with `create_new` a product's
+  atomic save is: create the temporary name exclusively, write it by its handle or by path through
+  the same roots, then `replace_file`.
+- `reserve(path)` creates the file of `create_new`, drops the handle and returns the resolved path.
+  The parent is canonicalized once, before the file is created, so no step after the create can
+  fail and leave a placeholder behind. Windows removes the file again when its post-create check
+  refuses it. It is kept for callers that reopen by path.
+- The package creation (`--create`) reserves its file the same way, through `reserve`. It creates the file at
   `path` exclusively (`O_EXCL` and no-follow, or `create_new` on Windows) under the held directory
   chain of a write root, so an existing name, a link included, is `cmd.path.io` with reason
   `exists`, and nothing is opened or truncated. The parent must resolve inside a write root; a
@@ -926,6 +1016,7 @@ gives `validate <file>` the package check, so parameter validation is the separa
 | `cmd.preview.rollback_failed` | `internal` | Reserved: previews are dry runs and no longer roll back, so it is not produced |
 | `cmd.query.cursor_invalid` | `invalid_input` | The cursor is not one this server issued for these parameters |
 | `cmd.query.cursor_stale` | `conflict` | The document is at another revision than the one the cursor was issued for; the details `expected` and `current` name them |
+| `cmd.selection.unavailable` | `not_found` | The keyword `last` names objects, and the session has no hook for it (detail `keyword`) |
 | `cmd.selection.unknown` | `not_found` | A selected identifier names no object of the document; the detail `unknown` lists them |
 | `cmd.roots.invalid` | `invalid_input` | A root to grant is not an existing directory |
 | `cmd.path.rejected` | `invalid_input` | The path is not acceptable; the detail `reason` says why |
@@ -1291,7 +1382,7 @@ notifications are `event.notify` with these `params`:
 |---|---|---|
 | `command.progress` | `requestId`, `fraction`, `messageId` | for the session's own runs |
 | `document.changed` | `document`, `revision`, `transaction`, `commits`, `changes` (a change summary) | after a commit of the document, whoever made it |
-| `selection.changed` | `document`, `revision`, `source` (`client` or `command`), `objects` | when the session's selection of the document changes |
+| `selection.changed` | `document`, `revision`, `source` (`client` or `command`), `count`, `truncated`, `objects` (at most 1000 entries; `truncated` is true when the selection is longer) | when the session's selection of the document changes |
 | `events.dropped` | `dropped` | before the next notification, when `dropped` notifications were lost |
 
 - A session receives `command.progress` for its own runs from the start, so clients that never
@@ -1352,7 +1443,7 @@ of that session against them, notifications included.
 
 | ID | Capability | Behavior | Tier | Phase |
 |---|---|---|---|---|
-| CORE-CMD-009 | Registry and aliases | Holds commands from all sources with unique identifiers, deprecated aliases and user aliases; resolves typed names by identifier, alias or localized name. | T1 | 0 |
+| CORE-CMD-009 | Registry and aliases | Holds commands from all sources with unique identifiers, deprecated aliases and user aliases; resolves typed names by identifier, alias or localized name, and first by a product's name resolver, which maps its own names to commands with flags. | T1 | 0 |
 | CORE-CMD-010 | Command catalog | Exports a JSON catalog of all exposed commands used for documentation, MCP tools, Python stubs and tests. | T1 | 0 |
 | CORE-CMD-011 | Prompt machines | Drives command input through states that accept points, distances, angles, picks, selections, text, numbers with units and keyword options, with defaults and previews. | T1 | 0 |
 | CORE-CMD-012 | Transparent commands | Runs commands marked transparent during another command's prompt without cancelling it. | T1 | 1 |

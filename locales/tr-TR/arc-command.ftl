@@ -57,6 +57,7 @@ cmd-preview-unsupported = Komut geri alma işlemini denetliyor ve önizleme olar
 cmd-preview-rollback-failed = Önizleme geri alınamadı ve geri alınabilir bir adım olarak kaldı.
 cmd-query-cursor-invalid = İmleç bu sorguya ait değil.
 cmd-query-cursor-stale = Belge { $expected } düzeltmesinden beri değişti; imleç artık geçerli değil.
+cmd-selection-unavailable = Oturumun { $keyword } seçim anahtarı için nesnesi yok.
 cmd-selection-unknown = Seçilen { $count } nesne belgede yok.
 cmd-roots-invalid = Bir dosya kökü var olan bir klasör değil.
 cmd-path-rejected = Yol kabul edilebilir değil.
