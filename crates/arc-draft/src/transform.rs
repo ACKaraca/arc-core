@@ -118,7 +118,7 @@ fn one() -> f64 {
 
 /// The registered command specifications of this module.
 pub(crate) fn specs() -> Vec<CommandSpec> {
-    vec![spec(ID, transform)]
+    vec![spec(ID, apply)]
 }
 
 /// The affine map of a [`TransformParam`]: `x ↦ L x + t` with the linear part `L` given by its
@@ -804,9 +804,20 @@ fn finite(value: &Value, limits: &Limits) -> bool {
     }
 }
 
-/// Transforms the listed entities. Each one is checked before any change, and every new value
-/// must be finite; a refused entity or value fails the whole command.
-fn transform(ctx: &mut Context<'_>, p: Params) -> Result<()> {
+/// Applies the transform of `p` to the listed entities inside the transaction of `ctx`, which is
+/// the work the command `core.draft.entity.transform` does. A product command with its own prompts
+/// calls this function from its run, so the checks and the undo of the command apply unchanged.
+///
+/// Each entity is checked before any change: its layer must not be locked, its associated objects
+/// must be selected, and every new value must be finite. A refused entity or value fails the whole
+/// call and changes nothing.
+///
+/// # Errors
+///
+/// `draft.entity.transform_unsupported` with the kind and reason, `draft.layer.locked`,
+/// `draft.field.invalid` for a transform parameter or a non-finite result, the codes of the object
+/// lookup, and the errors of the context such as a missing transaction.
+pub fn apply(ctx: &mut Context<'_>, p: Params) -> Result<()> {
     let map = Affine::new(&p.transform)?;
     let limits = *ctx.limits();
     let mut seen = BTreeSet::new();

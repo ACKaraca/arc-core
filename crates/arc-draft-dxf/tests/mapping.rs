@@ -703,3 +703,48 @@ fn extreme_magnitudes_are_imported_or_reported_never_a_panic() {
     let path = env.write("big.dxf", &support::bytes(&d));
     assert!(env.import(&path, space).is_ok());
 }
+
+#[test]
+fn linetype_lengths_and_offsets_convert_with_the_file_unit() {
+    // A file in inches with a dashed linetype: the dash, gap and offset are drawing lengths and
+    // convert to millimeters like the geometry does. The scale is a ratio and keeps its value.
+    let mut d = drawing(vec![line([0.0; 3], [1.0, 0.0, 0.0])], Some(1));
+    d.tables.linetypes = Some(arc_io_dxf::model::Table {
+        entries: vec![arc_io_dxf::model::TableEntry {
+            name: "Dashed".to_owned(),
+            data: arc_io_dxf::model::Linetype {
+                elements: vec![
+                    LinetypeElement {
+                        length: 0.5,
+                        scale: Some(2.0),
+                        offset_x: Some(0.1),
+                        offset_y: Some(-0.2),
+                        ..LinetypeElement::default()
+                    },
+                    LinetypeElement {
+                        length: -0.25,
+                        ..LinetypeElement::default()
+                    },
+                ],
+                ..arc_io_dxf::model::Linetype::default()
+            },
+            ..arc_io_dxf::model::TableEntry::default()
+        }],
+        ..arc_io_dxf::model::Table::default()
+    });
+    let p = plan(&d, &options());
+    let Some(Op::Linetype(lt)) = p.ops.iter().find(|op| matches!(op, Op::Linetype(_))) else {
+        panic!("the linetype is planned")
+    };
+    let lengths: Vec<f64> = lt.elements.iter().map(|e| e.length).collect();
+    assert_eq!(lengths.len(), 2);
+    assert!((lengths[0] - 12.7).abs() < 1e-9, "{lengths:?}");
+    assert!((lengths[1] - 6.35).abs() < 1e-9, "{lengths:?}");
+    let first = &lt.elements[0];
+    assert!((first.scale - 2.0).abs() < 1e-12);
+    let offset = first.offset.unwrap_or([f64::NAN; 2]);
+    assert!(
+        (offset[0] - 2.54).abs() < 1e-9 && (offset[1] + 5.08).abs() < 1e-9,
+        "{offset:?}"
+    );
+}

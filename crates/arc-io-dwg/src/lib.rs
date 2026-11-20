@@ -24,6 +24,8 @@ pub mod error;
 mod library;
 mod loss;
 mod map;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 pub use error::{codes, reasons};
 

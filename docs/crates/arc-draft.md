@@ -54,7 +54,8 @@ Reference-image tests of display lists rasterized on the CPU for every entity ki
 feature; SVG and PDF byte-determinism tests; appearance-resolution table tests; annotation-scale
 tests across viewports; dimension associativity tests that move geometry and assert updated
 measurements; font round-trip and glyph-coverage tests; property tests for block nesting limits and
-cycle rejection.
+cycle rejection. The entity transform is also tested through a product-style command that calls the
+exported function (`tests/transform_product.rs`).
 
 ## Capabilities
 
@@ -341,6 +342,14 @@ uniform scale, `R` the rotation and `T` the translation, all about the origin. P
 Text size and arrow size come from styles and are not scaled; a scale changes stored geometry only. The
 regeneration graph recomputes each derived value from the transformed inputs, so a dimension's measured
 value follows its new geometry.
+
+The transform is also available to product commands. `arc_draft::EntityTransformParams` is the
+parameter type (`objects`, `transform`) and `arc_draft::apply_entity_transform(ctx, params)` applies it
+to the entities inside the transaction of the calling command's context. The function is the body of
+`core.draft.entity.transform`: the same layer-lock, association and finite-value checks run, a refused
+entity fails the call with nothing changed, and one undo reverts the call's changes together with the
+rest of the command's transaction. A product command adds its own prompts and checks before the call.
+`tests/transform_product.rs` runs such a command through the registry and invoker.
 
 ## Layouts, viewports and display lists as implemented
 

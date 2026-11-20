@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Fixtures written in memory by the wrapped library (`arc_io_dwg::testing`). Off by default and
+# not in the WebAssembly build; products enable it in their dev-dependencies.
+testing = []
+
 [dependencies]
 arc-base = { workspace = true }
 arc-io-common = { workspace = true }

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 use acadrust::CadDocument;
 use acadrust::entities::EntityType;
+use acadrust::types::{Vector2, Vector3};
 use arc_base::{Cancel, Limits, Result};
 use arc_io_dxf::loss::{Argument, LossHeader, LossReport};
 use arc_io_dxf::model::{
@@ -12,7 +13,7 @@ use arc_io_dxf::model::{
 };
 use arc_io_dxf::{Group, Progress, Version};
 
-use crate::convert::{self, RecordBudget, array, finite3, p3, text};
+use crate::convert::{self, RecordBudget, array, finite2, finite3, p2, p3, text};
 use crate::entity::{self, Outcome};
 use crate::error::{limit, reasons};
 use crate::loss::LossLog;
@@ -81,33 +82,147 @@ impl<'a, 'q> Mapper<'a, 'q> {
         );
     }
 
-    /// The header variables the model carries; the rest of the header is reported as dropped.
-    /// A header variable whose value is not finite is skipped and reported.
+    /// The header variables the model carries, under their DXF names and group codes. The
+    /// variables of the dimension system and of the view, camera, render and UCS settings are not
+    /// mapped; they are reported together as one item of `io.dwg.header_dropped`. A number that is
+    /// not finite is skipped and reported.
     fn header(&mut self, doc: &CadDocument) -> Result<Vec<HeaderVariable>> {
         let h = &doc.header;
-        let layer = text(&h.current_layer_name, self.limits)?;
         self.loss.add(reasons::HEADER_DROPPED, "", None, 1);
-        let mut variables = vec![HeaderVariable {
-            name: "$INSUNITS".to_owned(),
-            values: vec![Group::int(70, i64::from(h.insertion_units))],
-        }];
-        if h.linetype_scale.is_finite() {
-            variables.push(HeaderVariable {
-                name: "$LTSCALE".to_owned(),
-                values: vec![Group::double(40, h.linetype_scale)],
-            });
+        let mut out = Vec::new();
+        // Identity: the fingerprint and version identifiers, the handle seed and the code page.
+        self.text_var(&mut out, "$FINGERPRINTGUID", 2, &h.fingerprint_guid)?;
+        self.text_var(&mut out, "$VERSIONGUID", 2, &h.version_guid)?;
+        self.var(
+            &mut out,
+            "$HANDSEED",
+            vec![Group::text(5, arc_io_dxf::Handle(h.handle_seed).to_hex())],
+        );
+        self.text_var(&mut out, "$DWGCODEPAGE", 3, &h.code_page)?;
+        self.text_var(&mut out, "$MENU", 1, &h.menu_name)?;
+        self.text_var(&mut out, "$PROJECTNAME", 1, &h.project_name)?;
+        self.text_var(&mut out, "$LASTSAVEDBY", 1, &h.last_saved_by)?;
+        self.text_var(&mut out, "$HYPERLINKBASE", 1, &h.hyperlink_base)?;
+        // Units and measurement.
+        self.int_var(&mut out, "$INSUNITS", 70, i64::from(h.insertion_units));
+        self.int_var(&mut out, "$MEASUREMENT", 70, i64::from(h.measurement));
+        self.int_var(&mut out, "$LUNITS", 70, i64::from(h.linear_unit_format));
+        self.int_var(&mut out, "$LUPREC", 70, i64::from(h.linear_unit_precision));
+        self.int_var(&mut out, "$AUNITS", 70, i64::from(h.angular_unit_format));
+        self.int_var(&mut out, "$AUPREC", 70, i64::from(h.angular_unit_precision));
+        self.real_var(&mut out, "$ANGBASE", 50, h.angle_base);
+        self.int_var(&mut out, "$ANGDIR", 70, i64::from(h.angle_direction));
+        // Limits, extents and the insertion base of model space.
+        self.point2_var(&mut out, "$LIMMIN", h.model_space_limits_min);
+        self.point2_var(&mut out, "$LIMMAX", h.model_space_limits_max);
+        self.int_var(&mut out, "$LIMCHECK", 70, flag(h.limit_check));
+        self.point3_var(&mut out, "$EXTMIN", h.model_space_extents_min);
+        self.point3_var(&mut out, "$EXTMAX", h.model_space_extents_max);
+        self.point3_var(&mut out, "$INSBASE", h.model_space_insertion_base);
+        // The current layer, text style, linetype, dimension style and multiline style by name.
+        self.text_var(&mut out, "$CLAYER", 8, &h.current_layer_name)?;
+        self.text_var(&mut out, "$TEXTSTYLE", 7, &h.current_text_style_name)?;
+        self.text_var(&mut out, "$CELTYPE", 6, &h.current_linetype_name)?;
+        self.text_var(&mut out, "$DIMSTYLE", 2, &h.current_dimstyle_name)?;
+        self.text_var(&mut out, "$CMLSTYLE", 2, &h.multiline_style)?;
+        // Current drafting settings and the time record.
+        self.real_var(&mut out, "$LTSCALE", 40, h.linetype_scale);
+        self.real_var(&mut out, "$CELTSCALE", 40, h.current_entity_linetype_scale);
+        self.real_var(&mut out, "$TEXTSIZE", 40, h.text_height);
+        self.real_var(&mut out, "$TRACEWID", 40, h.trace_width);
+        self.real_var(&mut out, "$ELEVATION", 40, h.elevation);
+        self.real_var(&mut out, "$THICKNESS", 40, h.thickness);
+        self.real_var(&mut out, "$PDSIZE", 40, h.point_display_size);
+        self.int_var(&mut out, "$PDMODE", 70, i64::from(h.point_display_mode));
+        self.int_var(&mut out, "$ORTHOMODE", 70, flag(h.ortho_mode));
+        self.int_var(&mut out, "$FILLMODE", 70, flag(h.fill_mode));
+        self.int_var(
+            &mut out,
+            "$PSLTSCALE",
+            70,
+            flag(h.paper_space_linetype_scaling),
+        );
+        self.int_var(
+            &mut out,
+            "$PLINEGEN",
+            70,
+            flag(h.polyline_linetype_generation),
+        );
+        self.int_var(&mut out, "$LWDISPLAY", 290, flag(h.lineweight_display));
+        self.int_var(
+            &mut out,
+            "$CELWEIGHT",
+            370,
+            i64::from(h.current_line_weight),
+        );
+        self.int_var(&mut out, "$USRTIMER", 70, flag(h.user_timer));
+        self.real_var(&mut out, "$TDCREATE", 40, h.create_date_julian);
+        self.real_var(&mut out, "$TDUPDATE", 40, h.update_date_julian);
+        self.real_var(&mut out, "$TDINDWG", 40, h.total_editing_time);
+        Ok(out)
+    }
+
+    /// Adds the header variable `name` with `values`.
+    fn var(&self, out: &mut Vec<HeaderVariable>, name: &str, values: Vec<Group>) {
+        out.push(HeaderVariable {
+            name: name.to_owned(),
+            values,
+        });
+    }
+
+    /// Adds a text header variable, cut to the string bound of the profile.
+    fn text_var(
+        &mut self,
+        out: &mut Vec<HeaderVariable>,
+        name: &str,
+        code: i16,
+        value: &str,
+    ) -> Result<()> {
+        let value = text(value, self.limits)?;
+        self.var(out, name, vec![Group::text(code, value)]);
+        Ok(())
+    }
+
+    /// Adds an integer header variable.
+    fn int_var(&self, out: &mut Vec<HeaderVariable>, name: &str, code: i16, value: i64) {
+        self.var(out, name, vec![Group::int(code, value)]);
+    }
+
+    /// Adds a real header variable, or skips and reports it when the value is not finite.
+    fn real_var(&mut self, out: &mut Vec<HeaderVariable>, name: &str, code: i16, value: f64) {
+        if value.is_finite() {
+            self.var(out, name, vec![Group::double(code, value)]);
         } else {
-            self.skipped("HEADER", "$LTSCALE");
+            self.skipped("HEADER", name);
         }
-        variables.push(HeaderVariable {
-            name: "$MEASUREMENT".to_owned(),
-            values: vec![Group::int(70, i64::from(h.measurement))],
-        });
-        variables.push(HeaderVariable {
-            name: "$CLAYER".to_owned(),
-            values: vec![Group::text(8, layer)],
-        });
-        Ok(variables)
+    }
+
+    /// Adds a two-dimensional point header variable (codes 10 and 20).
+    fn point2_var(&mut self, out: &mut Vec<HeaderVariable>, name: &str, value: Vector2) {
+        if finite2(value) {
+            let [x, y] = p2(value);
+            self.var(out, name, vec![Group::double(10, x), Group::double(20, y)]);
+        } else {
+            self.skipped("HEADER", name);
+        }
+    }
+
+    /// Adds a three-dimensional point header variable (codes 10, 20 and 30).
+    fn point3_var(&mut self, out: &mut Vec<HeaderVariable>, name: &str, value: Vector3) {
+        if finite3(value) {
+            let [x, y, z] = p3(value);
+            self.var(
+                out,
+                name,
+                vec![
+                    Group::double(10, x),
+                    Group::double(20, y),
+                    Group::double(30, z),
+                ],
+            );
+        } else {
+            self.skipped("HEADER", name);
+        }
     }
 
     /// Adds one kept table entry, with the names of the data it does not carry.
@@ -337,7 +452,6 @@ impl<'a, 'q> Mapper<'a, 'q> {
         for record in doc.block_records.iter() {
             let mut partial = Vec::new();
             for (flag, name) in [
-                (record.units != 0, "units"),
                 (!record.xref_path.is_empty(), "xref_path"),
                 (!record.description.is_empty(), "description"),
                 (!record.insert_handles.is_empty(), "insert_handles"),
@@ -354,12 +468,13 @@ impl<'a, 'q> Mapper<'a, 'q> {
                 scalable: Some(i16::from(record.scale_uniformly)),
                 preview: record.preview_data.clone(),
             };
+            // The insertion units travel in the flags, as the DXF reader keeps group 70 there.
             block_records.push(self.table_entry(
                 "BLOCK_RECORD",
                 &record.name,
                 record.handle,
                 data,
-                0,
+                record.units,
                 &partial,
             )?);
         }
@@ -514,6 +629,11 @@ impl<'a, 'q> Mapper<'a, 'q> {
     }
 }
 
+/// A boolean header value as the group integer of the file (0 or 1).
+fn flag(value: bool) -> i64 {
+    i64::from(u8::from(value))
+}
+
 /// A table of entries.
 fn table<T>(entries: Vec<TableEntry<T>>) -> Table<T> {
     Table {
@@ -529,7 +649,7 @@ mod tests {
     use acadrust::CadDocument;
     use acadrust::entities::EntityType;
     use acadrust::tables::{BlockRecord, Layer, LineType, LineTypeElement, TextStyle};
-    use acadrust::types::{Color, DxfVersion, Handle};
+    use acadrust::types::{Color, DxfVersion, Handle, Vector2, Vector3};
     use arc_base::{Cancel, Limits};
     use arc_io_dxf::loss::Argument;
 
@@ -751,5 +871,124 @@ mod tests {
             .collect();
         assert_eq!(top, vec!["LINE"]);
         assert!(drawing.blocks.is_empty());
+    }
+
+    /// The header variable `name` of a drawing mapped from `doc`, with its value groups.
+    fn header_value(doc: &CadDocument, name: &str) -> Option<Vec<Group>> {
+        let limits = Limits::CONSTRAINED;
+        let cancel = Cancel::new();
+        let mut mapper = Mapper::new(&limits, &cancel, None, 0);
+        let drawing = match mapper.drawing(doc, Version::R2018) {
+            Ok(drawing) => drawing,
+            Err(err) => panic!("the drawing is mapped: {}", err.code()),
+        };
+        drawing.header_variable(name).map(<[Group]>::to_vec)
+    }
+
+    #[test]
+    fn identity_and_settings_of_the_header_are_mapped_under_their_dxf_names() {
+        let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+        doc.header.fingerprint_guid = "{FP-1}".to_owned();
+        doc.header.version_guid = "{VER-2}".to_owned();
+        doc.header.handle_seed = 0x2A;
+        doc.header.insertion_units = 4;
+        doc.header.current_layer_name = "WALLS".to_owned();
+        doc.header.current_text_style_name = "Standard".to_owned();
+        doc.header.current_linetype_name = "DASHED".to_owned();
+        doc.header.current_dimstyle_name = "Metric".to_owned();
+        doc.header.code_page = "ANSI_1252".to_owned();
+        doc.header.model_space_extents_max = Vector3::new(10.0, 20.0, 0.0);
+        doc.header.model_space_limits_min = Vector2::new(-1.0, -2.0);
+        doc.header.text_height = 2.5;
+        doc.header.limit_check = true;
+
+        let text = |v: &[Group]| v.first().and_then(Group::as_text).map(str::to_owned);
+        assert_eq!(
+            header_value(&doc, "$FINGERPRINTGUID")
+                .as_deref()
+                .and_then(text),
+            Some("{FP-1}".to_owned())
+        );
+        assert_eq!(
+            header_value(&doc, "$VERSIONGUID").as_deref().and_then(text),
+            Some("{VER-2}".to_owned())
+        );
+        // The handle seed is hexadecimal text, as the DXF reader and writer keep it.
+        assert_eq!(
+            header_value(&doc, "$HANDSEED").as_deref().and_then(text),
+            Some("2A".to_owned())
+        );
+        assert_eq!(
+            header_value(&doc, "$DWGCODEPAGE").as_deref().and_then(text),
+            Some("ANSI_1252".to_owned())
+        );
+        assert_eq!(
+            header_value(&doc, "$CLAYER").as_deref().and_then(text),
+            Some("WALLS".to_owned())
+        );
+        assert_eq!(
+            header_value(&doc, "$CELTYPE").as_deref().and_then(text),
+            Some("DASHED".to_owned())
+        );
+        assert_eq!(
+            header_value(&doc, "$INSUNITS")
+                .as_deref()
+                .map(|v| v[0].value.clone()),
+            Some(arc_io_dxf::Value::Int(4))
+        );
+        assert_eq!(
+            header_value(&doc, "$TEXTSIZE")
+                .as_deref()
+                .map(|v| v[0].value.clone()),
+            Some(arc_io_dxf::Value::Double(2.5))
+        );
+        assert_eq!(
+            header_value(&doc, "$LIMCHECK")
+                .as_deref()
+                .map(|v| v[0].value.clone()),
+            Some(arc_io_dxf::Value::Int(1))
+        );
+        let extmax = header_value(&doc, "$EXTMAX").unwrap_or_default();
+        assert_eq!(
+            extmax.iter().map(|g| g.code).collect::<Vec<_>>(),
+            vec![10, 20, 30]
+        );
+        let limmin = header_value(&doc, "$LIMMIN").unwrap_or_default();
+        assert_eq!(
+            limmin.iter().map(|g| g.code).collect::<Vec<_>>(),
+            vec![10, 20]
+        );
+    }
+
+    #[test]
+    fn a_header_number_that_is_not_finite_is_skipped_and_reported() {
+        let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+        doc.header.linetype_scale = f64::NAN;
+        assert!(header_value(&doc, "$LTSCALE").is_none());
+        let limits = Limits::CONSTRAINED;
+        let cancel = Cancel::new();
+        let mut mapper = Mapper::new(&limits, &cancel, None, 0);
+        if let Err(err) = mapper.drawing(&doc, Version::R2018) {
+            panic!("the drawing is mapped: {}", err.code());
+        }
+        let report = mapper.finish(LossHeader {
+            format: "dwg".to_owned(),
+            version: "R2018".to_owned(),
+            direction: arc_io_dxf::loss::Direction::Import,
+            file_name: None,
+            file_hash: None,
+            application: None,
+            application_version: None,
+            time: None,
+            limits: None,
+        });
+        assert!(
+            report
+                .items
+                .iter()
+                .any(|i| i.reason == "io.dwg.value_skipped"
+                    && i.record_kind.as_deref() == Some("HEADER")),
+            "the skipped header number is reported"
+        );
     }
 }

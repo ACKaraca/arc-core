@@ -186,10 +186,19 @@ The `$INSUNITS` code of the file selects the unit of its coordinates (codes 1 to
 the ten units of the drafting model and microinch, mil, angstrom, nanometer, micron, decimeter,
 decameter, hectometer, gigameter, astronomical unit, light year and parsec). Lengths of the model
 space content (coordinates, radii, widths, heights, elevations, thicknesses, dimension points,
-pattern lines, text style heights and dimension style lengths) are multiplied by the factor from
-the file's unit to the unit of the target space. The content of blocks is not converted; a block
-declares the unit of its block record (or the file's) and the drafting model converts a reference
-to a block when it draws. When the file has no unit, an unknown code, or the target space is
+pattern lines, linetype element lengths and offsets, text style heights and dimension style
+lengths) are multiplied by the factor from the file's unit to the unit of the target space. Scales,
+rotations and angles are not converted.
+
+Block content is not converted on import. Each block keeps its content in its own unit: the
+`BLOCK_RECORD` insertion units (group 70, kept as the table entry's flags), and the file's unit when
+that record has none, because a unitless block takes the units of the drawing that holds it. The
+drafting model converts a reference to the block by the factor from the block's unit to the unit of
+the space that holds the reference, and places the reference position with the file factor. So a
+block inserted from a file in inches shows its content at 25.4 times its raw size in a millimeter
+space, and a block whose record names millimeters shows it at its raw size. `tests/block_units.rs`
+checks the displayed radius and position for a record with a unit, a unitless record and a record in
+another unit. When the file has no unit, an unknown code, or the target space is
 `unitless`, the factor is 1 and the import reports `draft.dxf.units_unitless`. The export writes
 the unit of the space as `$INSUNITS` and the unit of each block in its block record.
 
@@ -359,7 +368,9 @@ Unit tests for the color table, units and message registry; integration tests th
 registry and invoker (one transaction and undo, unit conversion, loss reports, limits,
 cancellation, roots and permissions, every surface, name reuse, block cycles and arrays); a
 property test that exports random documents of the mapped kinds, imports the result into an empty
-space and compares the content, and its reverse for hand-built neutral drawings. The nesting limit
+space and compares the content, and its reverse for hand-built neutral drawings. The unit rule of block
+definitions is tested on the displayed geometry (`tests/block_units.rs`), and the linetype element
+lengths and offsets are tested in `tests/mapping.rs`. The nesting limit
 is tested on chains of 64 and 65 references (the deepest one dropped, exactly one item), on a wide
 graph with shared sub-blocks, and through the import command, which must complete.
 

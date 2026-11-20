@@ -250,11 +250,17 @@ impl Mapper<'_> {
             ElementKind::Dot
         };
         let scale = e.scale.filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
-        let offset = (e.offset_x.is_some() || e.offset_y.is_some())
-            .then(|| [e.offset_x.unwrap_or(0.0), e.offset_y.unwrap_or(0.0)]);
+        // Lengths and offsets are drawing lengths, so they convert with the file's unit like the
+        // geometry; the scale and the rotation are ratios and an angle.
+        let offset = (e.offset_x.is_some() || e.offset_y.is_some()).then(|| {
+            [
+                e.offset_x.unwrap_or(0.0) * self.factor,
+                e.offset_y.unwrap_or(0.0) * self.factor,
+            ]
+        });
         ElementSpec {
             kind,
-            length: e.length.abs(),
+            length: e.length.abs() * self.factor,
             content: e
                 .text
                 .clone()

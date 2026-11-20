@@ -397,21 +397,30 @@ parsing runs in a separate worker process (CORE-IO-013).
   The library call cannot be cancelled once it has started. Progress is reported while the drawing is
   mapped, every 1024 records and at the end; the total is the number of entities.
 - A number that is not finite is not passed through. The record or field that holds it is skipped and
-  counted in `io.dwg.value_skipped`: the header variable `$LTSCALE`, a linetype with a length that is
+  counted in `io.dwg.value_skipped`: a header variable with a number that is not finite (the report names it, for example `$LTSCALE`), a linetype with a length that is
   not finite, a text style with a number that is not finite, and the base point of a block (which
   becomes the origin). An entity with such a number is invalid and is skipped, and an insert with an
   attribute whose number is not finite is skipped as a whole.
+
+### Test fixtures
+
+The `testing` feature (off by default, not part of the WebAssembly build) exposes
+`arc_io_dwg::testing::sample_dwg_bytes`, which builds a small R2018 drawing in memory, writes it with
+the library's writer and returns the DWG bytes. The drawing has a layer, a line, a block with a circle
+whose record units are inches, an insert of the block and a fixed fingerprint and version identifier.
+Products enable the feature in their dev-dependencies to read the fixture in their own tests. The
+library's writer is the only writer used; no file from another product is involved.
 
 ### Mapping
 
 | Library data | Neutral model |
 |---|---|
-| Header variables `$INSUNITS`, `$LTSCALE`, `$MEASUREMENT`, `$CLAYER` | Header variables with their group codes; all other header variables are counted as one item of `io.dwg.header_dropped` |
+| Header variables | Header variables under their DXF names and group codes, the same names the DXF reader keeps. Mapped: the identity values `$FINGERPRINTGUID` and `$VERSIONGUID` (group 2), `$HANDSEED` (group 5, hexadecimal text of the library's handle seed), `$DWGCODEPAGE`, `$MENU`, `$PROJECTNAME`, `$LASTSAVEDBY` and `$HYPERLINKBASE`; units and measurement (`$INSUNITS`, `$MEASUREMENT`, `$LUNITS`, `$LUPREC`, `$AUNITS`, `$AUPREC`, `$ANGBASE`, `$ANGDIR`); model space limits, extents and insertion base (`$LIMMIN`, `$LIMMAX`, `$LIMCHECK`, `$EXTMIN`, `$EXTMAX`, `$INSBASE`); current layer, text style, linetype, dimension style and multiline style by name; and the drafting settings `$LTSCALE`, `$CELTSCALE`, `$TEXTSIZE`, `$TRACEWID`, `$ELEVATION`, `$THICKNESS`, `$PDSIZE`, `$PDMODE`, `$ORTHOMODE`, `$FILLMODE`, `$PSLTSCALE`, `$PLINEGEN`, `$LWDISPLAY`, `$CELWEIGHT`, `$USRTIMER` and the creation and editing times `$TDCREATE`, `$TDUPDATE` and `$TDINDWG`. A real value that is not finite is skipped and reported. Every other header variable, including the dimension system variables (`DIM*`) and the view, camera, render, UCS and spline settings, is counted as one item of `io.dwg.header_dropped`. The R12 view, snap and grid state (`legacy`) is not mapped |
 | Layers | LAYER entries: color number (negative when the layer is off), true color, linetype name, plot flag, lineweight; flags frozen (1), frozen in new viewports (2) and locked (4). A layer that is off with the by-block color cannot carry the off state in a color number of 0, so the color 7 is used, negated, and the layer is partial (`color`) |
 | Linetypes | LTYPE entries: description, alignment, pattern length and element lengths; complex elements are partial. A linetype with a length that is not finite is skipped |
 | Text styles | STYLE entries: height, width factor, oblique angle in degrees (the library stores radians), last height, font names, generation flags. A style with a number that is not finite is skipped |
 | Application names, dimension style names | APPID and DIMSTYLE entries by name; dimension variables are partial |
-| Block records | BLOCK_RECORD entries: layout handle, explodable and scalable flags, preview bytes; the xref load state is partial (`xref_load_state`) |
+| Block records | BLOCK_RECORD entries: insertion units in the flags (group 70, as the DXF reader keeps them), layout handle, explodable and scalable flags, preview bytes; the xref load state is partial (`xref_load_state`) |
 | Block definitions | One block for each block record that is not a layout. A layout is a record with a layout handle, or a record named `*Model_Space` or `*Paper_Space`, whatever its handle. The definition holds the block flags (anonymous 1, has attributes 2, xref 4, xref overlay 8, external 16), the base point, and its entities. Block members named by a handle that names no entity of the file are counted in `io.dwg.handle_unresolved` |
 | Model space and paper space | Top-level entities; paper space entities carry the paper-space flag |
 | LINE, RAY, XLINE, CIRCLE, ARC, ELLIPSE, POINT | The same kinds; angles of arcs and points are converted from radians to degrees; ellipse parameters stay in radians, as the DXF model stores them |
@@ -424,6 +433,13 @@ parsing runs in a separate worker process (CORE-IO-013).
 | HATCH | Pattern name, solid and associative flags, pattern angle, scale and type, boundary paths, pattern lines and seed points. The elevation is the z of the elevation point, not a common property. A path made of one polyline keeps the polyline form, with the bulge of each vertex and `has_bulge` set when a bulge is not zero. Other paths keep line, arc, ellipse and spline edges. Elliptic edges store the circular angle of each end, in degrees, as the file does: the library's ellipse parameter `t` converts to `atan2(ratio sin t, cos t)`. Rational spline edges take their weights from the z of their control points. A polyline inside a multi-edge path becomes line edges, and an arc edge for each bulged segment, and is partial (`hatch_polyline_edges`). Gradient fills are partial (`hatch_gradient`) |
 | DIMENSION | Definition, text and insertion points, type, text, style and block names; the geometry beyond these is partial |
 
+The library exposes about 300 header variables as typed fields, each documented with its DXF name.
+The mapping above reads the identity, units, limits and current-name fields and the drafting
+settings listed in the header row. Not exposed by the library: the raw fixed-layout header of
+R12 files (crate-private in the library), and any DXF header variable that has no typed field. The
+variable list was taken from the library's field documentation, not from a DXF specification, so a
+variable missing from that list may also be absent from the library.
+
 Entity types the model does not carry, and entities outside any block or layout, are counted in
 `io.dwg.entity_dropped` by type name. Objects, classes and notifications are counted in
 `io.dwg.object_dropped`. The view port, view, user coordinate system and VX tables are counted in
@@ -435,7 +451,7 @@ partial item for the record kind: `color`, `transparency`, `graphic_data`, `exte
 `references`, `knot_parameterization`, `dimension_detail`, `mtext_columns`,
 `mtext_background`, `annotative`, `attribute_mtext`, `hatch_mpolygon`, `hatch_polyline_edges`,
 `hatch_gradient`, `polyline_flags`, `plot_style`, `xref`, `xref_load_state`, `true_type_font`,
-`shape_file`, `vertical`, `complex_elements`, `units`, `xref_path`, `description`, `insert_handles`,
+`shape_file`, `vertical`, `complex_elements`, `xref_path`, `description`, `insert_handles`,
 `dimension_variables`, `large_radial` and `alignment`. The names of all records of a group are
 merged, in alphabetical order; at most 32 names are listed and any others are summarized as
 `and more`. The count covers the whole group.

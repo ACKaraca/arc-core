@@ -83,6 +83,9 @@ pub mod types;
 pub mod validate;
 
 pub use commands::register_commands;
+pub use transform::{
+    Params as EntityTransformParams, TransformParam, apply as apply_entity_transform,
+};
 pub use types::register_types;
 pub use validate::install;
 
