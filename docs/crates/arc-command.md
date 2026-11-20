@@ -374,6 +374,12 @@ The modules are `prompt` (CORE-CMD-011), `line` (CORE-CMD-013) and `command_line
   settings, without a lock. `PromptState::base` and `PromptState::direction` expose the last point
   and the effective direction to a machine, so a host can draw the rubber band in `preview`.
   A host supplies the pointer direction before answering; the defaults above apply until it does.
+- **Undo of point answers.** Before each answer the session keeps the point state it had, and
+  `back()` restores it with the answer it removes: the direction lock an accepted point released
+  is in force again, and the last point is the latest point answer that remains (or the entry's
+  last point when none remains). A relative point typed after `back()` therefore measures from
+  the point before the removed answer. A lock set by `<angle` after the removed answer is
+  discarded with it, since that state is also newer than the removed answer.
 
 ### Command-line grammar
 

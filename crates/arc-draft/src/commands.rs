@@ -1086,8 +1086,29 @@ pub(crate) fn create(
     Ok(id)
 }
 
-/// Creates the entity of `key` in `owner` on top of the container's draw order.
-pub(crate) fn create_entity(
+/// Creates an entity of type `key` in `owner` on top of the draw order of `owner`, inside the
+/// transaction of `ctx`, and selects it.
+///
+/// This is the creation rule of `core.draft.entity.create`, for a product command that creates
+/// entities in the same transaction as its other changes:
+///
+/// - `owner` is a space or a block definition (`draft.object.wrong_type` otherwise);
+/// - the new entity takes the registry defaults of `key`, then `layer` (or none) and then each
+///   `(field index, value)` of `kind`; the indices are those of [`types::entity`] and of the
+///   registered schema of `key`, and an index past the last field is ignored;
+/// - the draw-order key places the entity on top, renumbering the container only when the free
+///   keys run out (see [`order`](crate::order));
+/// - creating on a locked layer is allowed (CORE-DRAFT-016).
+///
+/// Geometry is passed as the field value [`Value::Geometry`] of [`entity::KIND`]; a spline also
+/// takes [`spline::values`].
+///
+/// # Errors
+///
+/// `draft.object.wrong_type` for an `owner` that is not a space or block definition, the lookup
+/// error for an identifier that is not live, and the errors of the transaction, such as a rejected
+/// value.
+pub fn create_entity(
     ctx: &mut Context<'_>,
     key: &str,
     owner: ObjectId,
@@ -1634,6 +1655,25 @@ fn purge(ctx: &mut Context<'_>, p: Delete) -> Result<()> {
 }
 
 /// Moves `objects`, which must share one container, to `place`.
+/// Moves `objects` to the top of their container's draw order (`core.draft.order.front`), inside
+/// the transaction of `ctx`. The objects keep their relative order.
+///
+/// Each object is checked against its own layer lock, as the command does; the draw-order keys
+/// of entities that are not named may change.
+///
+/// # Errors
+///
+/// `draft.layer.locked` for a locked layer, `draft.object.wrong_type` for an object that is not
+/// an entity, `draft.order.container_mismatch` for objects of different containers, and the
+/// errors of the transaction.
+pub fn place_on_top(ctx: &mut Context<'_>, objects: &[ObjectId]) -> Result<()> {
+    order(
+        ctx,
+        objects.iter().map(|&id| IdParam(id)).collect(),
+        Place::Front,
+    )
+}
+
 fn order(ctx: &mut Context<'_>, objects: Vec<IdParam>, place: Place) -> Result<()> {
     let snapshot = ctx.txn()?.snapshot().clone();
     let mut container = None;

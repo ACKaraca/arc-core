@@ -14,7 +14,15 @@ use crate::types::{ENTITIES, LAYER, entity, layer};
 
 /// Fails with `draft.layer.locked` when `id` is an entity whose layer is locked. Other objects,
 /// and entities on an unlocked or absent layer, pass.
-pub(crate) fn check_entity(snapshot: &Snapshot, id: ObjectId) -> Result<()> {
+///
+/// A product command calls it before it modifies, transforms, deletes or reorders `id`, against
+/// the snapshot of its transaction, so that a refused command changes nothing.
+///
+/// # Errors
+///
+/// `draft.layer.locked` with the layer name as argument `layer`; `doc.object.not_found` when `id`
+/// is not live.
+pub fn check_entity(snapshot: &Snapshot, id: ObjectId) -> Result<()> {
     let handle = snapshot.resolve(id)?;
     let is_entity = snapshot
         .type_key(handle)
@@ -28,8 +36,14 @@ pub(crate) fn check_entity(snapshot: &Snapshot, id: ObjectId) -> Result<()> {
     }
 }
 
-/// Fails with `draft.layer.locked`, naming the layer, when the layer `layer_id` is locked.
-pub(crate) fn check_layer(snapshot: &Snapshot, layer_id: ObjectId) -> Result<()> {
+/// Fails with `draft.layer.locked`, naming the layer, when the layer `layer_id` is locked. A
+/// reference that does not resolve to a layer passes; the reference rules report it.
+///
+/// # Errors
+///
+/// `draft.layer.locked` with the layer name as argument `layer`; `doc.object.not_found` when a
+/// layer object cannot be read.
+pub fn check_layer(snapshot: &Snapshot, layer_id: ObjectId) -> Result<()> {
     // A reference that does not resolve names no locked layer; the reference rules report it.
     let Ok(handle) = snapshot.resolve(layer_id) else {
         return Ok(());

@@ -252,6 +252,25 @@ definition content copied by `core.draft.external_ref.bind` is not placed on a l
 not checked; a copied layer keeps the lock of the linked drawing. The `frozen` and `on` flags are not
 checked by these commands.
 
+### Exports for product commands
+
+A product command runs in the transaction of its own command and creates or checks entities the same
+way the drafting commands do. These functions are the foundation's rules, exported without a change of
+behavior; each takes the `Context` of the running command and changes the document only through its
+transaction.
+
+| Function | Rule |
+|---|---|
+| `commands::create_entity(ctx, key, owner, layer, kind)` | The creation rule of `core.draft.entity.create`: `owner` must be a space or block definition; the new entity takes the registry defaults of `key`, the `layer` (or none), then the `(field index, value)` pairs of `kind`; it is placed on top of the draw order and selected. Creating on a locked layer is allowed. Returns `Created { id }`. |
+| `commands::place_on_top(ctx, objects)` | The draw-order operation of `core.draft.order.front`: moves the objects to the top of their container, keeping their relative order, with the lock check of each named object. |
+| `spline::values(curve, fit_points)` | The field values of a spline: its geometry in `entity::KIND` and its fit points in `entity::SPLINE_FIT_POINTS`. Passed as the `kind` of `create_entity` with `types::SPLINE`. |
+| `lock::check_entity(snapshot, id)` | Fails with `draft.layer.locked` when `id` is an entity on a locked layer; other objects pass. |
+| `lock::check_layer(snapshot, layer)` | Fails with `draft.layer.locked` when the layer is locked; a reference that is not a layer passes. |
+
+A product command calls the lock checks before it changes an entity, against the snapshot of its
+transaction, so that a refused command changes nothing. The exports are covered by
+`tests/product_exports.rs`.
+
 ### Appearance resolution (CORE-DRAFT-017)
 
 `appearance::resolve` takes the chain of levels from the entity outward (the entity, the block
@@ -1545,8 +1564,9 @@ Where the specification was silent:
 ## Object snaps as implemented
 
 The module `snap` is headless: pure functions over a document snapshot, `arc-geom` and `arc-base`
-values. It holds no state and has no UI types; a host calls it per pick or per cursor move and
-passes the results of one call into the next. The host supplies, per frame: the snapshot, the
+values. It has no UI types and holds no state of its own. A host calls it per pick or per cursor
+move and passes the results of one call into the next; a host that queries on every cursor move
+keeps a `SnapIndex` between calls (see [Snap index](#snap-index)). The host supplies, per frame: the snapshot, the
 space, a `SnapQuery` (cursor, aperture in drawing units, enabled `SnapModes`, the previous point
 `from` of the running command if any, the UCS x axis, the tolerance, `Limits`, the nesting bound),
 and for constraints a `Frame` (the UCS or the last segment direction), the optional `PolarSettings`,
@@ -1628,6 +1648,25 @@ ortho, so tracking comes first. The host resolves an inverting key for ortho bef
   wins over a projection on one path; ties go to the earlier path. At most `MAX_ACQUIRED` (16)
   points are tracked.
 
+### Snap index
+
+`SnapIndex::build(snapshot, space, &query)` keeps the geometry that `snap_candidates` builds for one
+space at one document revision: the display lists of the top-level entities with the layer states
+applied, the points and insertion points, and a spatial index over the bounded curves. A host builds it
+once and calls `snap_candidates_indexed(snapshot, &index, &query)` for each cursor position. For the same
+snapshot and space the result equals `snap_candidates`; the query supplies the cursor, aperture, modes,
+previous point and UCS, which may change on each call.
+
+- The index records its document revision (`SnapIndex::revision`) and its space (`SnapIndex::space`). A
+  query against another revision fails with `draft.snap.index_stale`; the host builds a new index. The
+  revision number identifies a state only within one document, so the host pairs an index with the
+  document it was built from.
+- The tolerance, `Limits::record_count` and `SnapQuery::max_depth` of the query used to build the index
+  are fixed for it. A query with other values fails with `draft.snap.index_mismatch`.
+- The index holds at most `Limits::record_count` items (curves, points, insertion points and closed
+  curves together); a build that needs more fails with `draft.snap.limit_exceeded`. The direct call has
+  no item bound beyond the top-level count.
+
 ### Bounds and errors
 
 - `Limits::record_count` bounds the top-level entities examined.
@@ -1691,6 +1730,8 @@ The codes of every part of the crate:
 | `draft.purge.in_use` | `conflict` | An object selected for purging is in use |
 | `draft.display.too_large` | `limit_exceeded` | A display list would hold more primitives than the bound |
 | `draft.snap.limit_exceeded` | `limit_exceeded` | A snap query would examine more top-level entities, curve pairs or grid points than its bound |
+| `draft.snap.index_stale` | `conflict` | A snap index is queried at a document revision other than the one it was built from |
+| `draft.snap.index_mismatch` | `invalid_input` | A snap query's tolerance, record bound or nesting bound differs from those of its index |
 | `draft.font.syntax` | `invalid_input` | A line of a stroke-font file is malformed |
 | `draft.font.version_unsupported` | `unsupported` | A stroke-font file has a version this reader does not read |
 | `draft.font.header_invalid` | `invalid_input` | A stroke-font header value is missing, repeated or out of range |

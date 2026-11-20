@@ -172,6 +172,18 @@ pub mod codes {
         category: Category::LimitExceeded,
         message_id: "draft-snap-limit-exceeded",
     };
+    /// A snap index is queried at a document revision other than the one it was built from.
+    pub const SNAP_INDEX_STALE: ErrorCode = ErrorCode {
+        code: "draft.snap.index_stale",
+        category: Category::Conflict,
+        message_id: "draft-snap-index-stale",
+    };
+    /// A snap query's tolerance, record bound or nesting bound differs from those of its index.
+    pub const SNAP_INDEX_MISMATCH: ErrorCode = ErrorCode {
+        code: "draft.snap.index_mismatch",
+        category: Category::InvalidInput,
+        message_id: "draft-snap-index-mismatch",
+    };
     /// A line of a stroke-font file is malformed; the argument `line` names it.
     pub const FONT_SYNTAX: ErrorCode = ErrorCode {
         code: "draft.font.syntax",

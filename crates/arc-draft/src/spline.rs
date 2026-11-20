@@ -62,7 +62,13 @@ pub(crate) fn findings(values: &[Option<Value>]) -> Vec<arc_doc::Finding> {
 }
 
 /// The geometry and fit-point values of a spline.
-pub(crate) fn values(curve: &Nurbs2, fit: &[Point2]) -> Vec<(usize, Value)> {
+/// The field values of a spline entity: its geometry in [`entity::KIND`] and its fit points in
+/// [`entity::SPLINE_FIT_POINTS`] (empty when `fit` is empty).
+///
+/// These are the `kind` values of [`commands::create_entity`](crate::commands::create_entity) for
+/// the key [`SPLINE`](crate::types::SPLINE). The function performs no validation of its own.
+#[must_use]
+pub fn values(curve: &Nurbs2, fit: &[Point2]) -> Vec<(usize, Value)> {
     vec![
         (entity::KIND, Value::Geometry(GeometryBytes(curve.encode()))),
         (

@@ -217,3 +217,5 @@ draft-command-external-ref-bind = Bind external reference
 draft-command-external-ref-bind-description = Copies a linked drawing into a block definition and replaces the reference with a block reference.
 draft-external-ref-budget-exceeded = The linked drawings of the display list exceed the work budget of the display build.
 draft-snap-limit-exceeded = The snap query would examine more than { $limit } items.
+draft-snap-index-stale = The snap index was built from another revision of the document; rebuild it.
+draft-snap-index-mismatch = The snap query's tolerance, record bound or nesting bound differs from the index's.

@@ -15,6 +15,7 @@ mod arrange;
 pub mod bbox;
 pub mod boolean;
 pub mod closest;
+pub mod construct;
 pub mod corner;
 pub mod curve;
 pub mod edit;
@@ -42,6 +43,11 @@ pub mod view;
 pub use bbox::{Aabb2, Aabb3};
 pub use boolean::{BooleanOp, boolean};
 pub use closest::{CurvePoint, CurveProject, FootPoint};
+pub use construct::{
+    EdgeSide, MAX_POLYGON_SIDES, TangentCircle, arc_from_ends_and_radius, arc_from_start_center,
+    arc_through_points, circle_on_diameter, circle_through_points, ellipse_from_axis,
+    polygon_circumscribed, polygon_from_edge, polygon_inscribed, tangent_circles,
+};
 pub use corner::{
     ChamferSize, CornerMode, CornerPolyline, CornerResult, Replacement, SegmentPick, SkipReason,
     SkippedVertex, chamfer, chamfer_polyline_segments, chamfer_polyline_vertices, fillet,

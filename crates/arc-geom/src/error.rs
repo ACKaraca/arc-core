@@ -429,6 +429,37 @@ pub mod codes {
         message_id: "geom-corner-segment-invalid",
     };
 
+    /// Two points that a construction needs distinct coincide, or a center and a start point do.
+    pub const CONSTRUCT_COINCIDENT_POINTS: ErrorCode = ErrorCode {
+        code: "geom.construct.coincident_points",
+        category: Category::InvalidInput,
+        message_id: "geom-construct-coincident-points",
+    };
+    /// The three points of a circle or arc through three points lie on one line.
+    pub const CONSTRUCT_COLLINEAR_POINTS: ErrorCode = ErrorCode {
+        code: "geom.construct.collinear_points",
+        category: Category::InvalidInput,
+        message_id: "geom-construct-collinear-points",
+    };
+    /// The radius of an arc through two points is less than half the distance between them.
+    pub const CONSTRUCT_RADIUS_TOO_SMALL: ErrorCode = ErrorCode {
+        code: "geom.construct.radius_too_small",
+        category: Category::FailedOperation,
+        message_id: "geom-construct-radius-too-small",
+    };
+    /// A regular polygon has fewer than three sides or more than the bound.
+    pub const CONSTRUCT_SIDES_INVALID: ErrorCode = ErrorCode {
+        code: "geom.construct.sides_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-construct-sides-invalid",
+    };
+    /// The inputs of a tangent construction have infinitely many solutions.
+    pub const CONSTRUCT_DEGENERATE: ErrorCode = ErrorCode {
+        code: "geom.construct.degenerate",
+        category: Category::InvalidInput,
+        message_id: "geom-construct-degenerate",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         INPUT_NOT_FINITE,
@@ -500,6 +531,11 @@ pub mod codes {
         CORNER_CURVE_TOO_SHORT,
         CORNER_UNSUPPORTED_PAIR,
         CORNER_SEGMENT_INVALID,
+        CONSTRUCT_COINCIDENT_POINTS,
+        CONSTRUCT_COLLINEAR_POINTS,
+        CONSTRUCT_RADIUS_TOO_SMALL,
+        CONSTRUCT_SIDES_INVALID,
+        CONSTRUCT_DEGENERATE,
     ];
 }
 

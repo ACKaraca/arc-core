@@ -61,7 +61,7 @@ pub mod hatch_pattern;
 pub mod layout;
 pub mod leader;
 pub mod linetype;
-mod lock;
+pub mod lock;
 pub mod order;
 #[cfg(feature = "outline-text")]
 mod outline;

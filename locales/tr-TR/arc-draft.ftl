@@ -217,3 +217,5 @@ draft-command-external-ref-bind = Dış başvuruyu bağla
 draft-command-external-ref-bind-description = Bağlı bir çizimi bir blok tanımına kopyalar ve başvuruyu blok başvurusuyla değiştirir.
 draft-external-ref-budget-exceeded = Görüntü listesinin bağlı çizimleri görüntü oluşturmanın iş bütçesini aşıyor.
 draft-snap-limit-exceeded = Nesne yakalama sorgusu { $limit } öğeden fazlasını inceleyecekti.
+draft-snap-index-stale = Nesne yakalama dizini belgenin başka bir sürümünden oluşturuldu; yeniden oluşturun.
+draft-snap-index-mismatch = Nesne yakalama sorgusunun tolerans, kayıt sınırı veya iç içe geçme sınırı dizinin değerlerinden farklı.

@@ -7,8 +7,9 @@
 //! constraint functions of [`constrain`] (ortho, polar, snap step, tracking and their precedence)
 //! are pure functions over points and frames; the host passes their results back in.
 //!
-//! The module owns no state: a host calls it once per pick or per cursor move, with the snapshot
-//! it holds. Derived data is rebuilt on every call.
+//! [`snap_candidates`] rebuilds the display lists of the space on every call. A host that queries
+//! on every cursor move builds a [`SnapIndex`] once per document revision and calls
+//! [`snap_candidates_indexed`]; both return the same candidates for the same query.
 
 mod constrain;
 mod geometry;
@@ -20,6 +21,7 @@ pub use constrain::{
 };
 
 use std::cmp::Ordering;
+use std::fmt;
 
 use arc_base::math::{Point2, Vector2};
 use arc_base::{Error, Limits, ObjectId, Result, Tolerance};
@@ -228,7 +230,139 @@ pub fn snap_candidates(
     if query.aperture <= 0.0 || query.modes == SnapModes::NONE {
         return Ok(Vec::new());
     }
-    let scene = Scene::collect(snapshot, space, query)?;
+    let scene = Scene::collect(snapshot, space, &BuildParams::of(query))?;
+    query_scene(&scene, query)
+}
+
+/// The geometry of one space at one document revision, kept by a host between snap queries.
+///
+/// The index holds what [`snap_candidates`] builds for every call: the entities of the space
+/// through their display lists, the layer states applied (hidden entities and layers are left
+/// out), and a spatial index over the bounded curves. It is valid for the revision it was built
+/// from and for the space it names; [`snap_candidates_indexed`] refuses a query against another
+/// revision with `draft.snap.index_stale`, and the host rebuilds the index. The revision number
+/// identifies a state only within one document, so a host pairs an index with the document it
+/// built it from.
+///
+/// The index is bounded by the record count of the query it was built with: it holds at most
+/// `limits.record_count` curves, points, insertion points and closed curves together, and a
+/// build that needs more fails with `draft.snap.limit_exceeded`.
+pub struct SnapIndex {
+    revision: u64,
+    space: ObjectId,
+    params: BuildParams,
+    scene: Scene,
+}
+
+impl SnapIndex {
+    /// Builds the index of `space` in `snapshot`. The tolerance, the record bound and the nesting
+    /// bound of `query` are fixed for the index; the other fields of a query may differ on each
+    /// call.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`snap_candidates`] for a space that cannot be read, and
+    /// `draft.snap.limit_exceeded` when the index would hold more items than `limits.record_count`.
+    pub fn build(snapshot: &Snapshot, space: ObjectId, query: &SnapQuery) -> Result<Self> {
+        check_query(query)?;
+        let params = BuildParams::of(query);
+        let scene = Scene::collect(snapshot, space, &params)?;
+        let items = scene.items();
+        if u64::try_from(items).unwrap_or(u64::MAX) > query.limits.record_count {
+            return Err(limit_error(query.limits.record_count));
+        }
+        Ok(Self {
+            revision: snapshot.revision(),
+            space,
+            params,
+            scene,
+        })
+    }
+
+    /// The document revision the index was built from.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// The space the index was built for.
+    #[must_use]
+    pub fn space(&self) -> ObjectId {
+        self.space
+    }
+
+    /// The number of stored curves, points, insertion points and closed curves.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.scene.items()
+    }
+
+    /// Whether the index stores nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl fmt::Debug for SnapIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SnapIndex")
+            .field("revision", &self.revision)
+            .field("space", &self.space)
+            .field("items", &self.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The snap candidates of the space of `index` for `query` at the revision of `snapshot`. The
+/// result is identical to [`snap_candidates`] on the same snapshot and space.
+///
+/// # Errors
+///
+/// `draft.snap.index_stale` when `snapshot` is not the revision the index was built from;
+/// `draft.snap.index_mismatch` when the tolerance, the record bound or the nesting bound of
+/// `query` differ from those the index was built with; the errors of [`snap_candidates`] for
+/// the query's values.
+pub fn snap_candidates_indexed(
+    snapshot: &Snapshot,
+    index: &SnapIndex,
+    query: &SnapQuery,
+) -> Result<Vec<SnapCandidate>> {
+    check_query(query)?;
+    if snapshot.revision() != index.revision {
+        return Err(Error::new(codes::SNAP_INDEX_STALE)
+            .with_detail("built", index.revision.to_string())
+            .with_detail("current", snapshot.revision().to_string()));
+    }
+    if BuildParams::of(query) != index.params {
+        return Err(Error::new(codes::SNAP_INDEX_MISMATCH));
+    }
+    if query.aperture <= 0.0 || query.modes == SnapModes::NONE {
+        return Ok(Vec::new());
+    }
+    query_scene(&index.scene, query)
+}
+
+/// The values of a query that the scene is built with.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BuildParams {
+    tolerance: Tolerance,
+    record_count: u64,
+    max_depth: u32,
+}
+
+impl BuildParams {
+    fn of(query: &SnapQuery) -> Self {
+        Self {
+            tolerance: query.tolerance,
+            record_count: query.limits.record_count,
+            max_depth: query.max_depth,
+        }
+    }
+}
+
+/// The ranked candidates of `query` over a scene.
+fn query_scene(scene: &Scene, query: &SnapQuery) -> Result<Vec<SnapCandidate>> {
     let window = Aabb2::from_corners(
         query.cursor - Vector2::repeat(query.aperture),
         query.cursor + Vector2::repeat(query.aperture),
@@ -351,15 +485,19 @@ struct Scene {
 }
 
 impl Scene {
-    fn collect(snapshot: &Snapshot, space: ObjectId, query: &SnapQuery) -> Result<Self> {
+    fn items(&self) -> usize {
+        self.entries.len() + self.nodes.len() + self.insertions.len() + self.closed.len()
+    }
+
+    fn collect(snapshot: &Snapshot, space: ObjectId, params: &BuildParams) -> Result<Self> {
         let members = display::members(snapshot, space);
         let count = u64::try_from(members.len()).unwrap_or(u64::MAX);
-        if count > query.limits.record_count {
-            return Err(limit_error(query.limits.record_count));
+        if count > params.record_count {
+            return Err(limit_error(params.record_count));
         }
         let options = DisplayOptions {
-            tolerance: query.tolerance,
-            max_nesting: query.max_depth,
+            tolerance: params.tolerance,
+            max_nesting: params.max_depth,
             ..DisplayOptions::default()
         };
         let mut scene = Self::default();

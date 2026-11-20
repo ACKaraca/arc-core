@@ -888,6 +888,8 @@ pub struct PromptSession {
     machine: Arc<dyn PromptMachine>,
     preset: Map<String, Value>,
     answers: Vec<Answer>,
+    /// The point state before each answer, parallel to `answers`; `back` restores it.
+    undo: Vec<PointEntry>,
     current: Option<Prompt>,
     session: Session,
     entry: PointEntry,
@@ -946,6 +948,7 @@ impl PromptSession {
             machine,
             preset,
             answers: Vec::new(),
+            undo: Vec::new(),
             current: None,
             session: session.clone(),
             entry,
@@ -1063,7 +1066,7 @@ impl PromptSession {
                         Err(error) => error,
                     };
                     // The last answer completed invalid parameters: reject it and ask again.
-                    if self.answers.pop().is_none() {
+                    if self.pop_answer().is_none() {
                         return self.fail(error);
                     }
                     rejected = Some(error);
@@ -1119,6 +1122,7 @@ impl PromptSession {
         if let Err(error) = guarded(|| machine.check(&state, &prompt, &input)) {
             return self.rejected(error);
         }
+        self.undo.push(self.entry.clone());
         if matches!(input, PromptInput::Point(_)) {
             // An accepted point ends a direction lock: the next distance measures from it.
             self.entry.unlock();
@@ -1197,12 +1201,25 @@ impl PromptSession {
     }
 
     /// Removes the last answer and asks its prompt again; at the first prompt it asks it again.
+    ///
+    /// The point state returns to what held before the removed answer: the direction lock an
+    /// accepted point released is in force again. The last point is the latest point answer that
+    /// remains, or the host's point when none remains, so a relative point typed next measures
+    /// from the point before the removed one.
     pub fn back(&mut self, snapshot: &Snapshot) -> Feedback {
         if self.current.is_none() {
             return Feedback::Failed(Error::new(codes::PROMPT_ENDED));
         }
-        self.answers.pop();
+        self.pop_answer();
         self.advance(snapshot, None)
+    }
+
+    /// Removes the last answer and the point state saved before it.
+    fn pop_answer(&mut self) -> Option<Answer> {
+        if let Some(saved) = self.undo.pop() {
+            self.entry = saved;
+        }
+        self.answers.pop()
     }
 
     /// Cancels the session.

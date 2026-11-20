@@ -574,6 +574,11 @@ The codes `arc-geom` owns. A code is never reused for a different meaning; messa
 | `geom.corner.curve_too_short` | `failed_operation` | A part of a curve that a corner construction keeps would be empty or outside the curve |
 | `geom.corner.unsupported_pair` | `unsupported` | A corner construction is not defined for the kinds of its curves |
 | `geom.corner.segment_invalid` | `invalid_input` | A polyline segment index is outside the polyline or the two indices are equal |
+| `geom.construct.coincident_points` | `invalid_input` | Two points that a construction needs distinct are closer than the linear tolerance, or a center and a start point are |
+| `geom.construct.collinear_points` | `invalid_input` | The three points of a circle or of an arc through three points lie on one line |
+| `geom.construct.radius_too_small` | `failed_operation` | The radius of an arc through two points is less than half the distance between them |
+| `geom.construct.sides_invalid` | `invalid_input` | A regular polygon has fewer than three sides or more than `MAX_POLYGON_SIDES` |
+| `geom.construct.degenerate` | `invalid_input` | A tangent construction has infinitely many solutions: coincident lines, parallel lines at distance twice the radius, or concentric circles with a common distance |
 
 ### Spatial index (CORE-GEOM-027)
 
@@ -823,6 +828,63 @@ sharp corner) and, for each input, a `Replacement`, which is `Trimmed` with the 
 
 Not covered: ellipses, elliptical arcs and NURBS curves (`geom.corner.unsupported_pair`), chamfers of
 arcs, corners of supports that do not meet (`geom.corner.no_intersection`), and polyline widths.
+
+### Analytic constructions (CORE-GEOM-034)
+
+| ID | Capability | Behavior | Tier | Phase |
+|---|---|---|---|---|
+| CORE-GEOM-034 | Analytic constructions | Builds circles through two or three points, arcs through three points, from a start point, center and sweep, or from two ends and a signed radius, circles tangent to two lines or circles with all solutions, regular polygons inscribed in, circumscribed about or built on an edge, and ellipses from an axis and the other semi-axis, as exact primitives. | T1 | 1 |
+
+The functions of the module `construct` take points, curves and lengths and return `Circle2`,
+`Arc2`, `Ellipse2`, `TangentCircle` values or vertex lists. Each checks its inputs before it builds
+anything, and none changes a document. Distances are compared with `Tolerance::linear`, and the
+tangent tests compare directions with `Tolerance::angular`.
+
+- `circle_through_points(a, b, c, tolerance)` is the circumcircle of three points. Two points closer
+  than the linear tolerance are `geom.construct.coincident_points`; a third point within the
+  tolerance of the line through the other two is `geom.construct.collinear_points`.
+- `circle_on_diameter(a, b, tolerance)` has the midpoint of the segment as its center and half the
+  length as its radius.
+- `arc_through_points(start, middle, end, tolerance)` is the arc of the circumcircle from `start`
+  to `end` that passes through `middle`. The sweep is counterclockwise when `middle` is reached
+  first going counterclockwise from `start`, and clockwise otherwise.
+- `arc_from_start_center(start, center, sweep, tolerance)` takes the radius from the distance of
+  `start` from `center`. A positive sweep runs counterclockwise. The sweep rules of `Arc2` apply:
+  zero or a magnitude above a full turn is `geom.sweep.invalid`.
+- `arc_from_ends_and_radius(start, end, radius, tolerance)` returns the minor arc (sweep of
+  magnitude at most π). A positive radius puts the center on the left of the direction from `start`
+  to `end`, so the arc runs counterclockwise; a negative radius puts it on the right, and the arc
+  runs clockwise. A zero radius is `geom.radius.not_positive`; a magnitude below half the chord is
+  `geom.construct.radius_too_small`. A chord of exactly twice the radius gives a semicircle.
+- `tangent_circles(first, second, radius, tolerance)` returns every circle of the radius tangent to
+  both curves, as `TangentCircle { circle, first, second }` where `first` and `second` are the
+  tangent points. Each input is a `Curve2::Line` (infinite) or a `Curve2::Circle`; other kinds are
+  `geom.curve.kind_unsupported`. A line gives two offset lines, one on each side at the radius. A
+  circle of radius `R` gives the distances `R + radius` (outside) and `|R - radius|` (inside); the
+  inside distance is omitted when it is within the tolerance, because the center would then be the
+  circle's own center and the solution would coincide with the circle. Solutions are the
+  intersections of the loci of the two inputs, deduplicated within the linear tolerance and sorted
+  by the center's x and then y coordinate. No solution is an empty list, not an error.
+- The families of solutions are refused with `geom.construct.degenerate`: two lines that coincide
+  (their offset lines coincide), two parallel distinct lines at distance `2 · radius`, and two
+  concentric circles with equal distances from the common center.
+- `polygon_inscribed(circle, sides, start_angle)` returns the vertices counterclockwise, the first at
+  `start_angle`, on the circle. `polygon_circumscribed(circle, sides, start_angle)` returns the
+  vertices at the same angles at distance `radius / cos(π / sides)`, so that every edge is tangent
+  to the circle at its midpoint. Fewer than three sides, or more than `MAX_POLYGON_SIDES` (65 536),
+  is `geom.construct.sides_invalid`.
+- `polygon_from_edge(first, second, sides, side)` returns a regular polygon with the segment from
+  `first` to `second` as its first edge. The polygon lies on the chosen `EdgeSide`: its vertices run
+  counterclockwise for `Left` and clockwise for `Right`, starting with `first` and then `second`.
+  Equal points are `geom.segment.zero_length`.
+- `ellipse_from_axis(first, second, other)` takes the segment as one axis, centered at its midpoint.
+  When `other` is at most half the length of the segment, the segment is the major axis and the
+  ratio is `other / half_length`; otherwise the segment is the minor axis, the major axis is
+  perpendicular to it with length `other`, and the ratio is `half_length / other`. A length equal to
+  the half length gives a circle. A non-positive `other` is `geom.ellipse.invalid_axis`.
+
+Each construction is closed form; the work is bounded by the number of inputs, except the number of
+sides, which is bounded by `MAX_POLYGON_SIDES`.
 
 ### Point k-d tree (CORE-GEOM-028)
 
