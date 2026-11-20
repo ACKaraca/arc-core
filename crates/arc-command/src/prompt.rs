@@ -31,7 +31,7 @@ use crate::spec::CommandSpec;
 
 mod coordinates;
 
-pub use coordinates::{MAX_POINT_BYTES, PlaneTransform, PointEntry};
+pub use coordinates::{MAX_POINT_BYTES, PlaneTransform, PointEntry, parse_angle, parse_length};
 
 /// The most answers one prompt session collects.
 pub const MAX_ANSWERS: usize = 1024;
@@ -332,6 +332,32 @@ pub struct PromptState<'a> {
     /// The direction direct distances use, a unit vector in the plane: a direction locked by
     /// `<angle`, else the host's pointer direction.
     pub direction: Option<[f64; 2]>,
+    /// The session whose settings [`PromptState::setting`] reads.
+    session: &'a Session,
+}
+
+impl<'a> PromptState<'a> {
+    /// The state a machine reads: the inline parameters, the answers, the snapshot, the last
+    /// point and direction, and the session whose settings [`PromptState::setting`] reads. A
+    /// struct literal is not possible outside this crate, so products and tests build states here.
+    #[must_use]
+    pub fn new(
+        preset: &'a Map<String, Value>,
+        answers: &'a [Answer],
+        snapshot: &'a Snapshot,
+        base: Option<Point>,
+        direction: Option<[f64; 2]>,
+        session: &'a Session,
+    ) -> Self {
+        Self {
+            preset,
+            answers,
+            snapshot,
+            base,
+            direction,
+            session,
+        }
+    }
 }
 
 impl PromptState<'_> {
@@ -343,6 +369,15 @@ impl PromptState<'_> {
             .rev()
             .find(|a| a.key == key)
             .map(|a| &a.input)
+    }
+
+    /// The session setting `key`, when the session holds one. Commands store these with
+    /// `Context::set_setting`; [`PromptStep::with_remembered_default`] reads them. Settings can be
+    /// written at any time and clones of a session share them, so a value read here can differ
+    /// from one ask to the next, for example after a "back".
+    #[must_use]
+    pub fn setting(&self, key: &str) -> Option<Value> {
+        self.session.setting(key)
     }
 }
 
@@ -395,6 +430,7 @@ type StepCheck = Arc<dyn Fn(&Snapshot, &PromptInput) -> Result<()> + Send + Sync
 pub struct PromptStep {
     prompt: Prompt,
     check: Option<StepCheck>,
+    remembered: Option<String>,
 }
 
 impl fmt::Debug for PromptStep {
@@ -413,7 +449,53 @@ impl PromptStep {
         Self {
             prompt: Prompt::new(param, message_id, accept),
             check: None,
+            remembered: None,
         }
+    }
+
+    /// Takes the default from the session setting `key` when the session holds a value that the
+    /// step would admit as a typed answer (its accepted kinds, bounds and check); the value
+    /// replaces the default set with [`PromptStep::with_default`]. The setting is read each time
+    /// the step is asked. A command stores its value with `Context::set_setting` when it runs,
+    /// and the next prompt of the session offers it. A command must use keys in its own
+    /// product's namespace (the first segment of the key, see `crate::settings`). When the
+    /// session's settings store is full, the command's write fails with
+    /// `cmd.params.limit_exceeded`, and the command fails unless it handles that error.
+    #[must_use]
+    pub fn with_remembered_default(mut self, key: impl Into<String>) -> Self {
+        self.remembered = Some(key.into());
+        self
+    }
+
+    /// The prompt to ask in `state`: this step's prompt, with the remembered default when the
+    /// session holds one that reads as an answer and would be admitted as a typed answer; the
+    /// step's own default stays otherwise. Read on every ask, so it can differ after a "back".
+    fn asked(&self, state: &PromptState<'_>) -> Prompt {
+        let mut prompt = self.prompt.clone();
+        if let Some(key) = &self.remembered
+            && let Some(input) = state
+                .setting(key)
+                .and_then(|value| input_from_json(&self.prompt.accepts, &value))
+            && self.admits(state, &input)
+        {
+            prompt.default = Some(input);
+        }
+        prompt
+    }
+
+    /// Whether `input` would pass this step as a typed answer: an accepted kind admits it, and
+    /// the step's check does.
+    fn admits(&self, state: &PromptState<'_>, input: &PromptInput) -> bool {
+        let fits = self.prompt.accepts.iter().any(|accept| {
+            matches!(
+                admit(accept, input, state.snapshot, state.session),
+                Some(Ok(()))
+            )
+        });
+        fits && self
+            .check
+            .as_ref()
+            .is_none_or(|check| check(state.snapshot, input).is_ok())
     }
 
     /// Accepts `accept` as well.
@@ -514,6 +596,7 @@ impl PromptSequence {
                 PromptStep {
                     prompt,
                     check: None,
+                    remembered: None,
                 }
             })
             .collect();
@@ -687,7 +770,7 @@ impl PromptMachine for PromptSequence {
                         input_to_json(&step.prompt.accepts, &answer.input),
                     );
                 }
-                None => return Ok(Step::Ask(step.prompt.clone())),
+                None => return Ok(Step::Ask(step.asked(state))),
             }
         }
         Ok(Step::Done(params))
@@ -1018,13 +1101,14 @@ impl PromptSession {
     }
 
     fn state<'s>(&'s self, snapshot: &'s Snapshot) -> PromptState<'s> {
-        PromptState {
-            preset: &self.preset,
-            answers: &self.answers,
+        PromptState::new(
+            &self.preset,
+            &self.answers,
             snapshot,
-            base: self.last_point(),
-            direction: self.entry.effective_direction(),
-        }
+            self.last_point(),
+            self.entry.effective_direction(),
+            &self.session,
+        )
     }
 
     fn fail(&mut self, error: Error) -> Feedback {
@@ -1461,6 +1545,118 @@ mod tests {
                 Feedback::Failed(e) if e.code() == "cmd.prompt.ended"
             ));
         }
+    }
+
+    #[derive(serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+    struct Remembered {
+        length: f64,
+    }
+
+    fn remembered_spec() -> CommandSpec {
+        CommandSpec::new("test.remember.run", "l", "d", |_, _: Remembered| Ok(())).with_prompts(
+            PromptSequence::new().step(
+                PromptStep::new("length", "m", Accept::distance())
+                    .with_remembered_default("test.remembered.length"),
+            ),
+        )
+    }
+
+    #[test]
+    fn a_remembered_setting_is_the_default_when_it_reads_as_the_answer() {
+        let session = session();
+        let snapshot = snapshot();
+        let start = |session: &Session| {
+            PromptSession::start(Arc::new(remembered_spec()), Map::new(), session, &snapshot)
+        };
+        let (_, first) = start(&session);
+        assert!(
+            matches!(&first, Feedback::Ask(p) if p.default.is_none()),
+            "{first:?}"
+        );
+
+        session
+            .set_setting("test.remembered.length", json!(2.5))
+            .unwrap();
+        let (mut prompts, first) = start(&session);
+        let Feedback::Ask(prompt) = &first else {
+            panic!("{first:?}")
+        };
+        assert!(
+            matches!(prompt.default, Some(PromptInput::Distance(v)) if (v - 2.5).abs() < 1e-12)
+        );
+        let Feedback::Done(invocation) = prompts.accept_default(&snapshot) else {
+            panic!()
+        };
+        assert_eq!(invocation.params["length"], json!(2.5));
+
+        // A value that is not a distance is not offered.
+        session
+            .set_setting("test.remembered.length", json!("far"))
+            .unwrap();
+        let (_, first) = start(&session);
+        assert!(
+            matches!(&first, Feedback::Ask(p) if p.default.is_none()),
+            "{first:?}"
+        );
+    }
+
+    /// A distance step with a minimum of 1, a static default of 2 and the remembered key.
+    fn bounded_remembered_spec(check: Option<f64>) -> CommandSpec {
+        let mut step = PromptStep::new(
+            "length",
+            "m",
+            Accept::Distance {
+                min: Some(1.0),
+                max: None,
+            },
+        )
+        .with_default(PromptInput::Distance(2.0))
+        .with_remembered_default("test.remembered.length");
+        if let Some(limit) = check {
+            step = step.with_check(move |_, input| match input {
+                PromptInput::Distance(v) if *v > limit => Err(range_error("maximum")),
+                _ => Ok(()),
+            });
+        }
+        CommandSpec::new("test.bounded.run", "l", "d", |_, _: Remembered| Ok(()))
+            .with_prompts(PromptSequence::new().step(step))
+    }
+
+    fn default_offered(spec: CommandSpec, session: &Session) -> Option<PromptInput> {
+        let (_, first) = PromptSession::start(Arc::new(spec), Map::new(), session, &snapshot());
+        let Feedback::Ask(prompt) = first else {
+            panic!("{first:?}")
+        };
+        prompt.default
+    }
+
+    #[test]
+    fn a_remembered_value_the_step_would_not_admit_is_not_offered() {
+        let session = session();
+        // Right type, below the minimum: the step keeps its own default.
+        session
+            .set_setting("test.remembered.length", json!(0.5))
+            .unwrap();
+        assert_eq!(
+            default_offered(bounded_remembered_spec(None), &session),
+            Some(PromptInput::Distance(2.0))
+        );
+        // Admitted by the bounds but refused by the step's check: also not offered.
+        session
+            .set_setting("test.remembered.length", json!(5.0))
+            .unwrap();
+        assert_eq!(
+            default_offered(bounded_remembered_spec(Some(4.0)), &session),
+            Some(PromptInput::Distance(2.0))
+        );
+        // An admitted value replaces the static default.
+        session
+            .set_setting("test.remembered.length", json!(3.0))
+            .unwrap();
+        assert_eq!(
+            default_offered(bounded_remembered_spec(None), &session),
+            Some(PromptInput::Distance(3.0))
+        );
     }
 
     #[test]

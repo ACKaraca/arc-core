@@ -289,7 +289,10 @@ The modules are `prompt` (CORE-CMD-011), `line` (CORE-CMD-013) and `command_line
 ### Prompt machines
 
 - A `PromptMachine` is a pure function of a `PromptState`: the parameters typed inline
-  (`preset`), the answers so far and the current snapshot, which it reads and never changes.
+  (`preset`), the answers so far, the current snapshot and the session settings (`setting`),
+  which it reads and never changes. Settings can be written at any time, so a machine that reads
+  one can get a different answer on each ask; the default it reads is taken again on every ask,
+  so it may differ after a "back".
   `next` returns `Step::Ask(Prompt)` or `Step::Done(params)`; the machine has no state of its
   own, so "back" is removing the last answer. Keyword options change the path by being answers
   the machine reads. `check` may reject an answer that fits the prompt (any error, for example
@@ -321,6 +324,17 @@ The modules are `prompt` (CORE-CMD-011), `line` (CORE-CMD-013) and `command_line
   skipping parameters given inline; a step may add a check. `CommandSpec::with_prompts` gives
   every step without a default the parameter's schema `default` when an accepted input can
   represent it (the inverse of the JSON mapping above); otherwise the step has no default.
+- `PromptStep::with_remembered_default(key)` takes the step's default from the session setting
+  `key` when that setting reads as an answer of the step (the inverse of the JSON mapping) and
+  the step admits it as a typed answer (its accepted kinds, bounds and check). Otherwise the step
+  keeps its own default. The setting is read each time the step is asked, so the default can
+  differ after a "back". A command stores the value it ran with through `Context::set_setting`;
+  the write is applied only when the command succeeds, so the next prompt of the session offers
+  it. A command uses keys in its own product's namespace (the first segment of the key, per
+  `crate::settings`), one key per remembered parameter. Each session holds at most 256 settings
+  of at most 4096 bytes, shared with every other setting: when the store is full, the command's
+  write fails with `cmd.params.limit_exceeded`, and the command fails unless it handles that
+  error.
 - A command without a machine gets `PromptSequence::from_schema`: one step for each required
   parameter, in `required` order, with the message `cmd-prompt-param` (argument `name`). The
   schema kind decides the input: a quantity (`anyOf` number and string) takes an `Expression`,
@@ -367,9 +381,11 @@ The modules are `prompt` (CORE-CMD-011), `line` (CORE-CMD-013) and `command_line
   ```ebnf
   point      = last | coordinate | lock | direct ;
   last       = [ "*" ] , "@" ;                      (* the last point *)
-  coordinate = [ "*" ] , [ "#" | "@" ] , ( cartesian | polar ) ;
+  coordinate = [ "*" ] , [ "#" | "@" ] , ( cartesian | polar | cylindrical | spherical ) ;
   cartesian  = length , "," , length , [ "," , length ] ;
   polar      = length , "<" , angle ;               (* distance and angle from the origin or last point *)
+  cylindrical = length , "<" , angle , "," , length ; (* polar in the plane, then a height *)
+  spherical  = length , "<" , angle , "<" , angle ;  (* distance, angle in the plane, angle from the plane *)
   lock       = "<" , angle ;                        (* no prefix: locks a direction *)
   direct     = length ;                             (* no prefix, comma or "<": a distance *)
   ```
@@ -383,6 +399,13 @@ The modules are `prompt` (CORE-CMD-011), `line` (CORE-CMD-013) and `command_line
     relative default applies (absolute by default). `@` alone is the last point.
   - A polar `distance<angle` is measured from the origin of the coordinate system when absolute,
     and from the last point when relative.
+  - A cylindrical `distance<angle,z` places the polar point in the plane and sets its height to
+    `z`. A spherical `distance<angle<elevation` places a point `distance` from the origin, at
+    `elevation` above the plane (the angle from the plane, counterclockwise positive) and `angle`
+    counterclockwise from the positive X axis within the plane. Both follow the polar rules: the
+    angle base and units of the session, `*` for world coordinates, and the plane transform for
+    the planar part. A relative height is added to the last point's height (zero when it has
+    none); an absolute height is taken as typed. Heights are never transformed.
   - Angles are counterclockwise from the positive X axis of the coordinate system, in radians
     internally. The architecture defines no session angle base, so no other base exists. A
     surveyor bearing counts counterclockwise from east.
@@ -401,6 +424,13 @@ The modules are `prompt` (CORE-CMD-011), `line` (CORE-CMD-013) and `command_line
     the solver's unit names.
   - A distance or angle prompt reads the same lengths and angles (notations included) and no
     point form; a point form on those prompts is `cmd.prompt.unreadable` or the reader's error.
+  - A product reads the text of one dynamic input field the same way with
+    `prompt::parse_length(text, session)` and `prompt::parse_angle(text, session)`, which take the
+    session's context units as a point prompt does. They trim the text and refuse it with
+    `cmd.prompt.limit_exceeded` (detail `limit` = `line_bytes`) when it is longer than the command
+    line's cap, as a typed answer is. They read no point form and change no state.
+  - `PromptState::new` is the only way to build a `PromptState` outside the crate; a struct
+    literal is not possible because the state holds the session it reads settings from.
 
 - **Point state** (`PointEntry`, held by the prompt session): the last point the host sets
   (`set_last_point`), the host's pointer direction (`set_direction`, normalized to a unit vector

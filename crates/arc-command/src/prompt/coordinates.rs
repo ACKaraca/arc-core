@@ -2,8 +2,8 @@
 //! capability list).
 //!
 //! [`read`] recognizes the point forms of the grammar in `docs/crates/arc-command.md` and places
-//! them: absolute and relative Cartesian, polar, the last point, direct distance along a
-//! direction, and the direction lock. Lengths and angles are read by the solver first and then by
+//! them: absolute and relative Cartesian, polar, cylindrical, spherical, the last point, direct
+//! distance along a direction, and the direction lock. Lengths and angles are read by the solver first and then by
 //! the notations of `arc_base::DisplayFormat`, so no second parser exists here.
 
 use std::f64::consts::{FRAC_PI_2, TAU};
@@ -289,6 +289,21 @@ pub(crate) fn read(
     }
 
     let parts = line::split_top_level(body, ',');
+    if parts.len() > 1 && line::split_top_level(parts[0], '<').len() > 1 {
+        // Cylindrical `distance<angle,z`: a polar form in the plane, then a height.
+        let [planar, height] = parts.as_slice() else {
+            return None;
+        };
+        let planar = polar_text(planar.trim(), session)?;
+        return Some(
+            planar
+                .and_then(|(distance, radians)| {
+                    length(height.trim(), session)
+                        .map(|z| planar_vector(distance, radians, Some(z)))
+                })
+                .and_then(|vector| place(vector, mode, world, entry, last).map(Read::Point)),
+        );
+    }
     if parts.len() > 1 {
         if !(2..=3).contains(&parts.len()) {
             return None;
@@ -315,22 +330,10 @@ pub(crate) fn read(
         }));
     }
 
-    if let Some((distance_text, angle_text)) = body.split_once('<') {
-        let (distance_text, angle_text) = (distance_text.trim(), angle_text.trim());
-        if distance_text.is_empty() || angle_text.is_empty() {
-            return None;
-        }
-        return Some(
-            length(distance_text, session)
-                .and_then(|distance| {
-                    angle(angle_text, session).map(|radians| Vector {
-                        x: distance * radians.cos(),
-                        y: distance * radians.sin(),
-                        z: None,
-                    })
-                })
-                .and_then(|vector| place(vector, mode, world, entry, last).map(Read::Point)),
-        );
+    if line::split_top_level(body, '<').len() > 1 {
+        return angled(body, session).map(|vector| {
+            vector.and_then(|vector| place(vector, mode, world, entry, last).map(Read::Point))
+        });
     }
 
     // A bare length: a distance along the direction from the last point.
@@ -390,8 +393,94 @@ fn place(
     }
 }
 
+/// The vector of a polar form: `distance` at `radians` counterclockwise from the X axis.
+fn planar_vector(distance: f64, radians: f64, z: Option<f64>) -> Vector {
+    Vector {
+        x: distance * radians.cos(),
+        y: distance * radians.sin(),
+        z,
+    }
+}
+
+/// The vector of a spherical form: `distance` from the origin, `elevation` above the plane and
+/// `radians` counterclockwise from the X axis within the plane.
+fn spherical_vector(distance: f64, radians: f64, elevation: f64) -> Vector {
+    let horizontal = distance * elevation.cos();
+    Vector {
+        x: horizontal * radians.cos(),
+        y: horizontal * radians.sin(),
+        z: Some(distance * elevation.sin()),
+    }
+}
+
+/// The vector of a polar `distance<angle` or a spherical `distance<angle<elevation` form, with the
+/// angle from the plane last. Every piece is required; `None` when the text has neither shape.
+fn angled(body: &str, session: &Session) -> Option<Result<Vector>> {
+    let pieces = line::split_top_level(body, '<');
+    if pieces.iter().any(|piece| piece.is_empty()) {
+        return None;
+    }
+    match pieces.as_slice() {
+        [distance, radians] => Some(length(distance, session).and_then(|distance| {
+            angle(radians, session).map(|radians| planar_vector(distance, radians, None))
+        })),
+        [distance, radians, elevation] => Some(length(distance, session).and_then(|distance| {
+            let radians = angle(radians, session)?;
+            let elevation = angle(elevation, session)?;
+            Ok(spherical_vector(distance, radians, elevation))
+        })),
+        _ => None,
+    }
+}
+
+/// The distance and the angle of the planar part `distance<angle`; `None` when the text has no
+/// such shape.
+fn polar_text(text: &str, session: &Session) -> Option<Result<(f64, f64)>> {
+    let pieces = line::split_top_level(text, '<');
+    match pieces.as_slice() {
+        [distance, radians] if !distance.is_empty() && !radians.is_empty() => Some(
+            length(distance, session)
+                .and_then(|distance| angle(radians, session).map(|radians| (distance, radians))),
+        ),
+        _ => None,
+    }
+}
+
 fn no_base() -> Error {
     Error::new(codes::PROMPT_NO_BASE)
+}
+
+/// Reads one length typed as text, as a distance prompt reads a typed answer: the text is trimmed
+/// and read with [`length`], in meters.
+///
+/// # Errors
+///
+/// `cmd.prompt.limit_exceeded` (detail `limit` = `line_bytes`) when the trimmed text is longer
+/// than the command line's byte cap; otherwise the reader's error (`cmd.prompt.range`, or the
+/// solver's error when the text is not a length).
+pub fn parse_length(text: &str, session: &Session) -> Result<f64> {
+    length(checked_line(text)?, session)
+}
+
+/// Reads one angle typed as text, as an angle prompt reads a typed answer: the text is trimmed and
+/// read with [`angle`], in radians counterclockwise from the positive X axis.
+///
+/// # Errors
+///
+/// `cmd.prompt.limit_exceeded` (detail `limit` = `line_bytes`) when the trimmed text is longer
+/// than the command line's byte cap; otherwise the reader's error (`cmd.prompt.range`, or the
+/// solver's error when the text is not an angle).
+pub fn parse_angle(text: &str, session: &Session) -> Result<f64> {
+    angle(checked_line(text)?, session)
+}
+
+/// The trimmed text, refused when it is longer than the command line's byte cap.
+fn checked_line(text: &str) -> Result<&str> {
+    let text = text.trim();
+    if text.len() > line::MAX_LINE_BYTES {
+        return Err(Error::new(codes::PROMPT_LIMIT_EXCEEDED).with_detail("limit", "line_bytes"));
+    }
+    Ok(text)
 }
 
 /// A length in meters: the solver's reading, else the feet-and-inches notation. When both fail,
@@ -996,5 +1085,155 @@ mod tests {
         ));
         let preview = prompts.preview(&snapshot, None).unwrap();
         assert_eq!(preview["direction"], json!([1.0, 0.0]));
+    }
+
+    #[test]
+    fn cylindrical_forms_are_a_polar_form_in_the_plane_and_a_height() {
+        let units = ["meter", "degree"];
+        close(
+            &done_at(typed("5<90,2", &units, PointEntry::new())),
+            &[0.0, 5.0, 2.0],
+        );
+        close(
+            &done_at(typed(" 5 < 0 , 2 ", &units, PointEntry::new())),
+            &[5.0, 0.0, 2.0],
+        );
+        // A relative cylindrical form offsets the plane and the height from the last point.
+        close(
+            &done_at(typed("@5<0,1", &units, entry_at(10.0, 20.0))),
+            &[15.0, 20.0, 1.0],
+        );
+        let mut elevated = PointEntry::new();
+        elevated
+            .set_last_point(Some(Point {
+                x: 10.0,
+                y: 20.0,
+                z: Some(3.0),
+            }))
+            .unwrap();
+        close(
+            &done_at(typed("@5<0,1", &units, elevated.clone())),
+            &[15.0, 20.0, 4.0],
+        );
+        close(
+            &done_at(typed("#5<0,1", &units, elevated)),
+            &[5.0, 0.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn cylindrical_and_spherical_forms_honor_the_plane_transform_and_world_prefix() {
+        let units = ["meter", "degree"];
+        let mut e = PointEntry::new();
+        // Quarter turn counterclockwise, then a translation of (100, 0).
+        e.set_transform(PlaneTransform::new([[0.0, -1.0], [1.0, 0.0]], [100.0, 0.0]).unwrap());
+        close(
+            &done_at(typed("5<0,2", &units, e.clone())),
+            &[100.0, 5.0, 2.0],
+        );
+        close(
+            &done_at(typed("*5<0,2", &units, e.clone())),
+            &[5.0, 0.0, 2.0],
+        );
+        close(
+            &done_at(typed("*10<90<0", &units, e.clone())),
+            &[0.0, 10.0, 0.0],
+        );
+        close(
+            &done_at(typed("10<0<90", &units, e.clone())),
+            &[100.0, 0.0, 10.0],
+        );
+    }
+
+    #[test]
+    fn spherical_forms_measure_the_elevation_from_the_plane() {
+        let units = ["meter", "degree"];
+        close(
+            &done_at(typed("10<90<0", &units, PointEntry::new())),
+            &[0.0, 10.0, 0.0],
+        );
+        close(
+            &done_at(typed("10<0<90", &units, PointEntry::new())),
+            &[0.0, 0.0, 10.0],
+        );
+        let half = 10.0 * std::f64::consts::FRAC_1_SQRT_2;
+        close(
+            &done_at(typed("10<0<45", &units, PointEntry::new())),
+            &[half, 0.0, half],
+        );
+        // Relative: the offset is measured from the last point, its height added to the base height.
+        close(
+            &done_at(typed("@10<0<45", &units, entry_at(10.0, 20.0))),
+            &[10.0 + half, 20.0, half],
+        );
+        close(
+            &done_at(typed("*10<0<45", &units, entry_at(10.0, 20.0))),
+            &[half, 0.0, half],
+        );
+    }
+
+    #[test]
+    fn cylindrical_and_spherical_forms_reject_malformed_and_hostile_text() {
+        let units = ["meter", "degree"];
+        for text in ["5<30<", "5<<30", "5<30<20<10", "5<90,2,3", "5<,2"] {
+            assert_eq!(
+                code_of(typed(text, &units, entry_at(0.0, 0.0))),
+                "cmd.prompt.unreadable",
+                "{text}"
+            );
+        }
+        // Each part reads its own notation: a missing unit and a bad number are the reader's errors.
+        for text in ["5<90,2", "10<90<0", "5<90,", "<90,2"] {
+            assert!(
+                matches!(
+                    typed(text, &["meter"], PointEntry::new()),
+                    Feedback::Rejected { .. }
+                ),
+                "{text}"
+            );
+        }
+        for text in ["NaN<0,1", "5<NaN,1", "10<0<NaN", "5<0,inf"] {
+            assert!(
+                matches!(
+                    typed(text, &units, PointEntry::new()),
+                    Feedback::Rejected { .. }
+                ),
+                "{text}"
+            );
+        }
+        // Overflow of a sum or a product is a range error, as for Cartesian forms.
+        let huge = entry_at(f64::MAX, 0.0);
+        assert_eq!(
+            code_of(typed("@1e308<0,0", &units, huge.clone())),
+            "cmd.prompt.range"
+        );
+        assert_eq!(
+            code_of(typed("@1e308<0<0", &units, huge)),
+            "cmd.prompt.range"
+        );
+    }
+
+    #[test]
+    fn a_comparison_inside_parentheses_is_not_an_angle_separator() {
+        let units = ["meter", "degree"];
+        // The `<` sits inside a call or a group: the text is Cartesian, not polar or cylindrical.
+        close(
+            &done_at(typed("if(1 m<2 m,1 m,2 m),3 m", &units, PointEntry::new())),
+            &[1.0, 3.0],
+        );
+        close(
+            &done_at(typed(
+                "if(2 m<3 m,1 m,2 m),2 m,3 m",
+                &units,
+                PointEntry::new(),
+            )),
+            &[1.0, 2.0, 3.0],
+        );
+        // A polar form whose distance holds a comparison reads the top-level `<` only.
+        let half = 3.0_f64.sqrt() / 2.0;
+        close(
+            &done_at(typed("if(1<2,1,2)<30", &units, PointEntry::new())),
+            &[half, 0.5],
+        );
     }
 }
