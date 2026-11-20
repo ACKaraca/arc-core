@@ -359,3 +359,46 @@ fn a_database_whose_creation_was_interrupted_is_not_listed() {
     std::fs::write(folder.join(format!("session.{}", recovery::EXTENSION)), b"").unwrap();
     assert!(orphans(&root).is_empty());
 }
+
+#[test]
+fn a_bookkeeping_record_is_replayed_and_leaves_the_stacks_alone() {
+    let dir = TempDir::new("rec-silent");
+    let root = dir.path("app");
+    let base_path = dir.path("model.arc");
+    write_base(&base_path, &initial(), 1);
+    let (document, base) = open(&base_path);
+    let journal = protect(&document, &root, 1, Some(base));
+    set(&document, 1, 10);
+    set(&document, 2, 20);
+    assert!(document.undo().wait().unwrap().value);
+    // A merge record that writes a foreign row: no step, the redo stack stays.
+    document
+        .submit(|txn| {
+            txn.meta_mut().kind = arc_doc::TxnKind::Merge;
+            txn.add_foreign(arc_doc::StoredForeign {
+                source_format: "test".to_owned(),
+                record_kind: "note".to_owned(),
+                ..arc_doc::StoredForeign::default()
+            })
+            .map(drop)
+        })
+        .wait()
+        .unwrap();
+    assert_eq!(document.undo_step_list(10).len(), 1);
+    assert_eq!(document.redo_step_list(10).len(), 1);
+    // The older step still undoes and both redo.
+    assert!(document.undo().wait().unwrap().value);
+    assert!(document.redo().wait().unwrap().value);
+    assert!(document.redo().wait().unwrap().value);
+    let expected = state(&document.snapshot());
+    assert_eq!(expected.get(&2), Some(&20));
+    assert!(journal.flush(WAIT));
+    let written = journal.written();
+    drop(document);
+    drop(journal);
+    let recovered = recover_one(&root, 2);
+    assert_eq!(recovered.replayed, written);
+    assert_eq!(state(&recovered.document.snapshot()), expected);
+    assert_eq!(recovered.document.snapshot().foreign_rows().count(), 1);
+    assert!(!recovered.document.can_undo() && !recovered.document.can_redo());
+}

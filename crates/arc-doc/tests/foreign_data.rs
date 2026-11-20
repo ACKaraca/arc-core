@@ -420,3 +420,35 @@ proptest! {
         run(&actions);
     }
 }
+
+/// A merge record that adds a row after an undo takes a key above every key the session's
+/// operations named, so the redo of the undone step still applies (the floor of
+/// `Txn::add_foreign`).
+#[test]
+fn a_new_row_takes_a_key_above_the_keys_the_session_named() {
+    let doc = Document::new(
+        Arc::new(arc_doc::TypeRegistry::new()),
+        Arc::new(Evaluators::new()),
+    )
+    .unwrap();
+    let add = |doc: &Document, kind: arc_doc::TxnKind| {
+        doc.submit(move |txn| {
+            txn.meta_mut().kind = kind;
+            txn.add_foreign(arc_doc::StoredForeign {
+                source_format: "t".to_owned(),
+                record_kind: "k".to_owned(),
+                ..arc_doc::StoredForeign::default()
+            })
+        })
+        .wait()
+        .unwrap()
+        .value
+    };
+    assert_eq!(add(&doc, arc_doc::TxnKind::Normal), 1);
+    assert!(doc.undo().wait().unwrap().value);
+    assert_eq!(doc.snapshot().foreign_len(), 0);
+    assert_eq!(add(&doc, arc_doc::TxnKind::Merge), 2);
+    assert!(doc.redo().wait().unwrap().value);
+    let keys: Vec<i64> = doc.snapshot().foreign_rows().map(|r| r.id).collect();
+    assert_eq!(keys, vec![1, 2]);
+}

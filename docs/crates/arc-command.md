@@ -76,6 +76,18 @@ parsing and repeat (CORE-CMD-011, CORE-CMD-013, CORE-CMD-015) are described in t
   consecutive invocations with the same key form one undo step), `not_undoable`, or
   `undo_control`. `undo_control` commands currently run like `not_undoable` ones, without a
   transaction; their commit path comes with the core undo commands.
+  An `undoable` command may call `Context::commit_silently`: its transaction then commits as
+  bookkeeping, journal kind `merge`, which is not an undo step and leaves the undo and redo stacks
+  unchanged, while recovery and reopening still replay it. Such a transaction may only add
+  foreign data rows, each under a key above every key an operation of the session's history
+  named (`Txn::add_foreign` does this for `merge` transactions, `Txn::foreign_floor` is the
+  bound), so the inverse of any step on either stack still applies; anything else fails with
+  `cmd.silent_scope`. The descriptor still says `undoable`. `Context::after_commit` registers an
+  action that runs once the transaction committed, with the session and the result value to
+  amend (`cmd.no_transaction` for a command without a transaction). It never runs for a failed
+  or dry run. The commit event is delivered before the action runs, so a listener must not
+  expect what the action writes to exist. A failing action fails the command while the
+  transaction stays committed and the result is lost. Actions do not observe cancellation.
 - **Permission classes**: one or more of `read`, `edit`, `file_read`, `file_write`, `network`,
   `process`, `settings`; the default is `edit`.
 - **Exposure**: a set of the surfaces `ui`, `command_line`, `automation`, `mcp`, `plugin`; the
@@ -1067,6 +1079,7 @@ gives `validate <file>` the package check, so parameter validation is the separa
 | `cmd.fault` | `internal` | A fault escaped; the document was restored |
 | `cmd.result.invalid` | `internal` | The result cannot be encoded or violates its schema |
 | `cmd.no_transaction` | `internal` | A command without a transaction asked for one |
+| `cmd.silent_scope` | `internal` | A command that commits silently wrote more than foreign data rows |
 | `cmd.prompt.kind` | `invalid_input` | The answer is not a kind of input the prompt accepts, or not one of its keyword options |
 | `cmd.prompt.range` | `invalid_input` | The answer is outside the prompt's constraints; the detail `reason` says which |
 | `cmd.prompt.object` | `invalid_input` | A picked or selected object does not exist or has a type the prompt does not accept |

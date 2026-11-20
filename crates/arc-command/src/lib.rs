@@ -78,8 +78,8 @@ pub use command_line::{
     CommandLine, LastCommand, LineStep, Runner, Submitted, TRANSPARENT_PREFIX, Target,
 };
 pub use context::{
-    Clock, Context, FixedClock, IdParam, PROGRESS_DELAY_MILLIS, Probe, ProgressSink, QuantityParam,
-    Session,
+    AfterCommit, Clock, Context, FixedClock, IdParam, PROGRESS_DELAY_MILLIS, Probe, ProgressSink,
+    QuantityParam, Session,
 };
 pub use invoke::{Invocation, Invoker, Outcome, Preview};
 pub use line::{

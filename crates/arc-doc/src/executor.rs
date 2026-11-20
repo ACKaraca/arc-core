@@ -196,6 +196,11 @@ impl JournalSink for Recorder<'_> {
     fn record(&self, committed: &Committed) {
         let appended = {
             let mut history = lock(self.history);
+            for op in &committed.ops {
+                if let Op::ModifyForeign { id, .. } = op {
+                    history.foreign_top = history.foreign_top.max(*id);
+                }
+            }
             let appended = history
                 .journal
                 .append(
@@ -264,8 +269,10 @@ impl Core {
             .validators
             .clone();
         let (limits, txn_limits) = (&self.limits, self.txn_limits);
+        let floor = lock(&self.shared.history).foreign_top;
         let body = catch_unwind(AssertUnwindSafe(|| {
             let mut txn = Txn::new(&base, meta, txn_limits);
+            txn.set_foreign_floor(floor);
             let value = job(&mut txn)?;
             let checked = validate_txn(txn, limits, &validators)?;
             let set = &checked.parts.set;
@@ -339,7 +346,16 @@ impl Core {
                     saved = Some(history.undo.clone());
                 }
                 let group = meta.group.clone();
-                open(&mut history, &base, meta, txn_limits).map(|txn| (txn, group))
+                let floor = history.foreign_top;
+                open(&mut history, &base, meta, txn_limits).map(|txn| {
+                    (
+                        txn.map(|mut txn| {
+                            txn.set_foreign_floor(floor);
+                            txn
+                        }),
+                        group,
+                    )
+                })
             };
             let (Some(mut txn), group) = opened? else {
                 return Ok(None);

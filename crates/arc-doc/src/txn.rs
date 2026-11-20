@@ -175,6 +175,9 @@ pub struct Txn {
     /// The live savepoints, oldest first.
     held: Vec<Held>,
     next_serial: u64,
+    /// The foreign data row keys up to this one are named by an operation of the document's
+    /// history; [`Txn::add_foreign`] of a `merge` transaction allocates above it.
+    foreign_floor: i64,
 }
 
 impl Txn {
@@ -189,7 +192,20 @@ impl Txn {
             meta,
             held: Vec::new(),
             next_serial: 0,
+            foreign_floor: 0,
         }
+    }
+
+    /// The highest foreign data row key the document's history named when this transaction
+    /// opened (0 for a transaction not opened by the document's executor): a row added by a
+    /// `merge` transaction takes a key above it.
+    #[must_use]
+    pub fn foreign_floor(&self) -> i64 {
+        self.foreign_floor
+    }
+
+    pub(crate) fn set_foreign_floor(&mut self, floor: i64) {
+        self.foreign_floor = floor;
     }
 
     /// The snapshot the transaction applies to.
@@ -402,11 +418,22 @@ impl Txn {
         self.record(op, 0, |set| set.set_foreign(after).map(drop))
     }
 
-    /// Adds `row` under a new key, one more than the highest key in the candidate (1 for none),
-    /// ignoring `row.id`, and returns the key. Fails like [`Txn::set_foreign`], and with
+    /// Adds `row` under a new key, one more than the highest key in the candidate (1 for none)
+    /// and, in a transaction of kind `merge`, above [`Txn::foreign_floor`], so a record that is
+    /// no undo step never takes a key an undo or redo step of this session names, ignoring
+    /// `row.id`, and returns the key. Fails like [`Txn::set_foreign`], and with
     /// `doc.foreign.invalid` (reason `id`) when no key is left.
     pub fn add_foreign(&mut self, mut row: StoredForeign) -> Result<i64> {
-        row.id = self.snapshot().next_foreign_id().ok_or_else(|| {
+        let next = self
+            .snapshot()
+            .next_foreign_id()
+            .zip(if self.meta.kind == TxnKind::Merge {
+                self.foreign_floor.checked_add(1)
+            } else {
+                Some(1)
+            })
+            .map(|(next, above)| next.max(above));
+        row.id = next.ok_or_else(|| {
             Error::new(codes::FOREIGN_INVALID)
                 .with_arg("row", i64::MAX)
                 .with_arg("reason", "id")

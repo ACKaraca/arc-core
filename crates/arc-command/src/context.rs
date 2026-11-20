@@ -237,6 +237,10 @@ pub(crate) fn split_mix(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
+/// An action a command asks to run after its transaction committed: it gets the session and the
+/// command's result value, which it may amend ([`Context::after_commit`]).
+pub type AfterCommit = Box<dyn FnOnce(&Session, &mut Value) -> Result<()> + Send>;
+
 /// The context of one `run`.
 pub struct Context<'a> {
     store: Store<'a>,
@@ -249,6 +253,10 @@ pub struct Context<'a> {
     start: u64,
     flags: NameFlags,
     pub(crate) selection_after: Option<Vec<ObjectId>>,
+    /// Whether the command asked to commit as bookkeeping ([`Context::commit_silently`]).
+    pub(crate) silent: bool,
+    /// The actions to run once the transaction committed ([`Context::after_commit`]).
+    pub(crate) after_commit: Vec<AfterCommit>,
     pub(crate) selection_request: Option<Vec<ObjectId>>,
     /// The setting writes of the command, applied once it succeeds ([`Context::set_setting`]).
     pub(crate) settings_writes: Writes,
@@ -289,6 +297,8 @@ impl<'a> Context<'a> {
             start: session.clock.now_unix_millis(),
             flags: NameFlags::default(),
             selection_after: None,
+            silent: false,
+            after_commit: Vec::new(),
             selection_request: None,
             settings_writes: Writes::new(),
         }
@@ -327,6 +337,46 @@ impl<'a> Context<'a> {
             Store::Txn(txn) => Ok(txn),
             Store::Snapshot(_) => Err(Error::new(codes::NO_TRANSACTION)),
         }
+    }
+
+    /// Commits this command's transaction as document bookkeeping: it is journaled, so recovery
+    /// and reopening rebuild it, but it is not an undo step and leaves the undo and redo stacks
+    /// unchanged (journal kind `merge`). For changes the user did not make, such as recording
+    /// what a file export assigned. The transaction may only add foreign data rows, each under
+    /// a key above [`Txn::foreign_floor`], that is, a key no operation of this session's
+    /// history names; so the inverse of any step on either stack still applies after it. Any
+    /// other operation (an object change, a rewritten or removed row, a key at or below the
+    /// floor) fails the command with `cmd.silent_scope`.
+    ///
+    /// # Errors
+    ///
+    /// `cmd.no_transaction` for commands that are not `undoable`.
+    pub fn commit_silently(&mut self) -> Result<()> {
+        // The kind is set now: a merge transaction allocates its row keys above the history's.
+        self.txn()?.meta_mut().kind = arc_doc::TxnKind::Merge;
+        self.silent = true;
+        Ok(())
+    }
+
+    /// Runs `action` once this command's transaction has committed, in order with the other
+    /// actions, with the session and the command's result value (which it may amend). A
+    /// command whose transaction fails to commit, a dry run, and a command that fails never
+    /// run it. The commit event reaches listeners before the action runs, so a listener must
+    /// not expect what the action writes to exist. A failing action fails the command while the
+    /// transaction stays committed, and the command's result is lost. An action does not
+    /// observe cancellation. The action runs on the invoking thread, outside the executor; it
+    /// must not touch the document.
+    ///
+    /// # Errors
+    ///
+    /// `cmd.no_transaction` for commands that are not `undoable`.
+    pub fn after_commit(
+        &mut self,
+        action: impl FnOnce(&Session, &mut Value) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
+        self.txn()?;
+        self.after_commit.push(Box::new(action));
+        Ok(())
     }
 
     /// The selection at invocation.

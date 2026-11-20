@@ -95,6 +95,10 @@ pub(crate) struct History {
     pub(crate) undo: UndoManager,
     /// The limits the journal's records encode within.
     pub(crate) limits: Limits,
+    /// The highest foreign data row key any committed operation of this session named. A new
+    /// row takes a key above it ([`Txn::add_foreign`]), so no later commit can take a key
+    /// that an undo or redo step still names. Session state, never stored.
+    pub(crate) foreign_top: i64,
 }
 
 impl History {
@@ -135,6 +139,7 @@ impl Shared {
                 journal: Journal::default(),
                 undo: UndoManager::default(),
                 limits: Limits::DEFAULT,
+                foreign_top: 0,
             }),
         }
     }
@@ -222,6 +227,7 @@ impl Document {
             journal: Journal::new(config.limits),
             undo: UndoManager::new(config.undo_limits),
             limits: config.limits,
+            foreign_top: 0,
         };
         let weak = Arc::downgrade(&shared);
         let emitter: Emitter = Arc::new(move |event: &Event| {

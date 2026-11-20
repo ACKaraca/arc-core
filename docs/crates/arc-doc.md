@@ -977,7 +977,8 @@ occurred when the thread was descheduled.
   (source identifiers of copies included), kind `redo_of(last transaction of the step)`; the
   redo transaction forms a new undo step, whose undo inverts it again, so the undo of an undo is
   a redo. A reported `normal` or `link_reload` transaction clears the redo stack; `merge` and
-  `migration` transactions leave both stacks unchanged. The operations are checked strictly
+  `migration` transactions leave both stacks unchanged (`merge` is also the kind of a
+  command's bookkeeping commit, `Context::commit_silently` in `arc-command`). The operations are checked strictly
   against the current state first (`Op::apply` on a scratch working set): a state that does not
   hold the step's after values fails with `doc.undo.state_mismatch`, an internal error in
   phase 0, where nothing but the session's commands writes the document; refusing such an undo
@@ -1462,7 +1463,9 @@ were filled reads as one with empty tables.
   `LoadedRows::foreign` as read.
   The operations are `Txn::set_foreign(row)` (adds the row at `row.id` or replaces it),
   `Txn::add_foreign(row)` (assigns the key one above the highest key, at least 1, and returns
-  it) and `Txn::remove_foreign(id)`; each appends one `Op::ModifyForeign { id, before, after }`
+  it; in a `merge` transaction also above `Txn::foreign_floor`, the highest key any committed
+  operation of the session named, so a record that is no undo step never takes a key an undo or
+  redo step names) and `Txn::remove_foreign(id)`; each appends one `Op::ModifyForeign { id, before, after }`
   (`before` or `after` `None` for an absent row), whose inverse swaps the two, so undo, redo and
   recovery replay them like any operation (`Op::apply` fails with `doc.op.mismatch` when the
   row is not the recorded one). A row written by a transaction has `object` absent or 16

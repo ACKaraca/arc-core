@@ -110,6 +110,12 @@ pub mod codes {
         category: Category::Internal,
         message_id: "cmd-no-transaction",
     };
+    /// A command that commits silently wrote more than foreign data rows.
+    pub const SILENT_SCOPE: ErrorCode = ErrorCode {
+        code: "cmd.silent_scope",
+        category: Category::Internal,
+        message_id: "cmd-silent-scope",
+    };
 
     /// The answer is not a kind of input the prompt accepts, or not one of its keyword options.
     pub const PROMPT_KIND: ErrorCode = ErrorCode {
@@ -497,6 +503,7 @@ pub mod codes {
         FAULT,
         RESULT_INVALID,
         NO_TRANSACTION,
+        SILENT_SCOPE,
         PROMPT_KIND,
         PROMPT_RANGE,
         PROMPT_OBJECT,

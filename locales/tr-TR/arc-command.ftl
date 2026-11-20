@@ -18,6 +18,7 @@ cmd-cancelled = Komut iptal edildi; hiçbir şey değiştirilmedi.
 cmd-fault = Komut beklenmedik şekilde başarısız oldu; belge eski durumuna döndürüldü.
 cmd-result-invalid = Komut geçersiz bir sonuç üretti; hiçbir şey değiştirilmedi.
 cmd-no-transaction = Komut, işlem olmadan belgeyi değiştirmeye çalıştı.
+cmd-silent-scope = Komut, defter kaydı olarak işlendi ama yabancı veri satırlarından fazlasını değiştirdi.
 cmd-prompt-kind = Bu istem söz konusu girdiyi kabul etmiyor.
 cmd-prompt-range = Değer izin verilen aralığın dışında.
 cmd-prompt-object = Nesne yok veya burada kullanılamaz.

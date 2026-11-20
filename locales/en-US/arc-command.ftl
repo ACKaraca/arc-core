@@ -18,6 +18,7 @@ cmd-cancelled = The command was cancelled; nothing was changed.
 cmd-fault = The command failed unexpectedly; the document was restored.
 cmd-result-invalid = The command produced an invalid result; nothing was changed.
 cmd-no-transaction = The command tried to change the document without a transaction.
+cmd-silent-scope = The command committed as bookkeeping but changed more than foreign data rows.
 cmd-prompt-kind = This prompt does not accept that input.
 cmd-prompt-range = The value is outside the allowed range.
 cmd-prompt-object = The object does not exist or cannot be used here.

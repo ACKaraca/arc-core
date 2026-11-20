@@ -366,6 +366,7 @@ fn run_in_txn(
     flags: NameFlags,
     dry: bool,
 ) -> Result<Ran> {
+    let caller = session.clone();
     let session = session.clone();
     let canonical = serde_json::to_string(&json!({
         "command": spec.id(),
@@ -400,18 +401,29 @@ fn run_in_txn(
         let value = spec.call(&mut context, invocation.params)?;
         context.checkpoint()?;
         let selection_after = context.selection_after.take();
+        let silent = context.silent;
+        let actions = std::mem::take(&mut context.after_commit);
         let requested = context.selection_request.take();
         let writes = std::mem::take(&mut context.settings_writes);
         drop(context);
+        // A silent commit only adds rows under keys no operation of the history names, so the
+        // inverse of every step on either stack still applies after it.
+        let floor = txn.foreign_floor();
+        let adds_only = txn.ops().iter().all(|op| {
+            matches!(op, Op::ModifyForeign { id, before: None, after: Some(_) } if *id > floor)
+        });
+        if silent && !adds_only {
+            return Err(Error::new(codes::SILENT_SCOPE).with_arg("command", spec.id()));
+        }
         if let Some(ids) = selection_after {
             let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
             txn.meta_mut().selection_after = serde_json::to_string(&ids).ok();
         }
-        Ok((value, (requested, writes)))
+        Ok((value, (requested, writes), actions))
     };
     if dry {
         let done = document.dry_run(job).wait().map_err(map_error)?;
-        let (value, requests) = done.value.value;
+        let (value, requests, _) = done.value.value;
         return Ok((
             value,
             done.snapshot.revision(),
@@ -422,7 +434,11 @@ fn run_in_txn(
         ));
     }
     let completed = document.submit(job).wait().map_err(map_error)?;
-    let (value, requests) = completed.value;
+    let (mut value, requests, actions) = completed.value;
+    // The transaction is committed: the actions that were waiting for that run now.
+    for action in actions {
+        action(&caller, &mut value).map_err(map_error)?;
+    }
     Ok((
         value,
         completed.snapshot.revision(),

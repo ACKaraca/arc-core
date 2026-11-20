@@ -15,7 +15,9 @@
 //!   undo is again the inverse of what it applied, so an undo of an undo is a redo.
 //! - A reported `normal` or `link_reload` transaction clears the redo stack and forms a new step,
 //!   joins the open group's step, or is coalesced into the top step. `merge` and `migration`
-//!   transactions leave the stacks unchanged.
+//!   transactions leave the stacks unchanged. A `merge` transaction
+//!   that writes only foreign data rows is also how a command commits bookkeeping that is not a
+//!   user edit; the inverse of an older step still applies after it unless it wrote the same row.
 //! - **Groups** ([`UndoManager::begin_group`]) nest; only the outermost forms a step. Its
 //!   members must carry the outermost group's identifier in their metadata.
 //!   [`UndoManager::fail_group`] rolls back the transactions committed since the innermost open
