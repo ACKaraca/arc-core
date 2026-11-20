@@ -142,9 +142,22 @@ pub fn triangulate(
 ) -> Result<TriangleMesh2> {
     let limit = max_vertices.min(usize::try_from(u32::MAX).unwrap_or(usize::MAX));
     let loops = flatten_region(region, chord, angle, limit)?;
+    let (vertices, triangles) = triangulate_point_loops(&loops)?;
+    Ok(TriangleMesh2 {
+        vertices,
+        triangles,
+    })
+}
+
+/// The constrained Delaunay triangulation of loops given as points: counterclockwise outer loops
+/// and clockwise holes, as [`triangulate`] documents. Returns the vertices (loop after loop)
+/// and the counterclockwise triangles. Used by [`crate::Polyhedron`] to check and mesh faces.
+pub(crate) fn triangulate_point_loops(
+    loops: &[Vec<Point2>],
+) -> Result<(Vec<Point2>, Vec<[u32; 3]>)> {
     let mut vertices = Vec::new();
     let mut edges = Vec::new();
-    for points in &loops {
+    for points in loops {
         let first = vertices.len();
         let count = points.len();
         for k in 0..count {
@@ -156,10 +169,7 @@ pub fn triangulate(
         vertices.extend_from_slice(points);
     }
     let triangles = constrained_delaunay(&vertices, &edges)?;
-    Ok(TriangleMesh2 {
-        vertices,
-        triangles,
-    })
+    Ok((vertices, triangles))
 }
 
 /// [`triangulate`] with `tolerance.tessellation_chord`, `tolerance.tessellation_angle` and at
@@ -193,6 +203,52 @@ pub(crate) fn flatten_region(
     angle: f64,
     limit: usize,
 ) -> Result<Vec<Vec<Point2>>> {
+    Ok(
+        flatten_region_edges(region, chord, angle, limit, Merge::Isolated(chord))?
+            .into_iter()
+            .map(|flat| flat.points)
+            .collect(),
+    )
+}
+
+/// The source of a flattened edge: the index of the curve in the loop as the region stores it
+/// and the index of the facet in that curve, both in the stored direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EdgeSource {
+    pub(crate) curve: u32,
+    pub(crate) facet: u32,
+}
+
+/// A flattened loop; edge `k` runs from `points[k]` to the next point and comes from
+/// `sources[k]`.
+#[derive(Debug, Clone)]
+pub(crate) struct FlatLoop {
+    pub(crate) points: Vec<Point2>,
+    pub(crate) sources: Vec<EdgeSource>,
+}
+
+/// Which straight segments of a loop are merged into the next curve instead of being edges.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Merge {
+    /// A segment not longer than the distance, between two curves that are longer: the rule
+    /// of [`triangulate`], with the chord as the distance. A chain of short segments is kept.
+    Isolated(f64),
+    /// A run of consecutive segments whose lengths add up to at most the distance, such as the
+    /// joints that close gaps of at most the linear tolerance when a loop is made or reversed.
+    /// Anything longer is an edge, whatever the chord.
+    Run(f64),
+}
+
+/// [`flatten_region`] that also reports the source of every edge; a merged segment is not a
+/// source. The solids use [`Merge::Run`] with the linear tolerance, so that no edge of the
+/// caller's is lost to the chord tolerance, which applies to curved edges only.
+pub(crate) fn flatten_region_edges(
+    region: &Region,
+    chord: f64,
+    angle: f64,
+    limit: usize,
+    merge: Merge,
+) -> Result<Vec<FlatLoop>> {
     let mut loops = Vec::new();
     let mut used = 0_usize;
     let all = region
@@ -200,34 +256,83 @@ pub(crate) fn flatten_region(
         .iter()
         .flat_map(|part| std::iter::once(part.outer()).chain(part.holes()));
     for (index, lp) in all.enumerate() {
-        let points = flatten_loop(lp, chord, angle, limit.saturating_sub(used)).map_err(
-            |error| match error.code() {
-                code if code == codes::FLATTEN_TOO_MANY_VERTICES.code => too_many(limit),
-                _ => error,
-            },
-        )?;
-        if points.len() < 3 || !same_orientation(&points, lp.signed_area()) {
+        let flat =
+            flatten_loop(lp, chord, angle, merge, limit.saturating_sub(used)).map_err(|error| {
+                match error.code() {
+                    code if code == codes::FLATTEN_TOO_MANY_VERTICES.code => too_many(limit),
+                    _ => error,
+                }
+            })?;
+        if flat.points.len() < 3 || !same_orientation(&flat.points, lp.signed_area()) {
             return Err(Error::new(codes::TRIANGULATE_LOOP_COLLAPSED)
                 .with_detail("loop", i64::try_from(index).unwrap_or(i64::MAX)));
         }
-        used += points.len();
-        loops.push(points);
+        used += flat.points.len();
+        loops.push(flat);
     }
     Ok(loops)
 }
 
-fn flatten_loop(lp: &Loop2, chord: f64, angle: f64, budget: usize) -> Result<Vec<Point2>> {
+fn flatten_loop(
+    lp: &Loop2,
+    chord: f64,
+    angle: f64,
+    merge: Merge,
+    budget: usize,
+) -> Result<FlatLoop> {
     let curves = lp.curves();
-    let short = |index: usize| {
-        matches!(curves.get(index % curves.len()), Some(Curve2::Segment(s))
-            if crate::length(&(s.end() - s.start())) <= chord)
+    let limit = match merge {
+        Merge::Isolated(d) | Merge::Run(d) => d,
     };
+    let length = |index: usize| match curves.get(index % curves.len()) {
+        Some(Curve2::Segment(s)) => Some(crate::length(&(s.end() - s.start()))),
+        _ => None,
+    };
+    let short = |index: usize| length(index).is_some_and(|l| l <= limit);
+    let count = curves.len();
+    let mut merged = vec![false; count];
+    match merge {
+        // An isolated segment, such as a joint closing a gap or a rounding gap, is merged into
+        // the next curve, which starts within its length of the previous curve's end; a chain
+        // of short segments is kept, as it may turn arbitrarily.
+        Merge::Isolated(_) => {
+            for (index, slot) in merged.iter_mut().enumerate() {
+                *slot = short(index) && !short(index + 1) && !short(index + count - 1);
+            }
+        }
+        Merge::Run(_) => {
+            // Walk the loop from a curve that is not a short segment; a loop of short segments
+            // only is kept as it is.
+            if let Some(start) = (0..count).find(|&k| !short(k)) {
+                let mut run: Vec<usize> = Vec::new();
+                let mut total = 0.0;
+                for offset in 1..=count {
+                    let index = (start + offset) % count;
+                    if short(index) {
+                        run.push(index);
+                        total += length(index).unwrap_or(0.0);
+                    } else {
+                        if total <= limit {
+                            for &k in &run {
+                                if let Some(slot) = merged.get_mut(k) {
+                                    *slot = true;
+                                }
+                            }
+                        }
+                        run.clear();
+                        total = 0.0;
+                    }
+                }
+            }
+        }
+    }
+    let overflow = || too_many(budget);
     let mut out: Vec<Point2> = Vec::new();
+    // Per edge: the curve number among the curves kept, and the facet.
+    let mut edges: Vec<(u32, u32)> = Vec::new();
+    let mut kept = 0_u32;
     for (index, curve) in curves.iter().enumerate() {
-        // An isolated segment within the chord tolerance, such as a joint closing a gap or a
-        // rounding gap, is merged into the next curve, which starts within its length of the
-        // previous curve's end; a chain of short segments is kept, as it may turn arbitrarily.
-        if short(index) && !short(index + 1) && !short(index + curves.len() - 1) {
+        if merged.get(index).copied().unwrap_or(false) {
             continue;
         }
         // Room for the shared first vertex, which is dropped, and one more because flattening
@@ -236,24 +341,42 @@ fn flatten_loop(lp: &Loop2, chord: f64, angle: f64, budget: usize) -> Result<Vec
         let room = budget.saturating_sub(out.len()).saturating_add(2);
         let points = curve.flatten(chord, angle, room)?;
         // The first vertex is the previous curve's end, exactly or to rounding.
-        for p in points.into_iter().skip(usize::from(!out.is_empty())) {
+        for (k, p) in points
+            .into_iter()
+            .enumerate()
+            .skip(usize::from(!out.is_empty()))
+        {
             if out.last() != Some(&p) {
+                if !out.is_empty() {
+                    let facet = u32::try_from(k.saturating_sub(1)).map_err(|_| overflow())?;
+                    edges.push((kept, facet));
+                }
                 out.push(p);
             }
         }
+        kept = kept.saturating_add(1);
         if out.len() > budget.saturating_add(1) {
-            return Err(too_many(budget));
+            return Err(overflow());
         }
     }
     // The last vertex is the end of the last curve, which closes onto the first vertex.
     out.pop();
     while out.len() > 1 && out.last() == out.first() {
         out.pop();
+        edges.pop();
     }
     if out.len() > budget {
-        return Err(too_many(budget));
+        return Err(overflow());
     }
-    Ok(out)
+    // Edges are numbered in the stored order of the loop, so tags depend only on the region.
+    let sources = edges
+        .into_iter()
+        .map(|(curve, facet)| EdgeSource { curve, facet })
+        .collect();
+    Ok(FlatLoop {
+        points: out,
+        sources,
+    })
 }
 
 /// Whether the shoelace area of `points` is nonzero with the sign of `area`.

@@ -134,6 +134,10 @@ validates every part against an `arc_base::Limits` profile, and `into_builder` r
   Channels are already `f32`.
 - **From 2D.** `from_triangle_mesh2` places an `arc_geom::TriangleMesh2` in the plane
   `z = elevation`; its counterclockwise triangles face +Z.
+- **From a polyhedral solid.** `from_polyhedron` triangulates every face of an
+  `arc_geom::Polyhedron` (faces with holes included) into a flat-shaded mesh: each face has its own
+  vertices carrying the face's outward normal, and each face is one face group whose
+  `SubObjectKey::local` is the face index, so a triangle maps to its source face with `group_of`.
 
 ### Normals and tangents
 

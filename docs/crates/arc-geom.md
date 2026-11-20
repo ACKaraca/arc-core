@@ -29,6 +29,8 @@ appears.
 | `Nurbs2` | Degree, knots, weighted control points; rational and non-rational |
 | `Spiral` | Clothoid and other transition curves defined by start and end curvature and length |
 | `Surface` | Plane, cylinder, cone, sphere, torus, extrusion, revolution, NURBS |
+| `Plane3`, `PlaneFrame` | A plane as a point and unit normal, and its right-handed 2D frame for mapping between 3D and plane coordinates |
+| `Polyhedron` | Closed, oriented solid with planar faces (outer loop and holes), built by extrusion, clipped by planes and triangulated per face |
 | `Region` | Set of outer loops with holes, each loop a closed composite of exact curves, with orientation invariants |
 | `Tin` | Triangulated surface with vertices, triangles, breaklines, boundary and holes |
 | `SpatialIndex<T>` | R*-tree over bounding boxes keyed by caller identifiers |
@@ -573,6 +575,17 @@ The codes `arc-geom` owns. A code is never reused for a different meaning; messa
 | `geom.corner.coincident` | `invalid_input` | Two curves of a corner construction lie on the same line or circle |
 | `geom.corner.curve_too_short` | `failed_operation` | A part of a curve that a corner construction keeps would be empty or outside the curve |
 | `geom.corner.unsupported_pair` | `unsupported` | A corner construction is not defined for the kinds of its curves |
+| `geom.solid.limit_exceeded` | `limit_exceeded` | A solid has more vertices, faces or face-loop entries than the limit allows |
+| `geom.solid.topology_invalid` | `invalid_input` | A face of a solid has a loop with fewer than three vertices, a repeated vertex, an index outside the vertex list, a hole that is not inside its outer loop, a zero area or an edge not longer than the linear tolerance, or a vertex belongs to no face |
+| `geom.solid.not_planar` | `invalid_input` | A face of a solid has a vertex farther than the linear tolerance from the plane of the face |
+| `geom.solid.not_closed` | `invalid_input` | An edge of a face of a solid has no matching edge in the opposite direction |
+| `geom.solid.non_manifold` | `invalid_input` | An edge of a solid is used by more than two faces, or a diagonal of a face's triangulation is also an edge of another face |
+| `geom.solid.orientation_inconsistent` | `invalid_input` | Two faces of a solid that share an edge traverse it in the same direction |
+| `geom.solid.volume_not_positive` | `invalid_input` | The enclosed volume of a solid is not larger than the cube of the linear tolerance, because its faces point inward or it is flat |
+| `geom.solid.extrusion_invalid` | `invalid_input` | An extrusion height is zero or not finite, or the target plane is not parallel to the plane of the region |
+| `geom.solid.clip_degenerate` | `failed_operation` | The cutting plane meets the solid in a way that does not give a valid result, such as a section that touches itself at a vertex or a plane nearly parallel to a face it crosses |
+| `geom.solid.opening_unsupported` | `unsupported` | A prism to subtract does not pass fully through two parallel faces of the solid with its whole outline inside both faces and clear of every other face, or its region has holes |
+| `geom.solid.opening_splits` | `invalid_input` | A prism to subtract would leave the solid in more connected shells than it had, and `PrismTool::allow_split` is false |
 | `geom.corner.segment_invalid` | `invalid_input` | A polyline segment index is outside the polyline or the two indices are equal |
 | `geom.construct.coincident_points` | `invalid_input` | Two points that a construction needs distinct are closer than the linear tolerance, or a center and a start point are |
 | `geom.construct.collinear_points` | `invalid_input` | The three points of a circle or of an arc through three points lie on one line |
@@ -1108,3 +1121,99 @@ and elliptical boundaries with the moments of their flattening (chord 1e-4, turn
 a rotated ellipse, circular segments of sweeps from 1e-6 to 6, a rounded rectangle and nearly
 straight polyline arcs with closed forms, and the quadrature with the closed forms where both are
 accurate.
+
+### Planes and polyhedral solids (parts of CORE-GEOM-010 and CORE-GEOM-012)
+
+Implemented: the plane case of CORE-GEOM-012 and the solids the planar generators of the two-tier
+geometry decision (ADR-0003) cover. Not implemented: 3D curves (CORE-GEOM-010 beyond the plane
+intersections below), the curved analytic surfaces and NURBS surfaces, and the exact solid tier.
+The details are in the module documentation of `plane3`, `solid`, `solid_gen`, `solid_clip` and
+`solid_opening`; this section states the contract.
+
+- **Planes.** `Plane3` (origin and unit normal), `side`, `signed_distance`, `project`,
+  `intersect_line`, `intersect_segment` and `intersect_plane` take `Tolerance`; parallel, contained
+  and coincident cases are results, not errors. `PlaneFrame` maps points to plane coordinates and
+  back; `Plane3::frame` uses a horizontal first axis and an upward second axis (the world x and y
+  axes for a horizontal plane), `frame_with_x` takes the first axis from a hint.
+- **`Polyhedron`.** Vertices and faces; a `PolyFace` is an outer loop (counterclockwise seen from
+  outside) and hole loops (clockwise) of vertex indices lying in one plane, with a `FaceTag`.
+  `Polyhedron::new` validates counts against `Limits::array_length`, finite coordinates, loop shape,
+  planarity within `PLANARITY_FACTOR` times `tolerance.linear`, edges used once in each direction
+  (`geom.solid.not_closed`, `geom.solid.non_manifold`, `geom.solid.orientation_inconsistent`),
+  positive volume, and that every face triangulates: the exact edge tests of the triangulation find
+  no edge that crosses, touches or folds back, so no operation returns a solid that cannot be
+  meshed. The triangulation is kept; triangles and quadrilaterals cost constant time, other faces
+  `O(n log n)` in their vertices. Coordinates too large for the arithmetic give
+  `geom.precision.insufficient`. Volume, area, centroid and bounding box are exact sums over the
+  faces; `transformed` accepts any invertible `Transform3` and reverses loops for a mirror. Not
+  checked: faces crossing each other, distinct coincident vertices, connectedness and
+  manifoldness at vertices. The specification does not name this type; it is the smallest
+  representation that keeps walls, floors and roofs exact.
+- **Face tags.** `FaceTag` is a plain enum (`Untagged`, `Side { loop_index, curve, facet }`, `Top`,
+  `Bottom`, `OpeningWall { opening, curve, facet }`, `Cap { cut }`) carried by every operation:
+  `extrude` and `prism` set `Side`, `Top` and `Bottom`; `subtract_prism` sets `OpeningWall` with the
+  caller's opening number; `clip` sets `Cap` on new faces with the cut number the caller passes to
+  it, so the caps of a plan cut and a section cut can be told apart after both; every other output
+  face keeps the tag of its source face, and a face that is split yields several faces with the
+  same tag. `face_tag(i)` reads it. A side face is named by the input it comes from, not by the
+  faceting: loops are numbered from 0 in the order of the region (the outer loop of each part,
+  then its holes in the order given to `RegionPart::new`, parts in order); `curve` is the index of
+  the curve in the loop as the region stores it (outer loops counterclockwise, holes clockwise);
+  tags follow the region as stored, not the caller's drawing direction, so a clockwise outline
+  that `Region::new` reversed has curve 0 = the reverse of the last curve drawn, and a saved and
+  loaded or equal region numbers identically. A mirrored `Region::transformed` is a different
+  region and is renumbered as it stores it. `facet` is the index of the chord within a curved
+  edge, counted in the stored direction of the curve, and 0 for a straight edge.
+  The face of a straight edge therefore keeps its tag when the chord or the radius of a neighboring
+  arc changes. A segment of at most `tolerance.linear` between two
+  curves (a joint that closed a gap) is not an edge and is not counted. `OpeningWall` numbers the
+  curves of the profile's outer loop the same way. `Polyhedron::transformed` keeps every tag,
+  including under a mirror (the loops are reversed so the normals still point outward).
+- **Generators.** `extrude` (a `Region` in a `PlaneFrame`, along the frame normal, by a signed
+  height), `extrude_between` (to a parallel plane) and `prism` (a footprint in the x-y plane from a
+  base elevation). Curved edges become chords whose end points lie on the curve, at the caller's
+  chord tolerance with no angle limit. The solid then differs from the exact one by at most chord
+  times the length of the curved edges times the height: it is smaller along a convex arc (a
+  column) and larger along a concave one (a round hole, whose facets are inside the circle). The
+  chord applies to curved edges only: a straight edge is kept exactly whatever its length, so a
+  jog or a notch shorter than the chord stays in the solid. The region is also run through the
+  exact triangulation checks, so crossing loops are refused.
+- **Clipping.** `Polyhedron::clip` keeps one side of a plane and caps the cut with faces built from
+  the section loops. A vertex within `tolerance.linear` of the plane is on it. The cut is made as
+  if the plane were moved infinitesimally against its normal for both sides: `Positive` keeps the
+  vertices on the plane, `Negative` drops them, so the two results are exact complements and their
+  volumes sum to the solid's. Edges in the plane (the head, sill or jamb of an opening, the edge
+  of a step) are handled by cancelling edges that meet their reverse, so zero-width bridges vanish
+  and faces and caps split into separate faces. `section` returns the cap as a `Region` in the
+  plane's frame: where the solid has material on both sides of the plane. Refused with
+  `geom.solid.clip_degenerate`: a hole whose tip touches the cut line at one vertex, a plane
+  almost parallel to a crossed face, crossing points that cannot be paired, a result that fails
+  validation, and a cut that leaves two parts meeting along an edge that lies inside the cap (the
+  `Negative` side of a plane through the apex of a V-shaped notch). A result may have several
+  shells (`Polyhedron::shell_count`) when the parts do not meet. The cases and results are
+  tabulated in the `solid_clip` module documentation.
+- **Triangles.** `Polyhedron::triangulate_face` returns the triangles of a face (indices of the
+  solid's vertices, no vertices added); `arc_mesh::TriMesh::from_polyhedron` builds the flat-shaded
+  mesh with one face group per face (the group's local key is the face index), so a picked
+  triangle names its face and, through `face_tag`, its role.
+- **Openings.** `Polyhedron::subtract_prism` subtracts a prism (a `PrismTool` with its opening
+  number) that runs between two parallel faces. The outline may lie inside the faces or touch or
+  cross their boundary (a door at floor level, a full-height opening, an opening at a wall end),
+  in which case the faces parallel to the axis that it meets are cut and the walls trimmed to the
+  solid, and an outline may contain a corner of a face. A vertex of the outline within
+  `tolerance.linear` of the plane of a face parallel to the axis (a floor, a ceiling, a wall end,
+  the jamb of another opening) lies on it; a strip beyond the tolerance stays as a strip. An
+  opening that leaves the solid in more shells than it had (a profile used with the axis along the
+  wall, or a full-length opening) fails with `geom.solid.opening_splits` unless
+  `PrismTool::allow_split` is set. Anything else fails with `geom.solid.opening_unsupported`; the
+  reason is a detail. The
+  work for an opening is linear in the face loop entries (bounding boxes prefilter every face
+  test), plus the validation; openings are applied one after the other. General booleans are not
+  provided.
+
+The tests check that every generated, clipped and perforated solid validates and meshes, that
+volume and area survive rigid transforms, that the two clipped parts sum to the original volume,
+and that an extruded volume is area times height, with exact cases (unit cube, an L-shaped prism,
+a prism with a hole, cuts through vertices, edges and faces, the head, sill and jambs of the
+openings of a wall at 5 x 3 m, a plane in the step of an L-shaped solid, cuts within a tolerance of
+a vertex, and a slanted wall 500 km from the origin carried through extrusion, opening and cut).

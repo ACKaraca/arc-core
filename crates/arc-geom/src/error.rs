@@ -460,6 +460,75 @@ pub mod codes {
         message_id: "geom-construct-degenerate",
     };
 
+    /// A solid has more vertices, faces or face-loop entries than the limit allows.
+    pub const SOLID_LIMIT_EXCEEDED: ErrorCode = ErrorCode {
+        code: "geom.solid.limit_exceeded",
+        category: Category::LimitExceeded,
+        message_id: "geom-solid-limit-exceeded",
+    };
+    /// A face of a solid has a loop with fewer than three vertices, a repeated vertex, an index outside the vertex list, a hole that is not inside its outer loop, a zero area or an edge not longer than the linear tolerance, or a vertex belongs to no face.
+    pub const SOLID_TOPOLOGY_INVALID: ErrorCode = ErrorCode {
+        code: "geom.solid.topology_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-solid-topology-invalid",
+    };
+    /// A face of a solid has a vertex farther than the linear tolerance from the plane of the face.
+    pub const SOLID_NOT_PLANAR: ErrorCode = ErrorCode {
+        code: "geom.solid.not_planar",
+        category: Category::InvalidInput,
+        message_id: "geom-solid-not-planar",
+    };
+    /// An edge of a face of a solid has no matching edge in the opposite direction.
+    pub const SOLID_NOT_CLOSED: ErrorCode = ErrorCode {
+        code: "geom.solid.not_closed",
+        category: Category::InvalidInput,
+        message_id: "geom-solid-not-closed",
+    };
+    /// An edge of a solid is used by more than two faces, or a diagonal of a face's triangulation is also an edge of another face.
+    pub const SOLID_NON_MANIFOLD: ErrorCode = ErrorCode {
+        code: "geom.solid.non_manifold",
+        category: Category::InvalidInput,
+        message_id: "geom-solid-non-manifold",
+    };
+    /// Two faces of a solid that share an edge traverse it in the same direction.
+    pub const SOLID_ORIENTATION: ErrorCode = ErrorCode {
+        code: "geom.solid.orientation_inconsistent",
+        category: Category::InvalidInput,
+        message_id: "geom-solid-orientation-inconsistent",
+    };
+    /// The enclosed volume of a solid is not larger than the cube of the linear tolerance, because its faces point inward or it is flat.
+    pub const SOLID_VOLUME: ErrorCode = ErrorCode {
+        code: "geom.solid.volume_not_positive",
+        category: Category::InvalidInput,
+        message_id: "geom-solid-volume-not-positive",
+    };
+    /// An extrusion height is zero or not finite, or the target plane is not parallel to the plane of the region.
+    pub const SOLID_EXTRUSION_INVALID: ErrorCode = ErrorCode {
+        code: "geom.solid.extrusion_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-solid-extrusion-invalid",
+    };
+    /// The cutting plane meets the solid in a way that does not give a valid result, such as a section that touches itself at a vertex or a plane nearly parallel to a face it crosses.
+    pub const SOLID_CLIP_DEGENERATE: ErrorCode = ErrorCode {
+        code: "geom.solid.clip_degenerate",
+        category: Category::FailedOperation,
+        message_id: "geom-solid-clip-degenerate",
+    };
+
+    /// A prism to subtract does not pass fully through two parallel faces of the solid with its whole outline inside both faces and clear of every other face, or its region has holes.
+    pub const SOLID_OPENING_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "geom.solid.opening_unsupported",
+        category: Category::Unsupported,
+        message_id: "geom-solid-opening-unsupported",
+    };
+
+    /// A prism to subtract would split the solid into more shells than it has, and the tool does not allow splitting.
+    pub const SOLID_OPENING_SPLITS: ErrorCode = ErrorCode {
+        code: "geom.solid.opening_splits",
+        category: Category::InvalidInput,
+        message_id: "geom-solid-opening-splits",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         INPUT_NOT_FINITE,
@@ -536,6 +605,17 @@ pub mod codes {
         CONSTRUCT_RADIUS_TOO_SMALL,
         CONSTRUCT_SIDES_INVALID,
         CONSTRUCT_DEGENERATE,
+        SOLID_LIMIT_EXCEEDED,
+        SOLID_TOPOLOGY_INVALID,
+        SOLID_NOT_PLANAR,
+        SOLID_NOT_CLOSED,
+        SOLID_NON_MANIFOLD,
+        SOLID_ORIENTATION,
+        SOLID_VOLUME,
+        SOLID_EXTRUSION_INVALID,
+        SOLID_CLIP_DEGENERATE,
+        SOLID_OPENING_UNSUPPORTED,
+        SOLID_OPENING_SPLITS,
     ];
 }
 

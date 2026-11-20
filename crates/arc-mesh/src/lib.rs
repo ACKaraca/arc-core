@@ -26,6 +26,7 @@ pub mod mesh;
 pub mod normals;
 pub mod repair;
 pub mod simplify;
+pub mod solid;
 pub mod transform;
 
 mod topo;
