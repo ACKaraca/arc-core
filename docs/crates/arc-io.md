@@ -1116,7 +1116,8 @@ same-layer edge of the ADR-0001 amendment "Shared bounded ZIP and XML readers"),
 triangle meshes of the geometry evaluation (a lower-layer edge) and on `serde` for the loss report. Its
 readers take byte buffers and never paths, and the crate builds for `wasm32-unknown-unknown`. The
 geometry evaluation (CORE-IO-015) is described in [Geometry evaluation as implemented](#geometry-evaluation-as-implemented).
-Writing (CORE-IO-016), streaming (CORE-IO-017) and IDS (CORE-IO-018) are not implemented.
+The first part of writing (CORE-IO-016) is described in [IFC writing as implemented](#ifc-writing-as-implemented).
+Streaming (CORE-IO-017) and IDS (CORE-IO-018) are not implemented.
 
 ### Reading
 
@@ -1282,6 +1283,7 @@ reports no mapped records, so the `mapped` count is zero.
 | `io.ifc.opening_not_subtracted` | `approximated` |
 | `io.ifc.unit_assumed` | `approximated` |
 | `io.ifc.geometry_approximated` | `approximated` |
+| `io.ifc.not_written` | `dropped` |
 
 ### Limits
 
@@ -1478,5 +1480,146 @@ argument `limit` naming `memory_bytes`, `record_count` or `array_length`.
 | `io.ifc.instance_duplicate` | `corrupt_data` | Two instances have the same name, in one or several data sections |
 | `io.ifc.archive_entry_missing` | `not_found` | The archive has no entry whose name ends in `.ifc` after the metadata entries are skipped |
 | `io.ifc.archive_entry_ambiguous` | `unsupported` | The archive has more than one entry whose name ends in `.ifc` after the metadata entries are skipped |
+| `io.ifc.write_value_invalid` | `invalid_input` | The writer was given a number that is not finite, a negative quantity, a door or window size that is not positive, placement axes or a true north that are too short or parallel, a NUL in a text, a name repeated within a property or quantity set, or a set name repeated on one element |
+| `io.ifc.write_reference_invalid` | `invalid_input` | The writer was given an element whose storey or host is not in the model or of a kind the relationship does not allow, an opening without a host, or a chain of hosts that returns to its start |
+| `io.ifc.write_id_duplicate` | `invalid_input` | Two objects of the written file would have the same `GlobalId` |
 
 The `io.zip.*` codes of the archive reader are returned as the `arc-io-common` section defines them.
+
+## IFC writing as implemented
+
+`arc-io-ifc` writes the first part of CORE-IO-016: an IFC4 physical file (ISO 10303-21 clear text)
+from a neutral description of a building. `write(model, options)` takes a `WriteModel` and
+`WriteOptions` and returns `WriteOutput`: the bytes of the file and a loss report. It returns bytes and
+never writes a path. The model knows no product: a product maps its own objects to it. IFC4X3 output is
+not written yet.
+
+### The write model
+
+`WriteModel` (module `write`) holds a project, a site and a building (`Spatial`: identifier and name),
+the storeys (`Storey`: identifier, name, elevation), the elements, the length unit (`LengthUnit`:
+meters or millimeters), the plane angle unit (`AngleUnit`: radians or degrees) and an optional true
+north direction. Every length, area and volume of the model is in the length unit, squared or cubed.
+The structs of the model are marked non-exhaustive and are built with their `new` constructors
+(`WriteModel::new`, `Spatial::new`, `Storey::new`, `Element::new`, `Placement::new`,
+`PropertySet::new`, `Property::new`, `QuantitySet::new`, `Quantity::new`); their fields are public and
+set after construction.
+
+An `Element` has an identifier, a kind (`ElementKind`: wall, slab, door, window, opening), a name, the
+identifier of its storey, a `Placement` relative to the storey (origin, local z axis, local x axis), an
+optional `Body`, a predefined type, an operation type (doors) or partitioning type (windows), the overall
+width and height (doors and windows), a host, property sets and quantity sets. A `Body` is an extrusion
+(a closed polyline profile with optional holes in the plane `z = 0`, a direction and a depth) or a faceted
+B-rep (vertices and polygon faces given as index loops, counterclockwise seen from outside). The host of
+an opening is the element it voids (a wall, slab, door or window) and is required, because an opening
+voids exactly one element; the host of a door or window is the opening it fills; walls and slabs have
+no host. A chain of hosts that returns to its start, such as an opening hosted by the door that fills
+it, is refused.
+
+### What is written
+
+- Header: `FILE_DESCRIPTION` with `ViewDefinition [<view>]` (`WriteOptions::view_definition`, by default
+  `DesignTransferView_V1.0`) and the implementation level `2;1`; `FILE_NAME` with the caller's file name,
+  time stamp, author, organization and originating system, and `arc-io-ifc <version>` as the
+  preprocessor; `FILE_SCHEMA(('IFC4'))`. No owner history is written; IFC4 makes it optional.
+- Units: an `IfcUnitAssignment` of `IfcSIUnit` length, area and volume units (with the prefix `MILLI`
+  for millimeters) and the plane angle unit, a radian or a degree as an `IfcConversionBasedUnit` of the
+  radian.
+- Contexts: one `IfcGeometricRepresentationContext` (`Model`, dimension 3, the precision
+  `Tolerance::linear` in the length unit, the world coordinate system at the origin, the true north as
+  a two-dimensional direction) and its `Body` subcontext (`MODEL_VIEW`).
+- Spatial structure: `IfcProject`, `IfcSite`, `IfcBuilding` and one `IfcBuildingStorey` per storey,
+  linked by `IfcRelAggregates`. The site is placed at the origin, the building on the site, and each
+  storey on the building at its elevation.
+- Elements: `IfcWall`, `IfcSlab`, `IfcDoor`, `IfcWindow` and `IfcOpeningElement`, each with an
+  `IfcLocalPlacement` relative to its storey's placement. Every element except an opening is
+  contained in its storey by one `IfcRelContainedInSpatialStructure` per storey, in model order.
+  `IfcRelVoidsElement` links an opening to its host and `IfcRelFillsElement` a door or window to its
+  opening.
+- Types: the predefined type, compared in upper case with the values IFC4 defines for the kind, is
+  written as given; another text is written as `USERDEFINED` with the text as `ObjectType`; no value
+  is `NOTDEFINED`. A door's `OperationType` and a window's `PartitioningType` follow the same rule with
+  `UserDefinedOperationType` and `UserDefinedPartitioningType`. Doors and windows write `OverallHeight`
+  and `OverallWidth`.
+- Bodies: an `IfcProductDefinitionShape` with one `IfcShapeRepresentation` (`Body`) in the `Body`
+  subcontext. An extrusion is `SweptSolid`: an `IfcExtrudedAreaSolid` of an
+  `IfcArbitraryClosedProfileDef`, or of an `IfcArbitraryProfileDefWithVoids` when it has holes, whose
+  curves are closed `IfcPolyline`s (the last point is the first point's instance). A last profile point
+  equal to the first is dropped before writing. A B-rep is `Brep`: an `IfcFacetedBrep` of one
+  `IfcClosedShell` whose faces are `IfcFace`s with one `IfcFaceOuterBound` of an `IfcPolyLoop`.
+- Property sets: an `IfcPropertySet` of `IfcPropertySingleValue`s, with the values `IfcLabel`,
+  `IfcLengthMeasure`, `IfcAreaMeasure`, `IfcVolumeMeasure` or `IfcBoolean` and no unit (the project
+  units apply). Quantity sets: an `IfcElementQuantity` of `IfcQuantityLength`, `IfcQuantityArea` and
+  `IfcQuantityVolume`. Each set is assigned to its element by its own `IfcRelDefinesByProperties`.
+
+### Encoding and determinism
+
+- Instances are numbered from `#1` in the order they are written, and the same model and options give
+  the same bytes. The writer reads no clock and no random source.
+- Strings keep printable ASCII, double the apostrophe and the backslash, and write every other
+  character, control characters included, in `\X2\...\X0\` runs of four uppercase hexadecimal digits
+  per character; characters above U+FFFF are written in `\X4\...\X0\` runs of eight digits per
+  character. A NUL character is refused.
+- Reals always have a point and are written in their shortest form that reads back to the same value:
+  `1.`, `0.25`. Magnitudes below `1E-3` or from `1E15` up use an exponent with a sign and at least two
+  digits: `1.E-05`, `1.E+20`. Negative zero is written as `0.`; a value that is not finite is refused.
+- Enumerations are written between dots, typed values as `IFCLABEL('...')`, omitted values as `$` and
+  the derived attributes of the subcontext and of `IfcSIUnit` as `*`.
+
+### GlobalIds
+
+`global_id(uuid)` writes a 128-bit identifier as the 22-character `GlobalId`: the first character holds
+the two most significant bits and each following character the next six bits, in the IFC alphabet
+`0-9`, `A-Z`, `a-z`, `_`, `$`. The project, site, building, storeys and elements take their `GlobalId`
+from the identifier the caller gives (for a product, the value of its `ObjectId`), so the same object
+has the same `GlobalId` in every export. The relationships and the property and quantity sets the
+writer adds take a version 8 UUID from `derived_id(owner, role, index)`: the identifier of their object,
+a role number of the module `role` and the index of the set (0 for a relationship), so they are stable
+too and never equal a version 7 identifier. The roles are `AGGREGATES` 1, `CONTAINS` 2, `VOIDS` 3,
+`FILLS` 4, `PROPERTY_SET` 5, `PROPERTY_REL` 6, `QUANTITY_SET` 7 and `QUANTITY_REL` 8. `INSERT_OPENING` 9
+is for the caller: a product whose door or window has no opening object of its own derives the
+opening's identifier from the insert's with this role and index 0. The roles from `CALLER_FIRST`
+(`0x10000`) up are never used by the writer. Two objects with the same `GlobalId` are refused with
+`io.ifc.write_id_duplicate`.
+
+### Limits and errors
+
+Each instance counts against `record_count`, each string against `string_bytes`, each list against
+`array_length`, parenthesized nesting against `nesting_depth`, and the size of the output against
+`memory_bytes` when it is set; the failure is `io.limit_exceeded` naming the limit. Cancellation is
+checked before each element. Invalid input is refused with the `io.ifc.write_*` codes of the error-code
+table: numbers that are not finite, negative quantities, door or window sizes that are not positive,
+placement axes or a true north not longer than the square root of the `f64` machine epsilon (about
+1.5E-8, below which the angle of a direction is not defined), placement axes parallel within
+`Tolerance::angular`, repeated names within a set or among the property and quantity sets of one
+element, storeys or hosts that are missing or of the wrong kind, openings without a host, and chains of
+hosts that return to their start.
+
+### What is not written
+
+The loss report (direction `export`) counts the elements as mapped and reports `io.ifc.not_written`,
+with the element's `GlobalId` as the source and the entity that was not written as the record kind, for:
+
+- an extrusion whose profile or a hole has fewer than three points or no area (its area divided by the
+  diagonal of its bounding box, its mean width, is not above `Tolerance::linear` in meters), whose depth
+  in meters is not above `Tolerance::linear`, or whose direction is too short or within
+  `Tolerance::angular` of the profile plane (`IFCEXTRUDEDAREASOLID`); the element is written without a
+  representation;
+- a B-rep without faces or with a face of fewer than three vertices, an index outside the vertices or a
+  repeated index (`IFCFACETEDBREP`); a last index equal to the first closes the loop and is dropped
+  first; the element is written without a representation;
+- an empty property set (`IFCPROPERTYSET`) or quantity set (`IFCELEMENTQUANTITY`).
+
+The writer does not check that a profile is simple (a self-intersecting profile with area is written),
+that holes lie inside the outer loop, or that a B-rep is closed and planar. It writes no element types, materials, spaces, axis representations, owner
+history, classification or other element kinds, and no IFC4X3 schema.
+
+### Verification
+
+The tests read every written file back with `read`, `typed_views` and `geometry`: a house of four walls
+(three extrusions and one B-rep), a slab with a hole, and a door and a window filling openings in two
+walls, on two storeys. The spatial structure, the containment, the `GlobalId`s, the voids and fills, the
+property and quantity sets and the body volumes (6.0 m³ for a 10 × 0.2 × 3 m wall, 15.8 m³ for the slab)
+are compared with the model; `geometry` does not subtract openings, so each body keeps its own volume.
+The out-of-process oracle of the [interchange architecture](../architecture/interchange.md) is not part
+of the gate.

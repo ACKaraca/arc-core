@@ -29,3 +29,7 @@ io-ifc-loss-index-invalid = { $count } geometry items refer to an index outside 
 io-ifc-loss-opening-not-subtracted = { $count } openings were not subtracted from their elements, which are emitted solid.
 io-ifc-loss-unit-assumed = The unit assignment holds no usable length unit; meters and radians were assumed.
 io-ifc-loss-geometry-approximated = { $count } geometry items were approximated: a circle has fewer segments than its chord tolerance asks for, a face is not planar and was projected onto its mean plane, or an operator axis was replaced by a perpendicular direction.
+io-ifc-write-value-invalid = A value of the model cannot be written to IFC: a number that is not finite, a negative quantity, a size that is not positive, a degenerate placement or true north, a NUL character, or a repeated name in a set or among the sets of an element.
+io-ifc-write-reference-invalid = An element names a storey or host that is not in the model or of a kind the relationship does not allow, an opening has no host, or a chain of hosts returns to its start.
+io-ifc-write-id-duplicate = Two objects of the IFC file would have the same GlobalId.
+io-ifc-loss-not-written = { $count } degenerate bodies or empty property or quantity sets were not written.

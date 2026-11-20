@@ -77,6 +77,29 @@ pub mod codes {
         message_id: "io-ifc-archive-entry-ambiguous",
     };
 
+    /// A value of the model cannot be written: a number that is not finite, a negative quantity,
+    /// a door or window size that is not positive, placement axes or a true north that are too short
+    /// or parallel, a NUL in a text, a name repeated within a property or quantity set, or a set
+    /// name repeated on one element.
+    pub const IFC_WRITE_VALUE_INVALID: ErrorCode = ErrorCode {
+        code: "io.ifc.write_value_invalid",
+        category: Category::InvalidInput,
+        message_id: "io-ifc-write-value-invalid",
+    };
+    /// An element names a storey or host that is not in the model or of a kind the relationship
+    /// does not allow, an opening has no host, or a chain of hosts returns to its start.
+    pub const IFC_WRITE_REFERENCE_INVALID: ErrorCode = ErrorCode {
+        code: "io.ifc.write_reference_invalid",
+        category: Category::InvalidInput,
+        message_id: "io-ifc-write-reference-invalid",
+    };
+    /// Two objects of the written file would have the same `GlobalId`.
+    pub const IFC_WRITE_ID_DUPLICATE: ErrorCode = ErrorCode {
+        code: "io.ifc.write_id_duplicate",
+        category: Category::InvalidInput,
+        message_id: "io-ifc-write-id-duplicate",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         IFC_TRUNCATED,
@@ -87,6 +110,9 @@ pub mod codes {
         IFC_INSTANCE_DUPLICATE,
         IFC_ARCHIVE_ENTRY_MISSING,
         IFC_ARCHIVE_ENTRY_AMBIGUOUS,
+        IFC_WRITE_VALUE_INVALID,
+        IFC_WRITE_REFERENCE_INVALID,
+        IFC_WRITE_ID_DUPLICATE,
     ];
 }
 
@@ -254,6 +280,18 @@ pub mod reasons {
         message_id: "io-ifc-loss-geometry-approximated",
     };
 
+    /// The writer did not write a part of the model: a degenerate body (an extrusion profile or
+    /// hole of fewer than three points or without area, a depth not above the linear tolerance, a
+    /// direction that is too short or in the profile plane, a B-rep face of fewer than three
+    /// vertices, with an index outside its vertices or with a repeated index), or an empty property
+    /// or quantity set. The record kind names the entity that was not written.
+    pub const NOT_WRITTEN: Reason = Reason {
+        code: "io.ifc.not_written",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-not-written",
+    };
+
     /// Every reason of this crate, for the registry check.
     pub const ALL: &[Reason] = &[
         ENTITY_PRESERVED,
@@ -276,6 +314,7 @@ pub mod reasons {
         OPENING_NOT_SUBTRACTED,
         UNIT_ASSUMED,
         GEOMETRY_APPROXIMATED,
+        NOT_WRITTEN,
     ];
 }
 

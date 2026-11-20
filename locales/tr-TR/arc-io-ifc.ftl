@@ -29,3 +29,7 @@ io-ifc-loss-index-invalid = { $count } geometri öğesi, nokta listesinin dış�
 io-ifc-loss-opening-not-subtracted = { $count } açıklık, ait oldukları elemanlardan çıkarılmadı; elemanlar dolu olarak üretildi.
 io-ifc-loss-unit-assumed = Birim ataması kullanılabilir bir uzunluk birimi içermiyor; metre ve radyan varsayıldı.
 io-ifc-loss-geometry-approximated = { $count } geometri öğesi yaklaşık alındı: bir dairenin kiriş toleransının gerektirdiğinden az kenarı var, bir yüz düzlemsel değil ve ortalama düzlemine izdüşürüldü veya bir operatör ekseni dik bir yönle değiştirildi.
+io-ifc-write-value-invalid = Modeldeki bir değer IFC'ye yazılamıyor: sonlu olmayan bir sayı, negatif bir miktar, pozitif olmayan bir boyut, bozuk bir yerleşim ya da gerçek kuzey, bir NUL karakteri ya da bir kümede veya bir öğenin kümeleri arasında yinelenen bir ad.
+io-ifc-write-reference-invalid = Bir öğe, modelde olmayan ya da ilişkinin izin vermediği türde bir kata veya ana öğeye başvuruyor, bir boşluğun ana öğesi yok ya da ana öğe zinciri başladığı yere dönüyor.
+io-ifc-write-id-duplicate = IFC dosyasındaki iki nesne aynı GlobalId değerini alacaktı.
+io-ifc-loss-not-written = { $count } bozuk gövde ya da boş özellik veya miktar kümesi yazılmadı.

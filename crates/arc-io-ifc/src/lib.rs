@@ -6,8 +6,8 @@
 //! [`read`] takes byte buffers and never paths. It returns an [`IfcFile`] with every instance,
 //! indexed by name and by entity type, and a [`LossReport`] that counts the entity types the views
 //! do not read as preserved. [`IfcFile::typed_views`] builds the typed views. Geometry evaluation
-//! (CORE-IO-015) and writing (CORE-IO-016) are later units: geometry representations stay plain
-//! entity instances.
+//! (CORE-IO-015) is [`IfcFile::geometry`]. [`write()`](fn@write) writes an IFC4 file from the neutral
+//! description of a building in [`write`](mod@write) (CORE-IO-016, first part).
 //!
 //! Every count, string, nesting level and instance is checked against the caller's
 //! [`arc_base::Limits`] before it is stored. Malformed input returns a stable `io.ifc.*` code,
@@ -38,6 +38,7 @@ mod read;
 mod step;
 mod text;
 pub mod views;
+pub mod write;
 
 pub use error::{codes, reasons};
 pub use geometry::{Geometry, GeometryItem, Shape, Units};
@@ -51,3 +52,4 @@ pub use views::{
     Nominal, Number, Property, PropertySet, PropertyValue, Quantity, QuantityKind, QuantitySet,
     RootedEntity, SpatialNode, TypeAssignment, TypedViews, Value,
 };
+pub use write::{WriteModel, WriteOptions, WriteOutput, global_id, write};

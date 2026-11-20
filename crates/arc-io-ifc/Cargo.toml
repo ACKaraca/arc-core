@@ -1,6 +1,6 @@
 [package]
 name = "arc-io-ifc"
-description = "Bounded reader for IFC files: the STEP physical file (ISO 10303-21) and IFC-ZIP, with a neutral entity model and typed views of the spatial structure, types, property sets and quantity sets."
+description = "Bounded reader for IFC files: the STEP physical file (ISO 10303-21) and IFC-ZIP, with a neutral entity model and typed views of the spatial structure, types, property sets and quantity sets; and an IFC4 writer from a neutral building description."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
