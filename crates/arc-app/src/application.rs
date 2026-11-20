@@ -1009,8 +1009,19 @@ fn write_native(
 ) -> Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let target = absolute(target)?;
-    let temp = reserve_temporary(session, &target, || NEXT.fetch_add(1, Ordering::Relaxed))?;
-    let result = (format.writer())(document, &temp, session)
+    let permissions = existing_permissions(session, &target)?;
+    let (temp, file) =
+        reserve_temporary(session, &target, || NEXT.fetch_add(1, Ordering::Relaxed))?;
+    // The target's permissions are set on the new handle before the writer writes any content.
+    // The handle is closed before the writer runs, so the writer and the rename hold no handle.
+    let prepared = match permissions {
+        Some(permissions) => file.set_permissions(permissions),
+        None => Ok(()),
+    };
+    drop(file);
+    let result = prepared
+        .map_err(|e| Error::new(arc_command::error::codes::PATH_IO).with_source(e))
+        .and_then(|()| (format.writer())(document, &temp, session))
         .and_then(|()| session.roots.replace_file(&temp, &target));
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -1018,14 +1029,41 @@ fn write_native(
     result
 }
 
-/// Creates the temporary file beside `target` exclusively and returns its path. The name is
-/// `.<name>.<process id>.<number>.tmp`, with the numbers `next` gives; a name taken by a stale
-/// file of a process that crashed is tried with the next number, at most eight names.
+/// The permissions of the regular file at `target`, or `None` when nothing exists there. The
+/// save replaces the file by a rename, so the new file takes these permissions (the mode bits on
+/// Unix, the read-only attribute on Windows). A read-only file is refused with `cmd.path.io`
+/// (reason `denied`) before anything is created: the rename would replace it silently.
+///
+/// # Errors
+///
+/// The checks of [`Roots::check_write`]; a read-only target is `cmd.path.io` with reason
+/// `denied`; other metadata failures are `cmd.path.io` with reason `other`.
+fn existing_permissions(session: &Session, target: &Path) -> Result<Option<std::fs::Permissions>> {
+    session.roots.check_write(target)?;
+    let metadata = match std::fs::metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(Error::new(arc_command::error::codes::PATH_IO)
+                .with_detail("reason", "other")
+                .with_source(error));
+        }
+    };
+    if metadata.permissions().readonly() {
+        return Err(Error::new(arc_command::error::codes::PATH_IO).with_detail("reason", "denied"));
+    }
+    Ok(Some(metadata.permissions()))
+}
+
+/// Creates the temporary file beside `target` exclusively and returns its path with the open
+/// handle. The name is `.<name>.<process id>.<number>.tmp`, with the numbers `next` gives; a name
+/// taken by a stale file of a process that crashed is tried with the next number, at most eight
+/// names.
 fn reserve_temporary(
     session: &Session,
     target: &Path,
     mut next: impl FnMut() -> u64,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, std::fs::File)> {
     const ATTEMPTS: usize = 8;
     let name = target.file_name().map_or_else(
         || "document".to_owned(),
@@ -1034,10 +1072,7 @@ fn reserve_temporary(
     for _ in 0..ATTEMPTS {
         let temp = target.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), next()));
         match session.roots.create_new(&temp) {
-            Ok(file) => {
-                drop(file);
-                return Ok(temp);
-            }
+            Ok(file) => return Ok((temp, file)),
             Err(error) if is_exists(&error) => {}
             Err(error) => return Err(error),
         }
@@ -1099,6 +1134,9 @@ mod tests {
 
     use super::*;
     use arc_command::Roots;
+    use arc_doc::graph::Evaluators;
+    use arc_doc::{Snapshot, TypeRegistry};
+    use std::sync::atomic::AtomicU32;
 
     /// A directory with a short name, removed when dropped.
     struct Dir(PathBuf);
@@ -1135,7 +1173,8 @@ mod tests {
             std::fs::write(dir.0.join(format!(".doc.sample.{pid}.{number}.tmp")), "").unwrap();
         }
         let mut numbers = 5..;
-        let temp = reserve_temporary(&session, &target, || numbers.next().unwrap()).unwrap();
+        let (temp, _file) =
+            reserve_temporary(&session, &target, || numbers.next().unwrap()).unwrap();
         assert_eq!(temp, dir.0.join(format!(".doc.sample.{pid}.7.tmp")));
         assert!(temp.is_file());
         // Eight stale names in a row: the save fails instead of looping.
@@ -1145,6 +1184,121 @@ mod tests {
         let mut numbers = 8..;
         let error = reserve_temporary(&session, &target, || numbers.next().unwrap()).unwrap_err();
         assert_eq!(error.code(), "cmd.path.io");
+    }
+
+    /// The number of entries of `dir`, the temporary files included.
+    fn entries(dir: &Path) -> usize {
+        std::fs::read_dir(dir).unwrap().count()
+    }
+
+    /// A native format that records the permission bits its writer sees on the file it writes,
+    /// and writes `text` into it.
+    fn recording_format(seen: Arc<AtomicU32>, text: &'static str) -> NativeFormat {
+        NativeFormat::new(
+            |_: &Path, _: DocumentConfig, _: &Session| {
+                Err(Error::new(arc_command::error::codes::PATH_IO))
+            },
+            move |_: &Document, path: &Path, _: &Session| {
+                let permissions = std::fs::metadata(path)
+                    .map_err(|e| Error::new(arc_command::error::codes::PATH_IO).with_source(e))?
+                    .permissions();
+                seen.store(permission_bits(&permissions), Ordering::SeqCst);
+                std::fs::write(path, text)
+                    .map_err(|e| Error::new(arc_command::error::codes::PATH_IO).with_source(e))
+            },
+        )
+    }
+
+    fn document() -> Document {
+        Document::open(
+            Snapshot::empty(Arc::new(TypeRegistry::new())),
+            Arc::new(Evaluators::new()),
+            DocumentConfig::default(),
+        )
+        .unwrap()
+    }
+
+    /// The mode bits of a file on Unix; the read-only attribute as 0 or 0o200 elsewhere.
+    fn permission_bits(permissions: &std::fs::Permissions) -> u32 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.mode() & 0o7777
+        }
+        #[cfg(not(unix))]
+        {
+            u32::from(!permissions.readonly()) * 0o200
+        }
+    }
+
+    /// A native save over an existing file of mode 0600 keeps the mode: the temporary file has it
+    /// when the writer writes the content, and so does the saved file.
+    #[cfg(unix)]
+    #[test]
+    fn a_native_save_keeps_the_mode_of_the_target() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = Dir::new("mode");
+        let target = dir.0.join("doc.sample");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let seen = Arc::new(AtomicU32::new(0));
+        let format = recording_format(Arc::clone(&seen), "new");
+        write_native(&format, &session_in(&dir.0), &document(), &target).unwrap();
+        assert_eq!(seen.load(Ordering::SeqCst), 0o600);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o600);
+        assert_eq!(entries(&dir.0), 1, "no temporary file is left behind");
+    }
+
+    /// A read-only target is refused before any file is created, and the writer does not run.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_target_is_refused_and_unchanged() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = Dir::new("readonly");
+        let target = dir.0.join("doc.sample");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let seen = Arc::new(AtomicU32::new(0));
+        let format = recording_format(Arc::clone(&seen), "new");
+        let error = write_native(&format, &session_in(&dir.0), &document(), &target).unwrap_err();
+        assert_eq!(error.code(), "cmd.path.io");
+        assert!(matches!(
+            error.details().get("reason"),
+            Some(Value::Text(reason)) if reason == "denied"
+        ));
+        assert_eq!(seen.load(Ordering::SeqCst), 0, "the writer did not run");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o444);
+        assert_eq!(entries(&dir.0), 1, "no temporary file is left behind");
+    }
+
+    /// The Windows counterpart of the read-only refusal. Not run on the Unix development hosts.
+    #[cfg(windows)]
+    #[test]
+    #[expect(
+        clippy::permissions_set_readonly_false,
+        reason = "Windows only: clears the attribute so that the test directory can be removed"
+    )]
+    fn a_read_only_target_is_refused_and_unchanged_on_windows() {
+        let dir = Dir::new("readonly-win");
+        let target = dir.0.join("doc.sample");
+        std::fs::write(&target, "old").unwrap();
+        let mut permissions = std::fs::metadata(&target).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&target, permissions).unwrap();
+        let seen = Arc::new(AtomicU32::new(0));
+        let format = recording_format(Arc::clone(&seen), "new");
+        let error = write_native(&format, &session_in(&dir.0), &document(), &target).unwrap_err();
+        assert_eq!(error.code(), "cmd.path.io");
+        assert_eq!(seen.load(Ordering::SeqCst), 0, "the writer did not run");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
+        assert_eq!(entries(&dir.0), 1, "no temporary file is left behind");
+        let mut permissions = std::fs::metadata(&target).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&target, permissions).unwrap();
     }
 
     /// A relative path resolves against the current directory, so the roots are absolute.

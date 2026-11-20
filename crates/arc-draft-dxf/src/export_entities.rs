@@ -3,10 +3,12 @@
 use std::f64::consts::TAU;
 
 use arc_base::math::{Point2, Vector2};
-use arc_base::{Limits, ObjectId, Result};
+use arc_base::{Error, Limits, ObjectId, Result};
 use arc_doc::relationship::ReferenceField;
 use arc_doc::{ColorSource, Value};
+use arc_draft::array::ARRAY;
 use arc_draft::dimension::{DefinitionPoint, Kind as DimensionKind};
+use arc_draft::display::DisplayOptions;
 use arc_draft::order::sorted;
 use arc_draft::text::{Paragraph, Stack, paragraphs_of};
 use arc_draft::types::{self, BLOCK_REF, ENTITIES, POINT, SPLINE, WIPEOUT};
@@ -74,6 +76,10 @@ impl Exporter<'_> {
             };
             let object = snapshot.get(handle)?;
             let reader = Reader::new(snapshot.registry(), key.as_str(), &object.values);
+            if key.as_str() == ARRAY {
+                out.extend(self.array_inserts(&reader, owner, id)?);
+                continue;
+            }
             if let Some(entity) = self.entity(key.as_str(), &reader, owner, id)? {
                 self.count += 1;
                 self.rep.mapped(1);
@@ -94,6 +100,97 @@ impl Exporter<'_> {
             }
             self.count += 1;
             out.push(Entity::new(EntityKind::Preserved(record)));
+        }
+        Ok(out)
+    }
+
+    /// The block references that write the array `object`: one per item, in item order, each at
+    /// the item's placement and with the array's scale, rotation and layer properties. The
+    /// placements are those of the display list ([`arc_draft::array::expansion`]), with the
+    /// tolerance of the default display options. The first reference takes the array's bound
+    /// handle when the policy keeps it; the others get new handles. The array's definition
+    /// (counts, spacings, path) is not written: it is reported once (`draft.dxf.array_approximated`,
+    /// with the number of references). An array whose block is missing, or whose placements the
+    /// display cannot compute, is reported as unmapped and writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// `io.limit_exceeded` (argument `limit` = `record_count`) when the items would exceed the
+    /// export's array budget.
+    fn array_inserts(
+        &mut self,
+        r: &Reader<'_>,
+        owner: Handle,
+        object: ObjectId,
+    ) -> Result<Vec<Entity>> {
+        let tolerance = DisplayOptions::default().tolerance;
+        let expansion = match arc_draft::array::expansion(self.snapshot, object, &tolerance) {
+            Ok(expansion) => expansion,
+            Err(_) => {
+                self.rep.note(reasons::EXPORT_UNMAPPED, ARRAY, None, &[]);
+                return Ok(Vec::new());
+            }
+        };
+        let name = expansion
+            .block
+            .and_then(|block| self.blocks.get(&block).cloned());
+        let Some(name) = name else {
+            self.rep.note(reasons::EXPORT_UNMAPPED, ARRAY, None, &[]);
+            return Ok(Vec::new());
+        };
+        let count = u64::try_from(expansion.items.len()).unwrap_or(u64::MAX);
+        if count > self.array_budget {
+            return Err(Error::new(arc_io_dxf::codes::LIMIT_EXCEEDED)
+                .with_arg("limit", "record_count")
+                .with_detail("value", i64::try_from(count).unwrap_or(i64::MAX)));
+        }
+        self.array_budget -= count;
+        let z = r.f64_or("elevation", 0.0);
+        let scale = expansion.scale;
+        let scale = [scale.x, scale.y, scale.z];
+        let props = self.props(r, false);
+        let mut out = Vec::with_capacity(expansion.items.len());
+        let mut first = None;
+        for (i, item) in expansion.items.iter().enumerate() {
+            let fresh = self.handle();
+            // Only the first reference may take the array's bound handle.
+            let handle = if i == 0 {
+                self.handle_for(fresh, Some(object), "ARRAY")
+            } else {
+                fresh
+            };
+            first.get_or_insert(handle);
+            self.count += 1;
+            out.push(Entity {
+                head: arc_io_dxf::model::Head {
+                    handle: Some(handle),
+                    owner: Some(owner),
+                    app_groups: Vec::new(),
+                },
+                props: props.clone(),
+                kind: EntityKind::Insert(Insert {
+                    block: name.clone(),
+                    insert: p3(item.position, z),
+                    x_scale: Some(scale[0]).filter(|s| *s != 1.0),
+                    y_scale: Some(scale[1]).filter(|s| *s != 1.0),
+                    z_scale: Some(scale[2]).filter(|s| *s != 1.0),
+                    rotation: Some(item.rotation.to_degrees()).filter(|a| *a != 0.0),
+                    ..Insert::default()
+                }),
+                extras: Vec::new(),
+                xdata: Vec::new(),
+            });
+        }
+        if let Some(handle) = first {
+            self.written.push((object, handle));
+            self.rep.mapped(1);
+            self.rep.note_n(
+                reasons::ARRAY_APPROXIMATED,
+                ARRAY,
+                Some(handle.to_hex()),
+                count,
+                &[],
+            );
         }
         Ok(out)
     }

@@ -53,6 +53,7 @@ The crate is in the WebAssembly set: its file access goes only through `arc_comm
 | `ImportOptions::source_document`, `Plan::source_document` | The label of the source document the bindings refer to; empty by default |
 | `export_drawing(&Snapshot, space) -> Exported` | The model space with the document's tables and blocks as a `Drawing`, every handle assigned by the export (`HandlePolicy::Assign`), with a report and the handle written for each exported object (`Exported::handles`) |
 | `export_drawing_with(&Snapshot, space, &HandlePolicy) -> Exported` | The same, with the handles chosen by the policy |
+| `export_drawing_limited(&Snapshot, space, &HandlePolicy, &Limits) -> Exported` | The same, with the block references of the arrays bounded by the limits (see [Arrays](#arrays)); the command passes the session's limits |
 | `HandlePolicy` | `Assign` (the default) or `KeepSources { document, floor }`; see [Source identity](#source-identity) |
 | `register_commands(&mut Registry)` | Registers the two commands |
 | `Builder`, `Reader` (module `fields`) | Set and read the values of drafting objects by field name |
@@ -289,9 +290,46 @@ APPID, DIMSTYLE (each with its standard entry) and `BLOCK_RECORD`, the blocks `*
 | hatch | HATCH | Loops (polyline, circle and ellipse edges), solid or the lines of the inline families or of the referenced pattern in the final frame (scale and angle applied); a gradient is written solid (reported) |
 | wipeout | WIPEOUT | The boundary as the clip polygon of a unit image; the frame is not written (reported) |
 | block reference | INSERT with ATTRIB | Attribute values for the tags of the definition, at the definition's attribute positions transformed by the reference; the attribute text height is 2.5 times the y scale |
+| array | INSERT, one per item | The block reference of each item at the placement the display list draws, with the array's scale and layer; the definition is not written and is reported (`draft.dxf.array_approximated`). See [Arrays](#arrays) |
 | leader, multi-leader, other types | none | Reported (`draft.dxf.export_unmapped`) |
 | foreign data rows of format `dxf` | the preserved records | Rows of kind `entity` attached to the exported space or a block are written after its drawn entities, rows of kind `object` attached to the exported space after the standard objects, each with its groups unchanged except the owner group of an entity, which names the container it is written to. The handles the export assigns start above the handles of the rows. A row that does not decode is reported (`draft.dxf.export_unmapped`) |
 | layer, linetype, text style, dimension style, block | LAYER, LTYPE, STYLE, DIMSTYLE, BLOCK_RECORD and BLOCK | Same fields as the import; linetype text style names are written as handles of the style entries |
+
+### Arrays
+
+A reference array (`core.draft.array`) is written as block references, since the entities this crate
+writes have no associative array:
+
+- One INSERT per item, in item order, at the item's insertion point and rotation, with the array's
+  per-axis scale (a mirrored array writes a negative scale), on the array's layer and with its color,
+  linetype, lineweight, transparency and visibility. The placements are those of the display list: the
+  export calls `arc_draft::array::expansion`, which places the items with the same function as the
+  display list. Its tolerance is that of `DisplayOptions::default()`, which the plot path also uses, so
+  the placements agree with the plotted drawing.
+- The source block is written as a block definition like every other block of the document, also when
+  only arrays refer to it.
+- Counts, spacings, angles, polar centers, total angles and paths are not written. Each array is
+  reported once with `draft.dxf.array_approximated` (argument `count`, the number of references
+  written), and counts once as mapped.
+- An array whose block is missing, or whose placements the display cannot compute (for example a path
+  array whose path entity was deleted), is reported as unmapped (`draft.dxf.export_unmapped`) and
+  writes no references; the rest of the drawing is written.
+- A rectangular grid is not written as one MINSERT with column and row counts. A MINSERT spaces its
+  items along the reference's own rotated axes, and the reader computes the positions with its own
+  arithmetic, so the displayed placements would not be reproduced exactly. The rejected alternative,
+  a MINSERT when the grid axes coincide with the item rotation, saves records only in that case and is
+  not exact for every grid.
+- Handles under `keep_sources`: the first reference of an array takes the array's bound handle, when no
+  other record of the file holds it (otherwise the handle is reassigned and reported); every other
+  reference takes a new handle. `Exported::handles` lists the first reference's handle for the array.
+- Budget: the references of all arrays of one export are bounded by the smaller of `record_count` of the
+  limits and `ARRAY_REFERENCE_BUDGET` (1,000,000). An export that would exceed it fails with
+  `io.limit_exceeded` (argument `limit` = `record_count`) before any reference is built, and no file is
+  written. An array holds at most 10,000 items, which `core.draft.array.create` enforces with
+  `draft.array.too_many_items`.
+- An array has no attribute values, so its references carry no ATTRIB records.
+- Arrays owned by a layout are not written: the export writes one model space, as it does for every
+  paper-space entity.
 
 ### Loss reasons
 
@@ -338,6 +376,7 @@ reads DWG files.
 | `draft.dxf.hatch_dropped` | `failed` |
 | `draft.dxf.hatch_approximated` | `approximated` |
 | `draft.dxf.array_expanded` | `approximated` |
+| `draft.dxf.array_approximated` | `approximated` |
 | `draft.dxf.attribute_dropped` | `dropped` |
 | `draft.dxf.reference_unresolved` | `failed` |
 | `draft.dxf.reference_depth_exceeded` | `dropped` |
@@ -373,6 +412,12 @@ definitions is tested on the displayed geometry (`tests/block_units.rs`), and th
 lengths and offsets are tested in `tests/mapping.rs`. The nesting limit
 is tested on chains of 64 and 65 references (the deepest one dropped, exactly one item), on a wide
 graph with shared sub-blocks, and through the import command, which must complete.
+
+The array export tests (`tests/arrays.rs`) write each array kind (rectangular, polar with mirrored items,
+path along an arc and along a segment with spacing), read the file back with the DXF reader and compare every
+reference with the expansion of the array (positions exact, rotation within 1e-12 radian) and with the display
+segments of the drawing. They also cover a source block referenced only by arrays, an array inside a block
+definition with a layer, the handle rule under `keep_sources`, the budget and the item bound.
 
 The source identity tests (`tests/source_identity.rs`) import a drawing with bound layers, linetypes,
 styles, block records, block entities and model-space entities, export it with `keep_sources`, and

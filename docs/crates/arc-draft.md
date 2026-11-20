@@ -1290,6 +1290,10 @@ are ignored.
 list is the list of a block reference at that placement with the array's scale, so the array is
 regenerated as one unit when a parameter, the definition or an entity of the definition changes, and
 editing one array regenerates no other. Items share the sub-object keys of the definition's entities.
+`array::expansion(snapshot, id, tolerance)` returns the same placements for an array of a snapshot,
+with its inserted definition and per-axis scale, for consumers that write the items out (the DXF
+export writes one block reference per item this way). The display list and the expansion place items
+in one function, so they agree.
 
 - **Rectangular.** Item (row, column), row by row, is at the position plus the vector (column ·
   `column_spacing`, row · `row_spacing`) turned by `angle`; items keep the array's rotation. Spacings

@@ -176,6 +176,15 @@ pub mod reasons {
         message_id: "draft-dxf-loss-array-expanded",
     };
 
+    /// An array of block references was written as its single block references: the counts
+    /// and spacings of the array are not kept, only the placement of each item.
+    pub const ARRAY_APPROXIMATED: Reason = Reason {
+        code: "draft.dxf.array_approximated",
+        outcome: Outcome::Approximated,
+        severity: Severity::Warning,
+        message_id: "draft-dxf-loss-array-approximated",
+    };
+
     /// An attribute value without a definition in its block was not imported.
     pub const ATTRIBUTE_DROPPED: Reason = Reason {
         code: "draft.dxf.attribute_dropped",
@@ -290,6 +299,7 @@ pub mod reasons {
         HATCH_DROPPED,
         HATCH_APPROXIMATED,
         ARRAY_EXPANDED,
+        ARRAY_APPROXIMATED,
         ATTRIBUTE_DROPPED,
         REFERENCE_UNRESOLVED,
         REFERENCE_DEPTH_EXCEEDED,

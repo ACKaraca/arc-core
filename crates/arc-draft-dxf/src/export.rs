@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use arc_base::id::Identifier;
-use arc_base::{Error, ObjectId, Result};
+use arc_base::{Error, Limits, ObjectId, Result};
 use arc_doc::{Snapshot, StoredForeign, Value};
 use arc_draft::style::{DIM_STYLE, TEXT_STYLE};
 use arc_draft::types::{BLOCK, LAYER, LINETYPE, SpaceUnit};
@@ -36,6 +36,10 @@ const ROOT_HANDLE: u64 = 0xC;
 
 /// The lowest handle the export assigns; the structure around the content takes the first ones.
 const FIRST_ASSIGNED: u64 = 0x20;
+
+/// The most block references one export writes for arrays, over all arrays of the drawing. An
+/// export that needs more fails with `io.limit_exceeded` before it builds them.
+pub const ARRAY_REFERENCE_BUDGET: u64 = 1_000_000;
 
 /// The handles that must remain above the first assigned one: an export with fewer than 2^32
 /// handles to assign above its start is refused, so that no handle wraps.
@@ -105,6 +109,8 @@ pub(crate) struct Exporter<'a> {
     pub(crate) foreign: BTreeMap<(ObjectId, &'static str), Vec<&'a StoredForeign>>,
     /// Set when a handle could not be given without wrapping; the export then fails.
     exhausted: bool,
+    /// The block references the arrays may still expand to in this export.
+    pub(crate) array_budget: u64,
 }
 
 pub(crate) fn invalid(what: &str) -> Error {
@@ -286,6 +292,23 @@ pub fn export_drawing_with(
     space: ObjectId,
     policy: &HandlePolicy,
 ) -> Result<Exported> {
+    export_drawing_limited(snapshot, space, policy, &Limits::DEFAULT)
+}
+
+/// Exports the model space `space` as [`export_drawing_with`] does, with the limits `limits`
+/// bounding the block references the arrays of the drawing expand to: at most the smaller of
+/// `limits.record_count` and [`ARRAY_REFERENCE_BUDGET`].
+///
+/// # Errors
+///
+/// As [`export_drawing`], and `io.limit_exceeded` (argument `limit` = `record_count`) when the
+/// arrays need more block references than the budget allows.
+pub fn export_drawing_limited(
+    snapshot: &Snapshot,
+    space: ObjectId,
+    policy: &HandlePolicy,
+    limits: &Limits,
+) -> Result<Exported> {
     let unit = model_space_unit(snapshot, space)?;
     let (_, layers) = names_with_standard(&["0"], named(snapshot, LAYER));
     let (_, linetypes) = names_with_standard(&[], named(snapshot, LINETYPE));
@@ -359,6 +382,7 @@ pub fn export_drawing_with(
         written: Vec::new(),
         foreign,
         exhausted: false,
+        array_budget: limits.record_count.min(ARRAY_REFERENCE_BUDGET),
     };
     ex.text_styles = named(snapshot, TEXT_STYLE).into_iter().collect();
     ex.dim_styles = named(snapshot, DIM_STYLE).into_iter().collect();

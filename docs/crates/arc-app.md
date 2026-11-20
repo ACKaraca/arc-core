@@ -634,6 +634,13 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
   application renames the file over the target with `Roots::replace_file`; on failure it removes
   the temporary file and the target stays as it was. A relative target is resolved against the
   current directory first.
+- The temporary file takes the permissions of an existing target before `save` runs: the mode bits on
+  Unix, the read-only attribute on Windows. They are set on the handle of the exclusive create, before
+  any content is written, so the saved file keeps the target's mode (a 0600 file is still 0600 after
+  a save). The owner, the group, access control lists and extended attributes are not carried over,
+  and a target that does not exist gets the default permissions. A read-only target is refused before
+  anything is created, with `cmd.path.io` (reason `denied`): the rename would replace it silently, and
+  `save` does not run.
   session they are given, so the helper has no reason to be public.
 - `open(path)` with a registered extension calls the product's `open`; the package reader is the
   default for every other extension. The file must still be a declared file type that opens. A

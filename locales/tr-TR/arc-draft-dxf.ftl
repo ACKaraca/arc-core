@@ -22,6 +22,7 @@ draft-dxf-loss-dimension-nonassociative = { $count } ölçü geometriyle ilişki
 draft-dxf-loss-hatch-dropped = { $count } tarama, sınırı saklanamadığı için içe aktarılmadı.
 draft-dxf-loss-hatch-approximated = { $count } tarama daha basit bir dolguyla içe aktarıldı: { $what }.
 draft-dxf-loss-array-expanded = { $count } blok başvurusu dizisi tek tek başvurulara açıldı.
+draft-dxf-loss-array-approximated = İlişkisel bir dizi { $count } blok başvurusu olarak yazıldı; dizinin tanımı (sayılar, aralıklar ve yol) saklanmadı.
 draft-dxf-loss-attribute-dropped = { $count } { $kind } kaydı, blokları etiketi tanımlamadığı için içe aktarılmadı.
 draft-dxf-loss-reference-unresolved = { $count } blok başvurusu, blokları bulunmadığı veya kendini içereceği için içe aktarılmadı.
 draft-dxf-loss-reference-depth-exceeded = Blok başvurularının oluşturduğu zincir { $limit } düzeyden derin olacağı için { $count } blok başvurusu içe aktarılmadı.

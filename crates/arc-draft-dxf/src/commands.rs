@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::apply::{apply, model_space_unit};
 use crate::error::reasons;
-use crate::export::{HandlePolicy, export_drawing_with};
+use crate::export::{HandlePolicy, export_drawing_limited};
 use crate::plan::{ImportOptions, plan_with_report};
 use crate::report::Reporter;
 
@@ -287,7 +287,7 @@ fn export(ctx: &mut Context<'_>, p: ExportParams) -> Result<ExportResult> {
         },
         None => HandlePolicy::Assign,
     };
-    let exported = export_drawing_with(ctx.snapshot(), p.space.0, &policy)?;
+    let exported = export_drawing_limited(ctx.snapshot(), p.space.0, &policy, ctx.limits())?;
     ctx.progress(0.5, EXPORT_PROGRESS.message_id);
     let mut options = WriteOptions::for_version(p.version.version());
     options.binary = p.binary;

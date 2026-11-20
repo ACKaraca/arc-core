@@ -10,11 +10,12 @@
 
 use std::f64::consts::TAU;
 
-use arc_base::math::Point2;
+use arc_base::math::{Point2, Vector3};
 use arc_base::{Error, ObjectId, Result, Tolerance};
 use arc_command::{CommandSpec, Context, IdParam};
 use arc_doc::{
-    Bound, Cardinality, FieldDecl, Finding, GeometryBytes, OnDelete, Strength, Value, ValueType,
+    Bound, Cardinality, FieldDecl, Finding, GeometryBytes, OnDelete, Snapshot, Strength, Value,
+    ValueType,
 };
 use arc_geom::encoding::GeomCodec;
 use arc_geom::{Curve2, CurveEval};
@@ -24,7 +25,7 @@ use serde::Deserialize;
 use crate::commands::{Created, create_entity, expect, family, field_invalid, point2, spec};
 use crate::dimension::clearing_reference;
 use crate::display::{
-    DisplayOptions, EntityList, Look, Primitive, Reader, decode_curve, read, reference_list,
+    self, DisplayOptions, EntityList, Look, Primitive, Reader, decode_curve, read, reference_list,
 };
 use crate::error::codes;
 use crate::types::{
@@ -394,7 +395,7 @@ pub(crate) fn declarations() -> Vec<(&'static str, Vec<FieldDecl>, Vec<arc_doc::
         ),
         FieldDecl::new("position", ValueType::Point2).with_default(Value::Point2(Point2::origin())),
         FieldDecl::new("scale", ValueType::Vector3)
-            .with_default(Value::Vector3(arc_base::math::Vector3::new(1.0, 1.0, 1.0))),
+            .with_default(Value::Vector3(Vector3::new(1.0, 1.0, 1.0))),
         real("rotation", 0.0, f64::MIN, f64::MAX),
         FieldDecl::new("kind", variants(&["rectangular", "polar", "path"]))
             .with_default(Value::Enum(0)),
@@ -444,6 +445,67 @@ fn path_curve(reader: &dyn Reader, values: &[Option<Value>]) -> Result<Option<Cu
     }
 }
 
+/// The stored fields of the array `id` (common ones first, as [`Params::from_values`] reads them)
+/// and the placement of each item. The display list and [`expansion`] both place items here.
+fn placed(
+    reader: &dyn Reader,
+    id: ObjectId,
+    tolerance: &Tolerance,
+) -> Result<(Vec<Option<Value>>, Vec<Item>)> {
+    let mut values = vec![None; entity::KIND];
+    values.extend(read(reader, id, &NAMES)?);
+    let params = Params::from_values(&values);
+    let curve = if params.kind == Kind::Path {
+        path_curve(reader, &values)?
+    } else {
+        None
+    };
+    let all = items(&params, curve.as_ref(), tolerance)?;
+    Ok((values, all))
+}
+
+/// The placements of an array as its display list draws them: the inserted definition, the
+/// scale of every item and the placement of each item, in order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Expansion {
+    /// The inserted block definition, when the array refers to one.
+    pub block: Option<ObjectId>,
+    /// The per-axis scale of every item.
+    pub scale: Vector3,
+    /// The placement of every item, in order.
+    pub items: Vec<Item>,
+}
+
+/// The expansion of the array `id` of `snapshot`, computed with the placements of the display
+/// list ([`DisplayOptions`] with `tolerance`), for consumers that write the items out.
+///
+/// # Errors
+///
+/// The errors of the display list for the array: `draft.array.invalid`,
+/// `draft.array.too_many_items`, and the errors of reading its path curve.
+pub fn expansion(snapshot: &Snapshot, id: ObjectId, tolerance: &Tolerance) -> Result<Expansion> {
+    let options = DisplayOptions {
+        tolerance: *tolerance,
+        ..DisplayOptions::default()
+    };
+    display::with_snapshot(snapshot, &options, |reader| {
+        let (values, items) = placed(reader, id, tolerance)?;
+        let block = match values.get(field::BLOCK) {
+            Some(Some(Value::Reference(block))) => Some(*block),
+            _ => None,
+        };
+        let scale = match values.get(field::SCALE) {
+            Some(Some(Value::Vector3(scale))) => *scale,
+            _ => Vector3::new(1.0, 1.0, 1.0),
+        };
+        Ok(Expansion {
+            block,
+            scale,
+            items,
+        })
+    })
+}
+
 /// The display list of the array `base.source`: the list of a block reference for every item.
 pub(crate) fn list(
     reader: &dyn Reader,
@@ -453,15 +515,7 @@ pub(crate) fn list(
     options: &DisplayOptions,
 ) -> Result<EntityList> {
     let id: ObjectId = base.source;
-    let mut values = vec![None; entity::KIND];
-    values.extend(read(reader, id, &NAMES)?);
-    let params = Params::from_values(&values);
-    let curve = if params.kind == Kind::Path {
-        path_curve(reader, &values)?
-    } else {
-        None
-    };
-    let all = items(&params, curve.as_ref(), &options.tolerance)?;
+    let (values, all) = placed(reader, id, &options.tolerance)?;
     let block = values.get(field::BLOCK).cloned().flatten();
     let scale = values.get(field::SCALE).cloned().flatten();
     let (mut depth, mut primitives) = (0, Vec::new());
@@ -577,7 +631,7 @@ fn create(ctx: &mut Context<'_>, p: CreateArray) -> Result<Created> {
         (field::POSITION, point2(p.position)),
         (
             field::SCALE,
-            Value::Vector3(arc_base::math::Vector3::new(scale, scale, 1.0)),
+            Value::Vector3(Vector3::new(scale, scale, 1.0)),
         ),
         (field::ROTATION, Value::F64(p.rotation)),
     ];

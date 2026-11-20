@@ -21,6 +21,7 @@ draft-dxf-loss-dimension-nonassociative = { $count } dimensions were imported wi
 draft-dxf-loss-hatch-dropped = { $count } hatches were not imported because their boundary cannot be stored.
 draft-dxf-loss-hatch-approximated = { $count } hatches were imported with a simpler fill: { $what }.
 draft-dxf-loss-array-expanded = { $count } block reference arrays were expanded into single references.
+draft-dxf-loss-array-approximated = An associative array was written as { $count } block references; its definition (counts, spacings and path) is not kept.
 draft-dxf-loss-attribute-dropped = { $count } { $kind } attribute records were not imported because their block does not define the tag.
 draft-dxf-loss-reference-unresolved = { $count } block references were not imported because their block is missing or would contain itself.
 draft-dxf-loss-reference-depth-exceeded = { $count } block references were not imported because a chain of block references through them would be deeper than { $limit } levels.

@@ -31,5 +31,5 @@ pub mod units;
 
 pub use apply::{Applied, Created, apply};
 pub use commands::register_commands;
-pub use export::{HandlePolicy, export_drawing, export_drawing_with};
+pub use export::{HandlePolicy, export_drawing, export_drawing_limited, export_drawing_with};
 pub use plan::{ImportOptions, Plan, plan, plan_with_report};
