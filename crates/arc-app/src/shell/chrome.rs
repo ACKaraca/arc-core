@@ -26,6 +26,10 @@ pub enum ShellAction {
     HidePanel(String),
     /// Puts the product's default layout back.
     ResetLayout,
+    /// Makes a document tab the active one.
+    ActivateTab(TabId),
+    /// Closes a document tab, asking about unsaved changes.
+    CloseTab(TabId),
 }
 
 /// The options of a choice list of the toolbar and the entry shown as current.
@@ -100,6 +104,30 @@ impl std::fmt::Debug for DisplayProbe {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("DisplayProbe")
     }
+}
+
+/// What each viewport draws over the scene in model coordinates (labels, markers), read from the
+/// document for the active tab. The probe gets the active language tag, so a text it returns is
+/// in the language and the number format the user reads. Overlays follow the camera; the shell
+/// keeps labels that would cover each other apart (see [`arc_ui::ProductOverlay::Label`]).
+#[derive(Clone)]
+pub struct OverlayProbe(pub Arc<OverlayFn>);
+
+/// The function of an [`OverlayProbe`].
+pub type OverlayFn = dyn Fn(&Application, TabId, &str) -> Vec<arc_ui::ProductOverlay> + Send + Sync;
+
+impl std::fmt::Debug for OverlayProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OverlayProbe")
+    }
+}
+
+/// The view a new tab's viewport starts in, framed on the drawing once its scene is known.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InitialView {
+    /// The direction from the drawing toward the camera, in model coordinates with z up. A
+    /// direction along the z axis looks straight down with y up on the screen.
+    pub toward_camera: [f64; 3],
 }
 
 /// A toggle button of the status bar: a precision mode the product has a setting for.
@@ -309,6 +337,9 @@ const MENU_RESET: Message = Message {
 const MENU_ZOOM: Message = Message {
     message_id: "app-menu-view-zoom-extents",
 };
+const TAB_CLOSE: Message = Message {
+    message_id: "app-tab-close",
+};
 const STATUS_CURSOR: Message = Message {
     message_id: "app-status-cursor",
 };
@@ -378,8 +409,24 @@ pub fn toggle_key_intents(
     out
 }
 
-/// What the chrome of a frame shows: the menu bar, the toolbar strip and the status bar.
+/// One document tab of the tab strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabView {
+    /// The tab.
+    pub id: TabId,
+    /// The name shown: the file name, or the shell's name for a document never saved.
+    pub title: String,
+    /// The document has unsaved changes.
+    pub modified: bool,
+    /// The tab is the active one.
+    pub active: bool,
+}
+
+/// What the chrome of a frame shows: the menu bar, the toolbar strip, the document tabs and the
+/// status bar.
 pub struct ChromeFrame<'a> {
+    /// The document tabs, in order.
+    pub tabs: &'a [TabView],
     /// The resolved menu bar.
     pub entries: &'a [arc_ui::Entry],
     /// The rows of the View menu.
@@ -416,11 +463,56 @@ pub fn show_frame(ui: &mut Ui, frame: &ChromeFrame<'_>, actions: &mut Vec<Action
             None => {}
         });
     }
+    if !frame.tabs.is_empty() {
+        egui::Panel::top("arc-app-tabs").show(ui, |ui| {
+            if let Some(action) = show_tabs(ui, frame.tabs, frame.localize) {
+                actions.push(Action::Shell(action));
+            }
+        });
+    }
     egui::Panel::bottom("arc-app-status").show(ui, |ui| {
         if let Some(intent) = show_status(ui, frame.cursor, frame.toggles) {
             actions.push(Action::Line(LineAction::Invoke(intent)));
         }
     });
+}
+
+/// The modified mark of a document, shown after its name in the tab strip.
+pub const MODIFIED_MARK: &str = "*";
+
+/// The label of a tab: the name, then the modified mark.
+#[must_use]
+pub fn tab_label(tab: &TabView) -> String {
+    if tab.modified {
+        format!("{}{MODIFIED_MARK}", tab.title)
+    } else {
+        tab.title.clone()
+    }
+}
+
+/// Draws one tab per open document: its name with the modified mark (a click activates it) and
+/// a close button. Returns what the user chose.
+pub fn show_tabs(ui: &mut Ui, tabs: &[TabView], localize: &dyn Localize) -> Option<ShellAction> {
+    let mut chosen = None;
+    ui.horizontal_wrapped(|ui| {
+        for tab in tabs {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let label = tab_label(tab);
+                if ui.selectable_label(tab.active, label).clicked() && !tab.active {
+                    chosen = Some(ShellAction::ActivateTab(tab.id));
+                }
+                let close = ui
+                    .small_button("\u{d7}")
+                    .on_hover_text(TAB_CLOSE.text(localize));
+                if close.clicked() {
+                    chosen = Some(ShellAction::CloseTab(tab.id));
+                }
+            });
+            ui.add_space(6.0);
+        }
+    });
+    chosen
 }
 
 /// What the toolbar strip does after a frame.

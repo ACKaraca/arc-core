@@ -24,7 +24,7 @@ app-locale-catalog-too-large = The message catalog for { $tag } is too large.
 app-locale-fallback-missing = The catalog for the fallback language { $tag } is missing.
 app-log-invalid-config = The logging setting { $field } is not valid.
 app-log-io = The log file could not be written.
-app-file-none-chosen = No file was chosen.
+app-file-none-chosen = No file was chosen. If no file dialog opens on this system, type app.file.open path=<file> or app.file.save_as path=<file> in the command line.
 app-macro-write-failed = The macro could not be written to the file.
 app-recent-not-found = The file { $path } is not in the recent files.
 app-thumbnail-too-large = The preview image is larger than the allowed size.
@@ -123,3 +123,10 @@ app-menu-view-zoom-extents = Zoom to Extents
 app-menu-view-reset-layout = Reset Layout
 app-status-cursor = X { $x }   Y { $y }
 app-status-no-cursor = X -   Y -
+app-file-new-done = Created a new document.
+app-file-opened = Opened { $name }
+app-file-saved = Saved { $name }
+app-file-closed = Closed { $name }
+app-file-closed-new = Closed the document.
+app-file-kept-open = The document was not closed because it has unsaved changes. Save it first. If no question was shown, no dialog is available here: save by typing app.file.save_as path=<file> in the command line, then close it.
+app-tab-close = Close this document

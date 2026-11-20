@@ -32,6 +32,8 @@ const GAP: f32 = 4.0;
 const MAX_DASHES: usize = 512;
 /// The alpha of band fills.
 const BAND_FILL_ALPHA: u8 = 40;
+/// The opacity of the plate behind a text label, which keeps it readable over lines.
+const LABEL_PLATE_ALPHA: u8 = 150;
 
 /// The mapping between pixels of a `width × height` image and model coordinates, for one camera.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -209,6 +211,7 @@ pub fn paint_overlays(
         BandKind::Window => colors.viewport_selection,
         BandKind::Crossing => colors.viewport_preselection,
     };
+    let mut placed: Vec<Rect> = Vec::new();
     for overlay in overlays.iter().take(MAX_OVERLAYS) {
         match overlay {
             ProductOverlay::Line { from, to } => {
@@ -280,18 +283,43 @@ pub fn paint_overlays(
             }
             ProductOverlay::Label { at: p, text } => {
                 if let Some(position) = at(p) {
-                    let font = FontId::proportional(12.0);
-                    painter.text(
-                        position + egui::vec2(8.0, -8.0),
-                        egui::Align2::LEFT_BOTTOM,
-                        text,
-                        font,
-                        colors.viewport_selection,
-                    );
+                    paint_label(&painter, colors, position, text, &mut placed);
                 }
             }
         }
     }
+}
+
+/// Paints a text label beside `position`, on a plate that keeps it readable over lines. A label
+/// that would cover one of `placed` steps down until it does not, so labels of anchors that
+/// project close together (levels seen from above) stay readable, in the order they were given.
+fn paint_label(
+    painter: &egui::Painter,
+    colors: &Colors,
+    position: Pos2,
+    text: &str,
+    placed: &mut Vec<Rect>,
+) {
+    let galley = painter.layout_no_wrap(
+        text.to_owned(),
+        FontId::proportional(12.0),
+        colors.viewport_selection,
+    );
+    let size = galley.size();
+    let mut rect = Rect::from_min_size(position + egui::vec2(8.0, -8.0 - size.y), size);
+    for _ in 0..MAX_OVERLAYS {
+        if !placed.iter().any(|r| r.expand(1.0).intersects(rect)) {
+            break;
+        }
+        rect = rect.translate(egui::vec2(0.0, size.y + 2.0));
+    }
+    placed.push(rect);
+    painter.rect_filled(
+        rect.expand(2.0),
+        2.0,
+        Color32::from_black_alpha(LABEL_PLATE_ALPHA),
+    );
+    painter.galley(rect.min, galley, colors.viewport_selection);
 }
 
 /// Draws the segment `from`–`to` as dashes, at most [`MAX_DASHES`] of them.

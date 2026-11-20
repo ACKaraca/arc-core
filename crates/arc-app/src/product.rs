@@ -461,9 +461,12 @@ impl ProductBuilder {
     }
 
     /// Names the command that fills a new document before the user sees it (a drawing needs its
-    /// first space, for instance). The application runs it with the permissions `read`, `edit`
-    /// and `file_read` on a draft of the document and opens the result: what the command made is
-    /// the document's starting point, not a step the user can undo.
+    /// first space, for instance). The application runs it, without parameters and with the
+    /// permissions `read`, `edit` and `file_read`, on the new document as its starting content
+    /// (`arc_command::Invocation::initial`): the transaction is recorded, so the document saves and
+    /// recovers with it, but it is no undo step, and the document is clean until the user edits
+    /// it. The command reads the interface language from the session setting
+    /// [`crate::commands::LANGUAGE_SETTING`] to name what it creates.
     pub fn new_document_command(&mut self, command: impl Into<String>) {
         self.new_document = Some(command.into());
     }

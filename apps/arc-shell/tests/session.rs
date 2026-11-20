@@ -382,7 +382,8 @@ fn dropped_files_open_and_recent_files_are_written() {
     let pass = h.frame(Vec::new());
     assert!(pass.shows("dropped file opened"), "record missing");
     assert!(pass.shows("path=[redacted]"));
-    assert!(!pass.shows("dropped.arc"));
+    // The tab strip names the file; the log never shows its path.
+    assert!(!pass.shows(&file.display().to_string()));
 }
 
 #[test]

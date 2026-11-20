@@ -254,6 +254,16 @@ fn shown_text(shown: &Shown, localize: &dyn Localize) -> String {
     }
 }
 
+/// What a read-only row shows: a number in the display unit and the user's decimal separator, as
+/// an editable field would show it; any other value as text.
+fn read_only_text(row: &PropertyRow, context: &GridContext<'_>) -> String {
+    let field = numeric_field(row, context);
+    match (&row.value_type, number_of(&row.shown, field.dimension)) {
+        (ValueType::I64 | ValueType::F64 | ValueType::Quantity(_), Some(q)) => field.display(q),
+        _ => shown_text(&row.shown, context.localize),
+    }
+}
+
 impl PropertyGrid {
     /// Draws `model` by category and returns the intent of a committed edit. Text and numbers
     /// commit on Enter or when the field loses focus with a changed, valid text; a check box or
@@ -289,6 +299,7 @@ impl PropertyGrid {
         let key = row.path.to_string();
         let id = ui.make_persistent_id(("arc-property", &key));
         let mut name = (context.label)(&row.name);
+        let name_for_errors = name.clone();
         if row.overridden {
             name = format!(
                 "{name} {}",
@@ -298,7 +309,7 @@ impl PropertyGrid {
         ui.horizontal(|ui| {
             let label = ui.label(name.as_str());
             if row.read_only {
-                let text = shown_text(&row.shown, context.localize);
+                let text = read_only_text(row, context);
                 ui.add_enabled(false, TextEdit::singleline(&mut text.as_str()))
                     .labelled_by(label.id);
                 return None;
@@ -354,7 +365,8 @@ impl PropertyGrid {
                         // The committing Enter must not also reach the command line.
                         ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                         *editing = false;
-                        let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                        let escaped = ui
+                            .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
                         if !escaped && *text != shown {
                             return Some(Value::String(text.clone()));
                         }
@@ -364,8 +376,15 @@ impl PropertyGrid {
                 ValueType::I64 | ValueType::F64 | ValueType::Quantity(_) => {
                     let field = numeric_field(row, context);
                     let input = self.numbers.entry(key).or_default();
+                    input.label.clone_from(&name_for_errors);
                     let value = number_of(&row.shown, field.dimension);
-                    let q = input.show(ui, id, &field, value, context.localize, Some(label.id))?;
+                    // The field and its error line stack beside the label, so the error shows
+                    // under the field and is never clipped at the right edge.
+                    let q = ui
+                        .vertical(|ui| {
+                            input.show(ui, id, &field, value, context.localize, Some(label.id))
+                        })
+                        .inner?;
                     Some(match row.value_type {
                         // The field accepted only whole numbers within the i64 range checks.
                         #[allow(clippy::cast_possible_truncation, reason = "checked whole number")]

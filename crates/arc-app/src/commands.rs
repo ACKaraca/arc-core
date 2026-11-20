@@ -12,6 +12,12 @@ use arc_command::{CommandSpec, IdParam, Permission, Registry, Surface, UndoBehav
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+/// The session setting that holds the language tag of the interface (`en`, `tr`): the shell keeps
+/// it current in the sessions it runs commands in, and in the session of a new document's starting
+/// command, so a command can name what it creates in the language the user reads. Absent in
+/// headless runs.
+pub const LANGUAGE_SETTING: &str = "app.language";
+
 /// Opens a new, empty document.
 pub const FILE_NEW: &str = "app.file.new";
 /// Opens a file: `path`, or a file dialog without one.

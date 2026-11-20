@@ -245,6 +245,18 @@ pub mod messages {
     pub const QUANTITY_SCRUB: Message = Message {
         message_id: "ui-quantity-scrub",
     };
+    /// A numeric field's value is outside the range, naming the field.
+    pub const QUANTITY_RANGE_FIELD: Message = Message {
+        message_id: "ui-quantity-out-of-range-field",
+    };
+    /// A numeric field's text is no value; says what is accepted.
+    pub const QUANTITY_EXPECTED: Message = Message {
+        message_id: "ui-quantity-expected",
+    };
+    /// [`QUANTITY_EXPECTED`], naming the field.
+    pub const QUANTITY_EXPECTED_FIELD: Message = Message {
+        message_id: "ui-quantity-expected-field",
+    };
     /// The label of the tree's filter field.
     pub const TREE_FILTER: Message = Message {
         message_id: "ui-tree-filter",
@@ -581,6 +593,9 @@ pub(crate) mod tests {
             messages::PROPERTY_MIXED,
             messages::PROPERTY_OVERRIDDEN,
             messages::QUANTITY_SCRUB,
+            messages::QUANTITY_RANGE_FIELD,
+            messages::QUANTITY_EXPECTED,
+            messages::QUANTITY_EXPECTED_FIELD,
             messages::TREE_FILTER,
             messages::TREE_EXPAND,
             messages::TREE_COLLAPSE,

@@ -82,7 +82,11 @@ parsing and repeat (CORE-CMD-011, CORE-CMD-013, CORE-CMD-015) are described in t
   foreign data rows, each under a key above every key an operation of the session's history
   named (`Txn::add_foreign` does this for `merge` transactions, `Txn::foreign_floor` is the
   bound), so the inverse of any step on either stack still applies; anything else fails with
-  `cmd.silent_scope`. The descriptor still says `undoable`. `Context::after_commit` registers an
+  `cmd.silent_scope`. The descriptor still says `undoable`. `Invocation::initial` makes a call
+  commit as bookkeeping like that, without the scope rule, for the content a new document starts
+  with (the application runs a product's new-document command so): the call is accepted only on a
+  document at revision 0, where no step exists to invert, and fails with `cmd.silent_scope`
+  otherwise. `Context::after_commit` registers an
   action that runs once the transaction committed, with the session and the result value to
   amend (`cmd.no_transaction` for a command without a transaction). It never runs for a failed
   or dry run. The commit event is delivered before the action runs, so a listener must not

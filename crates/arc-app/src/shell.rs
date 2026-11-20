@@ -26,7 +26,10 @@ pub mod platform;
 pub mod prefs;
 pub mod prompts;
 
-pub use chrome::{ChoiceState, DisplayProbe, ShellAction, StatusToggle, ToolItem};
+pub use chrome::{
+    ChoiceState, DisplayProbe, InitialView, OverlayProbe, ShellAction, StatusToggle, TabView,
+    ToolItem,
+};
 pub use interaction::{
     DynamicOutput, Interaction, InteractionContext, InteractionOutput, ViewRequest,
 };
@@ -114,6 +117,8 @@ pub struct PanelContext<'a> {
     pub actions: &'a mut Vec<Action>,
     /// The recent log records, when the platform keeps them.
     pub log: Option<&'a LogRing>,
+    /// What the product draws over the active tab's viewport (see [`OverlayProbe`]).
+    pub overlays: &'a [arc_ui::ProductOverlay],
 }
 
 /// What a panel asks the shell to do after drawing.
@@ -236,6 +241,11 @@ pub struct ShellConfig {
     pub status: Vec<StatusToggle>,
     /// What each viewport draws besides the scene; `None` draws the grid and the axes.
     pub display: Option<DisplayProbe>,
+    /// What each viewport draws over the scene in model coordinates (labels); `None` draws
+    /// nothing.
+    pub overlays: Option<OverlayProbe>,
+    /// The view a new tab starts in; `None` looks straight down the z axis.
+    pub initial_view: Option<InitialView>,
     /// The seed of invocation seeds: each command-line step uses the next value of a sequence
     /// from it, so identifiers that commands generate differ between steps. Pass entropy (the
     /// clock and the process), or a fixed value for a reproducible session.
@@ -334,6 +344,8 @@ pub struct View {
 struct ConsoleError {
     message_id: &'static str,
     args: Vec<(&'static str, arc_base::error::Value)>,
+    /// A result line that is no error (a file was saved); drawn in the text color.
+    info: bool,
 }
 
 impl ConsoleError {
@@ -345,6 +357,15 @@ impl ConsoleError {
                 .iter()
                 .map(|(k, v)| (*k, v.clone()))
                 .collect(),
+            info: false,
+        }
+    }
+
+    fn info(message_id: &'static str, args: Vec<(&'static str, arc_base::error::Value)>) -> Self {
+        Self {
+            message_id,
+            args,
+            info: true,
         }
     }
 }
@@ -384,12 +405,26 @@ impl View {
     }
 }
 
-/// The initial camera: looking down the z axis at the origin, 100 units high.
-fn initial_camera() -> Result<ViewFrame> {
+/// The initial camera: 100 units from the origin along `view`'s direction toward the camera (the
+/// z axis without one), 100 units high; framed on the drawing once its scene is known.
+fn initial_camera(view: Option<InitialView>) -> Result<ViewFrame> {
+    let [x, y, z] = view.map_or([0.0, 0.0, 1.0], |v| v.toward_camera);
+    let length = (x * x + y * y + z * z).sqrt();
+    let toward = if length.is_finite() && length > 1e-9 {
+        Vector3::new(x / length, y / length, z / length)
+    } else {
+        Vector3::z()
+    };
+    // Looking along the vertical axis, y is up on the screen; otherwise z is.
+    let up = if toward.x.abs() + toward.y.abs() < 1e-6 {
+        Vector3::y()
+    } else {
+        Vector3::z()
+    };
     ViewFrame::new(
-        Point3::new(0.0, 0.0, 100.0),
+        Point3::origin() + toward * 100.0,
         Point3::origin(),
-        Vector3::y(),
+        up,
         Projection::Orthographic { height: 100.0 },
         0.1,
         10_000.0,
@@ -427,6 +462,10 @@ pub struct Shell {
     toolbar: Vec<ToolItem>,
     status: Vec<StatusToggle>,
     display: Option<DisplayProbe>,
+    overlays: Option<OverlayProbe>,
+    initial_view: Option<InitialView>,
+    /// The active language tag of the last frame, which names a new document's content.
+    language: String,
 }
 
 /// The user's files the shell reads at start and writes on change.
@@ -493,8 +532,11 @@ impl std::fmt::Debug for Shell {
     }
 }
 
-fn session(surface: Surface) -> Session {
-    Session::new(
+/// A session on `surface` for `app`'s product: its clock (so records carry the real time) and its
+/// answer for the keyword `last`.
+fn session(app: &Application, surface: Surface) -> Session {
+    let core = app.product().headless();
+    let mut session = Session::new(
         surface,
         [
             Permission::Read,
@@ -503,6 +545,9 @@ fn session(surface: Surface) -> Session {
             Permission::FileWrite,
         ],
     )
+    .with_last_hook(core.last.clone());
+    session.clock = Arc::clone(&core.clock);
+    session
 }
 
 impl Shell {
@@ -513,7 +558,6 @@ impl Shell {
     #[must_use]
     pub fn new(app: &Application, config: ShellConfig, gpu: Option<Gpu>) -> Self {
         let product = app.product();
-        let last = product.headless().last.clone();
         let mut errors = Vec::new();
         let mut panels = Vec::new();
         for entry in product.panels() {
@@ -548,8 +592,8 @@ impl Shell {
             extractors,
             gpu,
             views: BTreeMap::new(),
-            ui_session: session(Surface::Ui).with_last_hook(last.clone()),
-            line_session: session(Surface::CommandLine).with_last_hook(last),
+            ui_session: session(app, Surface::Ui),
+            line_session: session(app, Surface::CommandLine),
             errors,
             log: Vec::new(),
             seed: config.seed,
@@ -565,6 +609,9 @@ impl Shell {
             toolbar: config.toolbar,
             status: config.status,
             display: config.display,
+            overlays: config.overlays,
+            initial_view: config.initial_view,
+            language: String::new(),
         }
     }
 
@@ -750,17 +797,31 @@ impl Shell {
     /// Records the error of an action on the active tab: in [`Shell::errors`] and in the command
     /// panel's history, after the lines that exist now.
     fn report(&mut self, app: &Application, error: Error) {
+        self.push_result(app, ConsoleError::of(&error));
+        self.error(error);
+    }
+
+    /// Says what a successful file action did in the command panel's history.
+    fn announce(
+        &mut self,
+        app: &Application,
+        message_id: &'static str,
+        args: Vec<(&'static str, arc_base::error::Value)>,
+    ) {
+        self.push_result(app, ConsoleError::info(message_id, args));
+    }
+
+    /// Puts a result line at the end of the active tab's history. Only the latest result shows:
+    /// the lines of earlier results go, so an error that a later edit made stale does not stay.
+    fn push_result(&mut self, app: &Application, line: ConsoleError) {
         if let Some(view) = app.active().and_then(|t| self.views.get_mut(&t)) {
             let at = view
                 .interaction
                 .as_ref()
                 .map_or(0, |i| i.output().history.len());
-            if view.console.len() >= MAX_ERRORS {
-                view.console.remove(0);
-            }
-            view.console.push((at, ConsoleError::of(&error)));
+            view.console.clear();
+            view.console.push((at, line));
         }
-        self.error(error);
     }
 
     /// Creates the view of every open tab that has none and drops the views of closed tabs.
@@ -792,7 +853,7 @@ impl Shell {
         };
         Ok(View {
             selection: Vec::new(),
-            camera: initial_camera()?,
+            camera: initial_camera(self.initial_view)?,
             widget: ViewportWidget::new(),
             viewport: None,
             extraction,
@@ -949,9 +1010,24 @@ impl Shell {
         self.pump(app, None);
         self.appearance.apply(ctx);
         let millis = millis(input.time);
-        let mut actions: Vec<Action> = self
-            .chords
-            .handle_events(&self.keymap, &input.raw.events, millis)
+        if window.is_none() && self.language != input.language {
+            self.language.clear();
+            self.language.push_str(input.language);
+            let tag = serde_json::json!(input.language);
+            for session in [&self.ui_session, &self.line_session] {
+                // A tag within the setting limits never fails; the sessions just keep the old one.
+                let _ = session.set_setting(commands::LANGUAGE_SETTING, tag.clone());
+            }
+        }
+        // A key the keymap binds is handled by the binding alone: the press leaves the frame's
+        // events, so no widget (the command line's undo keys, a text field) handles it again.
+        let keyed = self.chords.take_events(
+            &self.keymap,
+            &mut input.raw.events,
+            millis,
+            ctx.text_edit_focused(),
+        );
+        let mut actions: Vec<Action> = keyed
             .into_iter()
             .chain(input.menu_intents)
             .map(Action::Intent)
@@ -984,6 +1060,35 @@ impl Shell {
             })
             .collect();
         let rows = chrome::panel_rows(&self.layout, &panel_titles);
+        let tab_views: Vec<TabView> = if main {
+            let untitled: Vec<TabId> = app
+                .tabs()
+                .iter()
+                .filter(|t| t.title().is_none())
+                .map(crate::application::Tab::id)
+                .collect();
+            app.tabs()
+                .iter()
+                .map(|t| TabView {
+                    id: t.id(),
+                    title: t.title().unwrap_or_else(|| {
+                        let name = prompts::UNTITLED.text(input.localize);
+                        match untitled.iter().position(|u| *u == t.id()) {
+                            Some(n) if untitled.len() > 1 => format!("{name} {}", n + 1),
+                            _ => name,
+                        }
+                    }),
+                    modified: t.is_dirty(),
+                    active: active == Some(t.id()),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let overlays = match (&self.overlays, active) {
+            (Some(probe), Some(tab)) => (probe.0)(app, tab, input.language),
+            _ => Vec::new(),
+        };
         let tools = chrome::tool_views(&self.toolbar, app, active, input.localize);
         let toggles = chrome::toggle_views(&self.status, app, active, input.localize);
         actions.extend(
@@ -1015,6 +1120,7 @@ impl Shell {
             }
         }
         let chrome_frame = chrome::ChromeFrame {
+            tabs: &tab_views,
             entries: &entries,
             rows: &rows,
             tools: &tools,
@@ -1078,6 +1184,7 @@ impl Shell {
                         time: input.time,
                         actions: &mut actions,
                         log: log_ring,
+                        overlays: &overlays,
                     };
                     p.show(ui, &mut cx);
                 });
@@ -1203,15 +1310,39 @@ impl Shell {
 
     /// Carries out one action of a frame.
     fn act(&mut self, app: &mut Application, action: Action, requests: &mut Vec<Request>) {
+        // An action that does something replaces the result lines of earlier ones: an error a
+        // later edit made stale does not stay in the history.
+        let works = match &action {
+            Action::Intent(intent) => !matches!(
+                intent.command.as_str(),
+                commands::SELECT_SET | commands::SELECT_CLEAR
+            ),
+            Action::Line(line) => !matches!(
+                line,
+                LineAction::ClearInput | LineAction::Cancel | LineAction::Back
+            ),
+            Action::Answer(_) => true,
+            _ => false,
+        };
+        if works && let Some(view) = app.active().and_then(|t| self.views.get_mut(&t)) {
+            view.console.clear();
+        }
         let result = match action {
             Action::Error(e) => Err(e),
-            Action::Shell(action) => self.shell_action(app, action),
+            Action::Shell(action) => self.shell_action(app, action, requests),
             Action::Setting { key, value } => self.set_setting(app, &key, value),
             Action::Intent(intent) => self.dispatch(app, intent, requests),
             Action::Answer(input) => self.line_step(app, LineStep::Answer(input), requests),
             Action::Line(line) if self.controlled(app) => self.controller_line(app, line),
             Action::Line(line) => match line {
                 LineAction::ClearInput => Ok(()),
+                // With no document open there is no command line, but a file command (a toolbar
+                // button's New or Open) must still work.
+                LineAction::Submit(text)
+                    if app.active().is_none() && commands::is_shell_command(text.trim()) =>
+                {
+                    self.shell_command(app, text.trim(), Map::new(), requests)
+                }
                 LineAction::Submit(text) => self.line_step(app, LineStep::Submit(&text), requests),
                 LineAction::Repeat => self.line_step(app, LineStep::Repeat, requests),
                 LineAction::Back => self.line_step(app, LineStep::Back, requests),
@@ -1232,8 +1363,18 @@ impl Shell {
     }
 
     /// Carries out a panel or camera action of the View menu or the toolbar.
-    fn shell_action(&mut self, app: &Application, action: ShellAction) -> Result<()> {
+    fn shell_action(
+        &mut self,
+        app: &mut Application,
+        action: ShellAction,
+        requests: &mut Vec<Request>,
+    ) -> Result<()> {
         match action {
+            ShellAction::ActivateTab(tab) => app.activate(tab),
+            ShellAction::CloseTab(tab) => {
+                app.activate(tab)?;
+                self.shell_command(app, commands::FILE_CLOSE, Map::new(), requests)
+            }
             ShellAction::ShowPanel(panel) => {
                 chrome::show_panel(&mut self.layout, &self.default_layout, &panel)
             }
@@ -1277,8 +1418,7 @@ impl Shell {
             let Some(controller) = view.interaction.as_deref_mut() else {
                 return;
             };
-            let session =
-                session(Surface::CommandLine).with_last_hook(app.product().headless().last.clone());
+            let session = session(app, Surface::CommandLine);
             let session = session_for(app.is_read_only_tab(tab), &session);
             let cx = InteractionContext::new(app, tab, &session, &view.selection, view.camera);
             controller.closing(&cx);
@@ -1290,8 +1430,7 @@ impl Shell {
         let tab = app
             .active()
             .ok_or_else(|| Error::new(crate::codes::DOCUMENT_UNKNOWN))?;
-        let session =
-            session(Surface::CommandLine).with_last_hook(app.product().headless().last.clone());
+        let session = session(app, Surface::CommandLine);
         let session = session_for(app.is_read_only_tab(tab), &session);
         let Some(view) = self.views.get_mut(&tab) else {
             return Err(Error::new(crate::codes::DOCUMENT_UNKNOWN));
@@ -1356,6 +1495,8 @@ impl Shell {
         self.seed = self.seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let seed = self.seed;
         let mut deferred: Vec<(String, Json)> = Vec::new();
+        // The selection a command set (`Context::set_selection`) becomes the tab's selection.
+        let mut chosen: Option<Vec<ObjectId>> = None;
         let result = {
             let app_ref: &Application = app;
             let document = app_ref.tab(tab)?.document();
@@ -1392,6 +1533,9 @@ impl Shell {
                 let revision = document.snapshot().revision();
                 let recorded = recorder.as_ref().map(|r| (r, invocation.clone()));
                 let outcome = app_ref.invoke(tab, session, invocation)?;
+                if let Some(ids) = &outcome.selection {
+                    chosen = Some(ids.clone());
+                }
                 if let Some((recorder, invocation)) = recorded {
                     // A step the recorder refuses (a full recorder) does not fail the run.
                     let _ = recorder.record(registry, &invocation, revision);
@@ -1400,6 +1544,15 @@ impl Shell {
             };
             view.line.drive(&target, step, &mut runner)
         };
+        if let Some(ids) = chosen {
+            let live = app.tab(tab)?.document().snapshot();
+            view.selection.clear();
+            select(
+                &mut view.selection,
+                ids.into_iter().filter(|o| live.resolve(*o).is_ok()),
+                SelectMode::Add,
+            );
+        }
         self.views.insert(tab, view);
         let submitted = result?;
         if let Submitted::Rejected { error, .. } = submitted {
@@ -1429,9 +1582,18 @@ impl Shell {
             .and_then(Json::as_str)
             .map(std::path::PathBuf::from);
         match command {
-            commands::FILE_NEW => app.new_document().map(drop),
+            commands::FILE_NEW => {
+                let language = self.language.clone();
+                app.new_document_in(&language)?;
+                self.announce(app, FILE_NEW_DONE.message_id, Vec::new());
+                Ok(())
+            }
             commands::FILE_OPEN => match path {
-                Some(p) => app.open(&p).map(drop),
+                Some(p) => {
+                    let tab = app.open(&p)?;
+                    self.announced_file(app, tab, FILE_OPENED.message_id);
+                    Ok(())
+                }
                 None => {
                     requests.push(Request::OpenDialog);
                     Ok(())
@@ -1440,7 +1602,9 @@ impl Shell {
             commands::FILE_SAVE => {
                 let tab = need()?;
                 if app.tab(tab)?.path().is_some() {
-                    app.save(tab)
+                    app.save(tab)?;
+                    self.announced_file(app, tab, FILE_SAVED.message_id);
+                    Ok(())
                 } else {
                     requests.push(Request::SaveDialog(tab));
                     Ok(())
@@ -1449,7 +1613,11 @@ impl Shell {
             commands::FILE_SAVE_AS => {
                 let tab = need()?;
                 match path {
-                    Some(p) => app.save_as(tab, &p),
+                    Some(p) => {
+                        app.save_as(tab, &p)?;
+                        self.announced_file(app, tab, FILE_SAVED.message_id);
+                        Ok(())
+                    }
                     None => {
                         requests.push(Request::SaveDialog(tab));
                         Ok(())
@@ -1462,8 +1630,10 @@ impl Shell {
                     requests.push(Request::AskClose(tab));
                     Ok(())
                 } else {
-                    self.close_tab(app, tab, |_| crate::application::CloseAnswer::Cancel)
-                        .map(drop)
+                    let title = app.tab(tab)?.title();
+                    self.close_tab(app, tab, |_| crate::application::CloseAnswer::Cancel)?;
+                    self.announce_closed(app, title);
+                    Ok(())
                 }
             }
             commands::APP_QUIT => {
@@ -1484,29 +1654,83 @@ impl Shell {
             commands::EDIT_UNDO => app.undo(need()?).map(drop),
             commands::EDIT_REDO => app.redo(need()?).map(drop),
             commands::SELECT_SET | commands::SELECT_CLEAR => {
-                let tab = need()?;
-                let snapshot = app.tab(tab)?.document().snapshot();
-                let Some(view) = self.views.get_mut(&tab) else {
-                    return Ok(());
-                };
-                if command == commands::SELECT_CLEAR {
-                    view.selection.clear();
-                    return Ok(());
-                }
-                let p: SelectParams =
-                    serde_json::from_value(Json::Object(params)).map_err(|e| {
-                        Error::new(arc_command::error::codes::PARAMS_MALFORMED).with_source(e)
-                    })?;
-                let objects = p
-                    .objects
-                    .into_iter()
-                    .map(|o| o.0)
-                    .filter(|o| snapshot.resolve(*o).is_ok());
-                select(&mut view.selection, objects, p.mode);
-                Ok(())
+                self.select_command(app, need()?, command, params)
             }
             _ => Ok(()),
         }
+    }
+}
+
+impl Shell {
+    /// Carries out `app.select.set` or `app.select.clear` on `tab`'s view.
+    fn select_command(
+        &mut self,
+        app: &Application,
+        tab: TabId,
+        command: &str,
+        params: Map<String, Json>,
+    ) -> Result<()> {
+        let snapshot = app.tab(tab)?.document().snapshot();
+        let Some(view) = self.views.get_mut(&tab) else {
+            return Ok(());
+        };
+        if command == commands::SELECT_CLEAR {
+            view.selection.clear();
+            return Ok(());
+        }
+        let p: SelectParams = serde_json::from_value(Json::Object(params))
+            .map_err(|e| Error::new(arc_command::error::codes::PARAMS_MALFORMED).with_source(e))?;
+        let objects = p
+            .objects
+            .into_iter()
+            .map(|o| o.0)
+            .filter(|o| snapshot.resolve(*o).is_ok());
+        select(&mut view.selection, objects, p.mode);
+        Ok(())
+    }
+}
+
+const FILE_NEW_DONE: Message = Message {
+    message_id: "app-file-new-done",
+};
+const FILE_OPENED: Message = Message {
+    message_id: "app-file-opened",
+};
+const FILE_SAVED: Message = Message {
+    message_id: "app-file-saved",
+};
+const FILE_CLOSED: Message = Message {
+    message_id: "app-file-closed",
+};
+const FILE_CLOSED_NEW: Message = Message {
+    message_id: "app-file-closed-new",
+};
+const FILE_KEPT: Message = Message {
+    message_id: "app-file-kept-open",
+};
+
+impl Shell {
+    /// Says that the file of `tab` was opened or saved (`message_id`), naming it.
+    fn announced_file(&mut self, app: &Application, tab: TabId, message_id: &'static str) {
+        let name = app.tab(tab).ok().and_then(crate::application::Tab::title);
+        if let Some(name) = name {
+            self.announce(app, message_id, vec![("name", name.into())]);
+        }
+    }
+
+    /// Says that a document was closed; `title` is its file name, none for a new document.
+    fn announce_closed(&mut self, app: &Application, title: Option<String>) {
+        match title {
+            Some(name) => self.announce(app, FILE_CLOSED.message_id, vec![("name", name.into())]),
+            None => self.announce(app, FILE_CLOSED_NEW.message_id, Vec::new()),
+        }
+    }
+
+    /// Says that closing a document with unsaved changes did not happen: the question was
+    /// answered with Cancel, or no dialog could show it. Nothing is lost, and the line says
+    /// how to go on.
+    pub(crate) fn announce_kept(&mut self, app: &Application) {
+        self.announce(app, FILE_KEPT.message_id, Vec::new());
     }
 }
 
@@ -1778,8 +2002,7 @@ impl Panel for ViewportPanel {
             cursor_digits,
             ..
         } = view;
-        let session =
-            session(Surface::CommandLine).with_last_hook(cx.app.product().headless().last.clone());
+        let session = session(cx.app, Surface::CommandLine);
         let controlled = session_for(cx.tab.is_some_and(|t| cx.app.is_read_only_tab(t)), &session);
         // With a controller the controller's prompt, selection and overlays are the viewport's.
         let frame = match (interaction.as_deref(), cx.tab) {
@@ -1807,14 +2030,22 @@ impl Panel for ViewportPanel {
             }),
             _ => None,
         };
-        let product = frame.as_ref().map(|f| ProductInput {
-            pointer: hook.as_mut().map(|h| h as &mut dyn PointerHandler),
-            overlays: &f.overlays,
-            dynamic: f.dynamic.as_ref().map(|d| DynamicPanel {
-                prompt: &d.prompt,
-                fields: &d.fields,
+        let product = match &frame {
+            Some(f) => Some(ProductInput {
+                pointer: hook.as_mut().map(|h| h as &mut dyn PointerHandler),
+                overlays: &f.overlays,
+                dynamic: f.dynamic.as_ref().map(|d| DynamicPanel {
+                    prompt: &d.prompt,
+                    fields: &d.fields,
+                }),
             }),
-        });
+            // Without a controller the product's overlays (labels) still show.
+            None => (!cx.overlays.is_empty()).then_some(ProductInput {
+                pointer: None,
+                overlays: cx.overlays,
+                dynamic: None,
+            }),
+        };
         widget.blocked = Some(ViewCube::rect(
             ui.available_rect_before_wrap(),
             ui.spacing().interact_size.y * 4.0,
@@ -2205,18 +2436,21 @@ impl ConsoleLine {
     fn error(error: &ConsoleError, localize: &dyn Localize) -> Self {
         let args: Vec<(&str, arc_base::error::Value)> =
             error.args.iter().map(|(k, v)| (*k, v.clone())).collect();
-        Self::Error(arc_ui::resolve(localize, error.message_id, &args))
+        let text = arc_ui::resolve(localize, error.message_id, &args);
+        if error.info {
+            Self::Text(text)
+        } else {
+            Self::Error(text)
+        }
     }
 }
 
-/// Draws the history above the input: monospace lines, errors in the error color, scrolled to
-/// the newest line. `reserve` is the height left for the input rows below.
-fn show_console(ui: &mut Ui, lines: &[ConsoleLine], colors: &Colors, reserve: f32) {
-    let height = (ui.available_height() - reserve).max(0.0);
+/// Draws the history in the space that is left: monospace lines, errors in the error color,
+/// scrolled to the newest line.
+fn show_console(ui: &mut Ui, lines: &[ConsoleLine], colors: &Colors) {
     egui::ScrollArea::vertical()
         .id_salt("arc-command-console")
-        .max_height(height)
-        .auto_shrink([false, true])
+        .auto_shrink([false, false])
         .stick_to_bottom(true)
         .show(ui, |ui| {
             for line in lines {
@@ -2227,6 +2461,19 @@ fn show_console(ui: &mut Ui, lines: &[ConsoleLine], colors: &Colors, reserve: f3
                 ui.add(egui::Label::new(egui::RichText::new(text).monospace().color(color)).wrap());
             }
         });
+}
+
+/// Lays out the command panel: the input pinned at the bottom, whatever the panel's height, and
+/// the history in the space above it, which scrolls.
+fn command_panel(ui: &mut Ui, colors: &Colors, lines: &[ConsoleLine], input: impl FnOnce(&mut Ui)) {
+    egui::Panel::bottom("arc-command-input")
+        .show_separator_line(false)
+        .resizable(false)
+        .frame(egui::Frame::NONE)
+        .show(ui, input);
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE)
+        .show(ui, |ui| show_console(ui, lines, colors));
 }
 
 /// The command-line panel of the active tab.
@@ -2242,8 +2489,7 @@ impl Panel for CommandLinePanel {
             return;
         };
         let registry = &cx.app.product().headless().registry;
-        let session =
-            session(Surface::CommandLine).with_last_hook(cx.app.product().headless().last.clone());
+        let session = session(cx.app, Surface::CommandLine);
         let commands = LineCommands {
             undo: commands::EDIT_UNDO.into(),
             redo: commands::EDIT_REDO.into(),
@@ -2272,26 +2518,30 @@ impl Panel for CommandLinePanel {
             for (_, e) in pending {
                 lines.push(ConsoleLine::error(e, cx.localize));
             }
-            show_console(ui, &lines, cx.colors, ui.spacing().interact_size.y * 3.0);
             view.line_view.command.clone_from(&out.command);
             view.line_view.space_submits = true;
             let completion = arc_command::line::Completion::default();
             let status: LineStatus = out.status;
-            if let Some(action) = view.line_view.show_with(
-                ui,
-                status,
-                out.prompt.as_ref(),
-                false,
-                &completion,
-                &context,
-            ) {
-                cx.actions.push(Action::Line(action));
-            }
-            cx.actions
-                .extend(view.line_view.take_queued().into_iter().map(Action::Line));
-            if let Some(text) = view.option_bar.show(ui, &out.options, cx.localize) {
-                cx.actions.push(Action::Line(LineAction::Submit(text)));
-            }
+            let line_view = &mut view.line_view;
+            let option_bar = &mut view.option_bar;
+            let actions = &mut *cx.actions;
+            let localize = cx.localize;
+            command_panel(ui, cx.colors, &lines, |ui| {
+                if let Some(action) = line_view.show_with(
+                    ui,
+                    status,
+                    out.prompt.as_ref(),
+                    false,
+                    &completion,
+                    &context,
+                ) {
+                    actions.push(Action::Line(action));
+                }
+                actions.extend(line_view.take_queued().into_iter().map(Action::Line));
+                if let Some(text) = option_bar.show(ui, &out.options, localize) {
+                    actions.push(Action::Line(LineAction::Submit(text)));
+                }
+            });
             return;
         }
         let lines: Vec<ConsoleLine> = view
@@ -2299,7 +2549,6 @@ impl Panel for CommandLinePanel {
             .iter()
             .map(|(_, e)| ConsoleLine::error(e, cx.localize))
             .collect();
-        show_console(ui, &lines, cx.colors, ui.spacing().interact_size.y * 3.0);
         let localized = BTreeMap::new();
         let target = Target {
             registry,
@@ -2316,11 +2565,15 @@ impl Panel for CommandLinePanel {
             has_selection: !view.selection.is_empty(),
             commands: &commands,
         };
-        if let Some(action) = view.line_view.show(ui, &view.line, &completion, &context) {
-            cx.actions.push(Action::Line(action));
-        }
-        cx.actions
-            .extend(view.line_view.take_queued().into_iter().map(Action::Line));
+        let line_view = &mut view.line_view;
+        let line = &view.line;
+        let actions = &mut *cx.actions;
+        command_panel(ui, cx.colors, &lines, |ui| {
+            if let Some(action) = line_view.show(ui, line, &completion, &context) {
+                actions.push(Action::Line(action));
+            }
+            actions.extend(line_view.take_queued().into_iter().map(Action::Line));
+        });
     }
 }
 

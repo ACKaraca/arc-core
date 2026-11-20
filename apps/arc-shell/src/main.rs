@@ -241,7 +241,8 @@ fn start() -> Result<(), String> {
         }
     }
     if app.tabs().is_empty() {
-        app.new_document().map_err(with)?;
+        app.new_document_in(localizer.active().language.as_str())
+            .map_err(with)?;
     }
     let gpu = Gpu::new(&GpuSettings::default()).map_err(with)?;
     let title = arc_shell::title(&localizer);

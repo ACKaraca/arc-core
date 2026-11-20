@@ -121,6 +121,8 @@ pub struct QuantityInput {
     scrubbed: Option<Quantity>,
     /// The error of the last rejected text.
     pub error: Option<Error>,
+    /// The readable name of the field, which the error line names; empty for none.
+    pub label: String,
 }
 
 /// The localized text of an error.
@@ -135,6 +137,41 @@ pub fn error_text(error: &Error, localize: &dyn Localize) -> String {
 }
 
 impl QuantityInput {
+    /// What the line under the field says about `error`: for a value outside the range, the
+    /// range and the field's name; for any text that does not read as a value of the field, an
+    /// example of what is accepted, in the decimal separator and the display unit of the field.
+    /// A whole-number error is its message.
+    fn error_line(&self, error: &Error, field: &QuantityField, localize: &dyn Localize) -> String {
+        let named = !self.label.is_empty();
+        let mut args: Vec<(&str, Value)> = error
+            .arguments()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        if named {
+            args.push(("field", Value::Text(self.label.clone())));
+        }
+        let id = match (error.code(), named) {
+            (c, true) if c == codes::QUANTITY_OUT_OF_RANGE.code => {
+                messages::QUANTITY_RANGE_FIELD.message_id
+            }
+            (c, _) if c == codes::QUANTITY_OUT_OF_RANGE.code => error.message_id(),
+            (c, _) if c == codes::QUANTITY_NOT_INTEGER.code => error.message_id(),
+            (_, named) => {
+                // A leading 3.5 shown in the field's own unit and separator is the example.
+                let example = field.display(Quantity::new(3.5, field.dimension));
+                args = vec![("example", Value::Text(example))];
+                if named {
+                    args.push(("field", Value::Text(self.label.clone())));
+                    messages::QUANTITY_EXPECTED_FIELD.message_id
+                } else {
+                    messages::QUANTITY_EXPECTED.message_id
+                }
+            }
+        };
+        resolve(localize, id, &args)
+    }
+
     /// Draws the scrub handle and the field for `value` (`None` shows the mixed-value text) and
     /// returns a new value when the user commits a valid, changed text (Enter or leaving the
     /// field) or ends a scrub. Escape restores the shown value. `label` names the field for
@@ -199,8 +236,10 @@ impl QuantityInput {
             }
             if edit.lost_focus() {
                 // The Enter that commits the field must not also reach the command line.
-                ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
-                if ui.input(|i| i.key_pressed(Key::Escape)) {
+                let entered = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+                // Escape ends the edit and is not also the command line's (which would clear the
+                // selection).
+                if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
                     self.editing = false;
                     self.error = None;
                 } else if self.text == shown && self.error.is_none() {
@@ -212,13 +251,21 @@ impl QuantityInput {
                             self.error = None;
                             result = Some(q);
                         }
-                        Err(error) => self.error = Some(error),
+                        Err(error) => {
+                            self.error = Some(error);
+                            // After Enter the text stays in the field, which keeps the focus
+                            // for the correction: typing goes on here, not to the command line.
+                            if entered {
+                                edit.request_focus();
+                            }
+                        }
                     }
                 }
             }
         });
         if let Some(error) = &self.error {
-            ui.colored_label(ui.visuals().error_fg_color, error_text(error, localize));
+            let text = self.error_line(error, field, localize);
+            ui.colored_label(ui.visuals().error_fg_color, text);
         }
         result
     }

@@ -53,6 +53,13 @@ pub struct Invocation {
     /// The revision the document must be at when the command starts; otherwise the invocation
     /// fails with `cmd.revision.mismatch` without running.
     pub expected_revision: Option<u64>,
+    /// The call makes the document's starting content (what a product's new-document command
+    /// creates). Its transaction commits as bookkeeping (journal kind `merge`): it is recorded, so
+    /// the document saves and recovers with it, but it is no undo step, so undo never removes
+    /// the starting content. Unlike `Context::commit_silently` it may change anything, and is
+    /// accepted only on a document at revision 0, where no step exists whose inverse it could
+    /// break; otherwise the call fails with `cmd.silent_scope`.
+    pub initial: bool,
 }
 
 impl std::fmt::Debug for Invocation {
@@ -79,6 +86,7 @@ impl Invocation {
             cancel: Cancel::new(),
             progress: None,
             expected_revision: None,
+            initial: false,
         }
     }
 }
@@ -383,7 +391,14 @@ fn run_in_txn(
         };
         expect_revision(invocation.expected_revision, &base)?;
         disabled(&spec, &probe)?;
+        let initial = invocation.initial;
+        if initial && base.revision() != 0 {
+            return Err(Error::new(codes::SILENT_SCOPE).with_arg("command", spec.id()));
+        }
         let meta = txn.meta_mut();
+        if initial {
+            meta.kind = arc_doc::TxnKind::Merge;
+        }
         meta.command = canonical;
         meta.label = label;
         meta.group = invocation.group.clone();
@@ -412,7 +427,7 @@ fn run_in_txn(
         let adds_only = txn.ops().iter().all(|op| {
             matches!(op, Op::ModifyForeign { id, before: None, after: Some(_) } if *id > floor)
         });
-        if silent && !adds_only {
+        if silent && !adds_only && !initial {
             return Err(Error::new(codes::SILENT_SCOPE).with_arg("command", spec.id()));
         }
         if let Some(ids) = selection_after {

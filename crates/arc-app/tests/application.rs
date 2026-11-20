@@ -532,3 +532,72 @@ fn settings_editor_lists_searches_sets_and_resets() {
         "app.settings.unknown_key"
     );
 }
+
+/// A product whose new-document command creates one layer, as a drafting product's creates the
+/// first space.
+fn product_with_start() -> Product {
+    let mut commands = arc_shell_sample::registry().unwrap();
+    commands
+        .register(arc_command::CommandSpec::new(
+            "test.start.make",
+            "test-start-make",
+            "test-start-make-description",
+            |ctx, _: arc_app::commands::NoParams| -> arc_base::Result<()> {
+                let id: arc_base::ObjectId = ctx.new_id();
+                ctx.txn()?.create(
+                    arc_shell_sample::LAYER,
+                    id,
+                    arc_doc::Header::default(),
+                    vec![Some(arc_doc::Value::String("Start".into()))],
+                )?;
+                Ok(())
+            },
+        ))
+        .unwrap();
+    let mut builder = ProductBuilder::new("arc-shell", "0.1.0")
+        .with_types(arc_shell_sample::types().unwrap())
+        .with_commands(commands);
+    builder
+        .file_type(FileType {
+            extension: "arc".into(),
+            message_id: "shell-file-arc".into(),
+            open: true,
+            save: true,
+        })
+        .unwrap();
+    builder.new_document_command("test.start.make");
+    builder.build(Arc::new(FixedClock(0)), owner("a")).unwrap()
+}
+
+#[test]
+fn a_new_document_starts_with_its_command_content_which_is_no_undo_step_and_saves() {
+    let dir = TempDir::new("start-content");
+    let config = |seed: u64| {
+        let next = AtomicU64::new(seed << 32);
+        AppConfig {
+            data_dir: dir.join("data"),
+            limits: Limits::DEFAULT,
+            id_generators: Box::new(move || {
+                IdGenerator::seeded(next.fetch_add(1, Ordering::Relaxed))
+            }),
+            recent: RecentFiles::new(20),
+        }
+    };
+    let mut app = Application::new(product_with_start(), config(1));
+    let tab = app.new_document().unwrap();
+    assert_eq!(app.tab(tab).unwrap().document().snapshot().len(), 1);
+    assert!(
+        !app.tab(tab).unwrap().is_dirty(),
+        "the content is the start"
+    );
+    assert!(!app.undo(tab).unwrap(), "nothing to undo: it is no step");
+    assert_eq!(app.tab(tab).unwrap().document().snapshot().len(), 1);
+    // Saving used to fail with `doc.package.last_txn_missing`: the objects had no transaction.
+    let file = dir.join("start.arc");
+    app.save_as(tab, &file).unwrap();
+    assert!(!app.tab(tab).unwrap().is_dirty());
+    app.close(tab, |_| CloseAnswer::Discard).unwrap();
+    let mut again = Application::new(product_with_start(), config(2));
+    let reopened = again.open(&file).unwrap();
+    assert_eq!(again.tab(reopened).unwrap().document().snapshot().len(), 1);
+}

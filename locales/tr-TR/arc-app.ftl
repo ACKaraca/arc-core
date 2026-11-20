@@ -24,7 +24,7 @@ app-locale-catalog-too-large = { $tag } için ileti kataloğu çok büyük.
 app-locale-fallback-missing = Yedek dil { $tag } için katalog eksik.
 app-log-invalid-config = { $field } günlük ayarı geçerli değil.
 app-log-io = Günlük dosyasına yazılamadı.
-app-file-none-chosen = Dosya seçilmedi.
+app-file-none-chosen = Dosya seçilmedi. Bu sistemde dosya penceresi açılmıyorsa komut satırına app.file.open path=<dosya> ya da app.file.save_as path=<dosya> yazın.
 app-macro-write-failed = Makro dosyaya yazılamadı.
 app-recent-not-found = { $path } dosyası son kullanılanlar arasında yok.
 app-thumbnail-too-large = Önizleme resmi izin verilen boyuttan büyük.
@@ -125,3 +125,10 @@ app-recovery-compare-unchanged = Kaydedilmiş dosya, bu değişiklikler yapıld�
 app-recovery-compare-changed = Kaydedilmiş dosya değişti veya yok; değişiklikler yeni bir belge olarak kurtarılır.
 app-recovery-compare-objects = Kaydedilmiş dosyada { $objects } nesne var.
 app-recovery-compare-records = { $records } değişiklik yeniden uygulanır.
+app-file-new-done = Yeni belge oluşturuldu.
+app-file-opened = { $name } açıldı
+app-file-saved = { $name } kaydedildi
+app-file-closed = { $name } kapatıldı
+app-file-closed-new = Belge kapatıldı.
+app-file-kept-open = Belge, kaydedilmemiş değişiklikleri olduğu için kapatılmadı. Önce kaydedin. Soru görüntülenmediyse bu sistemde iletişim penceresi yok: komut satırına app.file.save_as path=<dosya> yazarak kaydedin, sonra kapatın.
+app-tab-close = Bu belgeyi kapat

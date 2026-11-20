@@ -152,6 +152,8 @@ fn config() -> ShellConfig {
         toolbar: Vec::new(),
         status: Vec::new(),
         display: None,
+        overlays: None,
+        initial_view: None,
         seed: 1,
     }
 }
@@ -555,7 +557,10 @@ fn a_registered_controller_owns_the_command_panel_option_bar_and_viewport_clicks
     ctx.enable_accesskit();
     open_new_document(&mut shell, &mut app, &ctx);
 
-    // The controller's prompt, history and option are what the panel and the option bar show.
+    // The controller's prompt, history and option are what the panel and the option bar show. The
+    // panel's input row is pinned to the bottom and measured by the first frame, so the buttons
+    // are where a click lands from the second one on.
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
     let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
     assert!(shows(&run.nodes, "test-prompt"));
     assert!(shows(&run.nodes, "test-history-line"));
@@ -753,4 +758,58 @@ fn closing_reaches_the_controller_once_while_its_document_is_open() {
         [(dirty, true), (clean, true), (quit, true)]
     );
     assert!(app.tabs().is_empty());
+}
+
+fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+    egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }
+}
+
+#[test]
+fn a_key_the_product_binds_runs_once_and_the_command_line_does_not_run_it_again() {
+    let dir = TempDir::new("one-key");
+    let mut app = app(&dir.0, false);
+    let mut config = config();
+    config.bindings = vec![arc_ui::Binding {
+        keys: "Ctrl+Z".into(),
+        command: commands::EDIT_UNDO.into(),
+    }];
+    let mut shell = Shell::new(&app, config, None);
+    let ctx = egui::Context::default();
+    let tab = app.new_document().unwrap();
+    let session = Session::new(Surface::Ui, [Permission::Edit]);
+    for seed in 1..=2 {
+        let mut create = arc_command::Invocation::new(
+            "shell.point.create",
+            serde_json::json!({"position": [0.0, 0.0, 0.0]}),
+        );
+        create.seed = seed;
+        app.invoke(tab, &session, create).unwrap();
+    }
+    assert_eq!(app.tab(tab).unwrap().document().undo_step_list(10).len(), 2);
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    let ctrl = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..egui::Modifiers::NONE
+    };
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        vec![key(egui::Key::Z, ctrl)],
+        Vec::new(),
+        false,
+    );
+    let document = app.tab(tab).unwrap().document();
+    assert_eq!(
+        document.undo_step_list(10).len(),
+        1,
+        "one key press, one step"
+    );
 }

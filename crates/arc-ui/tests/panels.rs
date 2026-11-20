@@ -414,7 +414,7 @@ fn one_property_edit_emits_one_intent_and_invalid_input_none() {
     let pass = step(vec![]);
     assert!(pass.nodes.iter().any(|(_, n)| {
         n.value()
-            .is_some_and(|l| l.contains("solve-expr-dimension-mismatch"))
+            .is_some_and(|l| l.contains("ui-quantity-expected-field"))
     }));
     assert!(intents.borrow().is_empty());
     // A valid expression with units: exactly one intent with the field path and SI value.

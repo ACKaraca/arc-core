@@ -252,6 +252,8 @@ pub fn config(seed: u64) -> Result<ShellConfig> {
         toolbar: Vec::new(),
         status: Vec::new(),
         display: None,
+        overlays: None,
+        initial_view: None,
         seed,
     })
 }

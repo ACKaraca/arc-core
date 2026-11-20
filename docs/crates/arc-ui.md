@@ -141,6 +141,10 @@ return an `Intent` naming a command and never run one. Fallible functions return
   prefix of it (`ui.keys.prefix_conflict`), when its text is malformed (`ui.keys.invalid`) or
   its command is unknown (`ui.command.unknown`). At most 1,024 bindings are kept; the rest are
   reported once with `ui.keys.too_many`.
+- `ChordResolver::take_events` feeds the key presses of a frame and removes the ones a binding
+  took (a completed sequence or a stroke of a pending chord) from the events, so no widget
+  handles a key a binding handled: the binding wins and the key runs once. While a text field
+  has the focus, strokes without Ctrl, Alt or Command are not matched and stay in the events.
 - `ChordResolver` takes strokes with a time from the caller's clock. A completed sequence yields
   its intent; a proper prefix keeps the chord pending; anything else drops the chord and reports
   the stroke unbound. A pending chord expires when the next stroke comes more than 1,500 ms
@@ -321,8 +325,12 @@ Objects are listed as hyphenated identifier texts.
   display unit as the unit of bare numbers and the user's decimal separator, then checks the
   field's range and, for integer fields, that the value is whole. Values show through the
   display format; without one, as the SI number.
-- Invalid text stays in the field with the error's localized message below it; nothing is
-  returned for it and the value is unchanged.
+- Invalid text stays in the field, which keeps the focus after Enter, with the error's localized
+  message below it in the error color; nothing is returned for it and the value is unchanged.
+  Escape ends the edit and does not reach the command line. A text that is no value says what is
+  accepted (an example in the field's display unit and decimal separator, for example `3.5 m`
+  or `3,5 m`); a value outside the range names the range and the field's readable label
+  (`QuantityInput::label`; the property grid sets it from the row).
 - A handle (role spin button) beside the field scrubs the value by the step (one display unit by
   default) per logical point of drag, a tenth with Shift and ten times with Ctrl, clamped to the
   range, and returns the value once when the drag ends; focused, Up and Down step it.
@@ -750,8 +758,9 @@ Module `hooks` (feature `viewport`). A product gives the viewport a `ProductInpu
   most `MAX_POINTS` (4096) points, are drawn: `Line` (rubber band), `Band` (window: solid outline,
   crossing: dashed outline, both over the faint fill; the rectangle is the screen rectangle of the
   two projected corners), `Path` (polyline, optionally dashed), `Snap` (a snap marker by
-  `SnapKind`, drawn by `snap::paint` with the kind's name) and `Label` (text at a point, shown as
-  given; the product localizes it).
+  `SnapKind`, drawn by `snap::paint` with the kind's name) and `Label` (text at a point that
+  faces the screen, shown as given on a plate; the product localizes it; a label that would cover
+  an earlier one steps down until it does not, so the order given is the order of the stack).
 - Highlight: the widget does not highlight objects. The shell passes the selection the product
   supplies to `arc_gpu::Viewport::set_highlight` (see the application's interaction hook).
 - Decisions with the rejected alternatives:

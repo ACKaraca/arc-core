@@ -26,7 +26,7 @@ use winit::window::{Window, WindowId};
 use super::platform::{self, Done, FileDialogs, NativeDialogs, NativeMenu};
 use super::prompts::UNTITLED;
 use super::{FrameInput, Request, Shell, ShellConfig, UserFiles, WindowModel, prefs};
-use crate::application::{Application, TabId};
+use crate::application::{Application, Closed, TabId};
 use crate::automation::{self, Automation};
 use crate::codes;
 use crate::locale::Localizer;
@@ -568,6 +568,11 @@ impl Handler {
             localize: Some(&self.localizer),
         };
         let dialogs: &mut dyn FileDialogs = &mut dialogs;
+        // The name of a document that is about to close is read first.
+        let closing = match request {
+            Request::AskClose(tab) => self.app.tab(*tab).ok().and_then(|t| t.title()),
+            _ => None,
+        };
         match platform::carry_out(&mut self.shell, &mut self.app, dialogs, request) {
             Ok(Done::Quit) => {
                 self.save_placement(event_loop, None);
@@ -576,14 +581,32 @@ impl Handler {
                 event_loop.exit();
             }
             // The dialog library cannot tell a cancel from a missing dialog service, so both read
-            // as a neutral line instead of silence.
+            // as a neutral line that also says how to go on without a dialog, instead of silence.
             Ok(Done::Cancelled)
                 if matches!(request, Request::OpenDialog | Request::SaveDialog(_)) =>
             {
                 let error = Error::new(crate::error::codes::NO_FILE_CHOSEN);
                 self.shell.report(&self.app, error);
             }
-            Ok(_) => {}
+            Ok(Done::Opened(tab)) => {
+                self.shell
+                    .announced_file(&self.app, tab, super::FILE_OPENED.message_id)
+            }
+            Ok(Done::Saved) => {
+                if let Request::SaveDialog(tab) = request {
+                    self.shell
+                        .announced_file(&self.app, *tab, super::FILE_SAVED.message_id);
+                }
+            }
+            // The question was answered with Cancel, or no dialog could show it: the document
+            // stays open and the history says so, so the key or button never seems dead.
+            Ok(Done::Closed(Closed::Cancelled)) => self.shell.announce_kept(&self.app),
+            Ok(Done::Closed(Closed::Closed)) => {
+                if matches!(request, Request::AskClose(_)) {
+                    self.shell.announce_closed(&self.app, closing);
+                }
+            }
+            Ok(Done::Cancelled) => {}
             Err(e) => self.shell.report(&self.app, e),
         }
         self.shell.save_recent(&self.app);

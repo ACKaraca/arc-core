@@ -260,6 +260,25 @@ fn keyword_buttons(
         .inner
 }
 
+/// Ctrl+Z, Ctrl+Y and Ctrl+Shift+Z. They also work while a widget that is no text field has the
+/// focus (the viewport after a click): only a text field keeps them for its own text.
+fn undo_redo_keys(ui: &Ui, status: LineStatus, context: &LineContext<'_>) -> Option<LineAction> {
+    let (redo_shift, undo_key, redo_key) = ui.input_mut(|i| {
+        (
+            i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z),
+            i.consume_key(Modifiers::COMMAND, Key::Z),
+            i.consume_key(Modifiers::COMMAND, Key::Y),
+        )
+    });
+    if redo_shift || redo_key {
+        Some(redo(status, context.commands))
+    } else if undo_key {
+        Some(undo(status, context.commands))
+    } else {
+        None
+    }
+}
+
 impl CommandLineView {
     /// Draws the prompt, its keyword options, the input field and the completion candidates of
     /// `completion` (computed by the caller for [`CommandLineView::input`]), and handles keys:
@@ -304,24 +323,20 @@ impl CommandLineView {
         if in_field {
             action = self.apply_typing_in_order(ui, id, status, completion);
         }
+        if ours || !ui.ctx().text_edit_focused() {
+            action = undo_redo_keys(ui, status, context).or(action);
+        }
         if ours {
             let keys = ui.input_mut(|i| {
                 (
-                    i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z),
-                    i.consume_key(Modifiers::COMMAND, Key::Z),
-                    i.consume_key(Modifiers::COMMAND, Key::Y),
                     i.consume_key(Modifiers::NONE, Key::Escape),
                     i.consume_key(Modifiers::NONE, Key::Enter),
                     in_field && i.consume_key(Modifiers::NONE, Key::ArrowUp),
                     in_field && i.consume_key(Modifiers::NONE, Key::ArrowDown),
                 )
             });
-            let (redo_shift, undo_key, redo_key, esc, ret, up, down) = keys;
-            if redo_shift || redo_key {
-                action = Some(redo(status, context.commands));
-            } else if undo_key {
-                action = Some(undo(status, context.commands));
-            } else if esc {
+            let (esc, ret, up, down) = keys;
+            if esc {
                 action = escape(status, &self.input, context.commands);
                 if action == Some(LineAction::ClearInput) {
                     self.input.clear();

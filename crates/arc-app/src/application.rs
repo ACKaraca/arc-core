@@ -15,7 +15,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_base::error::Value;
-use arc_base::{DocumentId, Error, IdGenerator, Limits, Result, SessionId};
+use arc_base::id::Identifier;
+use arc_base::{DocumentId, Error, IdGenerator, Limits, ObjectId, Result, SessionId};
 use arc_command::{Clock, Invocation, Invoker, Outcome, Permission, Roots, Session, Surface};
 use arc_doc::package::recovery::{self, BaseFile, Orphan, RecoverOptions, RecoveryJournal};
 use arc_doc::package::{Access, Metadata, Mode, Package, ReadOnlyCause};
@@ -476,29 +477,35 @@ impl Application {
         Ok(self.tab(id)?.document.redo_many(count).wait()?.value)
     }
 
-    /// The snapshot a new document starts from: empty, or what the product's new-document
-    /// command made on a draft document.
-    fn starting_snapshot(&mut self) -> Result<arc_doc::Snapshot> {
-        let empty = arc_doc::Snapshot::empty(Arc::clone(&self.product.headless().types));
+    /// Runs the product's new-document command on `document` as its starting content.
+    fn start_content(&mut self, document: &Document, language: &str) -> Result<()> {
         let Some(command) = self.product.new_document_command().map(str::to_owned) else {
-            return Ok(empty);
+            return Ok(());
         };
-        let session = self.ids.generate();
-        let config = self.document_config(session);
+        // Each new document gets identifiers of its own.
+        let raw: ObjectId = self.ids.generate();
+        let seed = u64::try_from(raw.as_u128() & u128::from(u64::MAX)).unwrap_or(0);
         let core = self.product.headless();
-        let draft = Document::open(empty, Arc::clone(&core.evaluators), config)?;
-        let by = Session::new(
+        let mut by = Session::new(
             Surface::Ui,
             [Permission::Read, Permission::Edit, Permission::FileRead],
         );
-        let made = Invoker::new(&core.registry).invoke(
-            &draft,
-            &by,
-            Invocation::new(command, serde_json::Value::Object(serde_json::Map::new())),
-        );
-        let snapshot = draft.snapshot();
-        draft.close();
-        made.map(|_| snapshot)
+        by.clock = Arc::clone(&core.clock);
+        // The command names the document's content in the interface language.
+        if !language.is_empty() {
+            by.set_setting(
+                crate::commands::LANGUAGE_SETTING,
+                serde_json::json!(language),
+            )?;
+        }
+        let invocation = Invocation {
+            initial: true,
+            seed,
+            ..Invocation::new(command, serde_json::json!({}))
+        };
+        Invoker::new(&core.registry)
+            .invoke(document, &by, invocation)
+            .map(drop)
     }
 
     fn document_config(&mut self, session: SessionId) -> DocumentConfig {
@@ -555,14 +562,33 @@ impl Application {
     /// # Errors
     /// `doc.executor.stopped` when the document cannot start.
     pub fn new_document(&mut self) -> Result<TabId> {
+        self.new_document_in("")
+    }
+
+    /// [`Application::new_document`] for the interface language `language` (a tag such as `tr`;
+    /// empty for the product's default), which the new-document command reads from the session
+    /// setting [`crate::commands::LANGUAGE_SETTING`] to name the document's content.
+    ///
+    /// The product's new-document command, when it has one, runs on the new document as its
+    /// starting content ([`arc_command::Invocation::initial`]): the transaction is recorded, so
+    /// the document saves and recovers with it, but it is no undo step, and the document is
+    /// clean until the user edits it.
+    ///
+    /// # Errors
+    /// `doc.executor.stopped` when the document cannot start, and the errors of the command.
+    pub fn new_document_in(&mut self, language: &str) -> Result<TabId> {
         let session = self.ids.generate();
         let config = self.document_config(session);
-        let start = self.starting_snapshot()?;
         let core = self.product.headless();
-        let document = Document::open(start, Arc::clone(&core.evaluators), config)?;
+        let empty = arc_doc::Snapshot::empty(Arc::clone(&core.types));
+        let document = Document::open(empty, Arc::clone(&core.evaluators), config)?;
         let mut banners = Vec::new();
         let doc_id = self.ids.generate();
         let journal = self.protect(&document, doc_id, session, None, &mut banners);
+        if let Err(error) = self.start_content(&document, language) {
+            document.close();
+            return Err(error);
+        }
         let revision = document.snapshot().revision();
         Ok(self.push(Tab {
             id: TabId(0),

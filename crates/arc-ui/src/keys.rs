@@ -313,6 +313,39 @@ impl ChordResolver {
         self.pending.clear();
     }
 
+    /// Feeds the key presses of `events` and returns the intents of completed bindings, and
+    /// removes from `events` every press a binding took (a completed binding or a stroke of a
+    /// pending chord), so that no widget handles a key a binding already handled: when a
+    /// binding and a widget's own handling name the same key, the binding wins and the key runs
+    /// once. While `typing` (a text field has the focus) strokes without Ctrl, Alt or Command
+    /// belong to the field: they are neither matched nor removed.
+    pub fn take_events(
+        &mut self,
+        keymap: &Keymap,
+        events: &mut Vec<egui::Event>,
+        now_millis: u64,
+        typing: bool,
+    ) -> Vec<Intent> {
+        let mut intents = Vec::new();
+        events.retain(|event| {
+            let Some(combo) = KeyCombo::from_event(event) else {
+                return true;
+            };
+            if typing && !(combo.ctrl || combo.alt || combo.meta) {
+                return true;
+            }
+            match self.press(keymap, combo, now_millis) {
+                KeyOutcome::Invoke(intent) => {
+                    intents.push(intent);
+                    false
+                }
+                KeyOutcome::Pending => false,
+                KeyOutcome::Unbound => true,
+            }
+        });
+        intents
+    }
+
     /// Feeds every key press of `events` and returns the intents of completed bindings.
     pub fn handle_events(
         &mut self,

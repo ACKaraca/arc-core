@@ -615,7 +615,14 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
   open for editing gets a recovery journal (the package's `document_id`, or a generated one, and
   a fresh session identifier for each journal) whose failure to start is a banner, not an error.
   The path moves to the front of the recent files. On an error nothing is opened.
-- `new_document()` opens an empty document without a file, protected by a journal without base.
+- `new_document()` opens a document without a file, protected by a journal without base. When
+  the product named a new-document command (`ProductBuilder::new_document_command`), the command
+  runs on the new document as its starting content with `Invocation::initial`: the transaction is
+  recorded in the journal (so the document saves, and recovers with its content) but commits as
+  bookkeeping, journal kind `merge`, so it is no undo step and the tab starts clean. It is accepted
+  only on a document at revision 0 (`cmd.silent_scope` otherwise). `new_document_in(language)`
+  also gives the command the language tag as the session setting `app.language`, so the
+  starting content is named in the interface language.
 - `save(tab)` saves in place with `Package::save_document`, passing the recovery journal, so the
   journal holds nothing to replay afterwards. A document never saved fails with
   `app.document.no_path`, a read-only package with `app.document.read_only`. A
@@ -851,8 +858,40 @@ needs no window:
 - Each frame drops input events with non-finite positions, deltas or factors, or with
   magnitudes above 10^6 points (egui sums wheel deltas, which overflows from finite input),
   resolves the key bindings and takes the native menu's intents, draws the egui menu bar (unless a native menu
-  bar shows the menu) and the dock with the product's panels, then carries out what the panels
+  bar shows the menu), the toolbar, the document tab strip and the dock with the product's panels, then carries out what the panels
   asked for, in order.
+- A key is handled once. The keymap takes the key presses its bindings match (a completed
+  binding or a stroke of a pending chord) out of the frame's events before any widget sees them,
+  so a binding wins over a widget's own handling of the same key: a product that binds Ctrl+Z
+  and a command line that also handles Ctrl+Z run one undo. While a text field has the focus,
+  strokes without Ctrl, Alt or Command are the field's and no binding takes them (a product can
+  bind Delete without a rename deleting objects). The command line handles Ctrl+Z, Ctrl+Y and
+  Ctrl+Shift+Z whenever no text field has the focus, so a product needs no binding for them.
+- The tab strip below the toolbar has one tab per open document: its name (the file name, or
+  "Untitled document", numbered when several), a `*` while it has unsaved changes, a click to
+  activate it and a close button (`ShellAction::ActivateTab`, `ShellAction::CloseTab`; closing asks
+  about unsaved changes like `app.file.close`). The window title carries the same mark.
+- The command panel keeps the input row at the bottom of the panel whatever its height, and the
+  history above it scrolls, newest line at the bottom. The history shows the latest result: an
+  action that does something removes the result lines of earlier ones, so an error that a later
+  edit made stale does not stay. File actions add a line (`Saved <name>`, `Opened <name>`, a new
+  document, a closed document); a dialog that returned no file says `No file was chosen` and how
+  to continue by typing a path; a close or quit that is not carried out because the question was
+  answered with Cancel, or could not be shown, says so.
+- `ShellConfig::initial_view` (`InitialView { toward_camera }`) sets the direction a new tab's
+  viewport looks from (model coordinates, z up; straight down without one); the camera is framed
+  on the scene once it is known. `ShellConfig::overlays` (`OverlayProbe`) is called each frame
+  with the application, the active tab and the language tag, and returns
+  `arc_ui::ProductOverlay`s the viewport paints over the scene in model coordinates, such as
+  `Label`s that face the screen; labels that would cover each other are stepped down in the
+  order given. `PanelContext::overlays` hands them to the viewport panel.
+- The selection a command sets with `Context::set_selection` (`Outcome::selection`) becomes the
+  tab's selection after a command-line step, so a command can select what it created or a
+  product can map a click (`ViewportPanel::commands`, a tree's `TreeCommands`) to the objects it
+  stands for by naming its own selection command.
+- The sessions the shell runs commands in use the product's clock, so journal records carry the
+  real time, and hold the session setting `app.language` (`commands::LANGUAGE_SETTING`), the
+  language tag in effect.
 - Panels are product `Entry`s whose factory returns `Box<dyn Panel>` (`shell::panel`); a
   factory of another type is reported with `app.product.invalid_id` and left out. The standard
   panels are `ViewportPanel`, `PropertiesPanel` (with the product's edit command),
@@ -868,8 +907,8 @@ needs no window:
   `Action::Setting`s; the shell carries them out with `settings_editor::set` and `reset` in the
   user scope, writing the user settings file.
 - `LogPanel` (CORE-APP-015) shows the records of the platform's `LogRing`, newest at the bottom.
-- Every tab has a view: selection, camera (initially looking down the z axis at the origin,
-  20 m high, orthographic), the viewport widget, an `arc_gpu::Viewport` created on the first
+- Every tab has a view: selection, camera (initially at `ShellConfig::initial_view`, else looking
+  down the z axis at the origin; orthographic, framed on the scene), the viewport widget, an `arc_gpu::Viewport` created on the first
   frame that shows the tab when the shell has a GPU, an extraction driver with two workers, a
   subscription to the document's events, and its command line, property grid, tree and
   diagnostics states. Committed events submit their changes to extraction, and finished results
