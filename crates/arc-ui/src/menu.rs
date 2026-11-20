@@ -338,6 +338,21 @@ pub fn show_menu_bar(ui: &mut Ui, entries: &[Entry]) -> Option<Intent> {
         .inner
 }
 
+/// Draws a menu bar of `entries` followed by what `extra` adds to the bar (further menus the
+/// host builds itself), and returns the clicked command and what `extra` returned.
+pub fn show_menu_bar_with<R>(
+    ui: &mut Ui,
+    entries: &[Entry],
+    extra: impl FnOnce(&mut Ui) -> R,
+) -> (Option<Intent>, R) {
+    egui::MenuBar::new()
+        .ui(ui, |ui| {
+            let intent = show_entries(ui, entries);
+            (intent, extra(ui))
+        })
+        .inner
+}
+
 /// Draws a toolbar row and returns the clicked command. Buttons with an icon in `icons` show
 /// the icon recolored with the text color token and expose the label as their accessible name
 /// and tooltip; the others show the label.

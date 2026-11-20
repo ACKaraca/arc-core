@@ -753,6 +753,8 @@ impl DockArea {
         content: &mut dyn FnMut(&mut Ui, &str),
     ) {
         let rect = ui.available_rect_before_wrap();
+        // The root `Ui` of a pass paints no background, so the dock fills its own area.
+        ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
         let mut changes = Vec::new();
         let root = layout.root.clone();
         let mut path = Vec::new();
@@ -899,6 +901,16 @@ impl DockArea {
     ) {
         let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
         child.set_clip_rect(rect.intersect(ui.clip_rect()));
+        // Each group paints its own background and a visible border.
+        child
+            .painter()
+            .rect_filled(rect, 0.0, child.visuals().panel_fill);
+        child.painter().rect_stroke(
+            rect.shrink(0.5),
+            0.0,
+            child.visuals().widgets.noninteractive.bg_stroke,
+            egui::StrokeKind::Inside,
+        );
         let bar = self.direction.row(&mut child, false, |ui| {
             for (index, panel) in tabs.iter().enumerate() {
                 let name = title(panel);
@@ -932,6 +944,7 @@ impl DockArea {
         );
         if let Some(panel) = tabs.get(active) {
             let mut inner = child.new_child(UiBuilder::new().max_rect(body.shrink(2.0)));
+            inner.set_clip_rect(body.shrink(1.0).intersect(child.clip_rect()));
             content(&mut inner, panel);
         }
         let Some(anchor) = tabs.first() else {

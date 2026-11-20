@@ -49,6 +49,9 @@ pub const SHELL_CATALOGS: &[(&str, &str)] = &[
             include_str!("../../../locales/en-US/arc-gpu.ftl"),
             include_str!("../../../locales/en-US/arc-base.ftl"),
             include_str!("../../../locales/en-US/arc-shell.ftl"),
+            include_str!("../../../locales/en-US/arc-solve.ftl"),
+            include_str!("../../../locales/en-US/arc-geom.ftl"),
+            include_str!("../../../locales/en-US/arc-draft.ftl"),
         ),
     ),
     (
@@ -61,6 +64,9 @@ pub const SHELL_CATALOGS: &[(&str, &str)] = &[
             include_str!("../../../locales/tr-TR/arc-gpu.ftl"),
             include_str!("../../../locales/tr-TR/arc-base.ftl"),
             include_str!("../../../locales/tr-TR/arc-shell.ftl"),
+            include_str!("../../../locales/tr-TR/arc-solve.ftl"),
+            include_str!("../../../locales/tr-TR/arc-geom.ftl"),
+            include_str!("../../../locales/tr-TR/arc-draft.ftl"),
         ),
     ),
 ];

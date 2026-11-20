@@ -205,6 +205,15 @@ pub struct CommandLineView {
     pub language: String,
     /// Overrides the direction the language gives.
     pub direction: Option<Direction>,
+    /// The name of the running command, shown before the prompt.
+    pub command: Option<String>,
+    /// Space ends the typed input like Enter, unless the prompt takes free text or the input
+    /// already holds a space. A host whose command syntax has spaces (inline arguments) leaves
+    /// it off, which is the default.
+    pub space_submits: bool,
+    /// Moves keyboard focus to the input field in the next pass; cleared by [`Self::show_with`].
+    /// A host sets it when the user types outside any text field.
+    pub take_focus: bool,
     highlighted: Option<usize>,
     recall: Option<(String, usize)>,
 }
@@ -217,6 +226,30 @@ pub(crate) fn prompt_text(prompt: &Prompt, localize: &dyn Localize) -> String {
         .map(|(k, v)| (k.as_str(), Value::Text(v.clone())))
         .collect();
     resolve(localize, &prompt.message.id, &args)
+}
+
+/// The keyword options of `prompt` as buttons; the answer of a click.
+fn keyword_buttons(
+    ui: &mut Ui,
+    direction: Direction,
+    prompt: &Prompt,
+    localize: &dyn Localize,
+) -> Option<LineAction> {
+    direction
+        .row(ui, true, |ui| {
+            let mut action = None;
+            for option in prompt.keyword_options() {
+                let mut text = resolve(localize, &option.label, &[]);
+                if let Some(c) = option.shortcut {
+                    text = format!("{text} ({c})");
+                }
+                if ui.button(text).clicked() {
+                    action = Some(LineAction::Submit(option.id.clone()));
+                }
+            }
+            action
+        })
+        .inner
 }
 
 impl CommandLineView {
@@ -252,6 +285,9 @@ impl CommandLineView {
         context: &LineContext<'_>,
     ) -> Option<LineAction> {
         let id = ui.make_persistent_id("arc-command-line");
+        if std::mem::take(&mut self.take_focus) {
+            ui.memory_mut(|m| m.request_focus(id));
+        }
         let focused = ui.memory(|m| m.focused());
         let in_field = focused == Some(id);
         let ours = in_field || focused.is_none();
@@ -301,44 +337,35 @@ impl CommandLineView {
             || messages::COMMAND_LINE.text(context.localize),
             |p| prompt_text(p, context.localize),
         );
-        let direction = self.layout_direction();
-        let label = if direction.is_right_to_left() {
-            direction.row(ui, false, |ui| ui.label(label_text)).inner
-        } else {
-            ui.label(label_text)
+        let label_text = match (&self.command, prompt) {
+            (Some(name), Some(_)) => format!("{name}  {label_text}"),
+            _ => label_text,
         };
+        let direction = self.layout_direction();
         if let Some(prompt) = prompt.filter(|_| keywords) {
-            direction.row(ui, true, |ui| {
-                for option in prompt.keyword_options() {
-                    let mut text = resolve(context.localize, &option.label, &[]);
-                    if let Some(c) = option.shortcut {
-                        text = format!("{text} ({c})");
-                    }
-                    if ui.button(text).clicked() {
-                        action = Some(LineAction::Submit(option.id.clone()));
-                    }
-                }
-            });
+            action = keyword_buttons(ui, direction, prompt, context.localize).or(action);
         }
-        let field = ui
-            .add(
-                TextEdit::singleline(&mut self.input)
-                    .id(id)
-                    .desired_width(f32::INFINITY)
-                    .align(direction.start_align())
-                    // Escape and the vertical arrows belong to the command line, not to
-                    // focus movement.
-                    .event_filter(EventFilter {
-                        tab: false,
-                        horizontal_arrows: true,
-                        vertical_arrows: true,
-                        escape: true,
-                    }),
-            )
-            .labelled_by(label.id);
+        // Space ends the input like Enter, except where the prompt takes free text or the
+        // typed text already holds a space.
+        let space_submits = self.space_submits
+            && !prompt.is_some_and(|p| {
+                p.accepts
+                    .iter()
+                    .any(|a| matches!(a, arc_command::prompt::Accept::Text { .. }))
+            });
+        let field = self.input_row(ui, id, &label_text, direction);
         if field.changed() {
             self.highlighted = None;
             self.recall = None;
+            let typed = self.input.trim_end_matches(' ');
+            if space_submits
+                && self.input.ends_with(' ')
+                && !typed.trim_start().contains(' ')
+                && action.is_none()
+            {
+                self.input = typed.trim_start().to_owned();
+                action = self.submit(status);
+            }
         }
         if !self.input.is_empty() {
             for (index, candidate) in completion.candidates.iter().take(shown).enumerate() {
@@ -351,6 +378,36 @@ impl CommandLineView {
             }
         }
         action
+    }
+
+    /// The row of the label and the input field.
+    fn input_row(
+        &mut self,
+        ui: &mut Ui,
+        id: egui::Id,
+        label: &str,
+        direction: Direction,
+    ) -> egui::Response {
+        direction
+            .row(ui, false, |ui| {
+                let label = ui.label(egui::RichText::new(label).strong());
+                ui.add(
+                    TextEdit::singleline(&mut self.input)
+                        .id(id)
+                        .desired_width(f32::INFINITY)
+                        .align(direction.start_align())
+                        // Escape and the vertical arrows belong to the command line, not to
+                        // focus movement.
+                        .event_filter(EventFilter {
+                            tab: false,
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                            escape: true,
+                        }),
+                )
+                .labelled_by(label.id)
+            })
+            .inner
     }
 
     /// The layout direction: [`CommandLineView::direction`] when set, else the direction of

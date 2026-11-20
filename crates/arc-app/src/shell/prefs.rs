@@ -28,7 +28,7 @@ pub fn register_settings(builder: &mut ProductBuilder) -> Result<()> {
     builder.setting(Setting {
         key: THEME,
         ty: SettingType::Choice(&["light", "dark", "high_contrast_light", "high_contrast_dark"]),
-        default: SettingValue::Text("light".into()),
+        default: SettingValue::Text("dark".into()),
         scope: Scope::User,
         message_id: "app-setting-ui-theme",
     })?;

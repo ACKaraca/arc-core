@@ -944,6 +944,21 @@ fn encode_lines(item: &LineItem, limits: &SceneLimits, slot: u32) -> Result<Enco
     Ok(out)
 }
 
+/// The box of an item in scene coordinates: its bounds moved by its origin, or the box of its
+/// sphere when it has no finite bounds.
+fn item_box(item: &ItemEntry) -> (Point3, Point3) {
+    let [lo, hi] = item.bounds;
+    if lo.iter().chain(hi.iter()).all(|v| v.is_finite()) && (0..3).all(|k| lo[k] <= hi[k]) {
+        (
+            item.origin + Vector3::new(lo[0], lo[1], lo[2]),
+            item.origin + Vector3::new(hi[0], hi[1], hi[2]),
+        )
+    } else {
+        let r = item.radius;
+        (item.origin.map(|v| v - r), item.origin.map(|v| v + r))
+    }
+}
+
 impl Scene {
     /// Creates an empty scene on `gpu`.
     ///
@@ -1866,31 +1881,29 @@ impl Scene {
     }
 
     /// A sphere `(center, radius)` enclosing the items of `objects`, or of every item for
-    /// `None`; `None` when there is no such item. Each item is bounded by a sphere around its
-    /// origin; the result is centered on the box of those spheres.
+    /// `None`; `None` when there is no such item. The sphere is centered on the box of the
+    /// items' bounds, and its radius reaches the box corners (so a drawing that is wide and flat
+    /// is framed about its middle). An item without finite bounds counts as a sphere around its
+    /// origin.
     #[must_use]
     pub fn bounding_sphere(&self, objects: Option<&[ObjectId]>) -> Option<(Point3, f64)> {
-        let spheres: Vec<(Point3, f64)> = match objects {
-            None => self.items().map(|i| (i.origin, i.radius)).collect(),
+        let boxes: Vec<(Point3, Point3)> = match objects {
+            None => self.items().map(item_box).collect(),
             Some(ids) => ids
                 .iter()
                 .flat_map(|id| self.object_items(id))
-                .map(|i| (i.origin, i.radius))
+                .map(item_box)
                 .collect(),
         };
-        let (first, rest) = spheres.split_first()?;
-        let corner = |(c, r): &(Point3, f64), sign: f64| c.map(|v| v + sign * r);
-        let (mut low, mut high) = (corner(first, -1.0), corner(first, 1.0));
-        for s in rest {
-            low = low.inf(&corner(s, -1.0));
-            high = high.sup(&corner(s, 1.0));
+        let (first, rest) = boxes.split_first()?;
+        let (mut low, mut high) = *first;
+        for (l, h) in rest {
+            low = low.inf(l);
+            high = high.sup(h);
         }
         // Halving first keeps the midpoint finite for any finite corners.
         let center = Point3::from(low.coords * 0.5 + high.coords * 0.5);
-        let radius = spheres
-            .iter()
-            .map(|(c, r)| length(&(c - center)) + r)
-            .fold(0.0, f64::max);
+        let radius = length(&(high - center));
         Some((center, radius))
     }
 

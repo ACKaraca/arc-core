@@ -117,3 +117,8 @@ app-window-surface-failed = The graphics device cannot draw into the application
 
 app-menu-file = File
 app-menu-edit = Edit
+app-menu-view = View
+app-menu-view-zoom-extents = Zoom to Extents
+app-menu-view-reset-layout = Reset Layout
+app-status-cursor = X { $x }   Y { $y }
+app-status-no-cursor = X -   Y -

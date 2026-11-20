@@ -149,6 +149,9 @@ fn config() -> ShellConfig {
         menu: shell::default_menu().unwrap(),
         bindings: Vec::new(),
         appearance: arc_ui::Appearance::default(),
+        toolbar: Vec::new(),
+        status: Vec::new(),
+        display: None,
         seed: 1,
     }
 }

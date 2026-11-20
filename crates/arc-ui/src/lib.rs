@@ -102,10 +102,10 @@ pub use text::{Direction, Fallback, Localize, Message, fold_case, matches_filter
 pub use theme::{Appearance, Colors, Density, Metrics, Theme, ThemeId, UiScale};
 pub use tree::{TreeCommands, TreeItem, TreeSource, TreeView};
 #[cfg(feature = "viewport")]
-pub use view_cube::{CubeTarget, ViewCube, ViewCubeInput, ViewIntent};
+pub use view_cube::{CubeOutput, CubeTarget, ViewCube, ViewCubeInput, ViewIntent, orbit_by_drag};
 #[cfg(feature = "viewport")]
 pub use viewport::{
-    DynamicPanel, ProductInput, ScenePicker, ViewLink, ViewportInput, ViewportOutput,
-    ViewportWidget,
+    DynamicPanel, ProductInput, ScenePicker, ViewLink, ViewportDisplay, ViewportInput,
+    ViewportOutput, ViewportWidget, paint_crosshair,
 };
 pub use workspace::{NamedToolbar, ToolSet, Workspace, Workspaces};

@@ -204,6 +204,58 @@ impl ViewIntent {
     }
 }
 
+/// Radians of orbit per point of cube drag.
+pub const DRAG_RADIANS_PER_POINT: f64 = 0.01;
+/// A view whose direction is this close to the Z axis (as a cosine) is a plan view.
+const PLAN_COSINE: f64 = 0.999_9;
+
+/// The camera after the cube is dragged by `drag` points (x right, y down): an orbit about the
+/// view target, dragging right gives `yaw = -dx·k` and down `pitch = -dy·k` as in the viewport's
+/// navigation. A plan view keeps its up direction (+Y) and only tilts toward the front
+/// (dragging up), so the drawing does not turn over. Once the view
+/// has left the plan the up direction is +Z, as for every non-plan target of the cube, so a
+/// horizontal drag turns the model about the vertical axis. A plan view has no horizontal turn.
+///
+/// # Errors
+///
+/// The errors of `arc_gpu::navigation::orbit` and of the view frame.
+pub fn orbit_by_drag(
+    frame: &ViewFrame,
+    drag: [f32; 2],
+    tolerance: &arc_base::Tolerance,
+) -> Result<ViewFrame> {
+    let (yaw, pitch) = (
+        -f64::from(drag[0]) * DRAG_RADIANS_PER_POINT,
+        -f64::from(drag[1]) * DRAG_RADIANS_PER_POINT,
+    );
+    let rehint = |up: Vector3| {
+        ViewFrame::new(
+            frame.eye(),
+            frame.target(),
+            up,
+            frame.projection(),
+            frame.near(),
+            frame.far(),
+        )
+    };
+    let looking_down = frame.forward().z < 0.0;
+    let (base, yaw, pitch) = if frame.forward().z.abs() >= PLAN_COSINE {
+        // Dragging up (pitch > 0) lowers the eye on the -Y side of a top view, as dragging up
+        // does in any view; dragging down leaves the plan where it is. A bottom view mirrors it.
+        let lean = if looking_down {
+            pitch.max(0.0)
+        } else {
+            pitch.min(0.0)
+        };
+        (rehint(Vector3::y())?, 0.0, lean)
+    } else if frame.up_hint().z.abs() < 0.5 {
+        (rehint(Vector3::z())?, yaw, pitch)
+    } else {
+        (*frame, yaw, pitch)
+    };
+    arc_gpu::navigation::orbit(&base, &base.target(), yaw, pitch, tolerance)
+}
+
 /// The part under a point and the face it lies on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hit {
@@ -316,11 +368,36 @@ pub struct ViewCubeInput<'a> {
     pub size: f32,
 }
 
+/// What one frame of the view cube produced.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct CubeOutput {
+    /// The request of a click or keyboard activation.
+    pub intent: Option<ViewIntent>,
+    /// The movement of the pointer in points, while the cube is dragged: x right, y down.
+    pub drag: Option<[f32; 2]>,
+    /// The pointer is over the cube.
+    pub over: bool,
+}
+
 /// The view cube widget.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ViewCube;
 
 impl ViewCube {
+    /// The square the cube occupies in `viewport` when its edge is `size` points: in the top
+    /// right corner, shrunk to fit a small viewport.
+    #[must_use]
+    pub fn rect(viewport: Rect, size: f32) -> Rect {
+        let size = size
+            .min(viewport.width() - MARGIN)
+            .min(viewport.height() - MARGIN)
+            .max(0.0);
+        Rect::from_min_size(
+            Pos2::new(viewport.right() - MARGIN - size, viewport.top() + MARGIN),
+            egui::vec2(size, size),
+        )
+    }
+
     /// Draws the cube in the top right corner of `viewport` and returns the intent of a click or
     /// keyboard activation. The cube shrinks to fit a small viewport. Call it after the viewport
     /// widget so it is drawn over it.
@@ -330,15 +407,19 @@ impl ViewCube {
         viewport: Rect,
         input: &ViewCubeInput<'_>,
     ) -> Option<ViewIntent> {
-        let size = input
-            .size
-            .min(viewport.width() - MARGIN)
-            .min(viewport.height() - MARGIN)
-            .max(0.0);
-        let rect = Rect::from_min_size(
-            Pos2::new(viewport.right() - MARGIN - size, viewport.top() + MARGIN),
-            egui::vec2(size, size),
-        );
+        self.show_over_dragged(ui, viewport, input).intent
+    }
+
+    /// Like [`ViewCube::show_over`], and also reports a drag of the cube as the pointer's
+    /// movement in points, which the caller turns into an orbit, and whether the pointer is over
+    /// the cube.
+    pub fn show_over_dragged(
+        &mut self,
+        ui: &mut Ui,
+        viewport: Rect,
+        input: &ViewCubeInput<'_>,
+    ) -> CubeOutput {
+        let rect = Self::rect(viewport, input.size);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
         self.show(&mut child, rect, input)
     }
@@ -347,7 +428,7 @@ impl ViewCube {
         clippy::too_many_lines,
         reason = "drawing and interaction of one small widget"
     )]
-    fn show(&mut self, ui: &mut Ui, rect: Rect, input: &ViewCubeInput<'_>) -> Option<ViewIntent> {
+    fn show(&mut self, ui: &mut Ui, rect: Rect, input: &ViewCubeInput<'_>) -> CubeOutput {
         let c = input.colors;
         // The cube's silhouette is at most sqrt(3) half-widths from its center.
         let scale = f64::from(rect.width().min(rect.height())) / 2.0 / 3.0_f64.sqrt();
@@ -429,12 +510,17 @@ impl ViewCube {
         }
 
         let mut intent = None;
+        let mut drag = None;
         for target in CubeTarget::all() {
             let response = ui.interact(
                 rect,
                 ui.make_persistent_id(("arc-view-cube", target.0)),
-                Sense::click(),
+                Sense::click_and_drag(),
             );
+            if response.dragged() {
+                let d = response.drag_delta();
+                drag = Some([d.x, d.y]);
+            }
             let label = target.name(input.localize);
             response
                 .widget_info(|| WidgetInfo::labeled(egui::accesskit::Role::Button, true, &label));
@@ -456,7 +542,15 @@ impl ViewCube {
                 intent = chosen.map(ViewIntent::new);
             }
         }
-        intent
+        let over = ui
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|p| rect.contains(p));
+        if drag.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if over {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        CubeOutput { intent, drag, over }
     }
 }
 
@@ -480,6 +574,34 @@ mod tests {
 
     fn top() -> ViewFrame {
         looking_from([0.0, 0.0, 5.0], Vector3::y())
+    }
+
+    #[test]
+    fn dragging_the_cube_tilts_a_plan_view_and_then_turns_it_about_the_vertical() {
+        let tolerance = arc_base::Tolerance::DEFAULT;
+        let plan = top();
+        // Dragging up (negative y) tilts the plan view; the camera leaves the plan.
+        let tilted = orbit_by_drag(&plan, [0.0, -40.0], &tolerance).unwrap();
+        // Dragging down from a plan view changes nothing.
+        let down = orbit_by_drag(&plan, [0.0, 40.0], &tolerance).unwrap();
+        assert_eq!(down.eye(), plan.eye());
+        // Dragging down again after a tilt brings the eye back toward the top.
+        let back = orbit_by_drag(&tilted, [0.0, 40.0], &tolerance).unwrap();
+        assert!(back.eye().z > tilted.eye().z);
+        assert!(tilted.forward().z.abs() < 0.999, "{:?}", tilted.forward());
+        assert_eq!(tilted.target(), plan.target());
+        let distance = |f: &ViewFrame| (f.eye() - f.target()).norm();
+        assert!((distance(&tilted) - distance(&plan)).abs() < 1e-9);
+        // A horizontal drag now turns about the vertical axis: the eye keeps its height.
+        let turned = orbit_by_drag(&tilted, [30.0, 0.0], &tolerance).unwrap();
+        assert!((turned.eye().z - tilted.eye().z).abs() < 1e-9);
+        assert!(
+            (turned.eye().x - tilted.eye().x).abs() > 1e-6
+                || (turned.eye().y - tilted.eye().y).abs() > 1e-6
+        );
+        // A plan view has no horizontal turn.
+        let still = orbit_by_drag(&plan, [30.0, 0.0], &tolerance).unwrap();
+        assert_eq!(still.eye(), plan.eye());
     }
 
     #[test]

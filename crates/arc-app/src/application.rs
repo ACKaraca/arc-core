@@ -476,6 +476,31 @@ impl Application {
         Ok(self.tab(id)?.document.redo_many(count).wait()?.value)
     }
 
+    /// The snapshot a new document starts from: empty, or what the product's new-document
+    /// command made on a draft document.
+    fn starting_snapshot(&mut self) -> Result<arc_doc::Snapshot> {
+        let empty = arc_doc::Snapshot::empty(Arc::clone(&self.product.headless().types));
+        let Some(command) = self.product.new_document_command().map(str::to_owned) else {
+            return Ok(empty);
+        };
+        let session = self.ids.generate();
+        let config = self.document_config(session);
+        let core = self.product.headless();
+        let draft = Document::open(empty, Arc::clone(&core.evaluators), config)?;
+        let by = Session::new(
+            Surface::Ui,
+            [Permission::Read, Permission::Edit, Permission::FileRead],
+        );
+        let made = Invoker::new(&core.registry).invoke(
+            &draft,
+            &by,
+            Invocation::new(command, serde_json::Value::Object(serde_json::Map::new())),
+        );
+        let snapshot = draft.snapshot();
+        draft.close();
+        made.map(|_| snapshot)
+    }
+
     fn document_config(&mut self, session: SessionId) -> DocumentConfig {
         DocumentConfig {
             ids: (self.id_generators)(),
@@ -532,12 +557,9 @@ impl Application {
     pub fn new_document(&mut self) -> Result<TabId> {
         let session = self.ids.generate();
         let config = self.document_config(session);
+        let start = self.starting_snapshot()?;
         let core = self.product.headless();
-        let document = Document::open(
-            arc_doc::Snapshot::empty(Arc::clone(&core.types)),
-            Arc::clone(&core.evaluators),
-            config,
-        )?;
+        let document = Document::open(start, Arc::clone(&core.evaluators), config)?;
         let mut banners = Vec::new();
         let doc_id = self.ids.generate();
         let journal = self.protect(&document, doc_id, session, None, &mut banners);

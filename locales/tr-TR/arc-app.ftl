@@ -93,6 +93,11 @@ app-window-surface-failed = Grafik aygıtı uygulama penceresine çizim yapamıy
 
 app-menu-file = Dosya
 app-menu-edit = Düzenle
+app-menu-view = Görünüm
+app-menu-view-zoom-extents = Tümünü Sığdır
+app-menu-view-reset-layout = Yerleşimi Sıfırla
+app-status-cursor = X { $x }   Y { $y }
+app-status-no-cursor = X -   Y -
 
 app-banner-take-over = Kilidi devral
 

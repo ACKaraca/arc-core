@@ -248,9 +248,20 @@ pub fn config(seed: u64) -> Result<ShellConfig> {
             binding("Ctrl+W", arc_app::commands::FILE_CLOSE),
             binding("Ctrl+Q", arc_app::commands::APP_QUIT),
         ],
-        appearance: arc_ui::Appearance::default(),
+        appearance: appearance(),
+        toolbar: Vec::new(),
+        status: Vec::new(),
+        display: None,
         seed,
     })
+}
+
+/// The reference shell's appearance: dark, as drafting and modeling applications use.
+fn appearance() -> arc_ui::Appearance {
+    arc_ui::Appearance {
+        theme: arc_ui::ThemeId::Dark,
+        ..arc_ui::Appearance::default()
+    }
 }
 
 /// The message catalogs the shell formats with, for the requested languages.

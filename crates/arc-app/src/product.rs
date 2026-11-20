@@ -175,6 +175,7 @@ pub struct Product {
     extractors: Vec<Extractor>,
     view_renderer: Option<Arc<dyn ViewRenderer>>,
     openers: BTreeMap<String, Arc<NativeFormat>>,
+    new_document: Option<String>,
     #[cfg(feature = "window")]
     interaction: Option<crate::shell::interaction::Factory>,
 }
@@ -190,6 +191,13 @@ impl std::fmt::Debug for Product {
 }
 
 impl Product {
+    /// The command that fills a new, empty document, when the product registered one (see
+    /// [`ProductBuilder::new_document_command`]).
+    #[must_use]
+    pub fn new_document_command(&self) -> Option<&str> {
+        self.new_document.as_deref()
+    }
+
     /// The renderer of `view.render` and of the automation socket, when the product has one.
     #[must_use]
     pub fn view_renderer(&self) -> Option<Arc<dyn ViewRenderer>> {
@@ -275,6 +283,7 @@ pub struct ProductBuilder {
     last: Option<LastHook>,
     openers: BTreeMap<String, Arc<NativeFormat>>,
     package_extension: Option<String>,
+    new_document: Option<String>,
 }
 
 impl std::fmt::Debug for ProductBuilder {
@@ -327,6 +336,7 @@ impl ProductBuilder {
             last: None,
             openers: BTreeMap::new(),
             package_extension: None,
+            new_document: None,
         }
     }
 
@@ -450,6 +460,14 @@ impl ProductBuilder {
         self.interaction = Some(Arc::new(factory));
     }
 
+    /// Names the command that fills a new document before the user sees it (a drawing needs its
+    /// first space, for instance). The application runs it with the permissions `read`, `edit`
+    /// and `file_read` on a draft of the document and opens the result: what the command made is
+    /// the document's starting point, not a step the user can undo.
+    pub fn new_document_command(&mut self, command: impl Into<String>) {
+        self.new_document = Some(command.into());
+    }
+
     /// Gives the keyword `last` its meaning in every session the product serves: `hook` returns
     /// the objects the product names as the last one, live or not. Without it, `last` fails with
     /// `cmd.selection.unavailable`.
@@ -515,6 +533,7 @@ impl ProductBuilder {
             #[cfg(feature = "window")]
             interaction: self.interaction,
             openers: self.openers,
+            new_document: self.new_document,
         })
     }
 }

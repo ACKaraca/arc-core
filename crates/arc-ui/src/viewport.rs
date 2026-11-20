@@ -180,11 +180,51 @@ pub struct ViewportOutput {
     pub projection: ViewProjection,
     /// What the user did in the dynamic input panel this frame.
     pub dynamic: Vec<DynamicEvent>,
+    /// The model point under the pointer, when it is over the viewport.
+    pub pointer_model: Option<Point3>,
 }
+
+/// What the viewport draws under the scene and over it: the grid, the axes with the origin
+/// marker, and the crosshair that replaces the pointer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewportDisplay {
+    /// Draws the grid on the plane `z = 0`.
+    pub grid: bool,
+    /// Draws the X and Y axes and the origin marker.
+    pub axes: bool,
+    /// The grid spacing in model units; `None` picks a spacing that keeps lines about
+    /// [`MIN_GRID_PIXELS`] points apart.
+    pub spacing: Option<f64>,
+}
+
+impl Default for ViewportDisplay {
+    fn default() -> Self {
+        Self {
+            grid: true,
+            axes: true,
+            spacing: None,
+        }
+    }
+}
+
+/// The least distance between neighboring grid lines of the automatic spacing, in points.
+pub const MIN_GRID_PIXELS: f64 = 14.0;
+/// The most grid lines drawn per direction.
+const MAX_GRID_LINES: i64 = 400;
+/// Every this many grid lines is a stronger one.
+const MAJOR_EVERY: i64 = 5;
 
 /// The state of one viewport widget.
 #[derive(Debug, Clone, Default)]
 pub struct ViewportWidget {
+    /// What is drawn besides the scene.
+    pub display: ViewportDisplay,
+    /// A rectangle (the view cube) whose pointer presses and wheel turns belong to another
+    /// widget: the viewport ignores them there.
+    pub blocked: Option<Rect>,
+    /// The widget identifier of the viewport as of its last frame, so a host can tell whether
+    /// the viewport holds keyboard focus.
+    pub id: Option<egui::Id>,
     gestures: Gestures,
     link: Option<ViewLink>,
     seen: u64,
@@ -222,8 +262,10 @@ impl ViewportWidget {
     /// A consumed event is not handled by the widget. A press the product consumes belongs to the
     /// product until its release. A primary click the product consumes ends the widget's press
     /// without an answer.
+    #[allow(clippy::too_many_lines, reason = "one frame of the widget")]
     pub fn show(&mut self, ui: &mut Ui, input: ViewportInput<'_>) -> ViewportOutput {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        self.id = Some(response.id);
         let ppp = f64::from(ui.ctx().pixels_per_point());
         let scale = ppp * f64::from(input.scale.factor());
         let size = pixel_size(rect, ppp);
@@ -245,6 +287,7 @@ impl ViewportWidget {
             ui,
             &response,
             rect,
+            self.blocked,
             ppp,
             input.time,
             self.gestures.is_pressed(),
@@ -286,6 +329,7 @@ impl ViewportWidget {
             errors: Vec::new(),
             projection: ViewProjection::new(frame, size[0], size[1]),
             dynamic: Vec::new(),
+            pointer_model: None,
         };
         let moved_here = self.route(&mut view, &events, &mut handler, modifiers, scale, &mut out);
         if moved_here && let Some(link) = &self.link {
@@ -297,7 +341,18 @@ impl ViewportWidget {
             out.overlay = band_overlay(&band, input.colors, scale);
         }
 
-        paint_image(ui, rect, input.colors, input.texture);
+        out.pointer_model = pointer_model(ui, &response, rect, ppp, &out.projection);
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, input.colors.viewport);
+        paint_grid(
+            &painter,
+            rect,
+            ppp,
+            &out.projection,
+            input.colors,
+            &self.display,
+        );
+        paint_texture(&painter, rect, input.texture);
         if !overlays.is_empty() {
             paint_overlays(
                 ui,
@@ -442,10 +497,173 @@ fn is_click(
     }
 }
 
-/// Paints the background of the viewport and its image, when a texture is registered.
-fn paint_image(ui: &Ui, rect: Rect, colors: &Colors, texture: Option<TextureId>) {
+/// The model point under the pointer, when it is over the viewport `rect`.
+fn pointer_model(
+    ui: &Ui,
+    response: &Response,
+    rect: Rect,
+    ppp: f64,
+    projection: &ViewProjection,
+) -> Option<Point3> {
+    let p = ui
+        .input(|i| i.pointer.latest_pos())
+        .filter(|p| rect.contains(*p) && response.contains_pointer())?;
+    projection.pixel_to_model([
+        f64::from(p.x - rect.min.x) * ppp,
+        f64::from(p.y - rect.min.y) * ppp,
+    ])
+}
+
+/// The spacing of the automatic grid: 1, 2 or 5 times a power of ten of model units, the least
+/// one that is at least [`MIN_GRID_PIXELS`] points wide at `points_per_unit`.
+#[must_use]
+pub fn grid_spacing(points_per_unit: f64) -> Option<f64> {
+    if !points_per_unit.is_finite() || points_per_unit <= 0.0 {
+        return None;
+    }
+    let least = MIN_GRID_PIXELS / points_per_unit;
+    let decade = 10f64.powf(least.log10().floor());
+    [1.0, 2.0, 5.0, 10.0]
+        .iter()
+        .map(|m| m * decade)
+        .find(|s| *s >= least)
+}
+
+/// A color with its alpha set.
+fn faint(c: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
+}
+
+/// Paints the grid on the plane `z = 0`, the axes and the origin marker under the scene.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "grid indices are bounded by MAX_GRID_LINES"
+)]
+fn paint_grid(
+    painter: &egui::Painter,
+    rect: Rect,
+    ppp: f64,
+    projection: &ViewProjection,
+    colors: &Colors,
+    display: &ViewportDisplay,
+) {
+    if !display.grid && !display.axes {
+        return;
+    }
+    let [w, h] = projection.size().map(f64::from);
+    let corners = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]].map(|c| projection.pixel_to_model(c));
+    let (mut low, mut high) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+    for c in corners {
+        let Some(c) = c else {
+            return;
+        };
+        low = [low[0].min(c.x), low[1].min(c.y)];
+        high = [high[0].max(c.x), high[1].max(c.y)];
+    }
+    let Some(ppu) = projection.pixels_per_unit().map(|p| p / ppp) else {
+        return;
+    };
+    let to_screen = |x: f64, y: f64| {
+        projection.model_to_pixel(&Point3::new(x, y, 0.0)).map(|p| {
+            Pos2::new(
+                rect.min.x + (p[0] / ppp) as f32,
+                rect.min.y + (p[1] / ppp) as f32,
+            )
+        })
+    };
+    let line = |a: (f64, f64), b: (f64, f64), stroke: egui::Stroke| {
+        if let (Some(a), Some(b)) = (to_screen(a.0, a.1), to_screen(b.0, b.1)) {
+            painter.line_segment([a, b], stroke);
+        }
+    };
+    if display.grid
+        && let Some(step) = display
+            .spacing
+            .filter(|s| *s > 0.0 && *s * ppu >= MIN_GRID_PIXELS / 4.0)
+            .or_else(|| grid_spacing(ppu))
+    {
+        let minor = egui::Stroke::new(1.0, faint(colors.text_muted, 38));
+        let major = egui::Stroke::new(1.0, faint(colors.text_muted, 80));
+        for axis in 0..2 {
+            let first = (low[axis] / step).floor() as i64;
+            let last = (high[axis] / step).ceil() as i64;
+            if last.saturating_sub(first) > MAX_GRID_LINES {
+                continue;
+            }
+            for n in first..=last {
+                let at = n as f64 * step;
+                let stroke = if n % MAJOR_EVERY == 0 { major } else { minor };
+                if axis == 0 {
+                    line((at, low[1]), (at, high[1]), stroke);
+                } else {
+                    line((low[0], at), (high[0], at), stroke);
+                }
+            }
+        }
+    }
+    if display.axes {
+        line(
+            (low[0], 0.0),
+            (high[0], 0.0),
+            egui::Stroke::new(1.5, faint(colors.error, 210)),
+        );
+        line(
+            (0.0, low[1]),
+            (0.0, high[1]),
+            egui::Stroke::new(1.5, faint(colors.success, 210)),
+        );
+        if let Some(origin) = to_screen(0.0, 0.0) {
+            painter.circle_stroke(origin, 6.0, egui::Stroke::new(1.5, colors.text));
+            painter.circle_filled(origin, 1.5, colors.text);
+        }
+    }
+}
+
+/// Paints the crosshair at `pointer`: two lines across `rect` with a small gap at the pointer,
+/// in the text color. The pointer itself is hidden while it is over the viewport.
+pub fn paint_crosshair(ui: &Ui, rect: Rect, colors: &Colors, pointer: Pos2) {
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, colors.viewport);
+    let stroke = egui::Stroke::new(1.0, faint(colors.text, 170));
+    let gap = 5.0;
+    painter.line_segment(
+        [
+            Pos2::new(rect.left(), pointer.y),
+            Pos2::new(pointer.x - gap, pointer.y),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(pointer.x + gap, pointer.y),
+            Pos2::new(rect.right(), pointer.y),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(pointer.x, rect.top()),
+            Pos2::new(pointer.x, pointer.y - gap),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(pointer.x, pointer.y + gap),
+            Pos2::new(pointer.x, rect.bottom()),
+        ],
+        stroke,
+    );
+    painter.rect_stroke(
+        Rect::from_center_size(pointer, egui::vec2(2.0 * gap, 2.0 * gap)),
+        0.0,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+}
+
+/// Paints the image of the registered texture over the background, when there is one.
+fn paint_texture(painter: &egui::Painter, rect: Rect, texture: Option<TextureId>) {
     if let Some(texture) = texture {
         painter.image(
             texture,
@@ -482,10 +700,12 @@ fn collect_events(
     ui: &Ui,
     response: &Response,
     rect: Rect,
+    blocked: Option<Rect>,
     ppp: f64,
     time: f64,
     pressed: bool,
 ) -> Vec<ViewEvent> {
+    let free = |p: Pos2| rect.contains(p) && !blocked.is_some_and(|b| b.contains(p));
     let to_px = |p: Pos2| {
         [
             f64::from(p.x - rect.min.x) * ppp,
@@ -508,7 +728,7 @@ fn collect_events(
                     button,
                     pressed: true,
                     modifiers,
-                } if rect.contains(pos) => Some(ViewEvent::Pressed {
+                } if free(pos) => Some(ViewEvent::Pressed {
                     at: to_px(pos),
                     button,
                     modifiers,
@@ -524,7 +744,7 @@ fn collect_events(
                     button,
                 }),
                 Event::PointerGone => Some(ViewEvent::Left),
-                Event::MouseWheel { unit, delta, .. } if hovered => {
+                Event::MouseWheel { unit, delta, .. } if hovered && pointer.is_none_or(free) => {
                     let lines = f64::from(delta.y);
                     let points = match unit {
                         MouseWheelUnit::Point => lines,
@@ -663,6 +883,21 @@ pub fn band_overlay(band: &Band, colors: &Colors, scale: f64) -> Overlay {
 mod tests {
     use super::*;
     use crate::theme::ThemeId;
+
+    #[test]
+    fn grid_spacing_steps_in_one_two_five_and_keeps_lines_apart() {
+        for ppu in [0.001, 0.37, 1.0, 4.5, 80.0, 1.0e6] {
+            let step = grid_spacing(ppu).unwrap();
+            assert!(step * ppu >= MIN_GRID_PIXELS * 0.999, "{ppu} {step}");
+            assert!(step * ppu < MIN_GRID_PIXELS * 2.6, "{ppu} {step}");
+            let decade = 10f64.powf(step.log10().floor());
+            let mantissa = (step / decade).round();
+            assert!([1.0, 2.0, 5.0].contains(&mantissa), "{step}");
+        }
+        assert_eq!(grid_spacing(1.0), Some(20.0));
+        assert_eq!(grid_spacing(0.0), None);
+        assert_eq!(grid_spacing(f64::NAN), None);
+    }
 
     #[test]
     fn window_and_crossing_bands_differ_in_outline_and_color() {

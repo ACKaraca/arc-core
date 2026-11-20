@@ -19,12 +19,14 @@
 //! files after a change. Each floating dock tree is a secondary window: [`Shell::windows`]
 //! models them and [`Shell::frame_window`] composes one.
 
+pub mod chrome;
 pub mod event_loop;
 pub mod interaction;
 pub mod platform;
 pub mod prefs;
 pub mod prompts;
 
+pub use chrome::{ChoiceState, DisplayProbe, ShellAction, StatusToggle, ToolItem};
 pub use interaction::{DynamicOutput, Interaction, InteractionContext, InteractionOutput};
 
 use std::collections::BTreeMap;
@@ -123,6 +125,8 @@ pub enum Action {
     Answer(PromptInput),
     /// An error to show.
     Error(Error),
+    /// A shell action: panel management or the camera.
+    Shell(ShellAction),
     /// Set a setting in the user scope (`Some`) or remove it from there (`None`); the shell
     /// writes the user settings file and applies the appearance settings.
     Setting {
@@ -224,6 +228,12 @@ pub struct ShellConfig {
     pub bindings: Vec<Binding>,
     /// Theme, density and scale.
     pub appearance: Appearance,
+    /// The toolbar strip below the menu bar; empty draws none.
+    pub toolbar: Vec<ToolItem>,
+    /// The toggles of the status bar, after the cursor coordinates.
+    pub status: Vec<StatusToggle>,
+    /// What each viewport draws besides the scene; `None` draws the grid and the axes.
+    pub display: Option<DisplayProbe>,
     /// The seed of invocation seeds: each command-line step uses the next value of a sequence
     /// from it, so identifiers that commands generate differ between steps. Pass entropy (the
     /// clock and the process), or a fixed value for a reproducible session.
@@ -295,6 +305,39 @@ pub struct View {
     diagnostics: DiagnosticsPanel,
     /// Extraction results applied to the viewport, for [`Shell::busy`].
     pending: bool,
+    /// The model point under the pointer in drawing units, for the status bar.
+    cursor: Option<[f64; 2]>,
+    /// The revision of the document when the view was made; while the document is still at it
+    /// the view frames the drawing once its scene is known.
+    frame_revision: u64,
+    /// The camera has been framed on the drawing (or the user moved it).
+    framed: bool,
+    /// Frame the camera on the drawing in the next viewport pass.
+    zoom_extents: bool,
+    /// Errors of the command panel's actions with the history length they came after, shown in
+    /// the history.
+    console: Vec<(usize, ConsoleError)>,
+}
+
+/// An error kept for the command panel's history: its message and arguments, which the panel
+/// formats in the language in effect when it draws.
+#[derive(Debug, Clone)]
+struct ConsoleError {
+    message_id: &'static str,
+    args: Vec<(&'static str, arc_base::error::Value)>,
+}
+
+impl ConsoleError {
+    fn of(error: &Error) -> Self {
+        Self {
+            message_id: error.message_id(),
+            args: error
+                .arguments()
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect(),
+        }
+    }
 }
 
 impl std::fmt::Debug for View {
@@ -332,13 +375,13 @@ impl View {
     }
 }
 
-/// The initial camera: looking down the z axis at the origin, 20 m high.
+/// The initial camera: looking down the z axis at the origin, 100 units high.
 fn initial_camera() -> Result<ViewFrame> {
     ViewFrame::new(
         Point3::new(0.0, 0.0, 100.0),
         Point3::origin(),
         Vector3::y(),
-        Projection::Orthographic { height: 20.0 },
+        Projection::Orthographic { height: 100.0 },
         0.1,
         10_000.0,
     )
@@ -371,6 +414,10 @@ pub struct Shell {
     log_ring: Option<LogRing>,
     settings_changed: bool,
     recorder: Option<Recorder>,
+    default_layout: DockLayout,
+    toolbar: Vec<ToolItem>,
+    status: Vec<StatusToggle>,
+    display: Option<DisplayProbe>,
 }
 
 /// The user's files the shell reads at start and writes on change.
@@ -484,7 +531,7 @@ impl Shell {
         errors.extend(problems);
         Self {
             panels,
-            layout: config.layout,
+            layout: config.layout.clone(),
             menu: config.menu,
             keymap,
             chords: ChordResolver::default(),
@@ -505,6 +552,10 @@ impl Shell {
             log_ring: None,
             settings_changed: false,
             recorder: None,
+            default_layout: config.layout,
+            toolbar: config.toolbar,
+            status: config.status,
+            display: config.display,
         }
     }
 
@@ -687,6 +738,22 @@ impl Shell {
         self.errors.push(error);
     }
 
+    /// Records the error of an action on the active tab: in [`Shell::errors`] and in the command
+    /// panel's history, after the lines that exist now.
+    fn report(&mut self, app: &Application, error: Error) {
+        if let Some(view) = app.active().and_then(|t| self.views.get_mut(&t)) {
+            let at = view
+                .interaction
+                .as_ref()
+                .map_or(0, |i| i.output().history.len());
+            if view.console.len() >= MAX_ERRORS {
+                view.console.remove(0);
+            }
+            view.console.push((at, ConsoleError::of(&error)));
+        }
+        self.error(error);
+    }
+
     /// Creates the view of every open tab that has none and drops the views of closed tabs.
     fn sync_views(&mut self, app: &Application) {
         self.views
@@ -730,6 +797,11 @@ impl Shell {
             tree: TreeView::default(),
             diagnostics: DiagnosticsPanel::default(),
             pending: false,
+            cursor: None,
+            frame_revision: document.snapshot().revision(),
+            framed: false,
+            zoom_extents: false,
+            console: Vec::new(),
         })
     }
 
@@ -834,6 +906,10 @@ impl Shell {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one frame: the chrome, the dock and the panels"
+    )]
     fn compose(
         &mut self,
         app: &mut Application,
@@ -870,6 +946,48 @@ impl Shell {
             .collect();
         let (floating_at, mut own) = self.own_layout(window);
         let mut choices: Vec<Choice> = Vec::new();
+        let main = window.is_none();
+        let panel_titles: Vec<(String, String)> = self
+            .panels
+            .iter()
+            .map(|(id, _, _)| {
+                (
+                    id.clone(),
+                    titles.get(id).cloned().unwrap_or_else(|| id.clone()),
+                )
+            })
+            .collect();
+        let rows = chrome::panel_rows(&self.layout, &panel_titles);
+        let tools = chrome::tool_views(&self.toolbar, app, active, input.localize);
+        let toggles = chrome::toggle_views(&self.status, app, active, input.localize);
+        let cursor_text = chrome::cursor_text(
+            active
+                .and_then(|t| self.views.get(&t))
+                .and_then(|v| v.cursor),
+            input.localize,
+        );
+        if let (Some(probe), Some(tab)) = (&self.display, active) {
+            let display = (probe.0)(app, tab);
+            if let Some(view) = self.views.get_mut(&tab) {
+                view.widget.display = display;
+            }
+        }
+        // Typing outside a text field starts the command line.
+        if main && let Some(view) = active.and_then(|t| self.views.get_mut(&t)) {
+            let focused = ctx.memory(|m| m.focused());
+            let other = focused.is_some() && focused != view.widget.id;
+            if chrome::wants_command_line(&input.raw.events, ctx.text_edit_focused(), other) {
+                view.line_view.take_focus = true;
+            }
+        }
+        let chrome_frame = chrome::ChromeFrame {
+            entries: &entries,
+            rows: &rows,
+            tools: &tools,
+            toggles: &toggles,
+            cursor: &cursor_text,
+            localize: input.localize,
+        };
         let full = {
             let app_ref: &Application = app;
             let panels = &mut self.panels;
@@ -881,23 +999,18 @@ impl Shell {
             let notifications = &mut self.notifications;
             let recovery = &self.recovery;
             let log_ring = self.log_ring.as_ref();
-            let main = window.is_none();
             let mut view = active.and_then(|t| self.views.get_mut(&t));
             if let (Some(v), Some(gpu)) = (view.as_deref_mut(), gpu.as_ref())
                 && v.viewport.is_none()
             {
-                match Viewport::new(gpu, viewport_config(v.camera)) {
+                match Viewport::new(gpu, viewport_config(v.camera, &colors)) {
                     Ok(vp) => v.viewport = Some(vp),
                     Err(e) => actions.push(Action::Error(e)),
                 }
             }
             ctx.run_ui(input.raw, |ui| {
-                if !entries.is_empty() {
-                    egui::Panel::top("arc-app-menu").show(ui, |ui| {
-                        if let Some(intent) = arc_ui::menu::show_menu_bar(ui, &entries) {
-                            actions.push(Action::Intent(intent));
-                        }
-                    });
+                if main {
+                    chrome::show_frame(ui, &chrome_frame, &mut actions);
                 }
                 if main {
                     if notifications.active().next().is_some() {
@@ -939,6 +1052,10 @@ impl Shell {
         if let (Some(at), Some(own)) = (floating_at, own) {
             self.write_back(at, &own);
         }
+        // A focus request nobody took (no command line is shown) does not wait for later frames.
+        if let Some(view) = active.and_then(|t| self.views.get_mut(&t)) {
+            view.line_view.take_focus = false;
+        }
         self.finish(app, full, choices, actions)
     }
 
@@ -967,6 +1084,8 @@ impl Shell {
                 self.error(e);
             }
         }
+        // What an action changed shows in the next frame, which nothing else would ask for.
+        let acted = !actions.is_empty();
         for action in actions {
             self.act(app, action, &mut requests);
         }
@@ -975,7 +1094,7 @@ impl Shell {
         FrameOutput {
             full,
             requests,
-            busy: self.busy(),
+            busy: self.busy() || acted,
             settings_changed: std::mem::take(&mut self.settings_changed),
         }
     }
@@ -1052,6 +1171,7 @@ impl Shell {
     fn act(&mut self, app: &mut Application, action: Action, requests: &mut Vec<Request>) {
         let result = match action {
             Action::Error(e) => Err(e),
+            Action::Shell(action) => self.shell_action(app, action),
             Action::Setting { key, value } => self.set_setting(app, &key, value),
             Action::Intent(intent) => self.dispatch(app, intent, requests),
             Action::Answer(input) => self.line_step(app, LineStep::Answer(input), requests),
@@ -1073,7 +1193,27 @@ impl Shell {
             },
         };
         if let Err(e) = result {
-            self.error(e);
+            self.report(app, e);
+        }
+    }
+
+    /// Carries out a panel or camera action of the View menu or the toolbar.
+    fn shell_action(&mut self, app: &Application, action: ShellAction) -> Result<()> {
+        match action {
+            ShellAction::ShowPanel(panel) => {
+                chrome::show_panel(&mut self.layout, &self.default_layout, &panel)
+            }
+            ShellAction::HidePanel(panel) => self.layout.close(&panel),
+            ShellAction::ResetLayout => {
+                self.layout = self.default_layout.clone();
+                Ok(())
+            }
+            ShellAction::ZoomExtents => {
+                if let Some(view) = app.active().and_then(|t| self.views.get_mut(&t)) {
+                    view.zoom_extents = true;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1229,7 +1369,7 @@ impl Shell {
         self.views.insert(tab, view);
         let submitted = result?;
         if let Submitted::Rejected { error, .. } = submitted {
-            self.error(error);
+            self.report(app, error);
         }
         for (command, params) in deferred {
             let params = match params {
@@ -1415,10 +1555,60 @@ fn factory_error(id: &str) -> Error {
     Error::new(crate::codes::PRODUCT_INVALID_ID).with_arg("id", id)
 }
 
-fn viewport_config(camera: ViewFrame) -> ViewportConfig {
+fn viewport_config(camera: ViewFrame, colors: &Colors) -> ViewportConfig {
     let mut config = ViewportConfig::new(64, 64, camera);
     config.readback = false;
+    config.settings = render_settings(colors);
     config
+}
+
+/// The render settings of a viewport: a transparent background, so the widget's grid and axes
+/// show through under the drawing.
+fn render_settings(_colors: &Colors) -> arc_gpu::RenderSettings {
+    arc_gpu::RenderSettings {
+        // The egui renderer samples the frame as premultiplied: transparent black adds nothing.
+        background: arc_base::Color::from_srgb8([0, 0, 0, 0]),
+        ..arc_gpu::RenderSettings::DEFAULT
+    }
+}
+
+/// Frames the camera on everything in the viewport's scene: after a document opens (until its
+/// first change) and on a zoom-extents request. A scene that is not known yet waits for a later
+/// pass; an empty one ends an explicit request.
+fn frame_drawing(
+    viewport: Option<&Viewport>,
+    size: [u32; 2],
+    camera: &mut ViewFrame,
+    framed: &mut bool,
+    requested: &mut bool,
+    actions: &mut Vec<Action>,
+) {
+    let Some(viewport) = viewport else {
+        return;
+    };
+    let bounds = ViewportPicker(Some(viewport)).bounds();
+    let Some((center, radius)) = bounds else {
+        *requested = false;
+        return;
+    };
+    let aspect = f64::from(size[0].max(1)) / f64::from(size[1].max(1));
+    match arc_gpu::navigation::zoom_to_sphere(
+        camera,
+        &center,
+        (radius * 1.1).max(1.0),
+        aspect,
+        &Tolerance::DEFAULT,
+    ) {
+        Ok(next) => {
+            *camera = next;
+            *framed = true;
+            *requested = false;
+        }
+        Err(e) => {
+            *requested = false;
+            actions.push(Action::Error(e));
+        }
+    }
 }
 
 /// Picking through a tab's [`Viewport`] on its render thread.
@@ -1471,6 +1661,7 @@ impl ViewportPanel {
 }
 
 impl Panel for ViewportPanel {
+    #[allow(clippy::too_many_lines, reason = "one frame of the viewport")]
     fn show(&mut self, ui: &mut Ui, cx: &mut PanelContext<'_>) {
         let Some(view) = cx.view.as_deref_mut() else {
             return;
@@ -1483,6 +1674,10 @@ impl Panel for ViewportPanel {
             selection,
             hover,
             interaction,
+            cursor,
+            frame_revision,
+            framed,
+            zoom_extents,
             ..
         } = view;
         let session =
@@ -1507,7 +1702,11 @@ impl Panel for ViewportPanel {
         let selected = highlight.len();
         let mut picker = ViewportPicker(viewport.as_ref());
         let mut hook = match (interaction.as_deref_mut(), icx.as_ref()) {
-            (Some(controller), Some(cx)) => Some(Hook { controller, cx }),
+            (Some(controller), Some(cx)) => Some(Hook {
+                controller,
+                cx,
+                used: false,
+            }),
             _ => None,
         };
         let product = frame.as_ref().map(|f| ProductInput {
@@ -1518,6 +1717,10 @@ impl Panel for ViewportPanel {
                 fields: &d.fields,
             }),
         });
+        widget.blocked = Some(ViewCube::rect(
+            ui.available_rect_before_wrap(),
+            ui.spacing().interact_size.y * 4.0,
+        ));
         let out = widget.show(
             ui,
             ViewportInput {
@@ -1536,6 +1739,9 @@ impl Panel for ViewportPanel {
                 product,
             },
         );
+        if hook.as_ref().is_some_and(|h| h.used) {
+            ui.ctx().request_repaint();
+        }
         if let (Some(controller), Some(icx)) = (interaction.as_deref_mut(), icx.as_ref()) {
             for event in &out.dynamic {
                 controller.dynamic(icx, event);
@@ -1543,26 +1749,33 @@ impl Panel for ViewportPanel {
         }
         if let Some(c) = out.camera {
             *camera = c;
+            // The user's own navigation settles the framing.
+            *framed = true;
         }
-        let cube = ViewCubeInput {
-            frame: camera,
-            localize: cx.localize,
-            colors: cx.colors,
-            size: ui.spacing().interact_size.y * 4.0,
-        };
-        // The shell has no animation tick, so the end frame of the transition is applied at once
-        // (`interpolate` at t = 1).
-        if let Some(intent) = ViewCube.show_over(ui, out.response.rect, &cube) {
-            match intent
-                .frame_from(camera)
-                .and_then(|end| arc_gpu::navigation::interpolate(camera, &end, 1.0))
-            {
-                Ok(end) => *camera = end,
-                Err(e) => cx.actions.push(Action::Error(e)),
-            }
-        }
+        cube_and_crosshair(
+            ui,
+            &out.response.rect,
+            camera,
+            (cx.localize, cx.colors),
+            cx.actions,
+        );
+        *cursor = out.pointer_model.map(|p| [p.x, p.y]);
         *hover = out.hover;
         let overlay = (!out.overlay.primitives.is_empty()).then_some(out.overlay);
+        let revision = cx
+            .tab
+            .and_then(|t| cx.app.tab(t).ok())
+            .map(|t| t.document().snapshot().revision());
+        if *zoom_extents || (!*framed && revision == Some(*frame_revision)) {
+            frame_drawing(
+                viewport.as_ref(),
+                out.size,
+                camera,
+                framed,
+                zoom_extents,
+                cx.actions,
+            );
+        }
         sync_viewport(
             viewport.as_ref(),
             out.size,
@@ -1570,6 +1783,7 @@ impl Panel for ViewportPanel {
             *hover,
             highlight,
             overlay,
+            cx.colors,
             cx.actions,
         );
         cx.actions.extend(out.errors.into_iter().map(Action::Error));
@@ -1578,8 +1792,52 @@ impl Panel for ViewportPanel {
     }
 }
 
+/// Draws the view cube and the crosshair over the viewport at `rect` and applies what the cube
+/// asked for: a click snaps the camera to that view at once (the shell has no animation tick, so
+/// the end frame of the transition is `interpolate` at t = 1), a drag orbits it.
+fn cube_and_crosshair(
+    ui: &mut Ui,
+    rect: &egui::Rect,
+    camera: &mut ViewFrame,
+    (localize, colors): (&dyn Localize, &Colors),
+    actions: &mut Vec<Action>,
+) {
+    let cube = ViewCubeInput {
+        frame: camera,
+        localize,
+        colors,
+        size: ui.spacing().interact_size.y * 4.0,
+    };
+    let out = ViewCube.show_over_dragged(ui, *rect, &cube);
+    if let Some(intent) = out.intent {
+        match intent
+            .frame_from(camera)
+            .and_then(|end| arc_gpu::navigation::interpolate(camera, &end, 1.0))
+        {
+            Ok(end) => *camera = end,
+            Err(e) => actions.push(Action::Error(e)),
+        }
+    }
+    if let Some(drag) = out.drag.filter(|d| *d != [0.0, 0.0]) {
+        match arc_ui::orbit_by_drag(camera, drag, &Tolerance::DEFAULT) {
+            Ok(next) => *camera = next,
+            Err(e) => actions.push(Action::Error(e)),
+        }
+    }
+    if !out.over
+        && let Some(pointer) = ui.input(|i| i.pointer.latest_pos())
+        && rect.contains(pointer)
+    {
+        arc_ui::paint_crosshair(ui, *rect, colors, pointer);
+    }
+}
+
 /// Hands the frame's size, camera, highlight and overlay to the viewport; failures become
 /// actions.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one hand-over of the frame's state"
+)]
 fn sync_viewport(
     viewport: Option<&Viewport>,
     size: [u32; 2],
@@ -1587,6 +1845,7 @@ fn sync_viewport(
     hover: Option<ObjectId>,
     highlight: &[ObjectId],
     overlay: Option<arc_gpu::Overlay>,
+    colors: &Colors,
     actions: &mut Vec<Action>,
 ) {
     let Some(vp) = viewport else {
@@ -1597,6 +1856,7 @@ fn sync_viewport(
         vp.set_camera(*camera),
         vp.set_highlight(hover, highlight),
         vp.set_overlay(overlay),
+        vp.set_settings(render_settings(colors)),
     ];
     actions.extend(
         results
@@ -1796,6 +2056,42 @@ impl Panel for OutlinerPanel {
     }
 }
 
+/// A line of the command panel's history.
+enum ConsoleLine {
+    /// A line of the history.
+    Text(String),
+    /// An error, already in the language in effect.
+    Error(String),
+}
+
+impl ConsoleLine {
+    fn error(error: &ConsoleError, localize: &dyn Localize) -> Self {
+        let args: Vec<(&str, arc_base::error::Value)> =
+            error.args.iter().map(|(k, v)| (*k, v.clone())).collect();
+        Self::Error(arc_ui::resolve(localize, error.message_id, &args))
+    }
+}
+
+/// Draws the history above the input: monospace lines, errors in the error color, scrolled to
+/// the newest line. `reserve` is the height left for the input rows below.
+fn show_console(ui: &mut Ui, lines: &[ConsoleLine], colors: &Colors, reserve: f32) {
+    let height = (ui.available_height() - reserve).max(0.0);
+    egui::ScrollArea::vertical()
+        .id_salt("arc-command-console")
+        .max_height(height)
+        .auto_shrink([false, true])
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            for line in lines {
+                let (text, color) = match line {
+                    ConsoleLine::Text(t) => (t.as_str(), colors.text),
+                    ConsoleLine::Error(t) => (t.as_str(), colors.error),
+                };
+                ui.add(egui::Label::new(egui::RichText::new(text).monospace().color(color)).wrap());
+            }
+        });
+}
+
 /// The command-line panel of the active tab.
 #[derive(Debug, Default)]
 pub struct CommandLinePanel;
@@ -1825,9 +2121,23 @@ impl Panel for CommandLinePanel {
                 commands: &commands,
             };
             let skip = out.history.len().saturating_sub(MAX_SHOWN_HISTORY);
-            for line in out.history.iter().skip(skip) {
-                ui.label(line.as_str());
+            let mut lines: Vec<ConsoleLine> = Vec::new();
+            let errors = view.console.iter();
+            let mut pending = errors.peekable();
+            for (index, line) in out.history.iter().enumerate() {
+                while let Some((_, e)) = pending.next_if(|(at, _)| *at <= index) {
+                    lines.push(ConsoleLine::error(e, cx.localize));
+                }
+                if index >= skip {
+                    lines.push(ConsoleLine::Text(line.clone()));
+                }
             }
+            for (_, e) in pending {
+                lines.push(ConsoleLine::error(e, cx.localize));
+            }
+            show_console(ui, &lines, cx.colors, ui.spacing().interact_size.y * 3.0);
+            view.line_view.command.clone_from(&out.command);
+            view.line_view.space_submits = true;
             let completion = arc_command::line::Completion::default();
             let status: LineStatus = out.status;
             if let Some(action) = view.line_view.show_with(
@@ -1845,6 +2155,12 @@ impl Panel for CommandLinePanel {
             }
             return;
         }
+        let lines: Vec<ConsoleLine> = view
+            .console
+            .iter()
+            .map(|(_, e)| ConsoleLine::error(e, cx.localize))
+            .collect();
+        show_console(ui, &lines, cx.colors, ui.spacing().interact_size.y * 3.0);
         let localized = BTreeMap::new();
         let target = Target {
             registry,

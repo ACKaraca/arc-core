@@ -77,6 +77,8 @@ pub struct DynamicOutput {
 pub struct InteractionOutput {
     /// The state the command line's keys read (active, answers, repeatable).
     pub status: LineStatus,
+    /// The name of the running command, shown before its prompt.
+    pub command: Option<String>,
     /// The active prompt, labeling the command line.
     pub prompt: Option<Prompt>,
     /// The option bar: keyword options and parameters of the active prompt.
@@ -176,10 +178,14 @@ impl<'a> InteractionContext<'a> {
 pub(crate) struct Hook<'a, 'c> {
     pub(crate) controller: &'a mut dyn Interaction,
     pub(crate) cx: &'a InteractionContext<'c>,
+    /// A press, release or click reached the controller: what it shows changed after the
+    /// frame drew, so the shell asks for another frame.
+    pub(crate) used: bool,
 }
 
 impl PointerHandler for Hook<'_, '_> {
     fn pointer(&mut self, event: &PointerEvent) -> bool {
+        self.used |= !matches!(event.kind, arc_ui::PointerKind::Move);
         self.controller.pointer(self.cx, event)
     }
 }

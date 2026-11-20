@@ -187,6 +187,20 @@ fn monitors(event_loop: &ActiveEventLoop) -> (Vec<Monitor>, usize) {
     (monitors, at)
 }
 
+/// The size of the main window when no placement was saved: 1440 by 900 points, at most nine
+/// tenths of the primary monitor.
+fn default_size(monitor: Option<&Monitor>) -> [f64; 2] {
+    const WIDTH: f64 = 1440.0;
+    const HEIGHT: f64 = 900.0;
+    match monitor {
+        Some(m) if m.scale > 0.0 => {
+            let [w, h] = m.size.map(|v| f64::from(v) / m.scale * 0.9);
+            [WIDTH.min(w.max(640.0)), HEIGHT.min(h.max(480.0))]
+        }
+        _ => [WIDTH, HEIGHT],
+    }
+}
+
 impl Handler {
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: Error) {
         self.failure.get_or_insert(error);
@@ -212,6 +226,9 @@ impl Handler {
             attributes = attributes
                 .with_position(LogicalPosition::new(x, y))
                 .with_inner_size(LogicalSize::new(w, h));
+        } else {
+            let [w, h] = default_size(list.get(primary));
+            attributes = attributes.with_inner_size(LogicalSize::new(w, h));
         }
         let window = Arc::new(event_loop.create_window(attributes).map_err(window_error)?);
         let surface_error =
