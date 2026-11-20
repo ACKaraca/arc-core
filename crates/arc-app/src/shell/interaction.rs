@@ -122,7 +122,16 @@ impl<'a> InteractionContext<'a> {
         Ok(self.app.tab(self.tab)?.document())
     }
 
-    /// The session the command line runs in.
+    /// True when the tab is read-only. A read-only tab must not be changed: a controller that
+    /// writes to the document itself checks this first, because [`Self::invoke`] refuses edits
+    /// but direct changes do not pass through it.
+    #[must_use]
+    pub fn read_only(&self) -> bool {
+        self.app.is_read_only_tab(self.tab)
+    }
+
+    /// The session the command line runs in. On a read-only tab the shell hands the controller a
+    /// session without the `edit` permission.
     #[must_use]
     pub fn session(&self) -> &'a Session {
         self.session
@@ -140,7 +149,8 @@ impl<'a> InteractionContext<'a> {
         &self.camera
     }
 
-    /// Runs a document command for the tab through [`Application::invoke`].
+    /// Runs a document command for the tab through [`Application::invoke`], which removes the
+    /// `edit` permission on a read-only tab.
     ///
     /// # Errors
     ///

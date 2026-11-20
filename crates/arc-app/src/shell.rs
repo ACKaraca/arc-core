@@ -55,7 +55,7 @@ use arc_ui::{
 };
 use serde_json::{Map, Value as Json};
 
-use crate::application::{Application, TabId};
+use crate::application::{Application, TabId, session_for};
 use crate::commands::{self, SelectMode, SelectParams};
 use crate::locale::Localizer;
 use crate::logging::LogRing;
@@ -1091,6 +1091,7 @@ impl Shell {
             .ok_or_else(|| Error::new(crate::codes::DOCUMENT_UNKNOWN))?;
         let session =
             session(Surface::CommandLine).with_last_hook(app.product().headless().last.clone());
+        let session = session_for(app.is_read_only_tab(tab), &session);
         let Some(view) = self.views.get_mut(&tab) else {
             return Err(Error::new(crate::codes::DOCUMENT_UNKNOWN));
         };
@@ -1459,13 +1460,14 @@ impl Panel for ViewportPanel {
         } = view;
         let session =
             session(Surface::CommandLine).with_last_hook(cx.app.product().headless().last.clone());
+        let controlled = session_for(cx.tab.is_some_and(|t| cx.app.is_read_only_tab(t)), &session);
         // With a controller the controller's prompt, selection and overlays are the viewport's.
         let frame = match (interaction.as_deref(), cx.tab) {
             (Some(controller), Some(_)) => Some(controller.output()),
             _ => None,
         };
         let icx = cx.tab.map(|tab| {
-            InteractionContext::new(cx.app, tab, &session, selection.as_slice(), *camera)
+            InteractionContext::new(cx.app, tab, &controlled, selection.as_slice(), *camera)
         });
         let prompt = match frame {
             Some(_) => None,

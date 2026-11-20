@@ -8,6 +8,7 @@
 //! asks. Banners are data: a Fluent message identifier and its arguments.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -428,11 +429,17 @@ impl Application {
     /// `app.document.unknown` and the errors of [`Invoker::invoke`].
     pub fn invoke(&self, id: TabId, session: &Session, invocation: Invocation) -> Result<Outcome> {
         let tab = self.tab(id)?;
-        let mut session = session.clone();
-        if tab.is_read_only() {
-            session.permissions.remove(&Permission::Edit);
-        }
+        let session = session_for(tab.is_read_only(), session);
         Invoker::new(&self.product.headless().registry).invoke(&tab.document, &session, invocation)
+    }
+
+    /// True when tab `id` accepts no edits: it is read-only, or it is not open.
+    #[must_use]
+    pub(crate) fn is_read_only_tab(&self, id: TabId) -> bool {
+        match self.tab(id) {
+            Ok(tab) => tab.is_read_only(),
+            Err(_) => true,
+        }
     }
 
     /// Undoes the top undo step of tab `id`'s document and waits for it; false when there was
@@ -962,6 +969,18 @@ impl Application {
     /// `doc.recovery.locked` when a running session holds it.
     pub fn discard_recovery(&self, orphan: &Orphan) -> Result<()> {
         recovery::discard(orphan)
+    }
+}
+
+/// The session a command on a tab runs in: `session` without the `edit` class when the tab is
+/// read-only, so the commands that change documents are refused.
+pub(crate) fn session_for(read_only: bool, session: &Session) -> Cow<'_, Session> {
+    if read_only && session.permissions.contains(&Permission::Edit) {
+        let mut restricted = session.clone();
+        restricted.permissions.remove(&Permission::Edit);
+        Cow::Owned(restricted)
+    } else {
+        Cow::Borrowed(session)
     }
 }
 

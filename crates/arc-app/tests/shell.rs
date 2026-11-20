@@ -27,7 +27,7 @@ use arc_base::error::Value;
 use arc_base::{IdGenerator, Limits};
 use arc_command::prompt::{Accept, PointDims, Prompt};
 use arc_command::{FixedClock, Permission, Session, Surface};
-use arc_doc::package::LockOwner;
+use arc_doc::package::{LockOwner, Metadata, Package};
 use arc_ui::egui::{self, accesskit};
 use arc_ui::{
     Dock, DockLayout, DynamicEvent, Entry as MenuEntry, Intent, LineAction, LineStatus, Localize,
@@ -445,6 +445,8 @@ fn factories_of_the_wrong_type_are_reported() {
 struct Seen {
     lines: Vec<String>,
     clicks: usize,
+    /// For each pointer event: whether the tab is read-only and whether the session has `edit`.
+    access: Vec<(bool, bool)>,
 }
 
 /// A controller that keeps a prompt, one option and one history line, consumes viewport clicks
@@ -454,9 +456,12 @@ struct FakeController {
 }
 
 impl shell::Interaction for FakeController {
-    fn pointer(&mut self, _: &shell::InteractionContext<'_>, event: &PointerEvent) -> bool {
+    fn pointer(&mut self, cx: &shell::InteractionContext<'_>, event: &PointerEvent) -> bool {
+        let mut seen = self.seen.lock().unwrap();
+        let edit = cx.session().permissions.contains(&Permission::Edit);
+        seen.access.push((cx.read_only(), edit));
         if event.kind == PointerKind::Click {
-            self.seen.lock().unwrap().clicks += 1;
+            seen.clicks += 1;
             return true;
         }
         false
@@ -587,6 +592,72 @@ fn a_registered_controller_owns_the_command_panel_option_bar_and_viewport_clicks
     frame(&mut shell, &mut app, &ctx, vec![enter], Vec::new(), false);
     assert_eq!(seen.lock().unwrap().lines, ["yes", "hello"]);
     assert_eq!(seen.lock().unwrap().clicks, 1);
+}
+
+fn owner(user: &str) -> LockOwner {
+    LockOwner {
+        user: user.into(),
+        host: "test-host".into(),
+        application: "arc-shell".into(),
+        time_unix_ms: 0,
+    }
+}
+
+#[test]
+fn a_controller_sees_the_read_only_state_of_its_tab_and_no_edit_permission_on_it() {
+    let dir = TempDir::new("read-only-controller");
+    let path = dir.0.join("shared.arc");
+    drop(Package::create(&path, &Metadata::default(), &owner("holder")).unwrap());
+    // The holder opens the package first, so the second application opens it read-only.
+    let holder_seen = Arc::new(Mutex::new(Seen::default()));
+    let mut holder = app_with(&dir.0.join("holder"), false, Some(holder_seen.clone()));
+    holder.open(&path).unwrap();
+    let reader_seen = Arc::new(Mutex::new(Seen::default()));
+    let mut reader = app_with(&dir.0.join("reader"), false, Some(reader_seen.clone()));
+    reader.open(&path).unwrap();
+    assert!(
+        reader
+            .active()
+            .is_some_and(|t| reader.tab(t).unwrap().is_read_only())
+    );
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let at = egui::pos2(200.0, 200.0);
+    let press = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let click_viewport = || vec![egui::Event::PointerMoved(at), press(true), press(false)];
+
+    let mut holder_shell = Shell::new(&holder, config(), None);
+    frame(
+        &mut holder_shell,
+        &mut holder,
+        &ctx,
+        click_viewport(),
+        Vec::new(),
+        false,
+    );
+    let mut reader_shell = Shell::new(&reader, config(), None);
+    frame(
+        &mut reader_shell,
+        &mut reader,
+        &ctx,
+        click_viewport(),
+        Vec::new(),
+        false,
+    );
+
+    let holder_access = holder_seen.lock().unwrap().access.clone();
+    let reader_access = reader_seen.lock().unwrap().access.clone();
+    assert!(!holder_access.is_empty() && !reader_access.is_empty());
+    // An editable tab: not read-only, and the session keeps `edit`.
+    assert!(holder_access.iter().all(|a| *a == (false, true)));
+    // A read-only tab: read-only, and the session has no `edit`.
+    assert!(reader_access.iter().all(|a| *a == (true, false)));
 }
 
 #[test]

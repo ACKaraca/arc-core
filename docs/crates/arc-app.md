@@ -802,9 +802,15 @@ it is registered. Without a registration the shell behaves as before.
   highlights, and whose count the viewport reports as the selected count).
 - `InteractionContext` gives what a controller needs: `document()` (the tab's `arc_doc::Document`),
   `invoke(Invocation)` (a document command through `Application::invoke` in the shell's command
-  session), `session()`, `selection()` (the tab's shell selection), `camera()` (the tab's camera,
-  which is the view the controller's input is in) and `tab()`. The foundation has no space concept,
-  so the camera stands for the active space.
+  session), `session()`, `read_only()`, `selection()` (the tab's shell selection), `camera()` (the
+  tab's camera, which is the view the controller's input is in) and `tab()`. The foundation has no
+  space concept, so the camera stands for the active space.
+- A product controller must honor `read_only()`. A read-only tab is a package open without write
+  access (`Application::is_read_only_tab`, the rule `Application::invoke` also applies). On such a
+  tab the session of `session()` has no `edit` permission, so `invoke` refuses editing commands,
+  but a controller that changes `document()` itself, without `invoke`, is not stopped by that. It
+  must check `read_only()` before any such change and must not change the document when it is
+  true. A closed tab counts as read-only.
 - While a controller is registered: the viewport gets the controller's overlays, dynamic panel and
   highlight, and no prompt of the shell's own line (the widget does not answer prompts itself); the
   command panel draws the controller's prompt, history and option bar and sends its lines and
