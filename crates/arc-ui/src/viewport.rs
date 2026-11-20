@@ -36,7 +36,8 @@ use crate::gesture::{
     Band, BandKind, DRAG_THRESHOLD, Gestures, View, ViewEvent, ViewPicker, ViewportCommands,
 };
 use crate::hooks::{
-    PointerEvent, PointerHandler, PointerKind, ProductOverlay, ViewProjection, paint_overlays,
+    PointerEvent, PointerHandler, PointerKind, ProductOverlay, ViewProjection, WorkPlane,
+    paint_overlays,
 };
 use crate::text::{Localize, messages, resolve};
 use crate::theme::{Colors, UiScale};
@@ -124,6 +125,9 @@ pub struct ProductInput<'a> {
     pub overlays: &'a [ProductOverlay],
     /// The dynamic input panel, when the product asks for point input.
     pub dynamic: Option<DynamicPanel<'a>>,
+    /// The plane clicks answer point prompts on and [`PointerEvent::model`] lies on; `None` is
+    /// the plane through the camera target that faces the eye.
+    pub work_plane: Option<WorkPlane>,
 }
 
 /// What one frame of the widget reads.
@@ -306,6 +310,7 @@ impl ViewportWidget {
             Some(p) => (p.overlays, p.dynamic),
             None => (&[][..], None),
         };
+        let work_plane = product.as_ref().and_then(|p| p.work_plane);
         let mut handler = product.and_then(|p| p.pointer);
         let modifiers = ui.input(|i| i.modifiers);
         let mut view = View {
@@ -317,6 +322,7 @@ impl ViewportWidget {
             tolerance,
             picker: input.picker,
             commands: input.commands,
+            work_plane,
         };
         let mut out = ViewportOutput {
             response: response.clone(),
@@ -327,7 +333,7 @@ impl ViewportWidget {
             intent: None,
             answer: None,
             errors: Vec::new(),
-            projection: ViewProjection::new(frame, size[0], size[1]),
+            projection: ViewProjection::new(frame, size[0], size[1]).with_work_plane(work_plane),
             dynamic: Vec::new(),
             pointer_model: None,
         };
@@ -336,7 +342,8 @@ impl ViewportWidget {
             self.seen = link.publish(view.frame);
         }
         out.hover = self.gestures.hover();
-        out.projection = ViewProjection::new(view.frame, size[0], size[1]);
+        out.projection =
+            ViewProjection::new(view.frame, size[0], size[1]).with_work_plane(work_plane);
         if let Some(band) = self.gestures.band() {
             out.overlay = band_overlay(&band, input.colors, scale);
         }
@@ -395,7 +402,8 @@ impl ViewportWidget {
     ) -> bool {
         let mut moved_here = false;
         for event in events {
-            let projection = ViewProjection::new(view.frame, view.width, view.height);
+            let projection = ViewProjection::new(view.frame, view.width, view.height)
+                .with_work_plane(view.work_plane);
             if self.offer(handler, &projection, modifiers, event, scale) {
                 if matches!(event, ViewEvent::Moved(_)) {
                     // A consumed move still clears the widget's pre-selection.

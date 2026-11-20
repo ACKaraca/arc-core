@@ -28,7 +28,7 @@ pub mod prompts;
 
 pub use chrome::{
     ChoiceState, DisplayProbe, InitialView, OverlayProbe, ShellAction, StatusToggle, TabView,
-    ToolItem,
+    ToolItem, WorkPlaneProbe,
 };
 pub use interaction::{
     DynamicOutput, Interaction, InteractionContext, InteractionOutput, ViewRequest,
@@ -119,6 +119,8 @@ pub struct PanelContext<'a> {
     pub log: Option<&'a LogRing>,
     /// What the product draws over the active tab's viewport (see [`OverlayProbe`]).
     pub overlays: &'a [arc_ui::ProductOverlay],
+    /// The plane the active tab's point input lands on (see [`WorkPlaneProbe`]).
+    pub work_plane: Option<arc_ui::WorkPlane>,
 }
 
 /// What a panel asks the shell to do after drawing.
@@ -128,6 +130,15 @@ pub enum Action {
     Intent(Intent),
     /// A command-line action of the command-line widget.
     Line(LineAction),
+    /// Start a command the user chose from a menu or a key binding: a shell command is carried
+    /// out; any other command goes to the tab's controller as `LineAction::Invoke` when the
+    /// tab has one (a toolbar button's command reaches it the same way), else it starts on the
+    /// shell's command line as [`Action::Intent`] does.
+    Start(Intent),
+    /// Carry out an intent on the shell even when the tab has a controller: a shell command is
+    /// carried out, any other command starts on the shell's own command line (what
+    /// [`InteractionContext::ask`] produces).
+    Dispatch(Intent),
     /// An answer for the active prompt from the viewport.
     Answer(PromptInput),
     /// An error to show.
@@ -244,6 +255,9 @@ pub struct ShellConfig {
     /// What each viewport draws over the scene in model coordinates (labels); `None` draws
     /// nothing.
     pub overlays: Option<OverlayProbe>,
+    /// The plane point input lands on in each viewport; `None` keeps the plane through the camera
+    /// target (see [`WorkPlaneProbe`]).
+    pub work_plane: Option<WorkPlaneProbe>,
     /// The view a new tab starts in; `None` looks straight down the z axis.
     pub initial_view: Option<InitialView>,
     /// The seed of invocation seeds: each command-line step uses the next value of a sequence
@@ -463,6 +477,7 @@ pub struct Shell {
     status: Vec<StatusToggle>,
     display: Option<DisplayProbe>,
     overlays: Option<OverlayProbe>,
+    work_plane: Option<WorkPlaneProbe>,
     initial_view: Option<InitialView>,
     /// The active language tag of the last frame, which names a new document's content.
     language: String,
@@ -550,6 +565,24 @@ fn session(app: &Application, surface: Surface) -> Session {
     session
 }
 
+/// The controller's output; without a selection of its own the status reads the tab's selection.
+fn controller_output(controller: &dyn Interaction, selection: &[ObjectId]) -> InteractionOutput {
+    let mut out = controller.output();
+    if out.selection.is_none() {
+        out.status.has_selection = !selection.is_empty();
+    }
+    out
+}
+
+/// The session a controller of `tab` runs commands in: the command line's session with the
+/// interface language set, without the `edit` permission on a read-only tab.
+fn controller_session(app: &Application, tab: TabId, language: &str) -> Session {
+    let session = session(app, Surface::CommandLine);
+    // A tag within the setting limits never fails; the session just lacks the language.
+    let _ = session.set_setting(commands::LANGUAGE_SETTING, serde_json::json!(language));
+    session_for(app.is_read_only_tab(tab), &session).into_owned()
+}
+
 impl Shell {
     /// A shell for `app`'s product: calls each panel and extractor factory once. A factory that
     /// does not return the expected type, and key bindings the registry refuses, become errors
@@ -610,6 +643,7 @@ impl Shell {
             status: config.status,
             display: config.display,
             overlays: config.overlays,
+            work_plane: config.work_plane,
             initial_view: config.initial_view,
             language: String::new(),
         }
@@ -889,6 +923,9 @@ impl Shell {
                 if let Event::Committed(c) = event {
                     if let Some(driver) = &view.extraction {
                         driver.submit_changes(&c.snapshot, &c.changes);
+                        if let Some(dependents) = app.product().extraction_dependents() {
+                            driver.submit(&c.snapshot, dependents(&c.snapshot, &c.changes));
+                        }
                     }
                     changed = true;
                 }
@@ -1030,7 +1067,7 @@ impl Shell {
         let mut actions: Vec<Action> = keyed
             .into_iter()
             .chain(input.menu_intents)
-            .map(Action::Intent)
+            .map(Action::Start)
             .collect();
         let entries = if input.native_menu || window.is_some() {
             Vec::new()
@@ -1088,6 +1125,13 @@ impl Shell {
         let overlays = match (&self.overlays, active) {
             (Some(probe), Some(tab)) => (probe.0)(app, tab, input.language),
             _ => Vec::new(),
+        };
+        let work_plane = match (&self.work_plane, active) {
+            (Some(probe), Some(tab)) => {
+                let selection = self.views.get(&tab).map_or(&[][..], View::selection);
+                (probe.0)(app, tab, selection)
+            }
+            _ => None,
         };
         let tools = chrome::tool_views(&self.toolbar, app, active, input.localize);
         let toggles = chrome::toggle_views(&self.status, app, active, input.localize);
@@ -1185,6 +1229,7 @@ impl Shell {
                         actions: &mut actions,
                         log: log_ring,
                         overlays: &overlays,
+                        work_plane,
                     };
                     p.show(ui, &mut cx);
                 });
@@ -1313,7 +1358,7 @@ impl Shell {
         // An action that does something replaces the result lines of earlier ones: an error a
         // later edit made stale does not stay in the history.
         let works = match &action {
-            Action::Intent(intent) => !matches!(
+            Action::Start(intent) | Action::Intent(intent) | Action::Dispatch(intent) => !matches!(
                 intent.command.as_str(),
                 commands::SELECT_SET | commands::SELECT_CLEAR
             ),
@@ -1331,9 +1376,16 @@ impl Shell {
             Action::Error(e) => Err(e),
             Action::Shell(action) => self.shell_action(app, action, requests),
             Action::Setting { key, value } => self.set_setting(app, &key, value),
-            Action::Intent(intent) => self.dispatch(app, intent, requests),
+            // A command of a menu or a key binding starts the way a toolbar button's does: through
+            // the tab's controller when it has one, else on the shell's command line.
+            Action::Start(intent) if self.controlled(app) => {
+                self.controlled_line(app, LineAction::Invoke(intent), requests)
+            }
+            Action::Start(intent) | Action::Intent(intent) | Action::Dispatch(intent) => {
+                self.dispatch(app, intent, requests)
+            }
             Action::Answer(input) => self.line_step(app, LineStep::Answer(input), requests),
-            Action::Line(line) if self.controlled(app) => self.controller_line(app, line),
+            Action::Line(line) if self.controlled(app) => self.controlled_line(app, line, requests),
             Action::Line(line) => match line {
                 LineAction::ClearInput => Ok(()),
                 // With no document open there is no command line, but a file command (a toolbar
@@ -1411,6 +1463,7 @@ impl Shell {
         ask: impl FnOnce(&crate::application::Tab) -> crate::application::CloseAnswer,
     ) -> Result<crate::application::Closed> {
         let views = &mut self.views;
+        let language = self.language.as_str();
         app.close_with(tab, ask, |app, tab| {
             let Some(view) = views.get_mut(&tab) else {
                 return;
@@ -1418,28 +1471,89 @@ impl Shell {
             let Some(controller) = view.interaction.as_deref_mut() else {
                 return;
             };
-            let session = session(app, Surface::CommandLine);
-            let session = session_for(app.is_read_only_tab(tab), &session);
-            let cx = InteractionContext::new(app, tab, &session, &view.selection, view.camera);
+            let session = controller_session(app, tab, language);
+            let cx =
+                InteractionContext::new(app, tab, &session, &view.selection, view.camera, language);
             controller.closing(&cx);
         })
     }
 
-    /// Hands a command-panel action to the active tab's controller.
-    fn controller_line(&mut self, app: &Application, line: LineAction) -> Result<()> {
+    /// Hands a command-panel action to the active tab's controller, unless it names a shell
+    /// command: the shell carries those out itself, and cancels a running tool first (a save
+    /// keeps it running).
+    fn controlled_line(
+        &mut self,
+        app: &mut Application,
+        line: LineAction,
+        requests: &mut Vec<Request>,
+    ) -> Result<()> {
+        let (command, params, typed) = match &line {
+            LineAction::Submit(text) => (
+                text.split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned(),
+                Map::new(),
+                Some(text.clone()),
+            ),
+            LineAction::Invoke(i) | LineAction::CancelThen(i) => {
+                (i.command.clone(), i.params.clone(), None)
+            }
+            _ => return self.controller_line(app, line, requests),
+        };
+        let claimed = app
+            .active()
+            .and_then(|t| self.views.get(&t))
+            .and_then(|v| v.interaction.as_deref())
+            .is_some_and(|c| c.handles(&command));
+        if !commands::is_shell_command(&command) || claimed {
+            return self.controller_line(app, line, requests);
+        }
+        if !matches!(
+            command.as_str(),
+            commands::FILE_SAVE | commands::FILE_SAVE_AS
+        ) {
+            self.controller_line(app, LineAction::Cancel, requests)?;
+        }
+        match typed {
+            // A typed line may carry parameters (`app.file.open path=<file>`): the shell's own
+            // command line reads them.
+            Some(text) => self.line_step(app, LineStep::Submit(&text), requests),
+            None => self.shell_command(app, &command, params, requests),
+        }
+    }
+
+    /// Hands an action to the active tab's controller, then carries out what it asked for.
+    fn controller_line(
+        &mut self,
+        app: &mut Application,
+        line: LineAction,
+        requests: &mut Vec<Request>,
+    ) -> Result<()> {
         let tab = app
             .active()
             .ok_or_else(|| Error::new(crate::codes::DOCUMENT_UNKNOWN))?;
-        let session = session(app, Surface::CommandLine);
-        let session = session_for(app.is_read_only_tab(tab), &session);
+        let session = controller_session(app, tab, &self.language);
         let Some(view) = self.views.get_mut(&tab) else {
             return Err(Error::new(crate::codes::DOCUMENT_UNKNOWN));
         };
-        let cx = InteractionContext::new(app, tab, &session, &view.selection, view.camera);
-        match view.interaction.as_deref_mut() {
+        let cx = InteractionContext::new(
+            app,
+            tab,
+            &session,
+            &view.selection,
+            view.camera,
+            &self.language,
+        );
+        let result = match view.interaction.as_deref_mut() {
             Some(controller) => controller.line(&cx, line),
             None => Ok(()),
+        };
+        let asked = cx.take_asked();
+        for intent in asked {
+            self.dispatch(app, intent, requests)?;
         }
+        result
     }
 
     fn cancel_line(&mut self, app: &Application) {
@@ -2002,24 +2116,33 @@ impl Panel for ViewportPanel {
             cursor_digits,
             ..
         } = view;
-        let session = session(cx.app, Surface::CommandLine);
-        let controlled = session_for(cx.tab.is_some_and(|t| cx.app.is_read_only_tab(t)), &session);
-        // With a controller the controller's prompt, selection and overlays are the viewport's.
+        // With a controller the controller's prompt and overlays are the viewport's; its
+        // selection is too, when it reports one of its own.
         let frame = match (interaction.as_deref(), cx.tab) {
-            (Some(controller), Some(_)) => Some(controller.output()),
+            (Some(controller), Some(_)) => Some(controller_output(controller, selection)),
             _ => None,
         };
-        let icx = cx.tab.map(|tab| {
-            InteractionContext::new(cx.app, tab, &controlled, selection.as_slice(), *camera)
+        let controlled = cx
+            .tab
+            .map(|tab| controller_session(cx.app, tab, cx.language));
+        let icx = cx.tab.zip(controlled.as_ref()).map(|(tab, session)| {
+            InteractionContext::new(
+                cx.app,
+                tab,
+                session,
+                selection.as_slice(),
+                *camera,
+                cx.language,
+            )
         });
         let prompt = match frame {
             Some(_) => None,
             None => line.active().and_then(|s| s.prompt()),
         };
-        let highlight: &[ObjectId] = match &frame {
-            Some(f) => &f.selection,
-            None => selection.as_slice(),
-        };
+        let highlight: &[ObjectId] = frame
+            .as_ref()
+            .and_then(|f| f.selection.as_deref())
+            .unwrap_or(selection.as_slice());
         let selected = highlight.len();
         let mut picker = ViewportPicker(viewport.as_ref());
         let mut hook = match (interaction.as_deref_mut(), icx.as_ref()) {
@@ -2030,20 +2153,29 @@ impl Panel for ViewportPanel {
             }),
             _ => None,
         };
+        // The product's own overlays (labels) show with the controller's.
+        let overlays: Vec<arc_ui::ProductOverlay> = match &frame {
+            Some(f) if !cx.overlays.is_empty() => {
+                cx.overlays.iter().chain(&f.overlays).cloned().collect()
+            }
+            Some(f) => f.overlays.clone(),
+            None => Vec::new(),
+        };
         let product = match &frame {
             Some(f) => Some(ProductInput {
                 pointer: hook.as_mut().map(|h| h as &mut dyn PointerHandler),
-                overlays: &f.overlays,
+                overlays: &overlays,
                 dynamic: f.dynamic.as_ref().map(|d| DynamicPanel {
                     prompt: &d.prompt,
                     fields: &d.fields,
                 }),
+                work_plane: cx.work_plane,
             }),
-            // Without a controller the product's overlays (labels) still show.
-            None => (!cx.overlays.is_empty()).then_some(ProductInput {
+            None => (!cx.overlays.is_empty() || cx.work_plane.is_some()).then_some(ProductInput {
                 pointer: None,
                 overlays: cx.overlays,
                 dynamic: None,
+                work_plane: cx.work_plane,
             }),
         };
         widget.blocked = Some(ViewCube::rect(
@@ -2075,6 +2207,11 @@ impl Panel for ViewportPanel {
             for event in &out.dynamic {
                 controller.dynamic(icx, event);
             }
+        }
+        // What the controller asked for during a pointer event or a dynamic input edit.
+        if let Some(icx) = icx.as_ref() {
+            cx.actions
+                .extend(icx.take_asked().into_iter().map(Action::Dispatch));
         }
         if let Some(c) = out.camera {
             *camera = c;
@@ -2497,10 +2634,10 @@ impl Panel for CommandLinePanel {
         };
         if let Some(controller) = view.interaction.as_deref() {
             // The controller keeps the line: its prompt, history and options are what shows.
-            let out = controller.output();
+            let out = controller_output(controller, &view.selection);
             let context = LineContext {
                 localize: cx.localize,
-                has_selection: !out.selection.is_empty(),
+                has_selection: out.status.has_selection,
                 commands: &commands,
             };
             let skip = out.history.len().saturating_sub(MAX_SHOWN_HISTORY);
@@ -2519,7 +2656,7 @@ impl Panel for CommandLinePanel {
                 lines.push(ConsoleLine::error(e, cx.localize));
             }
             view.line_view.command.clone_from(&out.command);
-            view.line_view.space_submits = true;
+            view.line_view.space_submits = !out.inline_arguments;
             let completion = arc_command::line::Completion::default();
             let status: LineStatus = out.status;
             let line_view = &mut view.line_view;

@@ -69,6 +69,22 @@ pub fn matches_filter(name: &str, filter: &str, language: &str) -> bool {
     fold_case(name, language).contains(&fold_case(filter.trim(), language))
 }
 
+/// The decimal separator numbers are typed and shown with in `language` (a BCP 47 tag): a comma
+/// for the languages that use one (Turkish, German, French, Spanish, Italian, Portuguese, Dutch,
+/// Polish, Russian and a few more), a period for every other language, including an empty tag.
+#[must_use]
+pub fn decimal_separator(language: &str) -> char {
+    const COMMA: [&str; 12] = [
+        "tr", "az", "de", "fr", "es", "it", "pt", "nl", "pl", "ru", "cs", "sv",
+    ];
+    let primary = language.split(['-', '_']).next().unwrap_or_default();
+    if COMMA.iter().any(|c| primary.eq_ignore_ascii_case(c)) {
+        ','
+    } else {
+        '.'
+    }
+}
+
 /// The direction of a layout: the order of panels, columns and controls, and the side text
 /// starts from (CORE-UI-025).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -493,6 +509,14 @@ mod direction_tests {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn the_decimal_separator_follows_the_language() {
+        assert_eq!(super::decimal_separator("tr-TR"), ',');
+        assert_eq!(super::decimal_separator("tr"), ',');
+        assert_eq!(super::decimal_separator("en-US"), '.');
+        assert_eq!(super::decimal_separator(""), '.');
+    }
+
     use std::collections::BTreeMap;
 
     use super::{Fallback, Localize, messages, resolve};

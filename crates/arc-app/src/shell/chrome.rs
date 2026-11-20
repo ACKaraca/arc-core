@@ -122,6 +122,24 @@ impl std::fmt::Debug for OverlayProbe {
     }
 }
 
+/// The plane the active tab's point input lands on, read from the document and the tab's
+/// selection: a click that answers
+/// a point prompt, and the model point of a pointer event the product's controller receives, meet
+/// this plane (a storey's level plane, for example) instead of the plane through the camera
+/// target. `None` from the probe keeps the camera plane.
+#[derive(Clone)]
+pub struct WorkPlaneProbe(pub Arc<WorkPlaneFn>);
+
+/// The function of a [`WorkPlaneProbe`].
+pub type WorkPlaneFn =
+    dyn Fn(&Application, TabId, &[arc_base::ObjectId]) -> Option<arc_ui::WorkPlane> + Send + Sync;
+
+impl std::fmt::Debug for WorkPlaneProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkPlaneProbe")
+    }
+}
+
 /// The view a new tab's viewport starts in, framed on the drawing once its scene is known.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InitialView {
@@ -448,7 +466,7 @@ pub fn show_frame(ui: &mut Ui, frame: &ChromeFrame<'_>, actions: &mut Vec<Action
         let (intent, chosen) = arc_ui::menu::show_menu_bar_with(ui, frame.entries, |ui| {
             view_menu(ui, frame.rows, frame.localize)
         });
-        actions.extend(intent.map(Action::Intent));
+        actions.extend(intent.map(Action::Start));
         actions.extend(chosen.map(Action::Shell));
     });
     if !frame.tools.is_empty() {

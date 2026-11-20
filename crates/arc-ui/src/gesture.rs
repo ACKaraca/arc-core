@@ -226,6 +226,9 @@ pub struct View<'a> {
     pub picker: &'a mut dyn ViewPicker,
     /// The commands intents name.
     pub commands: &'a ViewportCommands,
+    /// The plane a click answers a point prompt on; `None` uses the plane through the camera
+    /// target that faces the eye.
+    pub work_plane: Option<crate::hooks::WorkPlane>,
 }
 
 /// What one event caused.
@@ -581,6 +584,14 @@ impl Gestures {
         plane_point(&view.frame, view.width, view.height, at)
     }
 
+    /// The point a click answers a point prompt with: on the work plane when there is one.
+    fn pick_point(&self, view: &View<'_>, at: [f64; 2]) -> Result<Point3> {
+        match &view.work_plane {
+            Some(plane) => work_point(&view.frame, view.width, view.height, at, plane),
+            None => self.view_plane_point(view, at),
+        }
+    }
+
     fn pick(&mut self, view: &mut View<'_>, region: Option<PickRegion>) -> Result<Vec<PickHit>> {
         match region {
             Some(r) => view.picker.pick(&view.frame, view.width, view.height, &r),
@@ -697,7 +708,7 @@ impl Gestures {
                     Some(PromptInput::Pick(id))
                 }
                 Some(id) => Some(PromptInput::Selection(vec![id])),
-                None if wants_point => match self.view_plane_point(view, at) {
+                None if wants_point => match self.pick_point(view, at) {
                     Ok(p) => Some(point_answer(prompt, p)),
                     Err(e) => {
                         out.error = Some(e);
@@ -792,11 +803,31 @@ impl Gestures {
 ///
 /// `arc_gpu::error::codes::NAVIGATION_INVALID` when the camera or the point is not finite.
 pub fn plane_point(frame: &ViewFrame, width: u32, height: u32, at: [f64; 2]) -> Result<Point3> {
+    let plane = crate::hooks::WorkPlane {
+        origin: frame.target(),
+        normal: frame.forward(),
+    };
+    work_point(frame, width, height, at, &plane)
+}
+
+/// The model point under the pixel `at` of a `width × height` image seen through `frame`: the
+/// pick ray meets `plane`.
+///
+/// # Errors
+///
+/// `arc_gpu::error::codes::NAVIGATION_INVALID` when the camera or the point is not finite, or the
+/// ray is parallel to the plane.
+pub fn work_point(
+    frame: &ViewFrame,
+    width: u32,
+    height: u32,
+    at: [f64; 2],
+    plane: &crate::hooks::WorkPlane,
+) -> Result<Point3> {
     let (w, h) = (f64::from(width.max(1)), f64::from(height.max(1)));
     let (origin, dir) = frame.ray_through(2.0 * at[0] / w - 1.0, 1.0 - 2.0 * at[1] / h, w / h)?;
-    let forward: Vector3 = frame.forward();
-    let along = dir.dot(&forward);
-    let t = (frame.target() - origin).dot(&forward) / along;
+    let normal: Vector3 = plane.normal;
+    let t = (plane.origin - origin).dot(&normal) / dir.dot(&normal);
     let p = origin + dir * t;
     if p.iter().all(|c| c.is_finite()) {
         Ok(p)
@@ -926,6 +957,7 @@ pub(crate) mod tests {
         prompt: Option<Prompt>,
         selected: usize,
         commands: ViewportCommands,
+        work_plane: Option<crate::hooks::WorkPlane>,
     }
 
     impl Rig {
@@ -937,6 +969,7 @@ pub(crate) mod tests {
                 prompt: None,
                 selected: 0,
                 commands: ViewportCommands::default(),
+                work_plane: None,
             }
         }
         fn send(&mut self, e: ViewEvent) -> Reaction {
@@ -950,6 +983,7 @@ pub(crate) mod tests {
                 tolerance: &tolerance,
                 picker: &mut self.fake,
                 commands: &self.commands,
+                work_plane: self.work_plane,
             };
             let r = self.g.handle(&mut view, &e);
             self.frame = view.frame;
@@ -1149,6 +1183,26 @@ pub(crate) mod tests {
             0.0,
         );
         assert_eq!(only_intent(&rs).unwrap().params["gesture"], "window");
+    }
+
+    #[test]
+    fn a_click_answers_on_the_work_plane() {
+        let mut rig = Rig::new(&[]);
+        rig.work_plane = Some(crate::hooks::WorkPlane {
+            origin: Point3::new(0.0, 0.0, 3.0),
+            normal: Vector3::z(),
+        });
+        rig.prompt = Some(Prompt::new(
+            "p",
+            "m",
+            Accept::Point {
+                dims: PointDims::Three,
+            },
+        ));
+        let Some(PromptInput::Point(p)) = rig.click([75.0, 25.0], Modifiers::NONE).answer else {
+            panic!("no point")
+        };
+        assert_eq!(p.z, Some(3.0));
     }
 
     #[test]

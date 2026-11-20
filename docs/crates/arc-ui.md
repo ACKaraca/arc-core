@@ -737,7 +737,13 @@ Module `hooks` (feature `viewport`). A product gives the viewport a `ProductInpu
   plane through the target that faces the eye; `model_to_pixel(&p) -> Option<[f64; 2]>` projects a
   model point, `None` behind the eye; `pixels_per_unit() -> Option<f64>` is the pixel size of one
   model unit on that plane. The pixel mapping is the one picking uses (x right, y down). The
-  functions are `Option` because a camera can give non-finite values.
+  functions are `Option` because a camera can give non-finite values. `with_work_plane(Some(WorkPlane
+  { origin, normal }))` makes `pixel_to_model` meet that plane instead (a ray parallel to it gives
+  `None`); `pixels_per_unit` stays on the plane through the target.
+- `ProductInput::work_plane` (`Option<WorkPlane>`): the plane the widget's own point-prompt answers
+  (a click with a point prompt active) and the `model` of every `PointerEvent` lie on, such as a
+  storey's level plane. `None` is the plane through the camera target that faces the eye.
+  `gesture::work_point(frame, width, height, pixel, &plane)` is the intersection.
 - `PointerHandler::pointer(&mut self, &PointerEvent) -> bool` receives `PointerEvent`s before the
   widget's own handling. Its kinds are `Move`, `Press`, `Release` and `Click` (a primary press and
   release without a drag beyond the drag threshold). Each event carries the button (`None` for a
@@ -783,6 +789,11 @@ Module `hooks` (feature `viewport`). A product gives the viewport a `ProductInpu
   inspects these in the AccessKit tree.
 
 ## Localization, scale and view cube as implemented
+
+**Decimal separator.** `text::decimal_separator(language)` is `,` for the primary subtags `tr`,
+`az`, `de`, `fr`, `es`, `it`, `pt`, `nl`, `pl`, `ru`, `cs` and `sv`, and `.` otherwise; the shell
+hands it to a product's controller (see `InteractionContext::decimal_separator`). The parsers of
+`arc-command` read `.` only.
 
 **Case folding.** `text::fold_case(text, language)` folds case for comparison with the rule of
 `language`, a BCP 47 tag. For Turkish (`tr`) and Azerbaijani (`az`) `I` folds to `ı` and `İ` to

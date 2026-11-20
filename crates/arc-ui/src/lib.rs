@@ -84,7 +84,9 @@ pub use gesture::{
     Band, BandKind, Gestures, Reaction, View, ViewEvent, ViewPicker, ViewportCommands,
 };
 #[cfg(feature = "viewport")]
-pub use hooks::{PointerEvent, PointerHandler, PointerKind, ProductOverlay, ViewProjection};
+pub use hooks::{
+    PointerEvent, PointerHandler, PointerKind, ProductOverlay, ViewProjection, WorkPlane,
+};
 pub use icons::{IconAtlas, Icons};
 pub use keys::{Binding, ChordResolver, KeyCombo, KeyOutcome, KeySequence, Keymap};
 pub use menu::{Entry, Menu, MenuItem, ToolEntry, Toolbar, ToolbarItem};
@@ -98,7 +100,9 @@ pub use style::{Preview, StyleEntry, StyleKind, StylePicker};
 pub use table::{
     CellRef, ColumnInfo, Selection, Sort, SortDirection, TableCommands, TableSource, TableView,
 };
-pub use text::{Direction, Fallback, Localize, Message, fold_case, matches_filter, resolve};
+pub use text::{
+    Direction, Fallback, Localize, Message, decimal_separator, fold_case, matches_filter, resolve,
+};
 pub use theme::{Appearance, Colors, Density, Metrics, Theme, ThemeId, UiScale};
 pub use tree::{TreeCommands, TreeItem, TreeSource, TreeView};
 #[cfg(feature = "viewport")]

@@ -153,6 +153,7 @@ fn config() -> ShellConfig {
         status: Vec::new(),
         display: None,
         overlays: None,
+        work_plane: None,
         initial_view: None,
         seed: 1,
     }
@@ -458,6 +459,15 @@ struct Seen {
     access: Vec<(bool, bool)>,
     /// For each `closing` call: the tab and whether its document was still open.
     closings: Vec<(TabId, bool)>,
+    /// The commands of `Invoke` actions.
+    invoked: Vec<String>,
+    /// The language, the decimal separator and the session's `app.language` of the last line.
+    context: Option<(String, char, Option<serde_json::Value>)>,
+    /// An idle controller shows no prompt, no option and no history, and has no selection of its
+    /// own.
+    idle: bool,
+    /// The controller leaves undo, redo and clearing the selection to the shell.
+    leaves_edit_to_shell: bool,
 }
 
 /// A controller that keeps a prompt, one option and one history line, consumes viewport clicks
@@ -480,6 +490,14 @@ impl shell::Interaction for FakeController {
 
     fn dynamic(&mut self, _: &shell::InteractionContext<'_>, _: &DynamicEvent) {}
 
+    fn handles(&self, command: &str) -> bool {
+        !self.seen.lock().unwrap().leaves_edit_to_shell
+            && matches!(
+                command,
+                commands::EDIT_UNDO | commands::EDIT_REDO | commands::SELECT_CLEAR
+            )
+    }
+
     fn closing(&mut self, cx: &shell::InteractionContext<'_>) {
         let open = cx.document().is_ok();
         self.seen.lock().unwrap().closings.push((cx.tab(), open));
@@ -487,16 +505,30 @@ impl shell::Interaction for FakeController {
 
     fn line(
         &mut self,
-        _: &shell::InteractionContext<'_>,
+        cx: &shell::InteractionContext<'_>,
         action: LineAction,
     ) -> arc_base::Result<()> {
-        if let LineAction::Submit(text) = action {
-            self.seen.lock().unwrap().lines.push(text);
+        let mut seen = self.seen.lock().unwrap();
+        seen.context = Some((
+            cx.language().to_owned(),
+            cx.decimal_separator(),
+            cx.session().setting(commands::LANGUAGE_SETTING),
+        ));
+        match action {
+            LineAction::Submit(text) if text == "ask" => {
+                cx.ask(Intent::new(commands::FILE_NEW));
+            }
+            LineAction::Submit(text) => seen.lines.push(text),
+            LineAction::Invoke(intent) => seen.invoked.push(intent.command),
+            _ => {}
         }
         Ok(())
     }
 
     fn output(&self) -> shell::InteractionOutput {
+        if self.seen.lock().unwrap().idle {
+            return shell::InteractionOutput::default();
+        }
         shell::InteractionOutput {
             status: LineStatus {
                 active: true,
@@ -611,6 +643,154 @@ fn a_registered_controller_owns_the_command_panel_option_bar_and_viewport_clicks
     frame(&mut shell, &mut app, &ctx, vec![enter], Vec::new(), false);
     assert_eq!(seen.lock().unwrap().lines, ["yes", "hello"]);
     assert_eq!(seen.lock().unwrap().clicks, 1);
+}
+
+/// Types `text` into the command line and presses Enter.
+fn submit(shell: &mut Shell, app: &mut Application, ctx: &egui::Context, text: &str) {
+    let run = frame(shell, app, ctx, Vec::new(), Vec::new(), false);
+    frame(
+        shell,
+        app,
+        ctx,
+        click(text_input(&run.nodes)),
+        Vec::new(),
+        false,
+    );
+    let typed = vec![egui::Event::Text(text.into())];
+    frame(shell, app, ctx, typed, Vec::new(), false);
+    let enter = key(egui::Key::Enter, egui::Modifiers::NONE);
+    frame(shell, app, ctx, vec![enter], Vec::new(), false);
+}
+
+#[test]
+fn the_shell_carries_out_its_commands_and_a_controller_gets_the_rest() {
+    let dir = TempDir::new("shell-commands");
+    let seen = Arc::new(Mutex::new(Seen {
+        idle: true,
+        ..Seen::default()
+    }));
+    let mut app = app_with(&dir.0, false, Some(seen.clone()));
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    open_new_document(&mut shell, &mut app, &ctx);
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    assert_eq!(app.tabs().len(), 1);
+
+    // A shell command typed on the controlled line is the shell's.
+    submit(&mut shell, &mut app, &ctx, commands::FILE_NEW);
+    assert_eq!(app.tabs().len(), 2);
+    assert!(seen.lock().unwrap().lines.is_empty());
+
+    // Typed parameters reach the shell's command line too.
+    let file = dir.0.join("typed.arc");
+    submit(
+        &mut shell,
+        &mut app,
+        &ctx,
+        &format!("{} path={}", commands::FILE_SAVE_AS, file.display()),
+    );
+    assert!(file.exists());
+    assert!(seen.lock().unwrap().lines.is_empty());
+
+    // A controller asks for a shell command through its context.
+    submit(&mut shell, &mut app, &ctx, "ask");
+    assert_eq!(app.tabs().len(), 3);
+
+    // A menu command is started the way a toolbar button's is: through the controller, with the
+    // language and the decimal separator in its context; a shell command from the menu is not.
+    let menu = vec![
+        Intent::new("shell.layer.create"),
+        Intent::new(commands::FILE_NEW),
+    ];
+    frame(&mut shell, &mut app, &ctx, Vec::new(), menu, false);
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.invoked, ["shell.layer.create"]);
+    assert_eq!(app.tabs().len(), 4);
+    let (language, separator, setting) = seen.context.clone().unwrap();
+    assert_eq!((language.as_str(), separator), ("en", '.'));
+    assert_eq!(setting, Some(serde_json::json!("en")));
+}
+
+#[test]
+fn undo_goes_to_the_controller_that_claims_it_and_to_the_shell_otherwise() {
+    for leaves in [false, true] {
+        let dir = TempDir::new("claims");
+        let seen = Arc::new(Mutex::new(Seen {
+            idle: true,
+            leaves_edit_to_shell: leaves,
+            ..Seen::default()
+        }));
+        let mut app = app_with(&dir.0, false, Some(seen.clone()));
+        let mut shell = Shell::new(&app, config(), None);
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        open_new_document(&mut shell, &mut app, &ctx);
+        frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+        let tab = app.active().unwrap();
+        let session = Session::new(Surface::Ui, [Permission::Edit]);
+        app.invoke(
+            tab,
+            &session,
+            arc_command::Invocation::new(
+                "shell.point.create",
+                serde_json::json!({"position": [0.0, 0.0, 0.0]}),
+            ),
+        )
+        .unwrap();
+        let steps = |app: &Application| app.tab(tab).unwrap().document().undo_step_list(10).len();
+        assert_eq!(steps(&app), 1);
+        let undo = vec![Intent::new(commands::EDIT_UNDO)];
+        frame(&mut shell, &mut app, &ctx, Vec::new(), undo, false);
+        let invoked = seen.lock().unwrap().invoked.clone();
+        if leaves {
+            assert!(invoked.is_empty(), "the shell undoes it");
+            assert_eq!(steps(&app), 0);
+        } else {
+            assert_eq!(invoked, [commands::EDIT_UNDO]);
+            assert_eq!(steps(&app), 1, "the controller owns undo");
+        }
+    }
+}
+
+#[test]
+fn escape_clears_the_selection_of_a_controlled_tab_at_once() {
+    let dir = TempDir::new("escape");
+    let seen = Arc::new(Mutex::new(Seen {
+        idle: true,
+        leaves_edit_to_shell: true,
+        ..Seen::default()
+    }));
+    let mut app = app_with(&dir.0, false, Some(seen.clone()));
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    open_new_document(&mut shell, &mut app, &ctx);
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    let tab = app.active().unwrap();
+    let session = Session::new(Surface::Ui, [Permission::Edit]);
+    let created = app
+        .invoke(
+            tab,
+            &session,
+            arc_command::Invocation::new(
+                "shell.point.create",
+                serde_json::json!({"position": [0.0, 0.0, 0.0]}),
+            ),
+        )
+        .unwrap();
+    let point: arc_base::ObjectId = created.value["id"].as_str().unwrap().parse().unwrap();
+    let mut requests = Vec::new();
+    let select = Intent::new(commands::SELECT_SET)
+        .with("objects", arc_ui::object_list(&[point]))
+        .with("mode", "replace");
+    shell.dispatch(&mut app, select, &mut requests).unwrap();
+    assert_eq!(shell.view(tab).unwrap().selection(), [point]);
+
+    // The controller reports no selection of its own: Escape sees the tab's and clears it.
+    let escape = key(egui::Key::Escape, egui::Modifiers::NONE);
+    frame(&mut shell, &mut app, &ctx, vec![escape], Vec::new(), false);
+    assert!(shell.view(tab).unwrap().selection().is_empty());
 }
 
 fn owner(user: &str) -> LockOwner {

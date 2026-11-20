@@ -820,12 +820,16 @@ it is registered. Without a registration the shell behaves as before.
   (a `Prompt`, which labels the command panel), `options` (a `PromptControls` for the tool option
   bar: keyword buttons and parameter fields), `history` (lines shown above the field, at most 16,
   most recent last), `overlays` (`ProductOverlay`s), `dynamic` (a `DynamicOutput`: a prompt message
-  and `DynamicField`s, shown beside the pointer) and `selection` (the objects the viewport
-  highlights, and whose count the viewport reports as the selected count).
+  and `DynamicField`s, shown beside the pointer) and `selection` (`Option<Vec<ObjectId>>`: the
+  objects of the controller's own that the viewport highlights and counts; `None`, the default,
+  shows the tab's selection, which follows a click, Escape or a command at once, and the shell then
+  also sets `status.has_selection` from it, so Escape on a selection clears it).
 - `InteractionContext` gives what a controller needs: `document()` (the tab's `arc_doc::Document`),
-  `invoke(Invocation)` (a document command through `Application::invoke` in the shell's command
+  `invoke(Invocation)` (a document command, seeing the tab's selection when it names none, through `Application::invoke` in the shell's command
   session), `session()`, `read_only()`, `selection()` (the tab's shell selection), `camera()` (the
-  tab's camera, which is the view the controller's input is in) and `tab()`. The foundation has no
+  tab's camera, which is the view the controller's input is in), `language()` (the interface language
+  tag, also the session setting `app.language` of `session()`), `decimal_separator()` (`,` or `.`
+  for that language), `ask(Intent)` and `tab()`. The foundation has no
   space concept, so the camera stands for the active space.
 - A product controller must honor `read_only()`. A read-only tab is a package open without write
   access (`Application::is_read_only_tab`, the rule `Application::invoke` also applies). On such a
@@ -833,12 +837,35 @@ it is registered. Without a registration the shell behaves as before.
   but a controller that changes `document()` itself, without `invoke`, is not stopped by that. It
   must check `read_only()` before any such change and must not change the document when it is
   true. A closed tab counts as read-only.
-- While a controller is registered: the viewport gets the controller's overlays, dynamic panel and
-  highlight, and no prompt of the shell's own line (the widget does not answer prompts itself); the
-  command panel draws the controller's prompt, history and option bar and sends its lines and
-  options to `line`; dynamic events go to `dynamic`. The shell's own command line does not prompt.
-  Commands that menus and the palette start still run on the shell's own command line, which is a
-  known gap: a product that uses a controller starts its commands through it.
+- While a controller is registered: the viewport gets the controller's overlays (after the
+  product's own `ShellConfig::overlays`, so level labels stay), dynamic panel and highlight, and no
+  prompt of the shell's own line (the widget does not answer prompts itself); the command panel
+  draws the controller's prompt, history and option bar and sends its lines and options to `line`;
+  dynamic events go to `dynamic`. The shell's own command line does not prompt.
+- Shell commands are the shell's, whoever controls the line, unless the controller claims them
+  with `Interaction::handles(command) -> bool`. The default claims nothing; a controller with its own
+  undo, such as one that steps back one answer, claims `app.edit.undo`, `app.edit.redo` and
+  `app.select.clear`. A submitted line (the first word, with its parameters) or an
+  `Invoke` or `CancelThen` intent naming an unclaimed shell command never reaches `line`: the shell
+  cancels a running tool first (`LineAction::Cancel`), except for save and save as, and carries the
+  command out. Every other command a menu, a key binding (`Action::Start`) or a toolbar button
+  starts reaches `line` as `LineAction::Invoke(intent)` with its parameters, so a menu item and a
+  toolbar button start a tool the same way (the commands of panels, such as the property grid's
+  edit and a click's selection command, still run on the shell's command line); a controller maps
+  `Invoke` of a command that needs prompts to the start of its own prompts.
+- `InteractionOutput::inline_arguments` (default `false`): the command line ends the input at a
+  space like Enter (one-letter commands, keyword answers); `true` keeps the space as text so an idle
+  line takes inline arguments such as `app.file.open path=<file>`.
+- `InteractionContext::ask(intent)` queues an intent (at most 16 per call) from any method of the
+  controller; after the call returns (after the viewport frame for `pointer` and `dynamic`) the
+  shell dispatches each (`Action::Dispatch`): a shell command is carried out, any other command starts on the
+  shell's own command line, which runs it when its parameters are complete and does not prompt
+  while a controller is registered.
+- `ShellConfig::work_plane` (`WorkPlaneProbe`, a function of the application, the active tab and
+  its selection returning `Option<arc_ui::WorkPlane>`) sets the plane that point input of the active tab's
+  viewport lands on: the click that answers a point prompt without a controller, and the `model` of
+  every `PointerEvent` a controller receives (see `ProductInput::work_plane` in
+  [arc-ui](arc-ui.md)). `None` keeps the plane through the camera target.
 - Decisions with the rejected alternatives:
   - One controller per tab, created when the tab's view is created. Rejected: one for the product,
     which would share a prompt between tabs.
@@ -846,6 +873,11 @@ it is registered. Without a registration the shell behaves as before.
     overlays, which would give it the egui context and the widget's internals.
   - The controller runs commands through `InteractionContext::invoke`, which needs no mutable
     application: the shell hands out `&Application`, as the panels already receive it.
+  - A shell command goes to the shell even when a controller is registered. Rejected: leaving it
+    to the controller, which cannot run `app.file.*` or clear the selection.
+  - The controller's session carries `app.language`; the foundation's parsers read `.` as the
+    decimal separator whatever the language, so a product that accepts a decimal comma converts it
+    itself where the prompt cannot be a point (a point's coordinates are separated by `,`).
 - Not verified here: a registered controller through a real window, and the option bar's layout
   with a long option list.
 
@@ -898,7 +930,11 @@ needs no window:
   `OutlinerPanel` (every object, flat, labelled by its `name` text field or type and
   identifier), `CommandLinePanel`, `DiagnosticsPanelView`, `SettingsPanel` and `LogPanel`.
   Extractors are product `Extractor`s whose factory returns an `arc_gpu` extractor
-  (`shell::extractor`).
+  (`shell::extractor`). An extractor sees the snapshot, so it may read other objects, but the shell
+  extracts only the objects a commit changed: `ProductBuilder::extraction_dependents(f)` registers
+  `f(snapshot, changes) -> Vec<ObjectId>`, called after each commit with listed changes, whose
+  objects are extracted too (the walls of a storey when its level changes, for example). A commit
+  of "everything" extracts everything and does not call it.
 - `SettingsPanel` (CORE-APP-011) lists every setting with a search text over keys and
   localized descriptions. A setting whose highest allowed scope is the user scope or above is
   edited there: a check box for a truth value, a choice list for a choice, otherwise a text field

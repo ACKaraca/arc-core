@@ -253,6 +253,7 @@ pub fn config(seed: u64) -> Result<ShellConfig> {
         status: Vec::new(),
         display: None,
         overlays: None,
+        work_plane: None,
         initial_view: None,
         seed,
     })

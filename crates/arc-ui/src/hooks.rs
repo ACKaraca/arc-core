@@ -16,7 +16,7 @@ use arc_base::math::Point3;
 use arc_geom::view::ViewFrame;
 use egui::{Color32, FontId, Modifiers, Pos2, Rect, Stroke, Ui};
 
-use crate::gesture::{BandKind, plane_point};
+use crate::gesture::{BandKind, plane_point, work_point};
 use crate::snap::{self, Snap, SnapKind};
 use crate::text::Localize;
 use crate::theme::Colors;
@@ -41,6 +41,18 @@ pub struct ViewProjection {
     frame: ViewFrame,
     width: u32,
     height: u32,
+    work: Option<WorkPlane>,
+}
+
+/// The plane a product's point input lands on: a click answering a point prompt and
+/// [`ViewProjection::pixel_to_model`] meet it instead of the plane through the camera target (a
+/// storey's level plane, for example). The normal needs no unit length.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorkPlane {
+    /// A point on the plane.
+    pub origin: Point3,
+    /// The plane's normal.
+    pub normal: arc_base::math::Vector3,
 }
 
 impl ViewProjection {
@@ -51,7 +63,16 @@ impl ViewProjection {
             frame,
             width,
             height,
+            work: None,
         }
+    }
+
+    /// The same projection with the plane [`Self::pixel_to_model`] meets; `None` is the plane
+    /// through the camera target that faces the eye.
+    #[must_use]
+    pub fn with_work_plane(mut self, plane: Option<WorkPlane>) -> Self {
+        self.work = plane;
+        self
     }
 
     /// The camera.
@@ -67,11 +88,14 @@ impl ViewProjection {
     }
 
     /// The model point under the pixel `at` (x right, y down, from the top-left corner): the
-    /// point where the pick ray meets the plane through the target that faces the eye. `None`
-    /// when the result is not finite.
+    /// point where the pick ray meets the work plane, or the plane through the target that faces
+    /// the eye without one. `None` when the result is not finite (a ray parallel to the plane).
     #[must_use]
     pub fn pixel_to_model(&self, at: [f64; 2]) -> Option<Point3> {
-        plane_point(&self.frame, self.width, self.height, at).ok()
+        match &self.work {
+            Some(plane) => work_point(&self.frame, self.width, self.height, at, plane).ok(),
+            None => plane_point(&self.frame, self.width, self.height, at).ok(),
+        }
     }
 
     /// The pixel of a model point, or `None` for a point behind the eye or outside the range of
@@ -88,8 +112,8 @@ impl ViewProjection {
     /// scale.
     #[must_use]
     pub fn pixels_per_unit(&self) -> Option<f64> {
-        let a = self.pixel_to_model([0.0, 0.0])?;
-        let b = self.pixel_to_model([1.0, 0.0])?;
+        let a = plane_point(&self.frame, self.width, self.height, [0.0, 0.0]).ok()?;
+        let b = plane_point(&self.frame, self.width, self.height, [1.0, 0.0]).ok()?;
         let units = (b - a).norm();
         (units.is_finite() && units > 0.0).then(|| 1.0 / units)
     }
@@ -424,6 +448,7 @@ mod tests {
                         },
                         overlays,
                         dynamic,
+                        work_plane: None,
                     }),
                 },
             ));
@@ -604,6 +629,28 @@ mod tests {
             }
             assert!(projection.pixels_per_unit().is_some_and(|v| v > 0.0));
         }
+    }
+
+    #[test]
+    fn a_work_plane_moves_the_model_point_onto_it() {
+        let plane = WorkPlane {
+            origin: Point3::new(0.0, 0.0, 6.0),
+            normal: Vector3::z(),
+        };
+        let projection = ViewProjection::new(perspective(), 120, 80).with_work_plane(Some(plane));
+        for at in [[10.0, 20.0], [60.0, 40.0]] {
+            let p = projection.pixel_to_model(at).expect("a point on the plane");
+            assert!((p.z - 6.0).abs() < 1e-9, "{p:?}");
+            let back = projection.model_to_pixel(&p).expect("a pixel");
+            assert!((back[0] - at[0]).abs() < 1e-6 && (back[1] - at[1]).abs() < 1e-6);
+        }
+        // A plane the rays run parallel to gives no point.
+        let edge = WorkPlane {
+            origin: Point3::origin(),
+            normal: Vector3::x(),
+        };
+        let sideways = ViewProjection::new(top(), 100, 100).with_work_plane(Some(edge));
+        assert!(sideways.pixel_to_model([50.0, 50.0]).is_none());
     }
 
     fn perspective() -> ViewFrame {

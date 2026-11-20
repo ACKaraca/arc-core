@@ -57,6 +57,13 @@ pub struct Entry {
     pub factory: Arc<dyn Factory>,
 }
 
+/// Names the objects whose render data depends on objects a commit changed, so they are extracted
+/// again: given the committed snapshot and its changes, the extra objects to extract (a wall's
+/// solid depends on the elevation of its storey's level, for example). See
+/// [`ProductBuilder::extraction_dependents`].
+pub type Dependents =
+    Arc<dyn Fn(&Snapshot, &arc_doc::events::Changes) -> Vec<ObjectId> + Send + Sync>;
+
 /// A registered extractor: it derives render data from objects of the listed types.
 #[derive(Clone)]
 pub struct Extractor {
@@ -173,6 +180,7 @@ pub struct Product {
     panels: Vec<Entry>,
     tools: Vec<Entry>,
     extractors: Vec<Extractor>,
+    dependents: Option<Dependents>,
     view_renderer: Option<Arc<dyn ViewRenderer>>,
     openers: BTreeMap<String, Arc<NativeFormat>>,
     new_document: Option<String>,
@@ -249,6 +257,13 @@ impl Product {
         &self.extractors
     }
 
+    /// The product's function naming the objects to extract again after a commit, when it
+    /// registered one (see [`ProductBuilder::extraction_dependents`]).
+    #[must_use]
+    pub fn extraction_dependents(&self) -> Option<&Dependents> {
+        self.dependents.as_ref()
+    }
+
     /// The file type of `path` by its extension, when one is registered.
     #[must_use]
     pub fn file_type(&self, path: &Path) -> Option<&FileType> {
@@ -277,6 +292,7 @@ pub struct ProductBuilder {
     panels: Vec<Entry>,
     tools: Vec<Entry>,
     extractors: Vec<Extractor>,
+    dependents: Option<Dependents>,
     view_renderer: Option<Arc<dyn ViewRenderer>>,
     #[cfg(feature = "window")]
     interaction: Option<crate::shell::interaction::Factory>,
@@ -330,6 +346,7 @@ impl ProductBuilder {
             panels: Vec::new(),
             tools: Vec::new(),
             extractors: Vec::new(),
+            dependents: None,
             view_renderer: None,
             #[cfg(feature = "window")]
             interaction: None,
@@ -449,6 +466,18 @@ impl ProductBuilder {
         self.view_renderer = Some(renderer);
     }
 
+    /// Registers the function that names the objects to extract again after a commit, besides the
+    /// changed ones: an object whose render data derives from another object (a wall from the level
+    /// of its storey) is listed when that object changes. It is called on the shell's frame with
+    /// the committed snapshot; a commit whose changes are "everything" extracts everything and
+    /// does not call it.
+    pub fn extraction_dependents(
+        &mut self,
+        f: impl Fn(&Snapshot, &arc_doc::events::Changes) -> Vec<ObjectId> + Send + Sync + 'static,
+    ) {
+        self.dependents = Some(Arc::new(f));
+    }
+
     /// Registers the product's interaction controller: `factory` creates one per tab, and the
     /// windowed shell routes the command panel, option bar, viewport pointer events and dynamic
     /// input of the tab to it. Without a registration the shell keeps its own command line.
@@ -532,6 +561,7 @@ impl ProductBuilder {
             panels: self.panels,
             tools: self.tools,
             extractors: self.extractors,
+            dependents: self.dependents,
             view_renderer: self.view_renderer,
             #[cfg(feature = "window")]
             interaction: self.interaction,
