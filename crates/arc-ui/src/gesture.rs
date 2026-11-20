@@ -360,6 +360,12 @@ impl Gestures {
         self.press.is_some()
     }
 
+    /// Ends a button press without an answer: the press of an event the product consumed as a
+    /// click, so the release does not answer again.
+    pub fn cancel_press(&mut self) {
+        self.press = None;
+    }
+
     /// The rubber band being dragged.
     #[must_use]
     pub fn band(&self) -> Option<Band> {
@@ -572,18 +578,7 @@ impl Gestures {
 
     /// The pick ray through `at` meets the plane through the target facing the eye.
     fn view_plane_point(&self, view: &View<'_>, at: [f64; 2]) -> Result<Point3> {
-        let (w, h) = (f64::from(view.width.max(1)), f64::from(view.height.max(1)));
-        let f = &view.frame;
-        let (origin, dir) = f.ray_through(2.0 * at[0] / w - 1.0, 1.0 - 2.0 * at[1] / h, w / h)?;
-        let forward: Vector3 = f.forward();
-        let along = dir.dot(&forward);
-        let t = (f.target() - origin).dot(&forward) / along;
-        let p = origin + dir * t;
-        if p.iter().all(|c| c.is_finite()) {
-            Ok(p)
-        } else {
-            Err(Error::new(arc_gpu::error::codes::NAVIGATION_INVALID))
-        }
+        plane_point(&view.frame, view.width, view.height, at)
     }
 
     fn pick(&mut self, view: &mut View<'_>, region: Option<PickRegion>) -> Result<Vec<PickHit>> {
@@ -787,6 +782,26 @@ impl Gestures {
             inside.retain(|id| !outside.iter().any(|h| h.key.object == *id));
         }
         Ok(inside)
+    }
+}
+
+/// The model point under the pixel `at` of a `width × height` image seen through `frame`: the
+/// pick ray meets the plane through the target that faces the eye.
+///
+/// # Errors
+///
+/// `arc_gpu::error::codes::NAVIGATION_INVALID` when the camera or the point is not finite.
+pub fn plane_point(frame: &ViewFrame, width: u32, height: u32, at: [f64; 2]) -> Result<Point3> {
+    let (w, h) = (f64::from(width.max(1)), f64::from(height.max(1)));
+    let (origin, dir) = frame.ray_through(2.0 * at[0] / w - 1.0, 1.0 - 2.0 * at[1] / h, w / h)?;
+    let forward: Vector3 = frame.forward();
+    let along = dir.dot(&forward);
+    let t = (frame.target() - origin).dot(&forward) / along;
+    let p = origin + dir * t;
+    if p.iter().all(|c| c.is_finite()) {
+        Ok(p)
+    } else {
+        Err(Error::new(arc_gpu::error::codes::NAVIGATION_INVALID))
     }
 }
 

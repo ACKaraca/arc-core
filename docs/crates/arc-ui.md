@@ -291,6 +291,11 @@ Objects are listed as hyphenated identifier texts.
   text; otherwise they walk the history entries that contain the text typed before the walk
   (ignoring case), and Down past the newest restores that text.
 
+- `CommandLineView::show_with` draws the field for a prompt and a `LineStatus` the caller supplies,
+  instead of a `CommandLine`, so a product whose controller keeps the line uses the same keys.
+  With `keywords: false` the prompt's keyword options are not drawn as buttons; the caller shows
+  them in the tool option bar. `show` is `show_with` with the shell's own line.
+
 ### Property grid (CORE-UI-010)
 
 - A `PropertyObject` gives an object's field declarations, values and the names of its read-only
@@ -576,6 +581,16 @@ Objects are listed as hyphenated identifier texts.
     focus was lost in that frame.
 - Open items: display units with a conversion from the document's unit settings, and grid or
   orthogonal constraints of the derived values (the caller computes them).
+- Product fields (`dynamic_input::show_fields`, feature-free): the product supplies
+  `DynamicField`s (label message identifier, text, `locked`, `focused`) and receives
+  `DynamicEvent`s: `Edited { index, text }` on a text change, `Tab { index }` and `Enter { index }`
+  when those keys are pressed in a field. The product owns the text and the lock, so the widget
+  shows what it is given each frame. Focus follows `focused`; Tab and Enter are consumed while a
+  field has the focus, and Tab does not move the focus itself (the product sets it). At most
+  `MAX_FIELDS` (8) fields are drawn. The panel is placed beside the pointer with the size of the
+  previous frame. `DynamicInput::show` is unchanged for the two point fields.
+  - Rejected: a generic field store in the widget. The product already holds the values, and a
+    second copy would disagree with it after an edit it did not accept.
 
 ### Snapping feedback (CORE-UI-030)
 
@@ -703,6 +718,53 @@ added: picking and navigation errors keep their `arc-gpu` and `arc-geom` codes.
   independent, or shared through a `ViewLink`: a widget whose camera changed publishes it, and
   every other widget on the link returns the published camera on its next frame (in the same
   frame when drawn later).
+
+### Product hooks of the viewport (CORE-UI-005, extension)
+
+Module `hooks` (feature `viewport`). A product gives the viewport a `ProductInput` in
+`ViewportInput::product`; without one the widget behaves as before.
+
+- `ViewProjection` (`ViewportOutput::projection`, also built with `ViewProjection::new(frame,
+  width, height)`): `pixel_to_model(px) -> Option<Point3>` is the point where the pick ray meets the
+  plane through the target that faces the eye; `model_to_pixel(&p) -> Option<[f64; 2]>` projects a
+  model point, `None` behind the eye; `pixels_per_unit() -> Option<f64>` is the pixel size of one
+  model unit on that plane. The pixel mapping is the one picking uses (x right, y down). The
+  functions are `Option` because a camera can give non-finite values.
+- `PointerHandler::pointer(&mut self, &PointerEvent) -> bool` receives `PointerEvent`s before the
+  widget's own handling. Its kinds are `Move`, `Press`, `Release` and `Click` (a primary press and
+  release without a drag beyond the drag threshold). Each event carries the button (`None` for a
+  move), the modifiers, the pixel, the model point (`None` when the pixel has none) and
+  `pixels_per_unit`, so a product converts a pixel aperture to model units by dividing by it.
+  Returning `true` consumes the event; the widget then does not handle it, so no selection, prompt
+  answer or rubber band comes from it.
+  - A move is offered only while the widget holds no press (a band or pan in progress).
+  - A press the handler consumes belongs to the handler: its release is offered to the handler,
+    and the widget does not see it.
+  - A press the handler does not consume goes to the widget. Its release is offered to the handler
+    too, but a consumed release does not stop the widget; a click the handler consumes ends the
+    widget's press without an answer.
+  - Navigation (wheel, pinch, keys, and the middle-button pan and orbit) stays with the widget. The
+    handler sees middle-button events too and may consume them to keep the widget from panning.
+- `ProductOverlay` is painted over the image with the theme's viewport tokens, in model
+  coordinates projected by the current camera; at most `MAX_OVERLAYS` (256) primitives, each with at
+  most `MAX_POINTS` (4096) points, are drawn: `Line` (rubber band), `Band` (window: solid outline,
+  crossing: dashed outline, both over the faint fill; the rectangle is the screen rectangle of the
+  two projected corners), `Path` (polyline, optionally dashed), `Snap` (a snap marker by
+  `SnapKind`, drawn by `snap::paint` with the kind's name) and `Label` (text at a point, shown as
+  given; the product localizes it).
+- Highlight: the widget does not highlight objects. The shell passes the selection the product
+  supplies to `arc_gpu::Viewport::set_highlight` (see the application's interaction hook).
+- Decisions with the rejected alternatives:
+  - The handler runs before the widget, with consumption as the only answer. Rejected: a product
+    that reads the widget's intents after the fact, which would let the widget answer first.
+  - Overlays are painted by egui in model coordinates, not as `arc-gpu` `Anchor::World`
+    primitives: the snap marker and its name are egui painting, and one painter keeps the overlay
+    style with the widget. The `arc-gpu` overlay stays the widget's own band.
+  - The pixel size of one model unit is measured on the plane through the target. Rejected: the
+    depth of each point, which would give a different scale per point and make an aperture depend
+    on the geometry under it.
+- Not verified here: how the overlays look on a real display, and whether the click threshold
+  feels right with a touch or pen pointer.
 
 ### Accessibility of the viewport (CORE-UI-027, in part)
 

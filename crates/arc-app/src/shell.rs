@@ -20,9 +20,12 @@
 //! models them and [`Shell::frame_window`] composes one.
 
 pub mod event_loop;
+pub mod interaction;
 pub mod platform;
 pub mod prefs;
 pub mod prompts;
+
+pub use interaction::{DynamicOutput, Interaction, InteractionContext, InteractionOutput};
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -45,10 +48,10 @@ use arc_ui::egui::{self, TextureId, Ui};
 use arc_ui::gesture::ViewPicker;
 use arc_ui::{
     Appearance, Binding, ChordResolver, Colors, CommandLineView, DiagnosticsPanel, Dock, DockArea,
-    DockLayout, GridContext, Intent, Keymap, LineAction, LineCommands, LineContext, Localize,
-    Lookup, Menu, Message, Notifications, PropertyGrid, PropertyModel, PropertyObject, Severity,
-    TreeCommands, TreeItem, TreeSource, TreeView, ViewCube, ViewCubeInput, ViewportCommands,
-    ViewportInput, ViewportWidget,
+    DockLayout, DynamicPanel, GridContext, Intent, Keymap, LineAction, LineCommands, LineContext,
+    LineStatus, Localize, Lookup, Menu, Message, Notifications, OptionBar, PointerHandler,
+    ProductInput, PropertyGrid, PropertyModel, PropertyObject, Severity, TreeCommands, TreeItem,
+    TreeSource, TreeView, ViewCube, ViewCubeInput, ViewportCommands, ViewportInput, ViewportWidget,
 };
 use serde_json::{Map, Value as Json};
 
@@ -59,7 +62,11 @@ use crate::logging::LogRing;
 use crate::recent::RecentEntry;
 use crate::settings::{Scope, SettingType, SettingValue};
 use crate::settings_editor;
+use interaction::Hook;
 use prompts::{Choice, RecoveryEntry};
+
+/// Submitted lines of a controller the command panel shows, most recent last.
+const MAX_SHOWN_HISTORY: usize = 16;
 
 /// How long a pick or a settle waits for the render and extraction threads.
 pub const WAIT: Duration = Duration::from_secs(5);
@@ -280,6 +287,9 @@ pub struct View {
     hover: Option<ObjectId>,
     line: CommandLine,
     line_view: CommandLineView,
+    /// The product's interaction controller, when the product registered a factory.
+    interaction: Option<Box<dyn Interaction>>,
+    option_bar: OptionBar,
     grid: PropertyGrid,
     tree: TreeView,
     diagnostics: DiagnosticsPanel,
@@ -686,7 +696,8 @@ impl Shell {
                 continue;
             }
             match self.new_view(tab.document()) {
-                Ok(view) => {
+                Ok(mut view) => {
+                    view.interaction = app.product().interaction().map(|factory| factory());
                     self.views.insert(tab.id(), view);
                 }
                 Err(e) => self.error(e),
@@ -713,6 +724,8 @@ impl Shell {
             hover: None,
             line: CommandLine::new(),
             line_view: CommandLineView::default(),
+            interaction: None,
+            option_bar: OptionBar::default(),
             grid: PropertyGrid::default(),
             tree: TreeView::default(),
             diagnostics: DiagnosticsPanel::default(),
@@ -1042,6 +1055,7 @@ impl Shell {
             Action::Setting { key, value } => self.set_setting(app, &key, value),
             Action::Intent(intent) => self.dispatch(app, intent, requests),
             Action::Answer(input) => self.line_step(app, LineStep::Answer(input), requests),
+            Action::Line(line) if self.controlled(app) => self.controller_line(app, line),
             Action::Line(line) => match line {
                 LineAction::ClearInput => Ok(()),
                 LineAction::Submit(text) => self.line_step(app, LineStep::Submit(&text), requests),
@@ -1060,6 +1074,30 @@ impl Shell {
         };
         if let Err(e) = result {
             self.error(e);
+        }
+    }
+
+    /// Whether the active tab's view has a product's interaction controller.
+    fn controlled(&self, app: &Application) -> bool {
+        app.active()
+            .and_then(|t| self.views.get(&t))
+            .is_some_and(|v| v.interaction.is_some())
+    }
+
+    /// Hands a command-panel action to the active tab's controller.
+    fn controller_line(&mut self, app: &Application, line: LineAction) -> Result<()> {
+        let tab = app
+            .active()
+            .ok_or_else(|| Error::new(crate::codes::DOCUMENT_UNKNOWN))?;
+        let session =
+            session(Surface::CommandLine).with_last_hook(app.product().headless().last.clone());
+        let Some(view) = self.views.get_mut(&tab) else {
+            return Err(Error::new(crate::codes::DOCUMENT_UNKNOWN));
+        };
+        let cx = InteractionContext::new(app, tab, &session, &view.selection, view.camera);
+        match view.interaction.as_deref_mut() {
+            Some(controller) => controller.line(&cx, line),
+            None => Ok(()),
         }
     }
 
@@ -1416,17 +1454,48 @@ impl Panel for ViewportPanel {
             line,
             selection,
             hover,
+            interaction,
             ..
         } = view;
-        let prompt = line.active().and_then(|s| s.prompt());
+        let session =
+            session(Surface::CommandLine).with_last_hook(cx.app.product().headless().last.clone());
+        // With a controller the controller's prompt, selection and overlays are the viewport's.
+        let frame = match (interaction.as_deref(), cx.tab) {
+            (Some(controller), Some(_)) => Some(controller.output()),
+            _ => None,
+        };
+        let icx = cx.tab.map(|tab| {
+            InteractionContext::new(cx.app, tab, &session, selection.as_slice(), *camera)
+        });
+        let prompt = match frame {
+            Some(_) => None,
+            None => line.active().and_then(|s| s.prompt()),
+        };
+        let highlight: &[ObjectId] = match &frame {
+            Some(f) => &f.selection,
+            None => selection.as_slice(),
+        };
+        let selected = highlight.len();
         let mut picker = ViewportPicker(viewport.as_ref());
+        let mut hook = match (interaction.as_deref_mut(), icx.as_ref()) {
+            (Some(controller), Some(cx)) => Some(Hook { controller, cx }),
+            _ => None,
+        };
+        let product = frame.as_ref().map(|f| ProductInput {
+            pointer: hook.as_mut().map(|h| h as &mut dyn PointerHandler),
+            overlays: &f.overlays,
+            dynamic: f.dynamic.as_ref().map(|d| DynamicPanel {
+                prompt: &d.prompt,
+                fields: &d.fields,
+            }),
+        });
         let out = widget.show(
             ui,
             ViewportInput {
                 texture: cx.texture,
                 frame: camera,
                 prompt,
-                selected: selection.len(),
+                selected,
                 picker: &mut picker,
                 commands: &self.commands,
                 localize: cx.localize,
@@ -1435,8 +1504,14 @@ impl Panel for ViewportPanel {
                 tolerance: &Tolerance::DEFAULT,
                 name: "",
                 time: cx.time,
+                product,
             },
         );
+        if let (Some(controller), Some(icx)) = (interaction.as_deref_mut(), icx.as_ref()) {
+            for event in &out.dynamic {
+                controller.dynamic(icx, event);
+            }
+        }
         if let Some(c) = out.camera {
             *camera = c;
         }
@@ -1458,25 +1533,48 @@ impl Panel for ViewportPanel {
             }
         }
         *hover = out.hover;
-        if let Some(vp) = viewport.as_ref() {
-            let overlay = (!out.overlay.primitives.is_empty()).then_some(out.overlay);
-            let results = [
-                vp.resize(out.size[0], out.size[1]),
-                vp.set_camera(*camera),
-                vp.set_highlight(*hover, selection),
-                vp.set_overlay(overlay),
-            ];
-            cx.actions.extend(
-                results
-                    .into_iter()
-                    .filter_map(Result::err)
-                    .map(Action::Error),
-            );
-        }
+        let overlay = (!out.overlay.primitives.is_empty()).then_some(out.overlay);
+        sync_viewport(
+            viewport.as_ref(),
+            out.size,
+            camera,
+            *hover,
+            highlight,
+            overlay,
+            cx.actions,
+        );
         cx.actions.extend(out.errors.into_iter().map(Action::Error));
         cx.actions.extend(out.intent.map(Action::Intent));
         cx.actions.extend(out.answer.map(Action::Answer));
     }
+}
+
+/// Hands the frame's size, camera, highlight and overlay to the viewport; failures become
+/// actions.
+fn sync_viewport(
+    viewport: Option<&Viewport>,
+    size: [u32; 2],
+    camera: &ViewFrame,
+    hover: Option<ObjectId>,
+    highlight: &[ObjectId],
+    overlay: Option<arc_gpu::Overlay>,
+    actions: &mut Vec<Action>,
+) {
+    let Some(vp) = viewport else {
+        return;
+    };
+    let results = [
+        vp.resize(size[0], size[1]),
+        vp.set_camera(*camera),
+        vp.set_highlight(hover, highlight),
+        vp.set_overlay(overlay),
+    ];
+    actions.extend(
+        results
+            .into_iter()
+            .filter_map(Result::err)
+            .map(Action::Error),
+    );
 }
 
 /// The property grid panel: the fields of the selected objects; an edit becomes an intent
@@ -1675,15 +1773,49 @@ pub struct CommandLinePanel;
 
 impl Panel for CommandLinePanel {
     fn show(&mut self, ui: &mut Ui, cx: &mut PanelContext<'_>) {
-        let (Some(view), Some(tab)) = (cx.view.as_deref_mut(), cx.tab) else {
+        let (Some(view), Some(tab_id)) = (cx.view.as_deref_mut(), cx.tab) else {
             return;
         };
-        let Ok(tab) = cx.app.tab(tab) else {
+        let Ok(tab) = cx.app.tab(tab_id) else {
             return;
         };
         let registry = &cx.app.product().headless().registry;
         let session =
             session(Surface::CommandLine).with_last_hook(cx.app.product().headless().last.clone());
+        let commands = LineCommands {
+            undo: commands::EDIT_UNDO.into(),
+            redo: commands::EDIT_REDO.into(),
+            clear_selection: commands::SELECT_CLEAR.into(),
+        };
+        if let Some(controller) = view.interaction.as_deref() {
+            // The controller keeps the line: its prompt, history and options are what shows.
+            let out = controller.output();
+            let context = LineContext {
+                localize: cx.localize,
+                has_selection: !out.selection.is_empty(),
+                commands: &commands,
+            };
+            let skip = out.history.len().saturating_sub(MAX_SHOWN_HISTORY);
+            for line in out.history.iter().skip(skip) {
+                ui.label(line.as_str());
+            }
+            let completion = arc_command::line::Completion::default();
+            let status: LineStatus = out.status;
+            if let Some(action) = view.line_view.show_with(
+                ui,
+                status,
+                out.prompt.as_ref(),
+                false,
+                &completion,
+                &context,
+            ) {
+                cx.actions.push(Action::Line(action));
+            }
+            if let Some(text) = view.option_bar.show(ui, &out.options, cx.localize) {
+                cx.actions.push(Action::Line(LineAction::Submit(text)));
+            }
+            return;
+        }
         let localized = BTreeMap::new();
         let target = Target {
             registry,
@@ -1695,11 +1827,6 @@ impl Panel for CommandLinePanel {
         };
         let input = view.line_view.input.clone();
         let completion = view.line.complete(&target, &input, input.len());
-        let commands = LineCommands {
-            undo: commands::EDIT_UNDO.into(),
-            redo: commands::EDIT_REDO.into(),
-            clear_selection: commands::SELECT_CLEAR.into(),
-        };
         let context = LineContext {
             localize: cx.localize,
             has_selection: !view.selection.is_empty(),

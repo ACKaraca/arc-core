@@ -233,6 +233,24 @@ impl CommandLineView {
         context: &LineContext<'_>,
     ) -> Option<LineAction> {
         let status = LineStatus::of(line, context.has_selection);
+        let prompt = line.active().and_then(|s| s.prompt());
+        self.show_with(ui, status, prompt, true, completion, context)
+    }
+
+    /// Draws the command line for a prompt and status the caller supplies, instead of a
+    /// [`CommandLine`]: a product whose controller keeps the line. `prompt` labels the field and,
+    /// with `keywords`, adds its keyword options as buttons; a product that shows the options in
+    /// its own option bar passes `keywords: false`. Keys and actions are the same as
+    /// [`CommandLineView::show`].
+    pub fn show_with(
+        &mut self,
+        ui: &mut Ui,
+        status: LineStatus,
+        prompt: Option<&Prompt>,
+        keywords: bool,
+        completion: &Completion,
+        context: &LineContext<'_>,
+    ) -> Option<LineAction> {
         let id = ui.make_persistent_id("arc-command-line");
         let focused = ui.memory(|m| m.focused());
         let in_field = focused == Some(id);
@@ -279,7 +297,7 @@ impl CommandLineView {
             }
         }
 
-        let label_text = line.active().and_then(|s| s.prompt()).map_or_else(
+        let label_text = prompt.map_or_else(
             || messages::COMMAND_LINE.text(context.localize),
             |p| prompt_text(p, context.localize),
         );
@@ -289,7 +307,7 @@ impl CommandLineView {
         } else {
             ui.label(label_text)
         };
-        if let Some(prompt) = line.active().and_then(|s| s.prompt()) {
+        if let Some(prompt) = prompt.filter(|_| keywords) {
             direction.row(ui, true, |ui| {
                 for option in prompt.keyword_options() {
                     let mut text = resolve(context.localize, &option.label, &[]);

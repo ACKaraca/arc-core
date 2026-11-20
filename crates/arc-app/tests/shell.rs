@@ -12,8 +12,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use arc_app::application::{AppConfig, Application, CloseAnswer, Closed};
 use arc_app::commands;
@@ -25,10 +25,14 @@ use arc_app::shell::{
 };
 use arc_base::error::Value;
 use arc_base::{IdGenerator, Limits};
+use arc_command::prompt::{Accept, PointDims, Prompt};
 use arc_command::{FixedClock, Permission, Session, Surface};
 use arc_doc::package::LockOwner;
 use arc_ui::egui::{self, accesskit};
-use arc_ui::{Dock, DockLayout, Entry as MenuEntry, Intent, Localize};
+use arc_ui::{
+    Dock, DockLayout, DynamicEvent, Entry as MenuEntry, Intent, LineAction, LineStatus, Localize,
+    OptionControl, PointerEvent, PointerKind, PromptControls,
+};
 
 struct Names;
 impl Localize for Names {
@@ -67,6 +71,11 @@ impl Drop for TempDir {
 }
 
 fn app(data: &Path, extra_panel: bool) -> Application {
+    app_with(data, extra_panel, None)
+}
+
+/// The application, with a fake interaction controller that records into `seen` when given.
+fn app_with(data: &Path, extra_panel: bool, seen: Option<Arc<Mutex<Seen>>>) -> Application {
     let mut b = ProductBuilder::new("arc-shell", "0.1.0")
         .with_types(arc_shell_sample::types().unwrap())
         .with_commands(arc_shell_sample::registry().unwrap());
@@ -97,6 +106,9 @@ fn app(data: &Path, extra_panel: bool) -> Application {
             factory: Arc::new(|| 7_u32),
         })
         .unwrap();
+    }
+    if let Some(seen) = seen {
+        b.interaction(move || Box::new(FakeController { seen: seen.clone() }));
     }
     let owner = LockOwner {
         user: "tester".into(),
@@ -426,4 +438,166 @@ fn factories_of_the_wrong_type_are_reported() {
             .collect::<Vec<_>>(),
         ["app.product.invalid_id"]
     );
+}
+
+/// What the fake controller saw.
+#[derive(Default)]
+struct Seen {
+    lines: Vec<String>,
+    clicks: usize,
+}
+
+/// A controller that keeps a prompt, one option and one history line, consumes viewport clicks
+/// and records submitted lines.
+struct FakeController {
+    seen: Arc<Mutex<Seen>>,
+}
+
+impl shell::Interaction for FakeController {
+    fn pointer(&mut self, _: &shell::InteractionContext<'_>, event: &PointerEvent) -> bool {
+        if event.kind == PointerKind::Click {
+            self.seen.lock().unwrap().clicks += 1;
+            return true;
+        }
+        false
+    }
+
+    fn dynamic(&mut self, _: &shell::InteractionContext<'_>, _: &DynamicEvent) {}
+
+    fn line(
+        &mut self,
+        _: &shell::InteractionContext<'_>,
+        action: LineAction,
+    ) -> arc_base::Result<()> {
+        if let LineAction::Submit(text) = action {
+            self.seen.lock().unwrap().lines.push(text);
+        }
+        Ok(())
+    }
+
+    fn output(&self) -> shell::InteractionOutput {
+        shell::InteractionOutput {
+            status: LineStatus {
+                active: true,
+                answers: 0,
+                has_selection: false,
+                has_last: false,
+            },
+            prompt: Some(Prompt::new(
+                "point",
+                "test-prompt",
+                Accept::Point {
+                    dims: PointDims::Two,
+                },
+            )),
+            options: PromptControls {
+                options: vec![OptionControl {
+                    id: "yes".into(),
+                    label: "test-option-yes".into(),
+                    shortcut: Some('y'),
+                }],
+                parameters: Vec::new(),
+            },
+            history: vec!["test-history-line".into()],
+            ..shell::InteractionOutput::default()
+        }
+    }
+}
+
+fn open_new_document(shell: &mut Shell, app: &mut Application, ctx: &egui::Context) {
+    let run = frame(shell, app, ctx, Vec::new(), Vec::new(), false);
+    let file = button(&run.nodes, "File");
+    frame(shell, app, ctx, click(file), Vec::new(), false);
+    let run = frame(shell, app, ctx, Vec::new(), Vec::new(), false);
+    let new = button(&run.nodes, "New");
+    frame(shell, app, ctx, click(new), Vec::new(), false);
+}
+
+fn text_input(nodes: &[accesskit::Node]) -> &accesskit::Node {
+    nodes
+        .iter()
+        .find(|n| n.role() == accesskit::Role::TextInput)
+        .unwrap_or_else(|| panic!("no text input"))
+}
+
+fn shows(nodes: &[accesskit::Node], text: &str) -> bool {
+    nodes
+        .iter()
+        .any(|n| n.label() == Some(text) || n.value() == Some(text))
+}
+
+#[test]
+fn a_registered_controller_owns_the_command_panel_option_bar_and_viewport_clicks() {
+    let dir = TempDir::new("controller");
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let mut app = app_with(&dir.0, false, Some(seen.clone()));
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    open_new_document(&mut shell, &mut app, &ctx);
+
+    // The controller's prompt, history and option are what the panel and the option bar show.
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    assert!(shows(&run.nodes, "test-prompt"));
+    assert!(shows(&run.nodes, "test-history-line"));
+    let option = button(&run.nodes, "test-option-yes (y)");
+
+    // A click in the viewport goes to the controller, which consumes it.
+    let at = egui::pos2(200.0, 200.0);
+    let press = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let click_viewport = vec![egui::Event::PointerMoved(at), press(true), press(false)];
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        click_viewport,
+        Vec::new(),
+        false,
+    );
+    assert_eq!(seen.lock().unwrap().clicks, 1);
+
+    // The option button submits its identifier to the controller.
+    frame(&mut shell, &mut app, &ctx, click(option), Vec::new(), false);
+    assert_eq!(seen.lock().unwrap().lines, ["yes"]);
+
+    // A typed line is submitted by Enter, in the frame after the text was typed.
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        click(text_input(&run.nodes)),
+        Vec::new(),
+        false,
+    );
+    let typed = vec![egui::Event::Text("hello".into())];
+    frame(&mut shell, &mut app, &ctx, typed, Vec::new(), false);
+    let enter = egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    frame(&mut shell, &mut app, &ctx, vec![enter], Vec::new(), false);
+    assert_eq!(seen.lock().unwrap().lines, ["yes", "hello"]);
+    assert_eq!(seen.lock().unwrap().clicks, 1);
+}
+
+#[test]
+fn without_a_controller_the_shell_shows_its_own_command_line() {
+    let dir = TempDir::new("no-controller");
+    let mut app = app(&dir.0, false);
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    open_new_document(&mut shell, &mut app, &ctx);
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    assert!(!shows(&run.nodes, "test-prompt"));
+    assert!(!shows(&run.nodes, "test-option-yes (y)"));
 }

@@ -202,6 +202,116 @@ impl DynamicInput {
     }
 }
 
+/// Most fields a product's dynamic input shows; more are not drawn.
+pub const MAX_FIELDS: usize = 8;
+
+/// A field a product supplies to the dynamic input. The product owns the text and the lock: the
+/// widget shows what it is given and reports what the user does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicField {
+    /// The label's message identifier.
+    pub label: String,
+    /// The text the field shows.
+    pub text: String,
+    /// Whether the product holds the field's value against the pointer (a typed value).
+    pub locked: bool,
+    /// Whether the field takes the keyboard focus this frame.
+    pub focused: bool,
+}
+
+/// What the user did in the dynamic input, for the product to apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DynamicEvent {
+    /// The text of field `index` changed to `text`.
+    Edited {
+        /// The field.
+        index: usize,
+        /// The new text.
+        text: String,
+    },
+    /// Tab in field `index`: the product moves the focus.
+    Tab {
+        /// The field the key was pressed in.
+        index: usize,
+    },
+    /// Enter in field `index`: the product takes the point input.
+    Enter {
+        /// The field the key was pressed in.
+        index: usize,
+    },
+}
+
+/// Draws the product's dynamic input `fields` in a panel beside `pointer`, inside `viewport`,
+/// under the prompt message `prompt`, and returns what the user did this frame. The panel keeps
+/// the size it last had, so it flips to the other side of the pointer at an edge of `viewport`
+/// using that size. Tab and Enter are consumed while a field has the focus; Tab does not move the
+/// focus here, the product sets it through [`DynamicField::focused`]. At most [`MAX_FIELDS`]
+/// fields are drawn.
+pub fn show_fields(
+    ctx: &Context,
+    localize: &dyn Localize,
+    prompt: &str,
+    viewport: Rect,
+    pointer: Pos2,
+    fields: &[DynamicField],
+) -> Vec<DynamicEvent> {
+    let fields = &fields[..fields.len().min(MAX_FIELDS)];
+    let ids: Vec<Id> = (0..fields.len()).map(field_id).collect();
+    let size_id = Id::unique("arc-dynamic-input-fields-size");
+    let size = ctx
+        .data(|d| d.get_temp::<Vec2>(size_id))
+        .unwrap_or(ESTIMATED_SIZE);
+    let mut events = Vec::new();
+    let ours = ctx.memory(|m| ids.iter().any(|id| m.has_focus(*id)));
+    let mut keys = Vec::new();
+    if ours {
+        let focused = ctx.memory(|m| ids.iter().position(|id| m.has_focus(*id)));
+        if let Some(index) = focused {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab)) {
+                keys.push(DynamicEvent::Tab { index });
+            }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+                keys.push(DynamicEvent::Enter { index });
+            }
+        }
+    }
+    let position = place(pointer, size, viewport);
+    let response = Area::new(Id::unique("arc-dynamic-input-fields"))
+        .order(Order::Foreground)
+        .fixed_pos(position)
+        .show(ctx, |ui| {
+            Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(resolve(localize, prompt, &[]));
+                for (index, field) in fields.iter().enumerate() {
+                    let mut text = field.text.clone();
+                    let label_text = resolve(localize, &field.label, &[]);
+                    ui.horizontal(|ui| {
+                        let label = ui.label(label_text);
+                        let edit = ui
+                            .add(
+                                egui::TextEdit::singleline(&mut text)
+                                    .id(field_id(index))
+                                    .desired_width(90.0),
+                            )
+                            .labelled_by(label.id);
+                        if field.focused && !edit.has_focus() {
+                            edit.request_focus();
+                        }
+                        if edit.changed() {
+                            events.push(DynamicEvent::Edited { index, text });
+                        }
+                    });
+                }
+            });
+        })
+        .response;
+    ctx.data_mut(|d| d.insert_temp(size_id, response.rect.size()));
+    let name = messages::DYNAMIC_INPUT.text(localize);
+    response.widget_info(|| WidgetInfo::labeled(Role::Group, true, name.as_str()));
+    keys.extend(events);
+    keys
+}
+
 fn field_id(index: usize) -> Id {
     Id::unique(("arc-dynamic-input-field", index))
 }

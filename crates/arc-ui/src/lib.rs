@@ -31,7 +31,8 @@
 //! - the style pickers for color, layer, linetype, lineweight and material (CORE-UI-015,
 //!   [`style`]);
 //! - with the feature `viewport`, the viewport widget, its interaction state machine and the
-//!   selection gestures (CORE-UI-005, CORE-UI-029, `gesture` and `viewport`) and the view cube
+//!   selection gestures (CORE-UI-005, CORE-UI-029, `gesture` and `viewport`), the product hooks
+//!   of the viewport (pointer handler, projection and overlays, [`hooks`]) and the view cube
 //!   (`view_cube`).
 //!
 //! Widgets never run commands; they return an [`Intent`]. No function in this crate panics.
@@ -44,6 +45,8 @@ pub mod dynamic_input;
 pub mod error;
 #[cfg(feature = "viewport")]
 pub mod gesture;
+#[cfg(feature = "viewport")]
+pub mod hooks;
 pub mod icons;
 pub mod keys;
 pub mod menu;
@@ -74,12 +77,14 @@ pub use command_line::{
 };
 pub use diagnostics::{DiagnosticsFilter, DiagnosticsPanel, filter_in};
 pub use dock::{Axis, Dock, DockArea, DockLayout, Floating, Side, Target};
-pub use dynamic_input::{DynamicInput, Relative};
+pub use dynamic_input::{DynamicEvent, DynamicField, DynamicInput, Relative, show_fields};
 pub use error::codes;
 #[cfg(feature = "viewport")]
 pub use gesture::{
     Band, BandKind, Gestures, Reaction, View, ViewEvent, ViewPicker, ViewportCommands,
 };
+#[cfg(feature = "viewport")]
+pub use hooks::{PointerEvent, PointerHandler, PointerKind, ProductOverlay, ViewProjection};
 pub use icons::{IconAtlas, Icons};
 pub use keys::{Binding, ChordResolver, KeyCombo, KeyOutcome, KeySequence, Keymap};
 pub use menu::{Entry, Menu, MenuItem, ToolEntry, Toolbar, ToolbarItem};
@@ -99,5 +104,8 @@ pub use tree::{TreeCommands, TreeItem, TreeSource, TreeView};
 #[cfg(feature = "viewport")]
 pub use view_cube::{CubeTarget, ViewCube, ViewCubeInput, ViewIntent};
 #[cfg(feature = "viewport")]
-pub use viewport::{ScenePicker, ViewLink, ViewportInput, ViewportOutput, ViewportWidget};
+pub use viewport::{
+    DynamicPanel, ProductInput, ScenePicker, ViewLink, ViewportInput, ViewportOutput,
+    ViewportWidget,
+};
 pub use workspace::{NamedToolbar, ToolSet, Workspace, Workspaces};

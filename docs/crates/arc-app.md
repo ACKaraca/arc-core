@@ -568,6 +568,13 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
   (each must be registered when the product is built) and a `Factory`. `Factory::create` returns
   `Box<dyn Any + Send>`, which the windowed shell downcasts to the type it registered; any
   `Fn() -> T` closure is a factory. This crate never calls a factory.
+- Tools are registered (`ProductBuilder::tool`, `Product::tools`) and kept, but no surface
+  instantiates or renders them yet: the shell does not read `Product::tools`. Tools are not a
+  working surface; a product that needs its own tool surface uses an interaction controller
+  (below).
+- `ProductBuilder::interaction(factory)` (feature `window`) registers the product's interaction
+  controller: a factory that creates one `Interaction` per tab (see
+  [Interaction controller](#interaction-controller-extension)).
 
 ### Document tabs (CORE-APP-003)
 
@@ -774,6 +781,45 @@ viewport's `gesture`), `app.select.clear`, `app.macro.record_start` and `app.mac
 (see the frame composition). Invoked through `arc_command::Invoker` they change
 nothing. The labels are in `locales/en-US/arc-app.ftl`. `shell::default_menu` is a File and an
 Edit menu of these commands.
+
+### Interaction controller (extension, feature `window`)
+
+Module `shell::interaction`. A product that runs its own command line, prompts and viewport input
+registers a factory; each tab's view then owns one `Interaction`, and the shell routes to it while
+it is registered. Without a registration the shell behaves as before.
+
+- `Interaction` (`Send`) has four methods, called on the shell's frame: `pointer(cx, &PointerEvent)
+  -> bool` for each viewport pointer event before the widget handles it (`true` consumes it),
+  `dynamic(cx, &DynamicEvent)` for dynamic input edits, `line(cx, LineAction) -> Result<()>` for
+  every action of the command panel (a submitted line or option, Escape as `Cancel`, `Back` or
+  `ClearInput`, undo and redo as `Invoke` or `CancelThen`, and repeat), and `output(&self) ->
+  InteractionOutput` for what the shell shows.
+- `InteractionOutput`: `status` (a `LineStatus`: active, answers, selection, repeatable), `prompt`
+  (a `Prompt`, which labels the command panel), `options` (a `PromptControls` for the tool option
+  bar: keyword buttons and parameter fields), `history` (lines shown above the field, at most 16,
+  most recent last), `overlays` (`ProductOverlay`s), `dynamic` (a `DynamicOutput`: a prompt message
+  and `DynamicField`s, shown beside the pointer) and `selection` (the objects the viewport
+  highlights, and whose count the viewport reports as the selected count).
+- `InteractionContext` gives what a controller needs: `document()` (the tab's `arc_doc::Document`),
+  `invoke(Invocation)` (a document command through `Application::invoke` in the shell's command
+  session), `session()`, `selection()` (the tab's shell selection), `camera()` (the tab's camera,
+  which is the view the controller's input is in) and `tab()`. The foundation has no space concept,
+  so the camera stands for the active space.
+- While a controller is registered: the viewport gets the controller's overlays, dynamic panel and
+  highlight, and no prompt of the shell's own line (the widget does not answer prompts itself); the
+  command panel draws the controller's prompt, history and option bar and sends its lines and
+  options to `line`; dynamic events go to `dynamic`. The shell's own command line does not prompt.
+  Commands that menus and the palette start still run on the shell's own command line, which is a
+  known gap: a product that uses a controller starts its commands through it.
+- Decisions with the rejected alternatives:
+  - One controller per tab, created when the tab's view is created. Rejected: one for the product,
+    which would share a prompt between tabs.
+  - Output as a value per frame, not a list of calls. Rejected: the controller painting its own
+    overlays, which would give it the egui context and the widget's internals.
+  - The controller runs commands through `InteractionContext::invoke`, which needs no mutable
+    application: the shell hands out `&Application`, as the panels already receive it.
+- Not verified here: a registered controller through a real window, and the option bar's layout
+  with a long option list.
 
 ### Frame composition (CORE-APP-025, feature `window`)
 

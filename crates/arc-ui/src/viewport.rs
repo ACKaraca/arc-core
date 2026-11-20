@@ -25,12 +25,19 @@ use arc_gpu::{
     Anchor, Overlay, OverlayPrimitive, PickHit, PickRegion, RenderSettings, Renderer, Scene,
 };
 use egui::{
-    Color32, Event, MouseWheelUnit, Pos2, Rect, Response, Sense, TextureId, Ui, WidgetInfo,
+    Color32, Event, Modifiers, MouseWheelUnit, Pos2, Rect, Response, Sense, TextureId, Ui,
+    WidgetInfo,
 };
 
 use crate::command::Intent;
 use crate::command_line::prompt_text;
-use crate::gesture::{Band, BandKind, Gestures, View, ViewEvent, ViewPicker, ViewportCommands};
+use crate::dynamic_input::{self, DynamicEvent, DynamicField};
+use crate::gesture::{
+    Band, BandKind, DRAG_THRESHOLD, Gestures, View, ViewEvent, ViewPicker, ViewportCommands,
+};
+use crate::hooks::{
+    PointerEvent, PointerHandler, PointerKind, ProductOverlay, ViewProjection, paint_overlays,
+};
 use crate::text::{Localize, messages, resolve};
 use crate::theme::{Colors, UiScale};
 
@@ -100,6 +107,25 @@ impl ViewPicker for ScenePicker<'_> {
     }
 }
 
+/// A dynamic input panel a product asks for beside the pointer.
+#[derive(Debug, Clone, Copy)]
+pub struct DynamicPanel<'a> {
+    /// The prompt's message identifier, shown above the fields.
+    pub prompt: &'a str,
+    /// The fields, in order.
+    pub fields: &'a [DynamicField],
+}
+
+/// What a product gives the widget for one frame; see [`crate::hooks`].
+pub struct ProductInput<'a> {
+    /// The handler offered each pointer event before the widget's own handling.
+    pub pointer: Option<&'a mut dyn PointerHandler>,
+    /// Overlays painted over the scene in model coordinates, in order.
+    pub overlays: &'a [ProductOverlay],
+    /// The dynamic input panel, when the product asks for point input.
+    pub dynamic: Option<DynamicPanel<'a>>,
+}
+
 /// What one frame of the widget reads.
 pub struct ViewportInput<'a> {
     /// The texture of the latest rendered frame, registered by the caller; `None` paints the
@@ -127,6 +153,8 @@ pub struct ViewportInput<'a> {
     pub name: &'a str,
     /// The caller's clock in seconds.
     pub time: f64,
+    /// The product's pointer handler, overlays and dynamic input; `None` for none of them.
+    pub product: Option<ProductInput<'a>>,
 }
 
 /// What one frame of the widget produced.
@@ -148,6 +176,10 @@ pub struct ViewportOutput {
     pub answer: Option<PromptInput>,
     /// Picking and navigation errors of this frame.
     pub errors: Vec<Error>,
+    /// The projection of the camera after this frame, for the product's next frame.
+    pub projection: ViewProjection,
+    /// What the user did in the dynamic input panel this frame.
+    pub dynamic: Vec<DynamicEvent>,
 }
 
 /// The state of one viewport widget.
@@ -156,6 +188,10 @@ pub struct ViewportWidget {
     gestures: Gestures,
     link: Option<ViewLink>,
     seen: u64,
+    /// The last press: its button and pixel position, for click detection.
+    press_start: Option<(egui::PointerButton, [f64; 2])>,
+    /// The button a product consumed the press of; its events are the product's until release.
+    product_press: Option<egui::PointerButton>,
 }
 
 impl ViewportWidget {
@@ -181,12 +217,17 @@ impl ViewportWidget {
     }
 
     /// Draws the viewport in the available space and handles its input.
+    ///
+    /// Each pointer event first goes to the product's [`PointerHandler`] (see [`crate::hooks`]).
+    /// A consumed event is not handled by the widget. A press the product consumes belongs to the
+    /// product until its release. A primary click the product consumes ends the widget's press
+    /// without an answer.
     pub fn show(&mut self, ui: &mut Ui, input: ViewportInput<'_>) -> ViewportOutput {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let ppp = f64::from(ui.ctx().pixels_per_point());
+        let scale = ppp * f64::from(input.scale.factor());
         let size = pixel_size(rect, ppp);
-        self.gestures
-            .set_scale(ppp * f64::from(input.scale.factor()));
+        self.gestures.set_scale(scale);
 
         let mut frame = *input.frame;
         let mut camera = None;
@@ -215,13 +256,22 @@ impl ViewportWidget {
             response.request_focus();
         }
 
+        let (prompt, selected, tolerance, name) =
+            (input.prompt, input.selected, input.tolerance, input.name);
+        let product = input.product;
+        let (overlays, dynamic) = match &product {
+            Some(p) => (p.overlays, p.dynamic),
+            None => (&[][..], None),
+        };
+        let mut handler = product.and_then(|p| p.pointer);
+        let modifiers = ui.input(|i| i.modifiers);
         let mut view = View {
             frame,
             width: size[0],
             height: size[1],
-            prompt: input.prompt,
-            selected: input.selected,
-            tolerance: input.tolerance,
+            prompt,
+            selected,
+            tolerance,
             picker: input.picker,
             commands: input.commands,
         };
@@ -234,10 +284,71 @@ impl ViewportWidget {
             intent: None,
             answer: None,
             errors: Vec::new(),
+            projection: ViewProjection::new(frame, size[0], size[1]),
+            dynamic: Vec::new(),
         };
+        let moved_here = self.route(&mut view, &events, &mut handler, modifiers, scale, &mut out);
+        if moved_here && let Some(link) = &self.link {
+            self.seen = link.publish(view.frame);
+        }
+        out.hover = self.gestures.hover();
+        out.projection = ViewProjection::new(view.frame, size[0], size[1]);
+        if let Some(band) = self.gestures.band() {
+            out.overlay = band_overlay(&band, input.colors, scale);
+        }
+
+        paint_image(ui, rect, input.colors, input.texture);
+        if !overlays.is_empty() {
+            paint_overlays(
+                ui,
+                input.localize,
+                input.colors,
+                rect,
+                ppp,
+                &out.projection,
+                overlays,
+            );
+        }
+        if let Some(panel) = dynamic {
+            let pointer = ui
+                .input(|i| i.pointer.latest_pos())
+                .unwrap_or(rect.center());
+            out.dynamic = dynamic_input::show_fields(
+                ui.ctx(),
+                input.localize,
+                panel.prompt,
+                rect,
+                pointer,
+                panel.fields,
+            );
+        }
+
+        announce(ui, &response, input.localize, name, selected, prompt);
+        out
+    }
+
+    /// Hands each event to the product first and the rest to the gestures, which may move the
+    /// camera and produce an intent, an answer or errors. Returns whether the camera moved.
+    fn route(
+        &mut self,
+        view: &mut View<'_>,
+        events: &[ViewEvent],
+        handler: &mut Option<&mut dyn PointerHandler>,
+        modifiers: Modifiers,
+        scale: f64,
+        out: &mut ViewportOutput,
+    ) -> bool {
         let mut moved_here = false;
-        for event in &events {
-            let r = self.gestures.handle(&mut view, event);
+        for event in events {
+            let projection = ViewProjection::new(view.frame, view.width, view.height);
+            if self.offer(handler, &projection, modifiers, event, scale) {
+                if matches!(event, ViewEvent::Moved(_)) {
+                    // A consumed move still clears the widget's pre-selection.
+                    self.gestures.handle(view, &ViewEvent::Left);
+                }
+                continue;
+            }
+            let r = self.gestures.handle(view, event);
             if let Some(c) = r.camera {
                 out.camera = Some(c);
                 moved_here = true;
@@ -248,37 +359,122 @@ impl ViewportWidget {
             out.answer = r.answer.or(out.answer.take());
             out.errors.extend(r.error);
         }
-        if moved_here && let Some(link) = &self.link {
-            self.seen = link.publish(view.frame);
-        }
-        out.hover = self.gestures.hover();
-        if let Some(band) = self.gestures.band() {
-            out.overlay = band_overlay(&band, input.colors, ppp * f64::from(input.scale.factor()));
-        }
-
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, input.colors.viewport);
-        if let Some(texture) = input.texture {
-            painter.image(
-                texture,
-                rect,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
-        }
-
-        let name = resolve(
-            input.localize,
-            messages::VIEWPORT.message_id,
-            &[("name", Value::Text(input.name.to_owned()))],
-        );
-        let description = describe(input.localize, input.selected, input.prompt);
-        response.widget_info(|| WidgetInfo::labeled(egui::accesskit::Role::Canvas, true, &name));
-        ui.ctx().accesskit_node_builder(response.id, |node| {
-            node.set_description(description);
-        });
-        out
+        moved_here
     }
+
+    /// Offers one event to the product's handler, and tracks the product's and the widget's
+    /// presses. Returns `true` when the event is consumed: the widget then does not handle it.
+    fn offer(
+        &mut self,
+        handler: &mut Option<&mut dyn PointerHandler>,
+        projection: &ViewProjection,
+        modifiers: Modifiers,
+        event: &ViewEvent,
+        scale: f64,
+    ) -> bool {
+        let press = self.press_start;
+        let mut send = |kind: PointerKind, button: Option<egui::PointerButton>, at: [f64; 2]| {
+            let Some(h) = handler.as_mut() else {
+                return false;
+            };
+            h.pointer(&PointerEvent {
+                kind,
+                button,
+                modifiers,
+                pixel: at,
+                model: projection.pixel_to_model(at),
+                pixels_per_unit: projection.pixels_per_unit(),
+            })
+        };
+        match *event {
+            ViewEvent::Moved(at) if !self.gestures.is_pressed() => {
+                send(PointerKind::Move, None, at)
+            }
+            ViewEvent::Pressed { at, button, .. } => {
+                self.press_start = Some((button, at));
+                if self.gestures.is_pressed() {
+                    return false;
+                }
+                let consumed = send(PointerKind::Press, Some(button), at);
+                if consumed {
+                    self.product_press = Some(button);
+                }
+                consumed
+            }
+            ViewEvent::Released { at, button } if self.product_press == Some(button) => {
+                self.product_press = None;
+                send(PointerKind::Release, Some(button), at);
+                if is_click(press, button, at, DRAG_THRESHOLD * scale) {
+                    send(PointerKind::Click, Some(button), at);
+                }
+                true
+            }
+            ViewEvent::Released { at, button } if self.gestures.is_pressed() => {
+                // The widget owns this press: the product sees the release, and may consume the
+                // click, which ends the press without the widget's answer.
+                send(PointerKind::Release, Some(button), at);
+                let clicked = self.gestures.band().is_none()
+                    && is_click(press, button, at, DRAG_THRESHOLD * scale);
+                if clicked && send(PointerKind::Click, Some(button), at) {
+                    self.gestures.cancel_press();
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Whether a release at `at` of `button` ends a click that started at `start` within `threshold`
+/// pixels.
+fn is_click(
+    start: Option<(egui::PointerButton, [f64; 2])>,
+    button: egui::PointerButton,
+    at: [f64; 2],
+    threshold: f64,
+) -> bool {
+    match start {
+        Some((pressed, from)) if pressed == button && button == egui::PointerButton::Primary => {
+            (from[0] - at[0]).hypot(from[1] - at[1]) <= threshold
+        }
+        _ => false,
+    }
+}
+
+/// Paints the background of the viewport and its image, when a texture is registered.
+fn paint_image(ui: &Ui, rect: Rect, colors: &Colors, texture: Option<TextureId>) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, colors.viewport);
+    if let Some(texture) = texture {
+        painter.image(
+            texture,
+            rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
+}
+
+/// Names the viewport for accessibility: its label, the selection count and the prompt.
+fn announce(
+    ui: &Ui,
+    response: &Response,
+    localize: &dyn Localize,
+    name: &str,
+    selected: usize,
+    prompt: Option<&Prompt>,
+) {
+    let name = resolve(
+        localize,
+        messages::VIEWPORT.message_id,
+        &[("name", Value::Text(name.to_owned()))],
+    );
+    let description = describe(localize, selected, prompt);
+    response.widget_info(|| WidgetInfo::labeled(egui::accesskit::Role::Canvas, true, &name));
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_description(description);
+    });
 }
 
 /// The egui events of this frame that concern the viewport, in viewport pixels.

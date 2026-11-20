@@ -196,6 +196,7 @@ fn clicking_an_object_rendered_by_the_adapter_gives_its_selection_intent() {
                     tolerance: &tolerance,
                     name: "Top",
                     time: 0.0,
+                    product: None,
                 },
             )
         })
@@ -322,6 +323,7 @@ impl Two {
                             tolerance: &tolerance,
                             name: "Side",
                             time: 0.0,
+                            product: None,
                         },
                     ));
                 }
@@ -431,6 +433,7 @@ fn the_viewport_exposes_its_name_role_selection_and_prompt() {
                     tolerance: &tolerance,
                     name: "Top",
                     time: 0.0,
+                    product: None,
                 },
             )
         });

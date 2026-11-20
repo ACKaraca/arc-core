@@ -391,6 +391,7 @@ fn viewport(scale: UiScale) -> Draw {
                 tolerance: &tolerance,
                 name: "Top",
                 time: 0.0,
+                product: None,
             },
         );
         let size = ui.spacing().interact_size.y * 4.0;

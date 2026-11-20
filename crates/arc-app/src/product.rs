@@ -175,6 +175,8 @@ pub struct Product {
     extractors: Vec<Extractor>,
     view_renderer: Option<Arc<dyn ViewRenderer>>,
     openers: BTreeMap<String, Arc<NativeFormat>>,
+    #[cfg(feature = "window")]
+    interaction: Option<crate::shell::interaction::Factory>,
 }
 
 impl std::fmt::Debug for Product {
@@ -192,6 +194,14 @@ impl Product {
     #[must_use]
     pub fn view_renderer(&self) -> Option<Arc<dyn ViewRenderer>> {
         self.view_renderer.clone()
+    }
+
+    /// The factory of the product's interaction controller, when the product registered one
+    /// (see [`ProductBuilder::interaction`]).
+    #[cfg(feature = "window")]
+    #[must_use]
+    pub fn interaction(&self) -> Option<&crate::shell::interaction::Factory> {
+        self.interaction.as_ref()
     }
 
     /// The part the headless runner takes: name, version, types, evaluators, commands, clock
@@ -260,6 +270,8 @@ pub struct ProductBuilder {
     tools: Vec<Entry>,
     extractors: Vec<Extractor>,
     view_renderer: Option<Arc<dyn ViewRenderer>>,
+    #[cfg(feature = "window")]
+    interaction: Option<crate::shell::interaction::Factory>,
     last: Option<LastHook>,
     openers: BTreeMap<String, Arc<NativeFormat>>,
     package_extension: Option<String>,
@@ -310,6 +322,8 @@ impl ProductBuilder {
             tools: Vec::new(),
             extractors: Vec::new(),
             view_renderer: None,
+            #[cfg(feature = "window")]
+            interaction: None,
             last: None,
             openers: BTreeMap::new(),
             package_extension: None,
@@ -425,6 +439,17 @@ impl ProductBuilder {
         self.view_renderer = Some(renderer);
     }
 
+    /// Registers the product's interaction controller: `factory` creates one per tab, and the
+    /// windowed shell routes the command panel, option bar, viewport pointer events and dynamic
+    /// input of the tab to it. Without a registration the shell keeps its own command line.
+    #[cfg(feature = "window")]
+    pub fn interaction(
+        &mut self,
+        factory: impl Fn() -> Box<dyn crate::shell::interaction::Interaction> + Send + Sync + 'static,
+    ) {
+        self.interaction = Some(Arc::new(factory));
+    }
+
     /// Gives the keyword `last` its meaning in every session the product serves: `hook` returns
     /// the objects the product names as the last one, live or not. Without it, `last` fails with
     /// `cmd.selection.unavailable`.
@@ -487,6 +512,8 @@ impl ProductBuilder {
             tools: self.tools,
             extractors: self.extractors,
             view_renderer: self.view_renderer,
+            #[cfg(feature = "window")]
+            interaction: self.interaction,
             openers: self.openers,
         })
     }
