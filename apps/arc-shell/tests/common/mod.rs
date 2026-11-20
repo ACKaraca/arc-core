@@ -306,7 +306,9 @@ impl Harness {
             prefs::apply_language(&self.app, &mut self.localizer, &[]);
         }
         for request in &out.requests {
-            let done = platform::carry_out(&mut self.app, &mut self.dialogs, request).unwrap();
+            let done =
+                platform::carry_out(&mut self.shell, &mut self.app, &mut self.dialogs, request)
+                    .unwrap();
             self.done.push(done);
         }
         self.shell.save_recent(&self.app);

@@ -387,3 +387,35 @@ fn restore_erased_refuses_an_object_whose_reference_target_is_gone() {
     assert_eq!(doc.with_journal(arc_doc::Journal::len), journal);
     assert_eq!(doc.undo_step_list(10).len(), steps);
 }
+
+#[test]
+fn restore_erased_skips_objects_the_erase_created_and_deleted_itself() {
+    let doc = document();
+    create(&doc, 2, 20, None, "make");
+    // One transaction creates a temporary object, deletes it and deletes B.
+    let name = command("erase-with-temporary");
+    doc.submit(move |txn| {
+        txn.meta_mut().command = name.clone();
+        txn.meta_mut().label = name;
+        txn.create(
+            KEY,
+            id(1),
+            Header::default(),
+            vec![Some(Value::I64(1)), None],
+        )
+        .map(drop)?;
+        txn.delete(id(1))?;
+        txn.delete(id(2))
+    })
+    .wait()
+    .unwrap();
+    assert_eq!(state(&doc.snapshot()), BTreeMap::new());
+
+    // Only B comes back: A never existed before that transaction.
+    let done = doc
+        .restore_erased(command("oops"), command("oops"))
+        .wait()
+        .unwrap();
+    assert_eq!(done.value, 1);
+    assert_eq!(state(&doc.snapshot()), BTreeMap::from([(2, 20)]));
+}

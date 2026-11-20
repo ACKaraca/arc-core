@@ -546,11 +546,13 @@ impl Document {
     /// considered: when all its deleted objects are live again (the erase was undone, or already
     /// restored) the value is zero and an older erase is never touched; when only some are live,
     /// the rest are restored. It is a normal commit with `command` and `label` as its opaque
-    /// texts: undoable like any step, and it clears the redo stack. The value is the number of objects restored, zero when there is nothing to
-    /// restore. The references and owner relations the erase cleared in surviving objects are not
-    /// restored. Fails, changing nothing, with the codes of the commit when the objects cannot
-    /// return consistently (for example `doc.reference.dangling` when one references an object
-    /// deleted since) or `doc.undo.state_mismatch` when a type's schema version changed.
+    /// texts: undoable like any step, and it clears the redo stack. The value is the number of
+    /// objects restored, zero when there is nothing to restore. An object the same record created
+    /// and then deleted is not restored, since it did not exist before. The references and owner
+    /// relations the erase cleared in surviving objects are not restored. Fails, changing
+    /// nothing, with the codes of the commit when the objects cannot return consistently (for
+    /// example `doc.reference.dangling` when one references an object deleted since) or
+    /// `doc.undo.state_mismatch` when a type's schema version changed.
     pub fn restore_erased(&self, command: String, label: String) -> Pending<usize> {
         self.on_executor(move |core| {
             let restored = std::cell::Cell::new(0);
@@ -880,6 +882,8 @@ fn summarize<'a>(
 
 /// The operations that re-create the objects the newest ordinary record that deleted anything
 /// deleted and that are not live, last deletion first so owners return before their children.
+/// An object the same record created before deleting it never existed before the record, so
+/// its deletion is not restored.
 fn last_erased(journal: &Journal, base: &Snapshot) -> Option<Vec<crate::op::Op>> {
     let record = journal
         .iter()
@@ -893,11 +897,20 @@ fn last_erased(journal: &Journal, base: &Snapshot) -> Option<Vec<crate::op::Op>>
                 .iter()
                 .any(|op| matches!(op, crate::op::Op::Delete { .. }))
         })?;
-    let ops: Vec<_> = record
-        .ops
-        .iter()
+    let mut created = std::collections::BTreeSet::new();
+    let mut deleted = Vec::new();
+    for op in &record.ops {
+        match op {
+            crate::op::Op::Create { .. } => {
+                created.insert(op.id());
+            }
+            crate::op::Op::Delete { .. } if !created.contains(&op.id()) => deleted.push(op),
+            _ => {}
+        }
+    }
+    let ops: Vec<_> = deleted
+        .into_iter()
         .rev()
-        .filter(|op| matches!(op, crate::op::Op::Delete { .. }))
         .filter(|op| base.resolve(op.id()).is_err())
         .map(crate::op::Op::inverse)
         .collect();

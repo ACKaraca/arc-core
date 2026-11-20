@@ -525,7 +525,7 @@ impl Handler {
             localize: Some(&self.localizer),
         };
         let dialogs: &mut dyn FileDialogs = &mut dialogs;
-        match platform::carry_out(&mut self.app, dialogs, request) {
+        match platform::carry_out(&mut self.shell, &mut self.app, dialogs, request) {
             Ok(Done::Quit) => {
                 self.save_placement(event_loop, None);
                 self.write_states();

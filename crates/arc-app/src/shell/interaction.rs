@@ -49,6 +49,16 @@ pub trait Interaction: Send {
 
     /// What the shell shows this frame.
     fn output(&self) -> InteractionOutput;
+
+    /// The tab of the controller is closing: the shell calls this once, before the tab's
+    /// document is closed and the controller is dropped. It is the last call of the controller,
+    /// so an undo group it began or a prompt it left open is ended here. The context's
+    /// [`InteractionContext::document`] still works. A change the controller makes here is not
+    /// part of a save made by the close, because the save has already happened.
+    ///
+    /// Not called when a close is cancelled or fails. Closing a tab through
+    /// [`Application::close`] directly, without the shell, drops the controller without this call.
+    fn closing(&mut self, _cx: &InteractionContext<'_>) {}
 }
 
 /// The dynamic input panel a controller asks for: its prompt message and fields.

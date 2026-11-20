@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use arc_base::{Error, Result};
 use arc_ui::{Entry, Intent, Localize};
 
-use super::Request;
+use super::{Request, Shell};
 use crate::application::{Application, CloseAnswer, Closed};
 use crate::error::codes;
 use crate::product::FileType;
@@ -203,11 +203,13 @@ fn untitled(app: &Application, tab: crate::application::TabId) -> String {
 
 /// Carries out `request` with `dialogs`: open and save dialogs drive [`Application::open`] and
 /// [`Application::save_as`], closing asks for dirty tabs, and quitting closes every tab in
-/// order and stops at the first one the user keeps.
+/// order and stops at the first one the user keeps. Closes go through `shell`, so each closing
+/// tab's controller is told first (see [`Shell::close_tab`]).
 ///
 /// # Errors
 /// The errors of the application's open, save and close flows.
 pub fn carry_out(
+    shell: &mut Shell,
     app: &mut Application,
     dialogs: &mut dyn FileDialogs,
     request: &Request,
@@ -232,10 +234,10 @@ pub fn carry_out(
                 .map_err(|e| Error::new(codes::MACRO_WRITE_FAILED).with_source(e)),
             None => Ok(Done::Cancelled),
         },
-        Request::AskClose(tab) => close(app, dialogs, *tab).map(Done::Closed),
+        Request::AskClose(tab) => close(shell, app, dialogs, *tab).map(Done::Closed),
         Request::Quit => {
             while let Some(tab) = app.tabs().first().map(crate::application::Tab::id) {
-                if close(app, dialogs, tab)? == Closed::Cancelled {
+                if close(shell, app, dialogs, tab)? == Closed::Cancelled {
                     return Ok(Done::Closed(Closed::Cancelled));
                 }
             }
@@ -245,6 +247,7 @@ pub fn carry_out(
 }
 
 fn close(
+    shell: &mut Shell,
     app: &mut Application,
     dialogs: &mut dyn FileDialogs,
     tab: crate::application::TabId,
@@ -252,7 +255,7 @@ fn close(
     let title = untitled(app, tab);
     let needs_path = app.tab(tab)?.path().is_none();
     let mut answer = None;
-    let closed = app.close(tab, |_| {
+    let closed = shell.close_tab(app, tab, |_| {
         let a = dialogs.ask_close(&title);
         answer = Some(a);
         // A document never saved cannot be saved in place: ask for a file below instead.
@@ -267,7 +270,7 @@ fn close(
         return match dialogs.pick_save(&types, None) {
             Some(path) => {
                 app.save_as(tab, &path)?;
-                app.close(tab, |_| CloseAnswer::Cancel)
+                shell.close_tab(app, tab, |_| CloseAnswer::Cancel)
             }
             None => Ok(Closed::Cancelled),
         };

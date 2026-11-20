@@ -1084,6 +1084,33 @@ impl Shell {
             .is_some_and(|v| v.interaction.is_some())
     }
 
+    /// Closes tab `tab` through [`Application::close`], calling the tab's controller first (see
+    /// [`Interaction::closing`]) when the close goes ahead.
+    ///
+    /// # Errors
+    /// The errors of [`Application::close`].
+    pub(crate) fn close_tab(
+        &mut self,
+        app: &mut Application,
+        tab: TabId,
+        ask: impl FnOnce(&crate::application::Tab) -> crate::application::CloseAnswer,
+    ) -> Result<crate::application::Closed> {
+        let views = &mut self.views;
+        app.close_with(tab, ask, |app, tab| {
+            let Some(view) = views.get_mut(&tab) else {
+                return;
+            };
+            let Some(controller) = view.interaction.as_deref_mut() else {
+                return;
+            };
+            let session =
+                session(Surface::CommandLine).with_last_hook(app.product().headless().last.clone());
+            let session = session_for(app.is_read_only_tab(tab), &session);
+            let cx = InteractionContext::new(app, tab, &session, &view.selection, view.camera);
+            controller.closing(&cx);
+        })
+    }
+
     /// Hands a command-panel action to the active tab's controller.
     fn controller_line(&mut self, app: &Application, line: LineAction) -> Result<()> {
         let tab = app
@@ -1261,7 +1288,7 @@ impl Shell {
                     requests.push(Request::AskClose(tab));
                     Ok(())
                 } else {
-                    app.close(tab, |_| crate::application::CloseAnswer::Cancel)
+                    self.close_tab(app, tab, |_| crate::application::CloseAnswer::Cancel)
                         .map(drop)
                 }
             }

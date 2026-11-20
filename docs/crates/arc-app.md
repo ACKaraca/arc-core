@@ -587,6 +587,10 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
   revision is read before a save, so a commit that races the save leaves the tab dirty, never
   falsely clean. Undoing back to the saved state is a new revision, so the tab stays dirty. A
   new document is clean until edited; a recovered document is dirty until saved.
+- A silent commit (`Context::commit_silently`) counts as a modification: it is a committed
+  transaction, so the revision moves and a clean package tab becomes dirty. Hosts get no flag for
+  it (only the declared undo behavior), so a close prompt can appear after bookkeeping that the user
+  did not make; this is a known gap, not a designed rule.
 - The title is the file name, or none for a document never saved, which the shell names. `activate`, `move_tab` (the position is clamped) and `close` manage the
   order; the tab opened last becomes active, and closing the active tab activates the next one,
   else the previous one.
@@ -789,12 +793,19 @@ Module `shell::interaction`. A product that runs its own command line, prompts a
 registers a factory; each tab's view then owns one `Interaction`, and the shell routes to it while
 it is registered. Without a registration the shell behaves as before.
 
-- `Interaction` (`Send`) has four methods, called on the shell's frame: `pointer(cx, &PointerEvent)
+- `Interaction` (`Send`) has five methods, called on the shell's frame: `pointer(cx, &PointerEvent)
   -> bool` for each viewport pointer event before the widget handles it (`true` consumes it),
   `dynamic(cx, &DynamicEvent)` for dynamic input edits, `line(cx, LineAction) -> Result<()>` for
   every action of the command panel (a submitted line or option, Escape as `Cancel`, `Back` or
   `ClearInput`, undo and redo as `Invoke` or `CancelThen`, and repeat), and `output(&self) ->
-  InteractionOutput` for what the shell shows.
+  InteractionOutput` for what the shell shows. `closing(cx)` has a default no-op. The shell calls
+  it once when a tab closes through the shell (the close command, the tab's close dialog, or
+  quitting), after the close is decided and any save it makes has succeeded, and before the tab
+  leaves the application. The tab's document is still open then, and `cx.document()` works. The
+  controller is dropped afterwards, so `closing` is the place to end state it left open, such as
+  an undo group it began. A cancelled or failed close does not call it. A change made in
+  `closing` is not part of the save of that close. Closing a tab with `Application::close` without
+  the shell drops the controller without this call.
 - `InteractionOutput`: `status` (a `LineStatus`: active, answers, selection, repeatable), `prompt`
   (a `Prompt`, which labels the command panel), `options` (a `PromptControls` for the tool option
   bar: keyword buttons and parameter fields), `history` (lines shown above the field, at most 16,

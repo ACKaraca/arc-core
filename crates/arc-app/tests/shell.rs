@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use arc_app::application::{AppConfig, Application, CloseAnswer, Closed};
+use arc_app::application::{AppConfig, Application, CloseAnswer, Closed, TabId};
 use arc_app::commands;
 use arc_app::product::{Entry, FileType, ProductBuilder};
 use arc_app::recent::RecentFiles;
@@ -337,7 +337,8 @@ fn open_save_and_close_go_through_the_dialogs_into_the_application() {
         step(&mut shell, &mut app, commands::FILE_OPEN),
         [Request::OpenDialog]
     );
-    let done = platform::carry_out(&mut app, &mut dialogs, &Request::OpenDialog).unwrap();
+    let done =
+        platform::carry_out(&mut shell, &mut app, &mut dialogs, &Request::OpenDialog).unwrap();
     assert_eq!(done, Done::Cancelled);
     assert!(app.tabs().is_empty());
 
@@ -356,7 +357,7 @@ fn open_save_and_close_go_through_the_dialogs_into_the_application() {
     let file = dir.0.join("saved.arc");
     dialogs.save = Some(file.clone());
     assert_eq!(
-        platform::carry_out(&mut app, &mut dialogs, &requests[0]).unwrap(),
+        platform::carry_out(&mut shell, &mut app, &mut dialogs, &requests[0]).unwrap(),
         Done::Saved
     );
     assert_eq!(app.tab(tab).unwrap().path(), Some(file.as_path()));
@@ -365,7 +366,8 @@ fn open_save_and_close_go_through_the_dialogs_into_the_application() {
     assert!(step(&mut shell, &mut app, commands::FILE_CLOSE).is_empty());
     assert!(app.tabs().is_empty());
     dialogs.open = Some(file.clone());
-    let done = platform::carry_out(&mut app, &mut dialogs, &Request::OpenDialog).unwrap();
+    let done =
+        platform::carry_out(&mut shell, &mut app, &mut dialogs, &Request::OpenDialog).unwrap();
     let Done::Opened(opened) = done else {
         panic!("{done:?}")
     };
@@ -384,7 +386,7 @@ fn open_save_and_close_go_through_the_dialogs_into_the_application() {
     assert_eq!(requests, [Request::AskClose(opened)]);
     dialogs.close = vec![CloseAnswer::Cancel];
     assert_eq!(
-        platform::carry_out(&mut app, &mut dialogs, &requests[0]).unwrap(),
+        platform::carry_out(&mut shell, &mut app, &mut dialogs, &requests[0]).unwrap(),
         Done::Closed(Closed::Cancelled)
     );
     assert_eq!(app.tabs().len(), 1);
@@ -395,7 +397,7 @@ fn open_save_and_close_go_through_the_dialogs_into_the_application() {
     );
     dialogs.close = vec![CloseAnswer::Discard];
     assert_eq!(
-        platform::carry_out(&mut app, &mut dialogs, &Request::Quit).unwrap(),
+        platform::carry_out(&mut shell, &mut app, &mut dialogs, &Request::Quit).unwrap(),
         Done::Quit
     );
     assert!(app.tabs().is_empty());
@@ -406,6 +408,7 @@ fn open_save_and_close_go_through_the_dialogs_into_the_application() {
 fn save_of_a_new_document_on_close_asks_for_a_file() {
     let dir = TempDir::new("close-save");
     let mut app = app(&dir.0.join("data"), false);
+    let mut shell = Shell::new(&app, config(), None);
     let tab = app.new_document().unwrap();
     let session = Session::new(Surface::Ui, [Permission::Edit]);
     app.invoke(
@@ -419,7 +422,8 @@ fn save_of_a_new_document_on_close_asks_for_a_file() {
         save: Some(dir.0.join("new.arc")),
         ..FakeDialogs::default()
     };
-    let done = platform::carry_out(&mut app, &mut dialogs, &Request::AskClose(tab)).unwrap();
+    let done =
+        platform::carry_out(&mut shell, &mut app, &mut dialogs, &Request::AskClose(tab)).unwrap();
     assert_eq!(done, Done::Closed(Closed::Closed));
     assert!(dir.0.join("new.arc").exists());
     assert_eq!(dialogs.asked, ["close", "save"]);
@@ -447,6 +451,8 @@ struct Seen {
     clicks: usize,
     /// For each pointer event: whether the tab is read-only and whether the session has `edit`.
     access: Vec<(bool, bool)>,
+    /// For each `closing` call: the tab and whether its document was still open.
+    closings: Vec<(TabId, bool)>,
 }
 
 /// A controller that keeps a prompt, one option and one history line, consumes viewport clicks
@@ -468,6 +474,11 @@ impl shell::Interaction for FakeController {
     }
 
     fn dynamic(&mut self, _: &shell::InteractionContext<'_>, _: &DynamicEvent) {}
+
+    fn closing(&mut self, cx: &shell::InteractionContext<'_>) {
+        let open = cx.document().is_ok();
+        self.seen.lock().unwrap().closings.push((cx.tab(), open));
+    }
 
     fn line(
         &mut self,
@@ -671,4 +682,72 @@ fn without_a_controller_the_shell_shows_its_own_command_line() {
     let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
     assert!(!shows(&run.nodes, "test-prompt"));
     assert!(!shows(&run.nodes, "test-option-yes (y)"));
+}
+
+#[test]
+fn closing_reaches_the_controller_once_while_its_document_is_open() {
+    let dir = TempDir::new("closing");
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let mut app = app_with(&dir.0.join("data"), false, Some(Arc::clone(&seen)));
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    let mut dialogs = FakeDialogs::default();
+    let session = Session::new(Surface::Ui, [Permission::Edit]);
+    // A command frame, then an idle frame: the view, and with it the controller, of a new tab
+    // is made by the frame after the one that opened it.
+    let run = |shell: &mut Shell, app: &mut Application, command: &str| {
+        let requests = frame(
+            shell,
+            app,
+            &ctx,
+            Vec::new(),
+            vec![Intent::new(command)],
+            false,
+        )
+        .requests;
+        frame(shell, app, &ctx, Vec::new(), Vec::new(), false);
+        requests
+    };
+
+    // A dirty tab asks first; a cancelled close does not reach the controller.
+    run(&mut shell, &mut app, commands::FILE_NEW);
+    let dirty = app.active().unwrap();
+    let mut create = arc_command::Invocation::new(
+        "shell.point.create",
+        serde_json::json!({"position": [1.0, 2.0, 3.0]}),
+    );
+    create.seed = 1;
+    app.invoke(dirty, &session, create).unwrap();
+    dialogs.close = vec![CloseAnswer::Cancel];
+    let request = Request::AskClose(dirty);
+    assert_eq!(
+        platform::carry_out(&mut shell, &mut app, &mut dialogs, &request).unwrap(),
+        Done::Closed(Closed::Cancelled)
+    );
+    assert!(seen.lock().unwrap().closings.is_empty());
+
+    // Discarding closes it: the controller is told once, with the document still open.
+    dialogs.close = vec![CloseAnswer::Discard];
+    assert_eq!(
+        platform::carry_out(&mut shell, &mut app, &mut dialogs, &request).unwrap(),
+        Done::Closed(Closed::Closed)
+    );
+    assert_eq!(seen.lock().unwrap().closings, [(dirty, true)]);
+    assert!(app.tab(dirty).is_err());
+
+    // A clean tab closed by the close command, then quitting with a clean tab left.
+    run(&mut shell, &mut app, commands::FILE_NEW);
+    let clean = app.active().unwrap();
+    assert!(run(&mut shell, &mut app, commands::FILE_CLOSE).is_empty());
+    run(&mut shell, &mut app, commands::FILE_NEW);
+    let quit = app.active().unwrap();
+    assert_eq!(
+        platform::carry_out(&mut shell, &mut app, &mut dialogs, &Request::Quit).unwrap(),
+        Done::Quit
+    );
+    assert_eq!(
+        seen.lock().unwrap().closings,
+        [(dirty, true), (clean, true), (quit, true)]
+    );
+    assert!(app.tabs().is_empty());
 }

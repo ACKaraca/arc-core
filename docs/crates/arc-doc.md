@@ -1010,7 +1010,9 @@ occurred when the thread was descheduled.
   with their original identifiers, headers and values, the objects deleted by the newest ordinary
   record (`normal` or `link_reload`, among the last 10,000) that deleted anything, and only that
   one: when all its objects are live again the result is zero and no older erase is touched; when
-  some are live, the rest return, last deletion first so owners return before their children. It returns the number of
+  some are live, the rest return, last deletion first so owners return before their children. An
+  object that the same record created before deleting it never existed before that record and is
+  not restored. It returns the number of
   objects restored (zero when there is none), joins an open group, undoes like any step and, as a normal commit, clears the redo stack.
   References and owner relations that the erase cleared in surviving objects are not restored.
   Objects that cannot return consistently (a reference to an object deleted since, an owner that

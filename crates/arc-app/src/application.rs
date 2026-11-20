@@ -872,6 +872,19 @@ impl Application {
     /// `app.document.unknown` and, for [`CloseAnswer::Save`], the errors of
     /// [`Application::save`].
     pub fn close(&mut self, id: TabId, ask: impl FnOnce(&Tab) -> CloseAnswer) -> Result<Closed> {
+        self.close_with(id, ask, |_, _| {})
+    }
+
+    /// Closes tab `id` like [`Application::close`]. `closing` runs once, right before the tab
+    /// leaves the application: after the answer is final and any save succeeded, while the
+    /// tab's document is still open and [`Application::tab`] still finds the tab. It does not
+    /// run when the close is cancelled or fails.
+    pub(crate) fn close_with(
+        &mut self,
+        id: TabId,
+        ask: impl FnOnce(&Tab) -> CloseAnswer,
+        closing: impl FnOnce(&Application, TabId),
+    ) -> Result<Closed> {
         let at = self.index(id)?;
         let tab = self.tabs.get(at).ok_or_else(no_path)?;
         let mut discard = false;
@@ -882,6 +895,7 @@ impl Application {
                 CloseAnswer::Discard => discard = true,
             }
         }
+        closing(&*self, id);
         let tab = self.tabs.remove(at);
         tab.document.close();
         if let Some(journal) = &tab.journal {
