@@ -79,14 +79,13 @@ pub enum LineAction {
     CancelThen(Intent),
 }
 
-/// Escape: clear typed text, else step back one answer, else cancel the command at its first
-/// prompt, else clear the selection; `None` when there is nothing to step back from.
+/// Escape: clear typed text, else cancel the active command whatever it has collected, else
+/// clear the selection; `None` when there is nothing to cancel. Stepping back one answer is
+/// undo's job, not Escape's.
 #[must_use]
 pub fn escape(status: LineStatus, typed: &str, commands: &LineCommands) -> Option<LineAction> {
     Some(if !typed.is_empty() {
         LineAction::ClearInput
-    } else if status.active && status.answers > 0 {
-        LineAction::Back
     } else if status.active {
         LineAction::Cancel
     } else if status.has_selection {
@@ -211,6 +210,9 @@ pub struct CommandLineView {
     /// already holds a space. A host whose command syntax has spaces (inline arguments) leaves
     /// it off, which is the default.
     pub space_submits: bool,
+    /// Actions of further submits in the same frame; the host takes them with
+    /// [`Self::take_queued`] after each draw.
+    queued: Vec<LineAction>,
     /// Moves keyboard focus to the input field in the next pass; cleared by [`Self::show_with`].
     /// A host sets it when the user types outside any text field.
     pub take_focus: bool,
@@ -293,6 +295,9 @@ impl CommandLineView {
         let ours = in_field || focused.is_none();
         let shown = completion.candidates.len().min(MAX_SHOWN_CANDIDATES);
         let mut action = None;
+        if in_field {
+            action = self.apply_typing_in_order(ui, id, status, completion);
+        }
         if ours {
             let keys = ui.input_mut(|i| {
                 (
@@ -378,6 +383,61 @@ impl CommandLineView {
             }
         }
         action
+    }
+
+    /// The further actions of the last draw, oldest first: a frame that carries several Enters
+    /// submits several lines, and [`Self::show_with`] returns only the first.
+    pub fn take_queued(&mut self) -> Vec<LineAction> {
+        std::mem::take(&mut self.queued)
+    }
+
+    /// When the frame holds an Enter, applies its text events and Enters in the order they came,
+    /// so characters typed before an Enter are in the line it submits, and returns the first
+    /// submit; the others are queued. Without an Enter the field takes the text itself.
+    fn apply_typing_in_order(
+        &mut self,
+        ui: &Ui,
+        id: egui::Id,
+        status: LineStatus,
+        completion: &Completion,
+    ) -> Option<LineAction> {
+        let is_enter = |e: &egui::Event| matches!(e, egui::Event::Key { key: Key::Enter, pressed: true, modifiers, .. } if !modifiers.any());
+        let events = ui.input(|i| i.events.clone());
+        if !events.iter().any(is_enter) {
+            return None;
+        }
+        ui.input_mut(|i| {
+            i.events
+                .retain(|e| !matches!(e, egui::Event::Text(_)) && !is_enter(e))
+        });
+        let mut actions = Vec::new();
+        for event in &events {
+            match event {
+                egui::Event::Text(t) => {
+                    self.input.extend(t.chars().filter(|c| !c.is_control()));
+                    self.highlighted = None;
+                    self.recall = None;
+                }
+                e if is_enter(e) => {
+                    match self.highlighted.and_then(|h| completion.candidates.get(h)) {
+                        Some(candidate) => self.complete(completion, &candidate.text),
+                        None => actions.extend(self.submit(status)),
+                    }
+                }
+                _ => {}
+            }
+        }
+        // The field must continue after the text this function put into the line.
+        let end = egui::text::CCursor::new(self.input.chars().count());
+        let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(end)));
+        state.store(ui.ctx(), id);
+        let mut actions = actions.into_iter();
+        let first = actions.next();
+        self.queued.extend(actions);
+        first
     }
 
     /// The row of the label and the input field.
@@ -492,9 +552,10 @@ mod tests {
             escape(status(true, 2, true, true), "12", &c),
             Some(LineAction::ClearInput)
         );
+        // One Escape cancels the whole command, whatever it has collected.
         assert_eq!(
             escape(status(true, 2, true, true), "", &c),
-            Some(LineAction::Back)
+            Some(LineAction::Cancel)
         );
         assert_eq!(
             escape(status(true, 0, true, true), "", &c),

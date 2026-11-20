@@ -314,6 +314,9 @@ pub struct View {
     framed: bool,
     /// Frame the camera on the drawing in the next viewport pass.
     zoom_extents: bool,
+    /// Frames still wanted after the viewport went clean: the last rendered frame is registered
+    /// as a texture by a redraw that follows the render.
+    settle: std::cell::Cell<u8>,
     /// Errors of the command panel's actions with the history length they came after, shown in
     /// the history.
     console: Vec<(usize, ConsoleError)>,
@@ -801,6 +804,7 @@ impl Shell {
             frame_revision: document.snapshot().revision(),
             framed: false,
             zoom_extents: false,
+            settle: std::cell::Cell::new(0),
             console: Vec::new(),
         })
     }
@@ -828,13 +832,18 @@ impl Shell {
                 if let Some(timeout) = wait {
                     let _ = driver.wait_idle(timeout);
                 }
-                let results = driver.take_results();
-                view.pending = !results.is_empty();
-                if let Some(viewport) = &view.viewport
-                    && !results.is_empty()
-                    && let Err(e) = viewport.update_scene(results)
-                {
-                    errors.push(e);
+                // Results wait for the viewport: taking them before it exists would drop the
+                // scene of a document that was open before its first frame.
+                if let Some(viewport) = &view.viewport {
+                    let results = driver.take_results();
+                    view.pending = !results.is_empty();
+                    if !results.is_empty()
+                        && let Err(e) = viewport.update_scene(results)
+                    {
+                        errors.push(e);
+                    }
+                } else {
+                    view.pending = true;
                 }
             }
             if let (Some(timeout), Some(viewport)) = (wait, &view.viewport)
@@ -859,9 +868,18 @@ impl Shell {
     /// True while extraction results or viewport frames are on their way.
     #[must_use]
     pub fn busy(&self) -> bool {
-        self.views
-            .values()
-            .any(|v| v.pending || v.viewport.as_ref().is_some_and(|vp| vp.dirty().any()))
+        self.views.values().any(|v| {
+            let working = v.pending || v.viewport.as_ref().is_some_and(|vp| vp.dirty().any());
+            if working {
+                v.settle.set(4);
+                true
+            } else if v.settle.get() > 0 {
+                v.settle.set(v.settle.get() - 1);
+                true
+            } else {
+                false
+            }
+        })
     }
 
     /// Composes one frame of the main window; see the [module documentation](self). Events
@@ -960,6 +978,11 @@ impl Shell {
         let rows = chrome::panel_rows(&self.layout, &panel_titles);
         let tools = chrome::tool_views(&self.toolbar, app, active, input.localize);
         let toggles = chrome::toggle_views(&self.status, app, active, input.localize);
+        actions.extend(
+            chrome::toggle_key_intents(&self.status, &toggles, &input.raw.events)
+                .into_iter()
+                .map(|i| Action::Line(LineAction::Invoke(i))),
+        );
         let cursor_text = chrome::cursor_text(
             active
                 .and_then(|t| self.views.get(&t))
@@ -1940,6 +1963,16 @@ impl Panel for PropertiesPanel {
     }
 }
 
+/// The last part of a type key with underscores as spaces and a capital: `core.draft.line` is
+/// `Line`.
+fn readable_type(key: &str) -> String {
+    let last = key.rsplit('.').next().unwrap_or(key).replace('_', " ");
+    let mut chars = last.chars();
+    chars.next().map_or_else(String::new, |c| {
+        c.to_uppercase().collect::<String>() + chars.as_str()
+    })
+}
+
 /// The objects of a snapshot as a flat outliner, in identifier order. Labels are the type key
 /// and the identifier, or the `name` text field when the object has one.
 struct Objects<'a> {
@@ -1951,6 +1984,7 @@ struct Objects<'a> {
 impl<'a> Objects<'a> {
     fn new(snapshot: &'a arc_doc::Snapshot, selection: &[ObjectId], language: &'a str) -> Self {
         let registry = snapshot.registry();
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
         let mut items: Vec<TreeItem> = snapshot
             .iter()
             .map(|(handle, object)| {
@@ -1962,9 +1996,13 @@ impl<'a> Objects<'a> {
                         _ => None,
                     }
                 });
+                // A readable type name and a count: the last part of the type key, capitalized.
+                let kind = readable_type(key);
+                let n = counts.entry(kind.clone()).or_insert(0);
+                *n += 1;
                 TreeItem {
                     id: object.id,
-                    label: name.unwrap_or_else(|| format!("{key} {}", object.id)),
+                    label: name.unwrap_or_else(|| format!("{kind} {n}")),
                     has_children: false,
                     selected: selection.contains(&object.id),
                     visible: None,
@@ -2150,6 +2188,8 @@ impl Panel for CommandLinePanel {
             ) {
                 cx.actions.push(Action::Line(action));
             }
+            cx.actions
+                .extend(view.line_view.take_queued().into_iter().map(Action::Line));
             if let Some(text) = view.option_bar.show(ui, &out.options, cx.localize) {
                 cx.actions.push(Action::Line(LineAction::Submit(text)));
             }
@@ -2180,6 +2220,8 @@ impl Panel for CommandLinePanel {
         if let Some(action) = view.line_view.show(ui, &view.line, &completion, &context) {
             cx.actions.push(Action::Line(action));
         }
+        cx.actions
+            .extend(view.line_view.take_queued().into_iter().map(Action::Line));
     }
 }
 

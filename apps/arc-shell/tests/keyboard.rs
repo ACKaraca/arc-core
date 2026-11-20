@@ -113,7 +113,7 @@ fn keyboard_only_create_select_edit_undo_and_save() {
     h.frame(Vec::new());
 
     // Select the point: Tab to its outliner row and press Enter.
-    tab_to(&mut h, accesskit::Role::Button, "shell.point");
+    tab_to(&mut h, accesskit::Role::Button, "Point");
     h.frame(vec![key(egui::Key::Enter, NONE)]);
     h.frame(Vec::new());
     let view = h.shell.view(tab).unwrap();

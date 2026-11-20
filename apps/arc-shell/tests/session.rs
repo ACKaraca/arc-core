@@ -432,7 +432,7 @@ fn point_row_listed(language: &str, filter: &str) -> bool {
     h.type_into(&label, filter);
     let listed = h
         .frame(Vec::new())
-        .find(accesskit::Role::Button, "shell.point")
+        .find(accesskit::Role::Button, "Point")
         .is_some();
     assert!(h.shell.errors().is_empty(), "{:?}", h.shell.errors());
     listed

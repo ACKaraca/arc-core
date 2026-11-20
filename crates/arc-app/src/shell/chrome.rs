@@ -113,6 +113,8 @@ pub struct StatusToggle {
     pub state: TogglePerceive,
     /// The intent that sets the state.
     pub set: ToggleSet,
+    /// A function key that flips the toggle, when it has one.
+    pub key: Option<egui::Key>,
 }
 
 impl std::fmt::Debug for StatusToggle {
@@ -341,6 +343,39 @@ pub fn view_menu(ui: &mut Ui, rows: &[PanelRow], localize: &dyn Localize) -> Opt
         }
     });
     chosen
+}
+
+/// The intents of the toggles whose key was pressed in `events` (without modifiers), in order.
+#[must_use]
+pub fn toggle_key_intents(
+    toggles: &[StatusToggle],
+    views: &[ToggleView],
+    events: &[egui::Event],
+) -> Vec<Intent> {
+    let mut out = Vec::new();
+    for event in events {
+        let egui::Event::Key {
+            key,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        if modifiers.any() {
+            continue;
+        }
+        for (toggle, view) in toggles.iter().zip(views) {
+            if toggle.key == Some(*key)
+                && let Some(flip) = &view.flip
+            {
+                out.push(flip.clone());
+            }
+        }
+    }
+    out
 }
 
 /// What the chrome of a frame shows: the menu bar, the toolbar strip and the status bar.

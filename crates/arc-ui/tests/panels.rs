@@ -745,3 +745,43 @@ fn keyboard_focus_walk_follows_visual_order_with_names_and_roles() {
     assert!((fraction - 0.2).abs() < 1e-6, "{fraction}");
     assert_ne!(after, before);
 }
+
+#[test]
+fn text_typed_before_an_enter_in_the_same_frame_is_in_the_line_it_submits() {
+    let ctx = egui::Context::default();
+    let commands = line_commands();
+    let mut view = CommandLineView::default();
+    let context = LineContext {
+        localize: &English,
+        has_selection: false,
+        commands: &commands,
+    };
+    let status = arc_ui::LineStatus {
+        active: true,
+        ..Default::default()
+    };
+    let completion = arc_command::line::Completion::default();
+    let enter = || key(egui::Key::Enter, egui::Modifiers::NONE);
+    let text = |t: &str| egui::Event::Text(t.to_owned());
+    // Focus the field first, as a click would.
+    run(&ctx, Vec::new(), |ui| {
+        view.take_focus = true;
+        view.show_with(ui, status, None, false, &completion, &context)
+    });
+    let (first, queued) = {
+        let (_, first) = run(
+            &ctx,
+            vec![text("@10,0"), enter(), text("@0,10"), enter(), text("20")],
+            |ui| view.show_with(ui, status, None, false, &completion, &context),
+        );
+        (first.flatten(), view.take_queued())
+    };
+    assert_eq!(first, Some(LineAction::Submit("@10,0".into())));
+    assert_eq!(queued, vec![LineAction::Submit("@0,10".into())]);
+    // The text after the last Enter stays in the field, and typing continues after it.
+    assert_eq!(view.input, "20");
+    run(&ctx, vec![text("5")], |ui| {
+        view.show_with(ui, status, None, false, &completion, &context)
+    });
+    assert_eq!(view.input, "205");
+}
