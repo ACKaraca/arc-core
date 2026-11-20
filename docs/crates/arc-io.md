@@ -413,6 +413,11 @@ library's writer is the only writer used; no file from another product is involv
 
 ### Mapping
 
+The library reports angles in radians, and the neutral model holds the degrees of the file format
+(the DXF text convention; see [arc-io-dxf](#dxf-as-implemented) and the drafting spec's
+[header variables](arc-draft-dxf.md#header-variables-of-the-export)). The mapping converts them, so a
+drawing means the same thing whichever file it came from.
+
 | Library data | Neutral model |
 |---|---|
 | Header variables | Header variables under their DXF names and group codes, the same names the DXF reader keeps. Mapped: the identity values `$FINGERPRINTGUID` and `$VERSIONGUID` (group 2), `$HANDSEED` (group 5, hexadecimal text of the library's handle seed), `$DWGCODEPAGE`, `$MENU`, `$PROJECTNAME`, `$LASTSAVEDBY` and `$HYPERLINKBASE`; units and measurement (`$INSUNITS`, `$MEASUREMENT`, `$LUNITS`, `$LUPREC`, `$AUNITS`, `$AUPREC`, `$ANGBASE`, `$ANGDIR`); model space limits, extents and insertion base (`$LIMMIN`, `$LIMMAX`, `$LIMCHECK`, `$EXTMIN`, `$EXTMAX`, `$INSBASE`); current layer, text style, linetype, dimension style and multiline style by name; and the drafting settings `$LTSCALE`, `$CELTSCALE`, `$TEXTSIZE`, `$TRACEWID`, `$ELEVATION`, `$THICKNESS`, `$PDSIZE`, `$PDMODE`, `$ORTHOMODE`, `$FILLMODE`, `$PSLTSCALE`, `$PLINEGEN`, `$LWDISPLAY`, `$CELWEIGHT`, `$USRTIMER` and the creation and editing times `$TDCREATE`, `$TDUPDATE` and `$TDINDWG`. A real value that is not finite is skipped and reported. Every other header variable, including the dimension system variables (`DIM*`) and the view, camera, render, UCS and spline settings, is counted as one item of `io.dwg.header_dropped`. The R12 view, snap and grid state (`legacy`) is not mapped |
@@ -474,6 +479,23 @@ tables and every table entry. Objects are not carried, so they are not counted.
 | `io.dwg.entity_partial` | `approximated` |
 | `io.dwg.value_skipped` | `dropped` |
 | `io.dwg.handle_unresolved` | `dropped` |
+
+### DWG header variables
+
+Angle-valued header variables, in degrees in the neutral model:
+
+| Variable | Library field | Status |
+|---|---|---|
+| `$ANGBASE` (angle base) | `angle_base` (radians) | Mapped in degrees |
+| `VIEWTWIST`, `LOFTANG1`, `LOFTANG2`, `CHAMFERD`, `DIMJOGANG` | `view_twist`, `loft_angle1`, `loft_angle2`, `chamfer_angle`, `dim_jog_angle` (radians) | Not mapped; counted in `io.dwg.header_dropped` |
+| `SNAPANG` (snap angle), polar angle | not exposed by the library | Not available from DWG input |
+
+The flag `$LWDISPLAY` (group 290) carries a Boolean, as the DXF format does, not an integer; a Boolean
+in an integer group would be refused by the writer.
+
+The angle base is the only angle variable the mapping carries; the others would convert the same way
+when they are mapped. The DXF reader keeps header angles as the file writes them, so no conversion is
+needed on that path.
 
 ### Error codes
 

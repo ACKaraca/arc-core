@@ -12,13 +12,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use arc_base::ObjectId;
 use arc_base::{Error, Result};
 use arc_command::Registry;
 use arc_command::headless;
+use arc_command::selection::LastHook;
 use arc_command::{Clock, Session, ViewRenderer};
 use arc_doc::graph::Evaluators;
 use arc_doc::package::LockOwner;
-use arc_doc::{Document, DocumentConfig, TypeRegistry};
+use arc_doc::{Document, DocumentConfig, Snapshot, TypeRegistry};
 
 use crate::codes;
 use crate::settings::{Setting, SettingsRegistry};
@@ -258,6 +260,7 @@ pub struct ProductBuilder {
     tools: Vec<Entry>,
     extractors: Vec<Extractor>,
     view_renderer: Option<Arc<dyn ViewRenderer>>,
+    last: Option<LastHook>,
     openers: BTreeMap<String, Arc<NativeFormat>>,
     package_extension: Option<String>,
 }
@@ -307,6 +310,7 @@ impl ProductBuilder {
             tools: Vec::new(),
             extractors: Vec::new(),
             view_renderer: None,
+            last: None,
             openers: BTreeMap::new(),
             package_extension: None,
         }
@@ -421,6 +425,16 @@ impl ProductBuilder {
         self.view_renderer = Some(renderer);
     }
 
+    /// Gives the keyword `last` its meaning in every session the product serves: `hook` returns
+    /// the objects the product names as the last one, live or not. Without it, `last` fails with
+    /// `cmd.selection.unavailable`.
+    pub fn last_objects(
+        &mut self,
+        hook: impl Fn(&Snapshot) -> Vec<ObjectId> + Send + Sync + 'static,
+    ) {
+        self.last = Some(Arc::new(hook));
+    }
+
     /// Registers an extractor. Its types are checked by [`ProductBuilder::build`], so types
     /// may be registered later.
     ///
@@ -465,6 +479,7 @@ impl ProductBuilder {
                 registry: self.commands,
                 clock,
                 owner,
+                last: self.last,
             },
             settings: self.settings,
             file_types: self.file_types,

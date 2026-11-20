@@ -29,6 +29,7 @@ use crate::error::codes;
 use crate::registry::{NameFlags, Registry};
 use crate::schema;
 use crate::selection;
+use crate::settings::Writes;
 use crate::spec::{CommandSpec, UndoBehavior};
 
 /// One call of a command.
@@ -270,11 +271,11 @@ impl<'r> Invoker<'r> {
         }
         let coalesce = spec.coalesce().map(str::to_owned);
         let command = spec.id().to_owned();
-        let (value, revision, txn_id, more, ops, requested) = match spec.undo() {
+        let (value, revision, txn_id, more, ops, requests) = match spec.undo() {
             UndoBehavior::Undoable => run_in_txn(document, session, invocation, spec, flags, dry)?,
             UndoBehavior::NotUndoable | UndoBehavior::UndoControl => {
                 let snapshot = document.snapshot();
-                let (value, requested) =
+                let (value, requests) =
                     run_on_snapshot(&snapshot, session, &invocation, &spec, flags)?;
                 (
                     value,
@@ -282,12 +283,17 @@ impl<'r> Invoker<'r> {
                     None,
                     Vec::new(),
                     Vec::new(),
-                    requested,
+                    requests,
                 )
             }
         };
-        // The selection is session state: applied after the command succeeded, never journaled.
+        // The selection and the settings are session state: applied after the command succeeded,
+        // never journaled, and not at all on a dry run.
+        let (requested, writes) = requests;
         let selection = if dry { None } else { requested };
+        if !dry {
+            session.settings.apply(&writes)?;
+        }
         if let Some(ids) = &selection {
             session.record_selection(ids, &document.snapshot())?;
         }
@@ -313,7 +319,7 @@ fn run_on_snapshot(
     invocation: &Invocation,
     spec: &CommandSpec,
     flags: NameFlags,
-) -> Result<(Value, Option<Vec<ObjectId>>)> {
+) -> Result<(Value, Requests)> {
     let probe = crate::context::Probe {
         snapshot,
         selection: &invocation.selection,
@@ -334,8 +340,14 @@ fn run_on_snapshot(
     let value = spec.call(&mut context, invocation.params.clone());
     let value = value.and_then(|value| context.checkpoint().map(|()| value));
     let requested = context.selection_request.take();
-    value.map(|value| (value, requested)).map_err(map_error)
+    let writes = std::mem::take(&mut context.settings_writes);
+    value
+        .map(|value| (value, (requested, writes)))
+        .map_err(map_error)
 }
+
+/// What a command asks for once it succeeds: the selection and the setting writes.
+type Requests = (Option<Vec<ObjectId>>, Writes);
 
 type Ran = (
     Value,
@@ -343,7 +355,7 @@ type Ran = (
     Option<TransactionId>,
     Vec<Diagnostic>,
     Vec<Op>,
-    Option<Vec<ObjectId>>,
+    Requests,
 );
 
 fn run_in_txn(
@@ -389,33 +401,34 @@ fn run_in_txn(
         context.checkpoint()?;
         let selection_after = context.selection_after.take();
         let requested = context.selection_request.take();
+        let writes = std::mem::take(&mut context.settings_writes);
         drop(context);
         if let Some(ids) = selection_after {
             let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
             txn.meta_mut().selection_after = serde_json::to_string(&ids).ok();
         }
-        Ok((value, requested))
+        Ok((value, (requested, writes)))
     };
     if dry {
         let done = document.dry_run(job).wait().map_err(map_error)?;
-        let (value, requested) = done.value.value;
+        let (value, requests) = done.value.value;
         return Ok((
             value,
             done.snapshot.revision(),
             None,
             done.diagnostics,
             done.value.ops,
-            requested,
+            requests,
         ));
     }
     let completed = document.submit(job).wait().map_err(map_error)?;
-    let (value, requested) = completed.value;
+    let (value, requests) = completed.value;
     Ok((
         value,
         completed.snapshot.revision(),
         completed.txn_id,
         completed.diagnostics,
         Vec::new(),
-        requested,
+        requests,
     ))
 }

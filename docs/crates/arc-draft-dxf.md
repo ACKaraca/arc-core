@@ -54,6 +54,7 @@ The crate is in the WebAssembly set: its file access goes only through `arc_comm
 | `export_drawing(&Snapshot, space) -> Exported` | The model space with the document's tables and blocks as a `Drawing`, every handle assigned by the export (`HandlePolicy::Assign`), with a report and the handle written for each exported object (`Exported::handles`) |
 | `export_drawing_with(&Snapshot, space, &HandlePolicy) -> Exported` | The same, with the handles chosen by the policy |
 | `export_drawing_limited(&Snapshot, space, &HandlePolicy, &Limits) -> Exported` | The same, with the block references of the arrays bounded by the limits (see [Arrays](#arrays)); the command passes the session's limits |
+| `export_drawing_for_mode(&Snapshot, space, &HandlePolicy, &Limits, binary: bool) -> Exported` | The same, for the output form the writer is given: a stored value the writer refuses in that form is omitted and reported, so the write does not fail. `export_drawing_limited` is the ASCII form; the export command passes its `binary` parameter |
 | `HandlePolicy` | `Assign` (the default) or `KeepSources { document, floor }`; see [Source identity](#source-identity) |
 | `register_commands(&mut Registry)` | Registers the two commands |
 | `Builder`, `Reader` (module `fields`) | Set and read the values of drafting objects by field name |
@@ -249,6 +250,50 @@ reported under `draft.dxf.record_preserved`. Entities of a type the neutral mode
 drafting model has no object for (leaders, solids, images and the like) and the typed objects of
 the OBJECTS section are listed in the loss report only.
 
+Header variables the import does not consume are kept the same way, unless they are not storable.
+A variable is storable when its name is a dollar sign followed by letters, digits or underscores
+(compared without regard to case, and kept as the file has it); it has at least one value; every
+value has the kind its group code gives (a real is finite, a code the crate does not know takes
+text); and every point is complete (an X group, codes 10 to 18, is followed by its Y group, codes
+20 to 28, which is followed by a Z group, codes 30 to 38, when there is one). A variable that is not
+storable is not kept and is reported under `draft.dxf.header_value_omitted`.
+
+Before a kept variable is stored, the import converts it to the target's units. The lengths and the
+points of the variables listed in the table below are multiplied by the unit factor of the file
+(positive `$PDSIZE` only, as a negative size is a percentage of the view). A variable of a name with
+no known unit class is kept unscaled and reported once under `draft.dxf.header_unscaled` with all
+such names. The variables that are ratios, angles, directions, times or counts are not changed.
+The table of unit classes is the crate's list: lengths (group 40) are `$TEXTSIZE`, `$ELEVATION`,
+`$PELEVATION`, `$THICKNESS`, `$TRACEWID`, `$VIEWSIZE`, `$FILLETRAD`, `$CHAMFERA`, `$CHAMFERB`,
+`$CHAMFERC`, `$PLINEWID`, `$DIMASZ`, `$DIMTXT`, `$DIMEXO`, `$DIMEXE`, `$DIMGAP`, `$DIMDLI`,
+`$DIMDLE`, `$DIMTSZ`, `$DIMCEN`, `$DIMRND`, `$DIMTP`, `$DIMTM` and `$DIMFXL`; points are `$LIMMIN`,
+`$LIMMAX`, `$PLIMMIN`, `$PLIMMAX`, `$INSBASE`, `$PINSBASE`, `$VIEWCTR`, `$SNAPBASE`, `$SNAPUNIT`,
+`$GRIDUNIT`, `$UCSORG` and `$PUCSORG`.
+
+The measurement system follows the target. When the file states one (its `$MEASUREMENT`, or else
+the system of its unit) and it is not the target's, `$MEASUREMENT` is written as the target's, and
+the file's `$LUNITS` (a format of its own system) is dropped and reported under
+`draft.dxf.header_derived_omitted`. A file that states neither keeps its variables as they are.
+
+The import replaces the header rows of its space: the rows of format `dxf` and record kind `header`
+that an earlier import wrote into the same space are removed in the same transaction, found by
+format, record kind and object, never by order. A second import into a space therefore leaves one
+set of header rows, not two.
+
+One foreign data row per
+variable, `source_format` `dxf`, `record_kind` `header`, `source_id` empty, `object` the target space,
+and `data` the variable as `plan::encode_record` encodes a record whose kind is the variable's name
+(`$DIMTXT`, for example) and whose groups are its value groups, unchanged. `$INSUNITS` is the only
+variable the import consumes, so it is not kept. Rows are kept in file order, at most
+`plan::MAX_HEADER_VARIABLES` (1,024) per import and within the string bound of the limits in encoded
+bytes; a variable beyond either bound is counted under `draft.dxf.foreign_overflow` with the kind
+`HEADER`. A kept variable needs no loss item. The rows are not counted against the 10,000 rows of
+the records above, and one undo removes them with the rest of the import.
+
+Header angle values are kept as the file writes them. This crate does not convert them: the neutral
+model holds header angles in degrees, as the DXF text does, and the list of angle variables is in
+[arc-io](arc-io.md#dwg-header-variables).
+
 ### Appearance and geometry fields
 
 | DXF | Drafting field |
@@ -292,8 +337,46 @@ APPID, DIMSTYLE (each with its standard entry) and `BLOCK_RECORD`, the blocks `*
 | block reference | INSERT with ATTRIB | Attribute values for the tags of the definition, at the definition's attribute positions transformed by the reference; the attribute text height is 2.5 times the y scale |
 | array | INSERT, one per item | The block reference of each item at the placement the display list draws, with the array's scale and layer; the definition is not written and is reported (`draft.dxf.array_approximated`). See [Arrays](#arrays) |
 | leader, multi-leader, other types | none | Reported (`draft.dxf.export_unmapped`) |
+| foreign data rows of format `dxf`, kind `header` | the header variables | See [Header variables of the export](#header-variables-of-the-export) |
 | foreign data rows of format `dxf` | the preserved records | Rows of kind `entity` attached to the exported space or a block are written after its drawn entities, rows of kind `object` attached to the exported space after the standard objects, each with its groups unchanged except the owner group of an entity, which names the container it is written to. The handles the export assigns start above the handles of the rows. A row that does not decode is reported (`draft.dxf.export_unmapped`) |
 | layer, linetype, text style, dimension style, block | LAYER, LTYPE, STYLE, DIMSTYLE, BLOCK_RECORD and BLOCK | Same fields as the import; linetype text style names are written as handles of the style entries |
+
+### Header variables of the export
+
+The export writes the header rows of the exported space (kind `header`, described under Entities above)
+in their stored order, then the variables the export owns. A variable the export owns takes the
+place of a stored variable of the same name, and otherwise follows the stored ones in the export's
+order. A name is written once; of several rows with one name, the last row's groups are written at
+the first row's place. A row that does not decode is skipped.
+
+Before a stored variable is written, the export checks its class. A variable that fails its check is
+not written and is reported, one loss item per class, with the names of the variables (at most 16 are
+listed; the count is complete):
+
+| Class | Variables | Written when | Reason |
+|---|---|---|---|
+| Derived | `$EXTMIN`, `$EXTMAX`, `$PEXTMIN`, `$PEXTMAX`, `$TDUPDATE`, `$TDUUPDATE`, `$TDINDWG`, `$TDUSRTIMER` | Never. The export computes none of them (no drawing-level bounds exist, and the times and the user timer are the editing history), and a stored value would be stale. A reader recomputes them | `draft.dxf.header_derived_omitted` |
+| Handle | any variable with a group code 5, 105, 320 to 369, 390 to 399, 480 or 481 | Every such handle names an object the export writes under that handle: the object is bound to it under `KeepSources` and was written with it. Under the default policy no object keeps a file handle, so these variables are omitted | `draft.dxf.header_handle_omitted` |
+| Name | `$CLAYER`, `$CELTYPE`, `$TEXTSTYLE`, `$DIMSTYLE`, `$DIMBLK`, `$DIMBLK1`, `$DIMBLK2`, `$DIMLDRBLK`, `$DIMTXSTY`, `$DIMLTYPE`, `$DIMLTEX1`, `$DIMLTEX2`, `$UCSNAME`, `$UCSBASE`, `$PUCSNAME`, `$PUCSBASE`, `$CMLSTYLE` | The name is an entry of the written table, compared without regard to case (block names: block records; text styles and linetypes: their tables). An empty block name is written, and an empty UCS name is the world coordinate system. The export writes no UCS table, so a named UCS is omitted. `$CMLSTYLE` is always omitted, because the export writes no multiline style table. An empty linetype or text style name is omitted | `draft.dxf.header_name_omitted` |
+| Value | `$DWGCODEPAGE`, a name that is not a variable name, and a value that is not storable or that the writer refuses in the output form | Never, see below. The writer refuses in the output form: an integer beyond its group code's range, a real that is not finite, a text in a group code the crate does not know (binary output only), and a binary chunk over 255 bytes (binary output only). The export is given the output form (`export_drawing_for_mode`), so a stored value that the writer would refuse does not fail the write | `draft.dxf.header_value_omitted` |
+
+A stored record (an object or entity record of the file) that holds a value the writer refuses in the
+output form is not written either, and is reported under `draft.dxf.export_unmapped`, as a record that
+does not decode is.
+
+The code page is not written: the export writes version R2018, whose text is UTF-8, and the writer
+uses `Drawing::code_page()` only for versions before 2007. A stored page would name an encoding that
+the output does not use, so it is omitted and reported. A reader of the file takes its default page
+(`ANSI_1252`), which the output does not depend on.
+
+| Variable | Value | Notes |
+|---|---|---|
+| `$INSUNITS` | the unit code of the space | Owned: the import does not keep it, so it follows the stored variables |
+| `$HANDSEED` | the writer's seed | Owned: the export gives the value `1` and the writer replaces it by one above the largest handle it writes |
+
+Every other stored variable keeps its stored values, including the limits (`$LIMMIN`, `$LIMMAX`),
+the creation time (`$TDCREATE`) and the user variables, in their order. A drawing that was not
+imported has no header rows, and its export writes only the owned variables.
 
 ### Arrays
 
@@ -362,6 +445,11 @@ reads DWG files.
 | `draft.dxf.entity_unmapped` | `dropped` |
 | `draft.dxf.record_preserved` | `preserved` |
 | `draft.dxf.foreign_overflow` | `dropped` |
+| `draft.dxf.header_derived_omitted` | `dropped` |
+| `draft.dxf.header_handle_omitted` | `dropped` |
+| `draft.dxf.header_name_omitted` | `dropped` |
+| `draft.dxf.header_unscaled` | `approximated` |
+| `draft.dxf.header_value_omitted` | `dropped` |
 | `draft.dxf.paper_space_skipped` | `dropped` |
 | `draft.dxf.objects_skipped` | `dropped` |
 | `draft.dxf.table_skipped` | `dropped` |
@@ -425,3 +513,19 @@ read the written file back: every bound handle is written unchanged, the seed is
 handles, and an object added afterwards takes a handle above the floor. They also cover a repeated
 handle, a preserved record that shares a bound handle, a bound handle on the root dictionary, and one
 undo removing the bindings.
+
+The header tests (`tests/header_roundtrip.rs`) import a file with twelve assorted header variables
+(strings, integers, reals, points with several group codes, an unknown name and an angle), export it
+and compare every kept variable and its position in the written file; they also cover the owned
+variables taking the place of stored ones, the count and string bounds, the angle in degrees on this
+path, a drawing that was not imported, and one undo removing the rows.
+
+The class tests (`tests/header_classes.rs`) cover each check of the export: derived variables omitted
+and listed in one item, handles written only for objects the file keeps under those handles, names
+matched against the written tables, values that do not fit their group codes omitted by the import,
+and the code page omitted.
+
+The review tests (`tests/header_review.rs`) cover the storable check and the point rules, the case
+insensitive names, the unit conversion and its unscaled item, the derived, handle and name classes,
+the replacement of header rows by a second import, and the writer's refusals in ASCII and binary
+output, including a stored record the writer refuses.

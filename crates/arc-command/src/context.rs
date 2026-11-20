@@ -15,11 +15,13 @@ use arc_base::{Cancel, Dimension, Error, Limits, ObjectId, Quantity, Result, Uni
 use arc_doc::{Snapshot, Txn};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::error::codes;
 use crate::registry::NameFlags;
 use crate::roots::Roots;
 use crate::selection::{LastHook, Selections};
+use crate::settings::{Settings, Writes, check};
 use crate::spec::{Permission, Surface};
 
 /// Progress is forwarded only once a command has run this long (CORE-CMD-008).
@@ -69,6 +71,8 @@ pub struct Session {
     pub(crate) selection: Selections,
     /// The product's answer for the keyword `last`, if it gave one.
     pub(crate) last: Option<LastHook>,
+    /// The session settings ([`crate::settings`]).
+    pub(crate) settings: Settings,
 }
 
 impl fmt::Debug for Session {
@@ -94,6 +98,7 @@ impl Session {
             roots: Roots::none(),
             selection: Selections::default(),
             last: None,
+            settings: Settings::default(),
         }
     }
 
@@ -107,6 +112,37 @@ impl Session {
     ) -> Self {
         self.last = Some(Arc::new(hook));
         self
+    }
+
+    /// Gives the keyword `last` the product's answer `hook`, or none when `hook` is `None`. The
+    /// product passes the hook it configured for its sessions, so every session it serves has it.
+    #[must_use]
+    pub fn with_last_hook(mut self, hook: Option<LastHook>) -> Self {
+        self.last = hook;
+        self
+    }
+
+    /// The value of the session setting `key`, when it has one ([`crate::settings`]).
+    #[must_use]
+    pub fn setting(&self, key: &str) -> Option<Value> {
+        self.settings.get(key)
+    }
+
+    /// Stores `value` as the session setting `key`. Clones of the session share settings; no
+    /// journal record, undo step or revision change results.
+    ///
+    /// # Errors
+    ///
+    /// `cmd.params.invalid` (detail `what` = `setting_key`) for a malformed key;
+    /// `cmd.params.limit_exceeded` (detail `limit`) for a value over [`crate::settings::MAX_SETTING_BYTES`]
+    /// or a new key beyond [`crate::settings::MAX_SETTINGS`].
+    pub fn set_setting(&self, key: &str, value: Value) -> Result<()> {
+        self.settings.set(key, value)
+    }
+
+    /// Removes the session setting `key` and returns its value, if it had one.
+    pub fn remove_setting(&self, key: &str) -> Option<Value> {
+        self.settings.remove(key)
     }
 
     /// The current selection of the session, live objects only, in order. Clones of the session
@@ -214,6 +250,8 @@ pub struct Context<'a> {
     flags: NameFlags,
     pub(crate) selection_after: Option<Vec<ObjectId>>,
     pub(crate) selection_request: Option<Vec<ObjectId>>,
+    /// The setting writes of the command, applied once it succeeds ([`Context::set_setting`]).
+    pub(crate) settings_writes: Writes,
 }
 
 impl fmt::Debug for Context<'_> {
@@ -252,6 +290,7 @@ impl<'a> Context<'a> {
             flags: NameFlags::default(),
             selection_after: None,
             selection_request: None,
+            settings_writes: Writes::new(),
         }
     }
 
@@ -324,6 +363,41 @@ impl<'a> Context<'a> {
     #[must_use]
     pub fn session(&self) -> &Session {
         self.session
+    }
+
+    /// The value of the session setting `key`, when it has one ([`crate::settings`]). A write
+    /// this command has made to `key` is what it reads.
+    #[must_use]
+    pub fn setting(&self, key: &str) -> Option<Value> {
+        match self.settings_writes.get(key) {
+            Some(written) => written.clone(),
+            None => self.session.setting(key),
+        }
+    }
+
+    /// Stores `value` as the session setting `key`: no journal record, undo step or revision
+    /// change. The write is applied when the command succeeds and is not a dry run; a failed
+    /// command or a dry run leaves the setting as it was. Reads of the command see the write.
+    ///
+    /// # Errors
+    ///
+    /// `cmd.params.invalid` (detail `what` = `setting_key` or `setting_value`) for a malformed key
+    /// or a value that does not serialize; `cmd.params.limit_exceeded` (detail `limit`) for a value
+    /// over [`crate::settings::MAX_SETTING_BYTES`] or a new key beyond
+    /// [`crate::settings::MAX_SETTINGS`], counting the writes already made by the command.
+    pub fn set_setting(&mut self, key: &str, value: Value) -> Result<()> {
+        let projected = self.session.settings.projected(&self.settings_writes);
+        check(key, &value, &projected)?;
+        self.settings_writes.insert(key.to_owned(), Some(value));
+        Ok(())
+    }
+
+    /// Removes the session setting `key` and returns the value it has for the command, if any.
+    /// The removal is applied with the command's other setting writes.
+    pub fn remove_setting(&mut self, key: &str) -> Option<Value> {
+        let previous = self.setting(key);
+        self.settings_writes.insert(key.to_owned(), None);
+        previous
     }
 
     /// The limits of the session.

@@ -54,6 +54,9 @@ that runs every command with generated adversarial parameters and asserts no fau
 document is restored; protocol conformance tests from recorded sessions; the escape-test suite
 against every surface; plug-in sandbox tests (denied imports, fuel and memory exhaustion, trap
 rollback); macro record-and-playback round trips; fuzzing of the protocol message parser.
+The session state tests (`tests/session_state.rs`) cover the settings of two sessions and their
+clones, a setting written by a command without a revision or undo change, the settings bounds, and
+the `last` hook over the protocol with and without the product's configuration.
 
 ## Command model as implemented
 
@@ -123,11 +126,13 @@ parsing and repeat (CORE-CMD-011, CORE-CMD-013, CORE-CMD-015) are described in t
 
 ### Context, sessions and predicates
 
-- A `Session` holds its surface, granted permission classes, limits, clock and context units.
-  This layer reads no system clock: the application supplies a `Clock`.
+- A `Session` holds its surface, granted permission classes, limits, clock, context units, the
+  selection, the session settings and the product's `last` hook. This layer reads no system clock:
+  the application supplies a `Clock`.
 - The `Context` of `run` gives the document state (the transaction's candidate, or the snapshot
   of a query), the transaction (`cmd.no_transaction` for commands that are not `undoable`), the
-  selection, the session, identifiers and random numbers from a generator seeded with the
+  selection, the session, the session settings (`Context::setting`, `set_setting`, `remove_setting`,
+  see [Session settings](#session-settings)), identifiers and random numbers from a generator seeded with the
   invocation's seed mixed with the revision of the snapshot the command runs on (so repeated
   invocations in one document never repeat identifiers), the session clock, cancellation and
   progress, the selection to restore afterward, and the name flags of the call (`name_flags`).
@@ -184,13 +189,45 @@ Progress reaches the invocation's sink only once the session clock shows 300 ms
   and in invocation parameters, including the protocol's `command.run`. The invoker expands them from
   the session before the parameters are validated, so the published parameter schema does not list
   them. `last` is the product's hook, `Session::with_last_objects`: without a hook it fails with
-  `cmd.selection.unavailable` (detail `keyword`).
+  `cmd.selection.unavailable` (detail `keyword`). A product gives the hook to every session it
+  serves through its configuration: `ServerConfig::last` for the protocol server (every session of
+  the server, the MCP endpoint included), `headless::Product::last` for the headless runner, and
+  `ProductBuilder::last_objects` in `arc-app`, which gives it to the application's default session,
+  the shell's sessions and the automation socket. `Session::with_last_hook(Option<LastHook>)` applies
+  the configured hook to one session.
 - Protocol: the hub's selection of a document is the one the protocol passes to commands. A
   `selection.set` and a command's `set_selection` both record it in the session that made the
   request. Keywords read the session of the invocation, so two connections see each other's
   selections only through the events they receive. A `selection.changed` event carries `count`,
   `truncated` and at most `EVENT_OBJECTS` (1000) objects; `selection.get` answers the whole
   selection, bounded by `array_length`.
+
+### Session settings
+
+- A session holds a small typed key-value store of settings the product keeps per session, outside
+  the document (`crate::settings`). A value is a `serde_json::Value`. Keys are dotted: at least two
+  segments of ASCII letters, digits, `_` or `-`, separated by `.`, at most 128 bytes in all. The
+  first segment is the product's namespace (for example `acme.object_snap`); the crate does not
+  check which product owns a namespace.
+- The API is `Session::setting`, `Session::set_setting`, `Session::remove_setting` and the same three
+  methods on `Context`. Clones of a session share its settings, as they share its selection; two
+  sessions never do. A protocol connection, the application's default session and each headless run
+  have their own.
+- A write creates no journal record, no undo step and no revision change. A product writes through
+  `Session::set_setting`, which takes effect when the call returns. A command writes through
+  `Context::set_setting`: the write is buffered in the context, a read inside the same command
+  (`Context::setting`) sees it, and it is applied when the command succeeds and is not a dry run, as
+  the selection is. A failed command, and a dry run, leave the settings as they were. The settings a
+  command writes are applied together or not at all. `Context::remove_setting` buffers a removal the
+  same way, and returns the value the command sees.
+- The user-interface and command-line sessions of the shell are separate sessions: each has its own
+  settings, and they share only the product's `last` hook.
+- Bounds: at most 256 settings per session (`MAX_SETTINGS`), counting the writes a command has made
+  (the bound is checked when each write is made); a value of at most 4096 bytes of JSON
+  text (`MAX_SETTING_BYTES`). Replacing an existing key does not count against the first bound. A
+  malformed key fails with `cmd.params.invalid` (detail `what` = `setting_key`); a value or a new key
+  beyond the bounds fails with `cmd.params.limit_exceeded` (detail `limit` = `setting_bytes` or
+  `setting_entries`).
 
 ### Registry and catalog
 
@@ -896,9 +933,15 @@ A product's per-document setup (its document validators and other document hooks
 The runner calls it once for every document it opens or creates, before any command runs on it;
 an error it returns stops the subcommand and is reported like an error of opening the document.
 `run_with_renderer` is `run_with_setup` without one. The setup is passed beside `Product`, not in
-it, so a product's existing `Product` literal is unchanged. The sample set installs nothing, so the
+it, so a `Product` literal needs no setup field (its `last` field is a separate change, below). The sample set installs nothing, so the
 reference CLI passes none; a validator installed through the hook rejects a commit through the
 protocol like any other validator (`apps/arc-shell-cli/tests/scripted.rs` covers this).
+
+Change note: `ServerConfig` and `headless::Product` gained the public field `last` (the product's
+answer for the keyword `last`, see `ProductBuilder::last_objects` in arc-app). Neither struct is
+`#[non_exhaustive]`, so a struct literal of either that does not name `last` no longer compiles. The
+fix is `last: None`, or for a `ServerConfig`, `ServerConfig::new` and then setting the field. The
+in-tree literals (arc-app's product builder and its automation tests) name the field.
 
 - Standard output carries JSON only: one value and a newline, sorted keys, or the protocol
   messages of `serve --stdio`, or one line per package for `batch`. Errors go to standard error as one line

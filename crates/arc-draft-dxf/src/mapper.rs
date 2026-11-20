@@ -6,14 +6,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use arc_draft::types::SpaceUnit;
 use arc_draft::validate::DEFAULT_MAX_NESTING;
 use arc_io_dxf::loss::{Argument, LossReport, Reason};
+use arc_io_dxf::model::HeaderVariable;
 use arc_io_dxf::{Drawing, Entity, EntityKind, Group, Handle, PreservedRecord, Value};
 
 use crate::depth::too_deep;
 use crate::error::reasons;
+use crate::header;
 use crate::plan::{
-    Appearance, BlockSpec, Container, DimStyleSpec, EntitySpec, FOREIGN_ENTITY, FOREIGN_OBJECT,
-    ForeignSpec, ImportOptions, LayerSpec, LinetypeSpec, MAX_FOREIGN_RECORDS, NamedSource, Op,
-    Plan, Shape, TextStyleSpec, encode_record,
+    Appearance, BlockSpec, Container, DimStyleSpec, EntitySpec, FOREIGN_ENTITY, FOREIGN_HEADER,
+    FOREIGN_OBJECT, ForeignSpec, ImportOptions, LayerSpec, LinetypeSpec, MAX_FOREIGN_RECORDS,
+    MAX_HEADER_VARIABLES, NamedSource, Op, Plan, Shape, TextStyleSpec, encode_record,
 };
 use crate::report::Reporter;
 use crate::units;
@@ -82,6 +84,9 @@ pub(crate) struct Mapper<'a> {
     pub(crate) edges: BTreeMap<String, BTreeSet<String>>,
     pub(crate) standard_linetypes: Vec<NamedSource>,
 }
+
+/// The header variables the import consumes itself; every other one is kept as a foreign row.
+const CONSUMED_HEADER: &[&str] = &["$INSUNITS"];
 
 /// The node of a block definition in the reference graph, numbered from 1 in order of first use;
 /// names are case insensitive, as the definitions are.
@@ -371,8 +376,69 @@ impl<'a> Mapper<'a> {
         }
     }
 
+    /// The header variables the mapping does not consume, as foreign rows of the target space in
+    /// file order. They are brought into the target's units, and those that are not storable are
+    /// reported. Those beyond [`MAX_HEADER_VARIABLES`] or the string bound of the limits are
+    /// counted as overflow; the variables kept need no loss item.
+    fn header_rows(&mut self) -> Vec<ForeignSpec> {
+        let mut vars: Vec<HeaderVariable> = self
+            .d
+            .header
+            .iter()
+            .filter(|v| {
+                !CONSUMED_HEADER
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(&v.name))
+            })
+            .cloned()
+            .collect();
+        let source =
+            units::metric(units::unit_of_code(self.source_unit).unwrap_or(SpaceUnit::Unitless));
+        let conversion = header::convert(
+            &mut vars,
+            self.factor,
+            units::metric(self.o.target_unit),
+            source,
+        );
+        header::report_conversion(&mut self.rep, &conversion);
+        let budget = self.o.limits.string_bytes;
+        let mut rows = Vec::new();
+        let mut bytes = 0_u64;
+        let mut overflow = 0_u64;
+        let mut invalid = Vec::new();
+        for var in &vars {
+            if !header::storable(var) {
+                invalid.push(var.name.clone());
+                continue;
+            }
+            let data = encode_record(&PreservedRecord {
+                kind: var.name.clone(),
+                groups: var.values.clone(),
+            });
+            let size = u64::try_from(data.len()).unwrap_or(u64::MAX);
+            if rows.len() < MAX_HEADER_VARIABLES && bytes.saturating_add(size) <= budget {
+                bytes += size;
+                rows.push(ForeignSpec {
+                    record_kind: FOREIGN_HEADER,
+                    container: Container::Space,
+                    source: None,
+                    data,
+                });
+            } else {
+                overflow += 1;
+            }
+        }
+        if overflow > 0 {
+            self.rep
+                .note_n(reasons::FOREIGN_OVERFLOW, "HEADER", None, overflow, &[]);
+        }
+        header::report(&mut self.rep, reasons::HEADER_VALUE_OMITTED, &invalid);
+        rows
+    }
+
     pub(crate) fn finish(mut self, reader: Option<&LossReport>) -> Plan {
         self.first_sources();
+        let header = self.header_rows();
         let standard_linetypes = std::mem::take(&mut self.standard_linetypes);
         let mut ops = Vec::new();
         ops.extend(self.linetypes.items.into_iter().map(Op::Linetype));
@@ -395,7 +461,7 @@ impl<'a> Mapper<'a> {
         }
         Plan {
             ops,
-            foreign: self.foreign,
+            foreign: header.into_iter().chain(self.foreign).collect(),
             version: self.d.version.name().to_owned(),
             source_unit: self.source_unit,
             factor: self.factor,

@@ -29,6 +29,7 @@ use crate::protocol::{Log, LogLevel, McpConfig, Server, ServerConfig, ViewRender
 use crate::registry::Registry;
 use crate::roots::Roots;
 use crate::schema::parse_params;
+use crate::selection::LastHook;
 use crate::spec::{Permission, Surface};
 
 /// The exit code of a runner invocation; the numbers follow the headless CLI conventions of
@@ -127,6 +128,8 @@ pub struct Product {
     pub clock: Arc<dyn Clock>,
     /// The owner written to the edit lock of a package opened for saving.
     pub owner: LockOwner,
+    /// The product's answer for the keyword `last`, given to every session of the runner.
+    pub last: Option<LastHook>,
 }
 
 impl std::fmt::Debug for Product {
@@ -708,6 +711,7 @@ fn config(o: &Options, product: &Product) -> Result<ServerConfig, Failure> {
     let mut config = ServerConfig::new(&product.name, &product.version, ceiling);
     config.roots = Roots::new(&o.read_roots, &o.write_roots)?;
     config.clock = Arc::clone(&product.clock);
+    config.last = product.last.clone();
     if o.sub == Sub::Mcp {
         config.surface = Surface::Mcp;
     }
@@ -721,7 +725,7 @@ fn session(config: &ServerConfig, limits: &Limits) -> Session {
     session.clock = Arc::clone(&config.clock);
     session.units = config.units.clone();
     session.roots = config.roots.clone();
-    session
+    session.with_last_hook(config.last.clone())
 }
 
 /// Refuses a recording the session could not express, before anything is saved.
@@ -1023,6 +1027,15 @@ fn read_params(params: Option<&OsString>, limits: &Limits) -> Result<Value, Fail
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runner_session_carries_the_products_last_hook() {
+        let mut config = ServerConfig::new("p", "1", [Permission::Read]);
+        assert!(session(&config, &Limits::DEFAULT).last.is_none());
+        let hook: LastHook = Arc::new(|_: &arc_doc::Snapshot| Vec::new());
+        config.last = Some(hook);
+        assert!(session(&config, &Limits::DEFAULT).last.is_some());
+    }
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()

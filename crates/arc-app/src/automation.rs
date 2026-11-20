@@ -502,13 +502,15 @@ impl Automation {
             self.add_client(&socket, &grant.client, grant.permissions.clone())?;
         }
         let registry: Registry = product.registry.clone();
+        let last = product.last.clone();
         let (name, version) = (product.name.clone(), product.version.clone());
         let serving = Arc::clone(&socket);
         let shared = Arc::clone(&self.shared);
         let worker = thread::Builder::new()
             .name("arc-automation".into())
             .spawn(move || {
-                let config = ServerConfig::new(name, version, ALL_PERMISSIONS);
+                let mut config = ServerConfig::new(name, version, ALL_PERMISSIONS);
+                config.last = last;
                 let server = Server::new(&registry, &documents, config, &TraceLog);
                 let server = match renderer.as_deref() {
                     Some(renderer) => server.with_view_renderer(renderer),

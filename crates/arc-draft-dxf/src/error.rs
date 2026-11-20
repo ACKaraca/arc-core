@@ -280,11 +280,62 @@ pub mod reasons {
         message_id: "draft-dxf-loss-binding-moved",
     };
 
+    /// A stored header variable was not written because the export computes it, or because a unit
+    /// conversion made it stale (the linear unit format of a file in another measurement system).
+    pub const HEADER_DERIVED_OMITTED: Reason = Reason {
+        code: "draft.dxf.header_derived_omitted",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "draft-dxf-loss-header-derived-omitted",
+    };
+
+    /// A stored header variable holding a handle was not written because no object the export
+    /// writes carries that handle.
+    pub const HEADER_HANDLE_OMITTED: Reason = Reason {
+        code: "draft.dxf.header_handle_omitted",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "draft-dxf-loss-header-handle-omitted",
+    };
+
+    /// A stored header variable naming a table entry was not written because the written file
+    /// has no entry of that name.
+    pub const HEADER_NAME_OMITTED: Reason = Reason {
+        code: "draft.dxf.header_name_omitted",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "draft-dxf-loss-header-name-omitted",
+    };
+
+    /// A header variable was not kept or not written: its name is not a variable name, a value is
+    /// not finite, does not fit its group code or is refused by the writer, a point is incomplete,
+    /// or the variable is a code page the export's output does not use.
+    pub const HEADER_VALUE_OMITTED: Reason = Reason {
+        code: "draft.dxf.header_value_omitted",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "draft-dxf-loss-header-value-omitted",
+    };
+
+    /// A header variable of a name with no known unit class was kept without scaling after a unit
+    /// conversion, because its meaning, and so whether it is a length, is not known.
+    pub const HEADER_UNSCALED: Reason = Reason {
+        code: "draft.dxf.header_unscaled",
+        outcome: Outcome::Approximated,
+        severity: Severity::Warning,
+        message_id: "draft-dxf-loss-header-unscaled",
+    };
+
     /// Every reason of this crate, for the registry check.
     pub const ALL: &[Reason] = &[
         ENTITY_UNMAPPED,
         RECORD_PRESERVED,
         FOREIGN_OVERFLOW,
+        HEADER_DERIVED_OMITTED,
+        HEADER_HANDLE_OMITTED,
+        HEADER_NAME_OMITTED,
+        HEADER_UNSCALED,
+        HEADER_VALUE_OMITTED,
         PAPER_SPACE_SKIPPED,
         OBJECTS_SKIPPED,
         TABLE_SKIPPED,

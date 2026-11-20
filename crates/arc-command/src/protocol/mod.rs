@@ -61,6 +61,7 @@ use crate::macros::Recorder;
 use crate::registry::Registry;
 use crate::roots::Roots;
 use crate::schema::text_depth;
+use crate::selection::LastHook;
 use crate::spec::{CommandSpec, Permission, Surface};
 use events::Hub;
 use framing::{Frame, next_frame};
@@ -179,6 +180,9 @@ pub struct ServerConfig {
     /// server, [`Surface::Mcp`] for the Model Context Protocol endpoint. It decides which
     /// commands `command.list`, `command.describe` and `command.run` reach.
     pub surface: Surface,
+    /// The product's answer for the keyword `last`, given to every session of this
+    /// configuration ([`Session::with_last_hook`]).
+    pub last: Option<LastHook>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -210,6 +214,7 @@ impl ServerConfig {
             clock: Arc::new(FixedClock(0)),
             units: Vec::new(),
             surface: Surface::Automation,
+            last: None,
         }
     }
 
@@ -220,7 +225,7 @@ impl ServerConfig {
         session.clock = Arc::clone(&self.clock);
         session.units = self.units.clone();
         session.roots = self.roots.clone();
-        session
+        session.with_last_hook(self.last.clone())
     }
 
     fn max_line(&self) -> usize {

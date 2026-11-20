@@ -110,7 +110,8 @@ impl<'a, 'q> Mapper<'a, 'q> {
         self.int_var(&mut out, "$LUPREC", 70, i64::from(h.linear_unit_precision));
         self.int_var(&mut out, "$AUNITS", 70, i64::from(h.angular_unit_format));
         self.int_var(&mut out, "$AUPREC", 70, i64::from(h.angular_unit_precision));
-        self.real_var(&mut out, "$ANGBASE", 50, h.angle_base);
+        // The library stores angles in radians; the header model keeps degrees, as the DXF text does.
+        self.real_var(&mut out, "$ANGBASE", 50, h.angle_base.to_degrees());
         self.int_var(&mut out, "$ANGDIR", 70, i64::from(h.angle_direction));
         // Limits, extents and the insertion base of model space.
         self.point2_var(&mut out, "$LIMMIN", h.model_space_limits_min);
@@ -148,7 +149,15 @@ impl<'a, 'q> Mapper<'a, 'q> {
             70,
             flag(h.polyline_linetype_generation),
         );
-        self.int_var(&mut out, "$LWDISPLAY", 290, flag(h.lineweight_display));
+        // A flag of the Boolean group codes (290 to 299) carries a Boolean, not an integer.
+        self.var(
+            &mut out,
+            "$LWDISPLAY",
+            vec![Group {
+                code: 290,
+                value: arc_io_dxf::Value::Bool(h.lineweight_display),
+            }],
+        );
         self.int_var(
             &mut out,
             "$CELWEIGHT",
@@ -883,6 +892,30 @@ mod tests {
             Err(err) => panic!("the drawing is mapped: {}", err.code()),
         };
         drawing.header_variable(name).map(<[Group]>::to_vec)
+    }
+
+    #[test]
+    fn the_lineweight_display_flag_is_a_boolean_value() {
+        let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+        doc.header.lineweight_display = true;
+        let value = header_value(&doc, "$LWDISPLAY").unwrap_or_default();
+        assert_eq!(value.len(), 1);
+        assert_eq!(
+            value.first().map(|g| (g.code, g.value.clone())),
+            Some((290, arc_io_dxf::Value::Bool(true)))
+        );
+    }
+
+    #[test]
+    fn the_angle_base_is_mapped_in_degrees() {
+        let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+        doc.header.angle_base = std::f64::consts::FRAC_PI_2;
+        let value = header_value(&doc, "$ANGBASE").unwrap_or_default();
+        assert_eq!(value.len(), 1);
+        assert_eq!(
+            value.first().map(|g| g.value.clone()),
+            Some(arc_io_dxf::Value::Double(90.0))
+        );
     }
 
     #[test]

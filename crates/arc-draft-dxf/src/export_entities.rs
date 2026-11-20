@@ -209,7 +209,13 @@ impl Exporter<'_> {
             .unwrap_or_default();
         let mut out = Vec::new();
         for row in rows {
-            if let Some(record) = decode_record(&row.data) {
+            // A record the writer refuses in the output form is not written, as a header is not.
+            let record = decode_record(&row.data).filter(|r| {
+                r.groups
+                    .iter()
+                    .all(|g| arc_io_dxf::value_writable(g, self.binary))
+            });
+            if let Some(record) = record {
                 self.rep.mapped(1);
                 out.push(record);
             } else {

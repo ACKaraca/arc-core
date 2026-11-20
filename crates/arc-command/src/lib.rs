@@ -71,6 +71,7 @@ pub mod registry;
 pub mod roots;
 pub mod schema;
 pub mod selection;
+pub mod settings;
 pub mod spec;
 
 pub use command_line::{

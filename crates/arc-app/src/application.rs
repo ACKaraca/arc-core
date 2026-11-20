@@ -284,7 +284,8 @@ impl Application {
     #[must_use]
     pub fn new(product: Product, mut config: AppConfig) -> Self {
         let ids = (config.id_generators)();
-        let session = default_session(Arc::clone(&product.headless().clock));
+        let session = default_session(Arc::clone(&product.headless().clock))
+            .with_last_hook(product.headless().last.clone());
         Self {
             settings: SettingsStore::new(product.settings().clone()),
             product,
@@ -304,9 +305,10 @@ impl Application {
     /// [`NativeFormat::new`]). The default grants read, edit, file read and file write on the
     /// user-interface surface, with the product's clock. The session's surface, permissions,
     /// limits and clock are taken from it; its roots are not: they are replaced for each file, as
-    /// the application has no roots policy of its own.
+    /// the application has no roots policy of its own. The product's `last` hook is kept: the
+    /// session given takes the product's hook, whatever hook it had. Its settings are its own.
     pub fn set_session(&mut self, session: Session) {
-        self.session = session;
+        self.session = session.with_last_hook(self.product.headless().last.clone());
     }
 
     /// The session for a file at `path`: the application's session with the file's directory

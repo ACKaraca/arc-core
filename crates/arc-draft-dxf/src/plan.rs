@@ -402,6 +402,15 @@ pub const FOREIGN_ENTITY: &str = "entity";
 /// target space.
 pub const FOREIGN_OBJECT: &str = "object";
 
+/// The `record_kind` of a header variable the import does not consume. The row's record is the
+/// variable (its name as the kind, its groups as the groups); the row's object is the target
+/// space, and the export writes the rows back in their stored order.
+pub const FOREIGN_HEADER: &str = "header";
+
+/// The most header variables one import keeps as rows; further variables, and those beyond the
+/// string bound of the limits, are counted in the loss report (`draft.dxf.foreign_overflow`).
+pub const MAX_HEADER_VARIABLES: usize = 1_024;
+
 /// A record of the file that has no drafting counterpart, kept as one foreign data row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ForeignSpec {
@@ -422,7 +431,9 @@ pub struct Plan {
     /// block definitions, then entities (blocks first, then the model space, each in file
     /// order).
     pub ops: Vec<Op>,
-    /// The records kept as foreign data rows, in file order (at most [`MAX_FOREIGN_RECORDS`]).
+    /// The rows kept as foreign data: the header variables first ([`FOREIGN_HEADER`], at most
+    /// [`MAX_HEADER_VARIABLES`]), then the records of the entities and objects in file order (at
+    /// most [`MAX_FOREIGN_RECORDS`]).
     pub foreign: Vec<ForeignSpec>,
     /// The format version name of the file, the rows' `source_version`.
     pub version: String,

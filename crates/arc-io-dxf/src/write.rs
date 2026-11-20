@@ -142,6 +142,25 @@ pub fn write(drawing: &Drawing, options: &mut WriteOptions<'_>) -> Result<WriteO
 }
 
 /// Calls `f` once per record the writer emits, with the record's model handle.
+/// Whether the writer accepts `group` in the form `binary` selects: the value's type matches the
+/// group code's kind, a real is finite, an integer is in its code's range, a binary chunk takes at
+/// most 255 bytes in binary form, and a text takes a code the crate does not know only in ASCII
+/// form (with a code of at least 0). A group that fails is refused by [`write`].
+#[must_use]
+pub fn value_writable(group: &Group, binary: bool) -> bool {
+    match (value_kind(group.code), &group.value) {
+        (Some(ValueKind::Text), Value::Text(_)) | (Some(ValueKind::Bool), Value::Bool(_)) => true,
+        (None, Value::Text(_)) => !binary && group.code >= 0,
+        (Some(ValueKind::Double), Value::Double(v)) => v.is_finite(),
+        (Some(ValueKind::Int8), Value::Int(v)) => (0..=255).contains(v),
+        (Some(k @ (ValueKind::Int16 | ValueKind::Int32 | ValueKind::Int64)), Value::Int(v)) => {
+            crate::token::int_in_range(k, *v) == Some(*v)
+        }
+        (Some(ValueKind::Bytes), Value::Bytes(b)) => !binary || b.len() <= 255,
+        _ => false,
+    }
+}
+
 fn visit(d: &Drawing, f: &mut dyn FnMut(Option<Handle>)) {
     fn entity(e: &Entity, f: &mut dyn FnMut(Option<Handle>)) {
         f(e.source_id());
@@ -267,26 +286,13 @@ impl Writer<'_, '_> {
     }
 
     fn group(&mut self, g: &Group) -> Result<()> {
-        let kind = value_kind(g.code);
         let invalid = || {
             Error::new(codes::DXF_WRITE_VALUE_INVALID).with_detail("group_code", i64::from(g.code))
         };
-        let valid = match (kind, &g.value) {
-            (Some(ValueKind::Text), Value::Text(_)) | (Some(ValueKind::Bool), Value::Bool(_)) => {
-                true
-            }
-            (None, Value::Text(_)) => !self.binary && g.code >= 0,
-            (Some(ValueKind::Double), Value::Double(v)) => v.is_finite(),
-            (Some(ValueKind::Int8), Value::Int(v)) => (0..=255).contains(v),
-            (Some(k @ (ValueKind::Int16 | ValueKind::Int32 | ValueKind::Int64)), Value::Int(v)) => {
-                crate::token::int_in_range(k, *v) == Some(*v)
-            }
-            (Some(ValueKind::Bytes), Value::Bytes(b)) => !self.binary || b.len() <= 255,
-            _ => false,
-        };
-        if !valid {
+        if !value_writable(g, self.binary) {
             return Err(invalid());
         }
+        let kind = value_kind(g.code);
         if self.binary {
             self.out.extend_from_slice(&g.code.to_le_bytes());
             match (&g.value, kind) {

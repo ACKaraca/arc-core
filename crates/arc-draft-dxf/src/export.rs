@@ -27,7 +27,8 @@ use crate::apply::{bound_handles, model_space_unit};
 use crate::color::to_true;
 use crate::error::{codes, reasons};
 use crate::fields::Reader;
-use crate::plan::{FOREIGN_ENTITY, FOREIGN_FORMAT, FOREIGN_OBJECT};
+use crate::header;
+use crate::plan::{FOREIGN_ENTITY, FOREIGN_FORMAT, FOREIGN_HEADER, FOREIGN_OBJECT, decode_record};
 use crate::report::Reporter;
 use crate::units::code_of_unit;
 
@@ -111,6 +112,8 @@ pub(crate) struct Exporter<'a> {
     exhausted: bool,
     /// The block references the arrays may still expand to in this export.
     pub(crate) array_budget: u64,
+    /// Whether the output is binary: a stored value the writer refuses in that form is omitted.
+    pub(crate) binary: bool,
 }
 
 pub(crate) fn invalid(what: &str) -> Error {
@@ -295,6 +298,42 @@ pub fn export_drawing_with(
     export_drawing_limited(snapshot, space, policy, &Limits::DEFAULT)
 }
 
+/// The stored header rows of the space `space`, in id order.
+fn stored_header_rows(snapshot: &Snapshot, space: ObjectId) -> Vec<&StoredForeign> {
+    let space_bytes = space.as_u128().to_be_bytes();
+    snapshot
+        .foreign_rows()
+        .filter(|row| {
+            row.source_format == FOREIGN_FORMAT
+                && row.record_kind == FOREIGN_HEADER
+                && row.object.as_deref() == Some(space_bytes.as_slice())
+        })
+        .map(|row| row.as_ref())
+        .collect()
+}
+
+/// Sets the header of `drawing`: the stored rows of the space, checked by [`header::write_back`],
+/// with the variables the export owns. A stored handle is kept only when the export writes its
+/// object under that handle.
+fn set_header(ex: &mut Exporter<'_>, rows: &[&StoredForeign], drawing: &mut Drawing) {
+    let kept: BTreeSet<u64> = ex
+        .written
+        .iter()
+        .filter(|(id, handle)| ex.bound.get(id) == Some(handle))
+        .map(|(_, handle)| handle.0)
+        .collect();
+    let stored: Vec<HeaderVariable> = rows
+        .iter()
+        .filter_map(|row| decode_record(&row.data))
+        .map(|record| HeaderVariable {
+            name: record.kind,
+            values: record.groups,
+        })
+        .collect();
+    let owned = std::mem::take(&mut drawing.header);
+    drawing.header = header::write_back(stored, owned, drawing, &kept, ex.binary, &mut ex.rep);
+}
+
 /// Exports the model space `space` as [`export_drawing_with`] does, with the limits `limits`
 /// bounding the block references the arrays of the drawing expand to: at most the smaller of
 /// `limits.record_count` and [`ARRAY_REFERENCE_BUDGET`].
@@ -308,6 +347,23 @@ pub fn export_drawing_limited(
     space: ObjectId,
     policy: &HandlePolicy,
     limits: &Limits,
+) -> Result<Exported> {
+    export_drawing_for_mode(snapshot, space, policy, limits, false)
+}
+
+/// Exports the model space `space` as [`export_drawing_limited`] does, for the output form the
+/// writer is given: `binary` as [`arc_io_dxf::WriteOptions::binary`]. A stored value the writer
+/// refuses in that form is omitted and reported, so the write does not fail.
+///
+/// # Errors
+///
+/// As [`export_drawing_limited`].
+pub fn export_drawing_for_mode(
+    snapshot: &Snapshot,
+    space: ObjectId,
+    policy: &HandlePolicy,
+    limits: &Limits,
+    binary: bool,
 ) -> Result<Exported> {
     let unit = model_space_unit(snapshot, space)?;
     let (_, layers) = names_with_standard(&["0"], named(snapshot, LAYER));
@@ -364,6 +420,7 @@ pub fn export_drawing_limited(
             .or_default()
             .push(row);
     }
+    let header_rows = stored_header_rows(snapshot, space);
     let mut ex = Exporter {
         snapshot,
         rep: Reporter::new(),
@@ -383,11 +440,13 @@ pub fn export_drawing_limited(
         foreign,
         exhausted: false,
         array_budget: limits.record_count.min(ARRAY_REFERENCE_BUDGET),
+        binary,
     };
     ex.text_styles = named(snapshot, TEXT_STYLE).into_iter().collect();
     ex.dim_styles = named(snapshot, DIM_STYLE).into_iter().collect();
     ex.blocks = named(snapshot, BLOCK).into_iter().collect();
-    let drawing = ex.build(space, unit)?;
+    let mut drawing = ex.build(space, unit)?;
+    set_header(&mut ex, &header_rows, &mut drawing);
     if ex.exhausted {
         return Err(exhausted());
     }

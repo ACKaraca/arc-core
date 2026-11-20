@@ -24,8 +24,8 @@ use crate::error::codes;
 use crate::fields::{Builder, Reader};
 use crate::plan::{
     Appearance, AttributeSpec, BlockSpec, By, Container, DimStyleSpec, ElementSpec, EntitySpec,
-    FOREIGN_FORMAT, FamilySpec, ForeignSpec, HatchSpec, LayerSpec, LinetypeSpec, Op, Plan, Shape,
-    TextStyleSpec,
+    FOREIGN_FORMAT, FOREIGN_HEADER, FamilySpec, ForeignSpec, HatchSpec, LayerSpec, LinetypeSpec,
+    Op, Plan, Shape, TextStyleSpec,
 };
 
 /// An object an import created, in creation order.
@@ -243,6 +243,17 @@ pub fn apply(ctx: &mut Context<'_>, space: ObjectId, plan: &Plan) -> Result<Appl
         if let Some(id) = applier.ids.linetypes.get(&key).copied() {
             applier.adopt(id, named.source)?;
         }
+    }
+    // An import replaces the header rows of its space: the rows of an earlier import into the
+    // same space are removed in this transaction, found by format, record kind and object.
+    let stale: Vec<i64> = applier
+        .snapshot
+        .foreign_of(space)
+        .filter(|r| r.source_format == FOREIGN_FORMAT && r.record_kind == FOREIGN_HEADER)
+        .map(|r| r.id)
+        .collect();
+    for id in stale {
+        applier.ctx.txn()?.remove_foreign(id)?;
     }
     for (n, spec) in plan.foreign.iter().enumerate() {
         if n % 256 == 0 {

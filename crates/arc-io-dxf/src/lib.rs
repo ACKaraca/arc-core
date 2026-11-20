@@ -36,4 +36,4 @@ pub use group::{Group, Handle, Value, ValueKind, Version, value_kind};
 pub use loss::{LossItem, LossReport, Outcome, Severity};
 pub use model::{Drawing, Entity, EntityKind, Object, ObjectKind, PreservedRecord};
 pub use read::{Progress, ReadOptions, ReadOutput, read, read_stream};
-pub use write::{WriteOptions, WriteOutput, write};
+pub use write::{WriteOptions, WriteOutput, value_writable, write};

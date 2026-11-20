@@ -20,6 +20,7 @@ pub mod export;
 mod export_entities;
 pub mod fields;
 mod geo;
+mod header;
 mod map_entities;
 mod map_hatch;
 mod map_tables;
@@ -31,5 +32,8 @@ pub mod units;
 
 pub use apply::{Applied, Created, apply};
 pub use commands::register_commands;
-pub use export::{HandlePolicy, export_drawing, export_drawing_limited, export_drawing_with};
+pub use export::{
+    HandlePolicy, export_drawing, export_drawing_for_mode, export_drawing_limited,
+    export_drawing_with,
+};
 pub use plan::{ImportOptions, Plan, plan, plan_with_report};

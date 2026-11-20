@@ -65,6 +65,23 @@ pub fn code_of_unit(unit: SpaceUnit) -> i64 {
     }
 }
 
+/// Whether `unit` is a metric unit: `Some(true)` for the metric ones, `Some(false)` for the
+/// imperial ones and `None` for unitless.
+#[must_use]
+pub fn metric(unit: SpaceUnit) -> Option<bool> {
+    match unit {
+        SpaceUnit::Unitless => None,
+        SpaceUnit::Millimeter | SpaceUnit::Centimeter | SpaceUnit::Meter | SpaceUnit::Kilometer => {
+            Some(true)
+        }
+        SpaceUnit::Inch
+        | SpaceUnit::Foot
+        | SpaceUnit::Yard
+        | SpaceUnit::Mile
+        | SpaceUnit::UsSurveyFoot => Some(false),
+    }
+}
+
 /// The factor that converts a length of the file's unit `code` to `target`; 1 when either is
 /// unitless or the code is unknown.
 #[must_use]

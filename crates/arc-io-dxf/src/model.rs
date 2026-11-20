@@ -48,7 +48,7 @@ impl Drawing {
     pub fn header_variable(&self, name: &str) -> Option<&[Group]> {
         self.header
             .iter()
-            .find(|v| v.name == name)
+            .find(|v| v.name.eq_ignore_ascii_case(name))
             .map(|v| v.values.as_slice())
     }
 

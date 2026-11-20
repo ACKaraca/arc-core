@@ -345,7 +345,10 @@ pub struct Shell {
     extractors: ExtractorRegistry,
     gpu: Option<Gpu>,
     views: BTreeMap<TabId, View>,
+    /// The session of the user-interface commands. Settings are per session: the user-interface
+    /// and command-line sessions do not share the settings a command writes, only the `last` hook.
     ui_session: Session,
+    /// The session of the command line; see `ui_session` for what the two do not share.
     line_session: Session,
     errors: Vec<Error>,
     log: Vec<String>,
@@ -444,6 +447,7 @@ impl Shell {
     #[must_use]
     pub fn new(app: &Application, config: ShellConfig, gpu: Option<Gpu>) -> Self {
         let product = app.product();
+        let last = product.headless().last.clone();
         let mut errors = Vec::new();
         let mut panels = Vec::new();
         for entry in product.panels() {
@@ -478,8 +482,8 @@ impl Shell {
             extractors,
             gpu,
             views: BTreeMap::new(),
-            ui_session: session(Surface::Ui),
-            line_session: session(Surface::CommandLine),
+            ui_session: session(Surface::Ui).with_last_hook(last.clone()),
+            line_session: session(Surface::CommandLine).with_last_hook(last),
             errors,
             log: Vec::new(),
             seed: config.seed,
@@ -1678,7 +1682,8 @@ impl Panel for CommandLinePanel {
             return;
         };
         let registry = &cx.app.product().headless().registry;
-        let session = session(Surface::CommandLine);
+        let session =
+            session(Surface::CommandLine).with_last_hook(cx.app.product().headless().last.clone());
         let localized = BTreeMap::new();
         let target = Target {
             registry,

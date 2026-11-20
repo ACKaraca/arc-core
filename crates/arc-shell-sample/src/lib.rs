@@ -324,5 +324,6 @@ pub fn product(clock: Arc<dyn Clock>, owner: LockOwner) -> arc_base::Result<Prod
         registry: registry()?,
         clock,
         owner,
+        last: None,
     })
 }

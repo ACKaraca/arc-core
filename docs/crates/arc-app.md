@@ -432,6 +432,9 @@ standard error. Windows uses the data directory.
   attaches `SnapshotRenderer` over its extractor, so the automation socket answers `view.render`.
   `arc-shell-cli` attaches it to the `serve` and `mcp` subcommands. The renderer runs on the
   thread of the session that asked.
+- The product gives the keyword `last` its meaning with `ProductBuilder::last_objects`. The hook
+  reaches every session the application serves: the default session, the shell's sessions, the
+  command line and the automation socket (see [arc-command](arc-command.md#context-sessions-and-predicates)).
 - `SnapshotRenderer` keeps one GPU device: the first render that needs it creates it, and later
   renders reuse it. A failed creation is not kept, so the next render tries again. The renderer
   takes its lock before the extraction, so renders run one at a time and a session waits its turn.
@@ -670,6 +673,9 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
   The application has no roots policy of its own, so the file's directory is the policy.
 - `set_session` is therefore a trust point for the surface, the permission classes, the limits and
   the clock of product commands run by the native callbacks. It is not a trust point for roots.
+- `set_session` keeps the product's `last` hook: the session given takes the product's hook in place
+  of its own. The session's settings are its own; the shell's user-interface and command-line
+  sessions do not share settings with each other (only the hook).
 - A relative path is resolved against the current directory before the directory is taken. The
   directory must exist (`cmd.roots.invalid` otherwise); a path without a parent is
   `app.file.unsupported_type`.
