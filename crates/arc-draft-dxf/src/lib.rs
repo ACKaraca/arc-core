@@ -27,6 +27,7 @@ mod map_tables;
 mod map_text;
 mod mapper;
 pub mod plan;
+mod records;
 pub mod report;
 pub mod units;
 

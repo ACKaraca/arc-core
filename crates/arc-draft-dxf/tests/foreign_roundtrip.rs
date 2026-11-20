@@ -16,6 +16,10 @@ use arc_draft_dxf::{ImportOptions, plan};
 use arc_io_dxf::{EntityKind, Group, Object, ObjectKind, PreservedRecord};
 use support::{Env, bytes, circle, drawing};
 
+fn result_reasons_contain(report: &arc_io_dxf::LossReport, reason: &str) -> bool {
+    report.items.iter().any(|i| i.reason == reason)
+}
+
 fn record(kind: &str, handle: &str) -> PreservedRecord {
     PreservedRecord {
         kind: kind.to_owned(),
@@ -95,9 +99,25 @@ fn an_unmapped_record_is_kept_written_back_and_removed_by_undo() {
             assert_eq!(got, want);
         }
     }
-    assert!(exported.objects.iter().any(
-        |o| matches!(&o.kind, ObjectKind::Preserved(r) if *r == record("ACDBPLACEHOLDER", "ABD"))
-    ));
+    // The owner 1F is not written (the file has no such object), so the object names the root
+    // dictionary the export writes, and the substitution is reported.
+    let mut placeholder = record("ACDBPLACEHOLDER", "ABD");
+    placeholder.groups[1] = Group::text(330, "C");
+    assert!(
+        exported
+            .objects
+            .iter()
+            .any(|o| matches!(&o.kind, ObjectKind::Preserved(r) if *r == placeholder))
+    );
+    assert!(
+        result_reasons_contain(
+            &arc_draft_dxf::export_drawing(&env.snapshot(), space)
+                .unwrap()
+                .report,
+            "draft.dxf.owner_substituted"
+        ),
+        "the substitution is reported"
+    );
     // The handles of the exporter's own records are above the preserved ones.
     assert!(
         exported

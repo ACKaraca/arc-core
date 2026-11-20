@@ -26,6 +26,7 @@ use crate::error::reasons;
 use crate::export::{Exporter, alpha_of, invalid, lineweight_code, note_what};
 use crate::fields::Reader;
 use crate::plan::{FOREIGN_ENTITY, decode_record};
+use crate::records;
 
 fn p3(p: Point2, z: f64) -> [f64; 3] {
     [p.x, p.y, z]
@@ -88,14 +89,11 @@ impl Exporter<'_> {
         }
         for mut record in self.preserved_records(container, FOREIGN_ENTITY) {
             self.claim_record(&mut record);
-            // The record's owner is the container it is written to now.
-            let first_marker = record.groups.iter().position(|g| g.code == 100);
-            let owned = record
-                .groups
-                .iter_mut()
-                .take(first_marker.unwrap_or(usize::MAX))
-                .find(|g| g.code == 330);
-            if let Some(group) = owned {
+            // The record's owner is the container it is written to now. The owner position skips
+            // the groups of application data, so a reactor inside them keeps its number.
+            if let Some(i) = records::owner_position(&record.groups)
+                && let Some(group) = record.groups.get_mut(i)
+            {
                 group.value = arc_io_dxf::Value::Text(owner.to_hex());
             }
             self.count += 1;
@@ -178,7 +176,12 @@ impl Exporter<'_> {
                     ..Insert::default()
                 }),
                 extras: Vec::new(),
-                xdata: Vec::new(),
+                // The array's extended data goes with its first reference.
+                xdata: if i == 0 {
+                    self.xdata_of(object)
+                } else {
+                    Vec::new()
+                },
             });
         }
         if let Some(handle) = first {
@@ -214,6 +217,10 @@ impl Exporter<'_> {
                 r.groups
                     .iter()
                     .all(|g| arc_io_dxf::value_writable(g, self.binary))
+                    && r.groups
+                        .iter()
+                        .filter(|g| g.code == 1001)
+                        .all(|g| g.as_text().is_some_and(records::valid_name))
             });
             if let Some(record) = record {
                 self.rep.mapped(1);
@@ -292,7 +299,7 @@ impl Exporter<'_> {
             props,
             kind,
             extras: Vec::new(),
-            xdata: Vec::new(),
+            xdata: self.xdata_of(object),
         }))
     }
 

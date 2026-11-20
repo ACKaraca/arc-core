@@ -256,6 +256,8 @@ impl Mapper<'_> {
             self.note(reasons::REFERENCE_UNRESOLVED, "INSERT", source);
             return;
         }
+        // The extended data belongs to the reference as a whole: it goes with the first item.
+        let xdata = self.extended(&e.xdata, "INSERT", source);
         let mut scale = [
             i.x_scale.unwrap_or(1.0),
             i.y_scale.unwrap_or(1.0),
@@ -308,6 +310,11 @@ impl Mapper<'_> {
                             attributes: attributes.clone(),
                         }),
                         source: source.filter(|_| row == 0 && col == 0),
+                        xdata: if row == 0 && col == 0 {
+                            xdata.clone()
+                        } else {
+                            Vec::new()
+                        },
                     },
                 ));
             }

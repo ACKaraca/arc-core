@@ -6,17 +6,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use arc_draft::types::SpaceUnit;
 use arc_draft::validate::DEFAULT_MAX_NESTING;
 use arc_io_dxf::loss::{Argument, LossReport, Reason};
-use arc_io_dxf::model::HeaderVariable;
+use arc_io_dxf::model::{HeaderVariable, XData};
 use arc_io_dxf::{Drawing, Entity, EntityKind, Group, Handle, PreservedRecord, Value};
 
 use crate::depth::too_deep;
 use crate::error::reasons;
 use crate::header;
 use crate::plan::{
-    Appearance, BlockSpec, Container, DimStyleSpec, EntitySpec, FOREIGN_ENTITY, FOREIGN_HEADER,
-    FOREIGN_OBJECT, ForeignSpec, ImportOptions, LayerSpec, LinetypeSpec, MAX_FOREIGN_RECORDS,
-    MAX_HEADER_VARIABLES, NamedSource, Op, Plan, Shape, TextStyleSpec, encode_record,
+    Appearance, BlockSpec, Container, DimStyleSpec, EntitySpec, FOREIGN_APPID, FOREIGN_CLASS,
+    FOREIGN_DICTIONARY, FOREIGN_ENTITY, FOREIGN_HEADER, FOREIGN_OBJECT, ForeignSpec, ImportOptions,
+    LayerSpec, LinetypeSpec, MAX_FOREIGN_RECORDS, MAX_HEADER_VARIABLES, NamedSource, Op, Plan,
+    Shape, TextStyleSpec, encode_record,
 };
+use crate::records;
 use crate::report::Reporter;
 use crate::units;
 
@@ -83,6 +85,10 @@ pub(crate) struct Mapper<'a> {
     pub(crate) foreign: Vec<ForeignSpec>,
     pub(crate) edges: BTreeMap<String, BTreeSet<String>>,
     pub(crate) standard_linetypes: Vec<NamedSource>,
+    /// Rows of extended data kept on created objects (they share the row budget with `foreign`).
+    pub(crate) extended_rows: u64,
+    /// Encoded bytes of the extended data kept, over all objects.
+    pub(crate) extended_bytes: u64,
 }
 
 /// The header variables the import consumes itself; every other one is kept as a foreign row.
@@ -138,7 +144,54 @@ impl<'a> Mapper<'a> {
             foreign: Vec::new(),
             edges: BTreeMap::new(),
             standard_linetypes: Vec::new(),
+            extended_rows: 0,
+            extended_bytes: 0,
         }
+    }
+
+    /// Whether one more row fits the rows the import keeps (`MAX_FOREIGN_RECORDS` and the record
+    /// bound of the limits, counting the extended data rows as well).
+    pub(crate) fn room(&self) -> bool {
+        let rows = u64::try_from(self.foreign.len()).unwrap_or(u64::MAX);
+        let rows = rows.saturating_add(self.extended_rows);
+        rows < u64::try_from(MAX_FOREIGN_RECORDS).unwrap_or(u64::MAX)
+            && rows < self.o.limits.record_count
+    }
+
+    /// The extended data of a source record as the groups the object keeps. Over the per-object
+    /// bound (`string_bytes` of the limits), over the total bound (`input_bytes`) or over the row
+    /// bound, the data is not kept and reported (`draft.dxf.xdata_omitted`).
+    pub(crate) fn extended(
+        &mut self,
+        xdata: &[XData],
+        kind: &str,
+        source: Option<Handle>,
+    ) -> Vec<Group> {
+        if xdata.is_empty() {
+            return Vec::new();
+        }
+        let groups = records::xdata_groups(xdata);
+        if !records::xdata_well_formed(&groups, false) {
+            self.rep
+                .note(reasons::XDATA_OMITTED, kind, hex(source), &[]);
+            return Vec::new();
+        }
+        let size = u64::try_from(
+            encode_record(&PreservedRecord {
+                kind: records::XDATA.to_owned(),
+                groups: groups.clone(),
+            })
+            .len(),
+        )
+        .unwrap_or(u64::MAX);
+        let total = self.extended_bytes.saturating_add(size);
+        if size > self.o.limits.string_bytes || total > self.o.limits.input_bytes || !self.room() {
+            self.note(reasons::XDATA_OMITTED, kind, source);
+            return Vec::new();
+        }
+        self.extended_bytes = total;
+        self.extended_rows += 1;
+        groups
     }
 
     pub(crate) fn note(&mut self, reason: Reason, kind: &str, source: Option<Handle>) {
@@ -299,12 +352,15 @@ impl<'a> Mapper<'a> {
             return;
         }
         self.rep.mapped(1);
+        let source = e.source_id();
+        let xdata = self.extended(&e.xdata, e.kind.type_name(), source);
         self.entities.push((
             container.clone(),
             EntitySpec {
                 appearance,
                 shape: built.shape,
-                source: e.source_id(),
+                source,
+                xdata,
             },
         ));
     }
@@ -312,39 +368,96 @@ impl<'a> Mapper<'a> {
     /// Keeps `record` as a foreign data row attached to `container` unless the import holds
     /// the most rows it keeps or the record is larger than the limits allow.
     fn keep(&mut self, record: &PreservedRecord, record_kind: &'static str, container: &Container) {
-        let data = encode_record(record);
         let handle = record.handle();
-        let fits = self.foreign.len() < MAX_FOREIGN_RECORDS
-            && u64::try_from(data.len()).is_ok_and(|n| n <= self.o.limits.input_bytes)
-            && u64::try_from(self.foreign.len()).is_ok_and(|n| n < self.o.limits.record_count);
-        if !fits {
+        if self.keep_quiet(record, record_kind, container, handle) {
+            self.note(reasons::RECORD_PRESERVED, &record.kind, handle);
+        } else {
             self.note(reasons::FOREIGN_OVERFLOW, &record.kind, handle);
-            return;
         }
-        self.note(reasons::RECORD_PRESERVED, &record.kind, handle);
+    }
+
+    /// Adds the row for `record` without a loss item; `false` when it does not fit the bounds.
+    fn keep_quiet(
+        &mut self,
+        record: &PreservedRecord,
+        record_kind: &'static str,
+        container: &Container,
+        source: Option<Handle>,
+    ) -> bool {
+        let data = encode_record(record);
+        let fits =
+            self.room() && u64::try_from(data.len()).is_ok_and(|n| n <= self.o.limits.input_bytes);
+        if !fits {
+            return false;
+        }
         self.foreign.push(ForeignSpec {
             record_kind,
             container: container.clone(),
-            source: handle,
+            source,
             data,
         });
+        true
+    }
+
+    /// Keeps the records of a table or section that is kept as a whole, one row each; the rows
+    /// that do not fit are counted as overflow, and the kept ones are reported with their count.
+    fn keep_all(
+        &mut self,
+        kind: &str,
+        record_kind: &'static str,
+        records: Vec<(PreservedRecord, Option<Handle>)>,
+    ) {
+        let mut kept = 0_u64;
+        let mut overflow = 0_u64;
+        for (record, source) in records {
+            if self.keep_quiet(&record, record_kind, &Container::Space, source) {
+                kept += 1;
+            } else {
+                overflow += 1;
+            }
+        }
+        if kept > 0 {
+            self.rep
+                .note_n(reasons::RECORD_PRESERVED, kind, None, kept, &[]);
+        }
+        if overflow > 0 {
+            self.rep
+                .note_n(reasons::FOREIGN_OVERFLOW, kind, None, overflow, &[]);
+        }
     }
 
     fn skip_rest(&mut self) {
         let d = self.d;
         let mut skipped = 0_u64;
+        let mut dictionaries = Vec::new();
         for o in &d.objects {
-            if let arc_io_dxf::ObjectKind::Preserved(record) = &o.kind {
-                self.keep(record, FOREIGN_OBJECT, &Container::Space);
-            } else {
-                skipped += 1;
+            match &o.kind {
+                arc_io_dxf::ObjectKind::Preserved(record) => {
+                    self.keep(record, FOREIGN_OBJECT, &Container::Space);
+                }
+                arc_io_dxf::ObjectKind::Dictionary(dict) => {
+                    dictionaries.push((records::dictionary_record(o, dict), o.source_id()));
+                }
+                _ => {
+                    skipped += 1;
+                    if !o.xdata.is_empty() {
+                        self.note(reasons::XDATA_OMITTED, o.kind.type_name(), o.source_id());
+                    }
+                }
             }
         }
+        self.keep_all("DICTIONARY", FOREIGN_DICTIONARY, dictionaries);
         if skipped > 0 {
             let handle = d
                 .objects
                 .iter()
-                .find(|o| !matches!(o.kind, arc_io_dxf::ObjectKind::Preserved(_)))
+                .find(|o| {
+                    !matches!(
+                        o.kind,
+                        arc_io_dxf::ObjectKind::Preserved(_)
+                            | arc_io_dxf::ObjectKind::Dictionary(_)
+                    )
+                })
                 .and_then(|o| o.source_id());
             self.rep.note_n(
                 reasons::OBJECTS_SKIPPED,
@@ -354,12 +467,14 @@ impl<'a> Mapper<'a> {
                 &[],
             );
         }
+        self.keep_classes();
+        self.keep_appids();
+        self.omit_unmapped_xdata();
         let t = &d.tables;
         let skipped = [
             ("VPORT", t.vports.as_ref().map(|t| t.entries.len())),
             ("VIEW", t.views.as_ref().map(|t| t.entries.len())),
             ("UCS", t.ucs.as_ref().map(|t| t.entries.len())),
-            ("APPID", t.appids.as_ref().map(|t| t.entries.len())),
         ];
         for (name, count) in skipped {
             if count.is_some_and(|c| c > 0) {
@@ -373,6 +488,58 @@ impl<'a> Mapper<'a> {
         for section in &d.preserved_sections {
             self.rep
                 .note(reasons::TABLE_SKIPPED, &section.name, None, &[]);
+        }
+    }
+
+    /// Keeps each class of the CLASSES section once per class name (the first one wins).
+    fn keep_classes(&mut self) {
+        let mut names = BTreeSet::new();
+        let mut records = Vec::new();
+        for class in &self.d.classes {
+            if names.insert(class.dxf_name.to_lowercase()) {
+                records.push((records::class_record(class), None));
+            }
+        }
+        self.keep_all("CLASS", FOREIGN_CLASS, records);
+    }
+
+    /// Keeps each registered application once per name (the first one wins), as the APPID table.
+    fn keep_appids(&mut self) {
+        let Some(table) = &self.d.tables.appids else {
+            return;
+        };
+        let mut names = BTreeSet::new();
+        let mut records = Vec::new();
+        for entry in &table.entries {
+            if names.insert(entry.name.to_lowercase()) {
+                records.push((records::appid_record(entry), entry.head.handle));
+            }
+        }
+        self.keep_all("APPID", FOREIGN_APPID, records);
+    }
+
+    /// Reports the extended data of block records and sub-records (the BLOCK and ENDBLK records,
+    /// polyline vertices and attributes) that the import does not map.
+    fn omit_unmapped_xdata(&mut self) {
+        let mut found: Vec<(String, Option<Handle>)> = Vec::new();
+        let mut visit = |e: &Entity| {
+            if !e.xdata.is_empty() {
+                found.push((e.kind.type_name().to_owned(), e.source_id()));
+            }
+        };
+        for block in &self.d.blocks {
+            visit(&block.begin);
+            visit(&block.end);
+            for e in &block.entities {
+                visit_children(e, &mut visit);
+            }
+        }
+        for e in &self.d.entities {
+            visit_children(e, &mut visit);
+        }
+        for (kind, source) in found {
+            self.rep
+                .note(reasons::XDATA_OMITTED, &kind, hex(source), &[]);
         }
     }
 
@@ -507,6 +674,23 @@ impl<'a> Mapper<'a> {
         for (_, spec) in &mut self.entities {
             claim_source(&mut seen, rep, "ENTITY", &mut spec.source);
         }
+    }
+}
+
+/// Calls `f` on the sub-records of an entity that the import does not map: polyline vertices and
+/// sequence ends, attribute records of a block reference.
+fn visit_children(e: &Entity, f: &mut dyn FnMut(&Entity)) {
+    match &e.kind {
+        EntityKind::Polyline(p) => {
+            p.vertices.iter().for_each(&mut *f);
+            if let Some(seqend) = &p.seqend {
+                f(seqend);
+            }
+        }
+        EntityKind::Insert(i) => {
+            i.attribs.iter().for_each(&mut *f);
+        }
+        _ => {}
     }
 }
 

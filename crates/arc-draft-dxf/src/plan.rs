@@ -215,6 +215,9 @@ pub struct EntitySpec {
     pub appearance: Appearance,
     /// The kind data.
     pub shape: Shape,
+    /// Extended data of the source record: group 1001 and the groups after it, in file order
+    /// (empty when none is kept). The apply step stores it with the object it creates.
+    pub xdata: Vec<Group>,
     /// The DXF handle of the source record, `None` when the file gave none or the handle
     /// occurs earlier in the file.
     pub source: Option<Handle>,
@@ -241,6 +244,9 @@ pub struct LayerSpec {
     pub locked: bool,
     /// Whether the layer plots.
     pub plottable: bool,
+    /// Extended data of the source record: group 1001 and the groups after it, in file order
+    /// (empty when none is kept). The apply step stores it with the object it creates.
+    pub xdata: Vec<Group>,
     /// The DXF handle of the layer's table entry, bound to the object on apply.
     pub source: Option<Handle>,
 }
@@ -273,6 +279,9 @@ pub struct LinetypeSpec {
     pub description: String,
     /// The elements.
     pub elements: Vec<ElementSpec>,
+    /// Extended data of the source record: group 1001 and the groups after it, in file order
+    /// (empty when none is kept). The apply step stores it with the object it creates.
+    pub xdata: Vec<Group>,
     /// The DXF handle of the linetype's table entry.
     pub source: Option<Handle>,
 }
@@ -296,6 +305,9 @@ pub struct TextStyleSpec {
     pub upside_down: bool,
     /// Whether the text runs vertically.
     pub vertical: bool,
+    /// Extended data of the source record: group 1001 and the groups after it, in file order
+    /// (empty when none is kept). The apply step stores it with the object it creates.
+    pub xdata: Vec<Group>,
     /// The DXF handle of the style's table entry.
     pub source: Option<Handle>,
 }
@@ -318,6 +330,9 @@ pub struct DimStyleSpec {
     pub name: String,
     /// `(field, value)` pairs; reals and integers.
     pub values: Vec<(&'static str, f64)>,
+    /// Extended data of the source record: group 1001 and the groups after it, in file order
+    /// (empty when none is kept). The apply step stores it with the object it creates.
+    pub xdata: Vec<Group>,
     /// The DXF handle of the style's table entry.
     pub source: Option<Handle>,
 }
@@ -352,6 +367,9 @@ pub struct BlockSpec {
     pub unit: SpaceUnit,
     /// The attribute definitions.
     pub attributes: Vec<AttributeSpec>,
+    /// Extended data of the source record: group 1001 and the groups after it, in file order
+    /// (empty when none is kept). The apply step stores it with the object it creates.
+    pub xdata: Vec<Group>,
     /// The DXF handle of the block's block record, the record the block's entities are owned by.
     pub source: Option<Handle>,
 }
@@ -406,6 +424,23 @@ pub const FOREIGN_OBJECT: &str = "object";
 /// variable (its name as the kind, its groups as the groups); the row's object is the target
 /// space, and the export writes the rows back in their stored order.
 pub const FOREIGN_HEADER: &str = "header";
+
+/// The `record_kind` of a CLASS record of the CLASSES section. The row's object is the target
+/// space; the record is the class with its groups in file order.
+pub const FOREIGN_CLASS: &str = "class";
+
+/// The `record_kind` of an APPID table entry (a registered application). The row's object is the
+/// target space; the export writes the entry with its groups and adds the applications that
+/// written extended data names.
+pub const FOREIGN_APPID: &str = "appid";
+
+/// The `record_kind` of a DICTIONARY object of the OBJECTS section, with its entries. The row's
+/// object is the target space; the export writes the entries that name written objects.
+pub const FOREIGN_DICTIONARY: &str = "dictionary";
+
+/// The `record_kind` of the extended data of a created object. The row's object is that object,
+/// its `data` a record of kind `XDATA` whose groups are the extended data as in the file.
+pub const FOREIGN_XDATA: &str = "xdata";
 
 /// The most header variables one import keeps as rows; further variables, and those beyond the
 /// string bound of the limits, are counted in the loss report (`draft.dxf.foreign_overflow`).

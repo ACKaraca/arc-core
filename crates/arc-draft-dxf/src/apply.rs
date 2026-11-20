@@ -18,14 +18,15 @@ use arc_draft::types::{
 };
 use arc_geom::Curve2;
 use arc_geom::encoding::GeomCodec;
-use arc_io_dxf::Handle;
+use arc_io_dxf::{Group, Handle, PreservedRecord};
 
 use crate::error::codes;
 use crate::fields::{Builder, Reader};
 use crate::plan::{
     Appearance, AttributeSpec, BlockSpec, By, Container, DimStyleSpec, ElementSpec, EntitySpec,
-    FOREIGN_FORMAT, FOREIGN_HEADER, FamilySpec, ForeignSpec, HatchSpec, LayerSpec, LinetypeSpec,
-    Op, Plan, Shape, TextStyleSpec,
+    FOREIGN_APPID, FOREIGN_CLASS, FOREIGN_DICTIONARY, FOREIGN_FORMAT, FOREIGN_HEADER,
+    FOREIGN_XDATA, FamilySpec, ForeignSpec, HatchSpec, LayerSpec, LinetypeSpec, Op, Plan, Shape,
+    TextStyleSpec,
 };
 
 /// An object an import created, in creation order.
@@ -187,6 +188,10 @@ struct Applier<'c, 'a> {
     document: String,
     /// The objects bound under the document label before the import.
     bound_here: BTreeSet<ObjectId>,
+    /// The extended data rows of each object, by key.
+    xdata_rows: BTreeMap<ObjectId, Vec<i64>>,
+    /// The version name of the file, the rows' `source_version`.
+    version: String,
 }
 
 /// Creates the objects of `plan` in the transaction of `ctx`: definitions first, then the
@@ -224,7 +229,10 @@ pub fn apply(ctx: &mut Context<'_>, space: ObjectId, plan: &Plan) -> Result<Appl
         ctx,
         space,
         applied: Applied::default(),
+        xdata_rows: BTreeMap::new(),
+        version: plan.version.clone(),
     };
+    applier.xdata_rows = xdata_rows(&applier.snapshot);
     let taken = existing(&applier.snapshot, BLOCK);
     let total = plan.ops.len().max(1);
     for (n, op) in plan.ops.iter().enumerate() {
@@ -241,15 +249,25 @@ pub fn apply(ctx: &mut Context<'_>, space: ObjectId, plan: &Plan) -> Result<Appl
     for named in &plan.standard_linetypes {
         let key = named.name.to_lowercase();
         if let Some(id) = applier.ids.linetypes.get(&key).copied() {
-            applier.adopt(id, named.source)?;
+            applier.adopt(id, named.source, &[])?;
         }
     }
-    // An import replaces the header rows of its space: the rows of an earlier import into the
-    // same space are removed in this transaction, found by format, record kind and object.
+    // An import replaces the header, class, application and dictionary rows of its space: the rows
+    // of an earlier import into the same space are removed in this transaction, found by format,
+    // record kind and object. The last import's records win for the space.
     let stale: Vec<i64> = applier
         .snapshot
         .foreign_of(space)
-        .filter(|r| r.source_format == FOREIGN_FORMAT && r.record_kind == FOREIGN_HEADER)
+        .filter(|r| {
+            r.source_format == FOREIGN_FORMAT
+                && [
+                    FOREIGN_HEADER,
+                    FOREIGN_CLASS,
+                    FOREIGN_APPID,
+                    FOREIGN_DICTIONARY,
+                ]
+                .contains(&r.record_kind.as_str())
+        })
         .map(|r| r.id)
         .collect();
     for id in stale {
@@ -262,6 +280,27 @@ pub fn apply(ctx: &mut Context<'_>, space: ObjectId, plan: &Plan) -> Result<Appl
         applier.foreign(spec, &plan.version)?;
     }
     Ok(applier.applied)
+}
+
+/// The extended data rows of `snapshot` by the object each is attached to.
+fn xdata_rows(snapshot: &Snapshot) -> BTreeMap<ObjectId, Vec<i64>> {
+    let mut out: BTreeMap<ObjectId, Vec<i64>> = BTreeMap::new();
+    for row in snapshot.foreign_rows() {
+        if row.source_format != FOREIGN_FORMAT || row.record_kind != FOREIGN_XDATA {
+            continue;
+        }
+        let Some(bytes) = row
+            .object
+            .as_deref()
+            .and_then(|b| <[u8; 16]>::try_from(b).ok())
+        else {
+            continue;
+        };
+        out.entry(ObjectId::from_u128(u128::from_be_bytes(bytes)))
+            .or_default()
+            .push(row.id);
+    }
+    out
 }
 
 impl Applier<'_, '_> {
@@ -282,8 +321,10 @@ impl Applier<'_, '_> {
     }
 
     /// Binds the existing object `id` to the file's `source` when it has no binding under the
-    /// document label yet; an existing object is not created and is not listed as created.
-    fn adopt(&mut self, id: ObjectId, source: Option<Handle>) -> Result<()> {
+    /// document label yet; an existing object is not created and is not listed as created. Its
+    /// extended data is replaced by the file's (see [`Self::extended`]).
+    fn adopt(&mut self, id: ObjectId, source: Option<Handle>, xdata: &[Group]) -> Result<()> {
+        self.extended(id, xdata, source)?;
         match source {
             Some(handle) if !self.bound_here.contains(&id) => {
                 self.bind_source(id, handle)?;
@@ -292,6 +333,34 @@ impl Applier<'_, '_> {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Sets the extended data of the object `id` to `groups` as one row bound to it. The rows the
+    /// object held before are removed in this transaction, so the last import's data replaces them,
+    /// and an empty `groups` leaves the object without a row.
+    fn extended(&mut self, id: ObjectId, groups: &[Group], source: Option<Handle>) -> Result<()> {
+        for old in self.xdata_rows.remove(&id).unwrap_or_default() {
+            self.ctx.txn()?.remove_foreign(old)?;
+        }
+        if groups.is_empty() {
+            return Ok(());
+        }
+        let data = crate::plan::encode_record(&PreservedRecord {
+            kind: crate::records::XDATA.to_owned(),
+            groups: groups.to_vec(),
+        });
+        let key = self.ctx.txn()?.add_foreign(StoredForeign {
+            id: 0,
+            source_format: FOREIGN_FORMAT.to_owned(),
+            source_version: (!self.version.is_empty()).then(|| self.version.clone()),
+            source_id: source.map(Handle::to_hex),
+            object: Some(id.as_u128().to_be_bytes().to_vec()),
+            record_kind: FOREIGN_XDATA.to_owned(),
+            data,
+            asset: None,
+        })?;
+        self.xdata_rows.insert(id, vec![key]);
+        Ok(())
     }
 
     /// Records that `id` was created as an object of `type_key` from the file object `source`:
@@ -364,7 +433,7 @@ impl Applier<'_, '_> {
     fn linetype(&mut self, s: &LinetypeSpec) -> Result<()> {
         let key = s.name.to_lowercase();
         if let Some(id) = self.ids.linetypes.get(&key).copied() {
-            return self.adopt(id, s.source);
+            return self.adopt(id, s.source, &s.xdata);
         }
         let mut b = self.builder(LINETYPE);
         b.set("name", Value::String(s.name.clone()))?
@@ -376,13 +445,14 @@ impl Applier<'_, '_> {
         let id = self.create(LINETYPE, None, b.values)?;
         self.ids.linetypes.insert(key, id);
         self.applied.linetypes += 1;
-        self.bind(id, LINETYPE, s.source)
+        self.bind(id, LINETYPE, s.source)?;
+        self.extended(id, &s.xdata, s.source)
     }
 
     fn layer(&mut self, s: &LayerSpec) -> Result<()> {
         let key = s.name.to_lowercase();
         if let Some(id) = self.ids.layers.get(&key).copied() {
-            return self.adopt(id, s.source);
+            return self.adopt(id, s.source, &s.xdata);
         }
         let linetype = s
             .linetype
@@ -402,13 +472,14 @@ impl Applier<'_, '_> {
         let id = self.create(LAYER, None, b.values)?;
         self.ids.layers.insert(key, id);
         self.applied.layers += 1;
-        self.bind(id, LAYER, s.source)
+        self.bind(id, LAYER, s.source)?;
+        self.extended(id, &s.xdata, s.source)
     }
 
     fn text_style(&mut self, s: &TextStyleSpec) -> Result<()> {
         let key = s.name.to_lowercase();
         if let Some(id) = self.ids.text_styles.get(&key).copied() {
-            return self.adopt(id, s.source);
+            return self.adopt(id, s.source, &s.xdata);
         }
         let mut b = self.builder(arc_draft::style::TEXT_STYLE);
         b.set("name", Value::String(s.name.clone()))?
@@ -422,13 +493,14 @@ impl Applier<'_, '_> {
         let id = self.create(arc_draft::style::TEXT_STYLE, None, b.values)?;
         self.ids.text_styles.insert(key, id);
         self.applied.text_styles += 1;
-        self.bind(id, arc_draft::style::TEXT_STYLE, s.source)
+        self.bind(id, arc_draft::style::TEXT_STYLE, s.source)?;
+        self.extended(id, &s.xdata, s.source)
     }
 
     fn dim_style(&mut self, s: &DimStyleSpec) -> Result<()> {
         let key = s.name.to_lowercase();
         if let Some(id) = self.ids.dim_styles.get(&key).copied() {
-            return self.adopt(id, s.source);
+            return self.adopt(id, s.source, &s.xdata);
         }
         let mut b = self.builder(arc_draft::style::DIM_STYLE);
         b.set("name", Value::String(s.name.clone()))?;
@@ -444,7 +516,8 @@ impl Applier<'_, '_> {
         let id = self.create(arc_draft::style::DIM_STYLE, None, b.values)?;
         self.ids.dim_styles.insert(key, id);
         self.applied.dim_styles += 1;
-        self.bind(id, arc_draft::style::DIM_STYLE, s.source)
+        self.bind(id, arc_draft::style::DIM_STYLE, s.source)?;
+        self.extended(id, &s.xdata, s.source)
     }
 
     fn block(&mut self, s: &BlockSpec, taken: &BTreeMap<String, ObjectId>) -> Result<()> {
@@ -466,7 +539,8 @@ impl Applier<'_, '_> {
         self.ids.blocks.insert(s.name.to_lowercase(), id);
         self.order.insert(id, 0);
         self.applied.blocks += 1;
-        self.bind(id, BLOCK, s.source)
+        self.bind(id, BLOCK, s.source)?;
+        self.extended(id, &s.xdata, s.source)
     }
 
     fn entity(&mut self, container: &Container, spec: &EntitySpec) -> Result<()> {
@@ -485,7 +559,8 @@ impl Applier<'_, '_> {
         *order += 1;
         let id = self.create(key, Some(owner), b.values)?;
         self.applied.entities += 1;
-        self.bind(id, key, spec.source)
+        self.bind(id, key, spec.source)?;
+        self.extended(id, &spec.xdata, spec.source)
     }
 
     fn common(&mut self, b: &mut Builder, a: &Appearance) -> Result<()> {

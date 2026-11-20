@@ -45,3 +45,7 @@ draft-dxf-command-export = DXF dışa aktar
 draft-dxf-command-export-description = Bir model alanını katmanları, çizgi tipleri, stilleri ve blokları ile bir DXF dosyasına yazar.
 draft-dxf-progress-import = DXF dosyası içe aktarılıyor
 draft-dxf-progress-export = DXF dosyası yazılıyor
+draft-dxf-loss-xdata-omitted = { $count } nesnenin genişletilmiş verisi tutulmadı: bir boyut sınırını aşıyor, satırlar dolu veya nesne bu içe aktarımın eşlemediği bir alt kayıt.
+draft-dxf-loss-owner-substituted = Yazılmayan bir sahibi olan { $count } korunmuş nesne var; sahip olarak kök sözlük yazıldı.
+draft-dxf-loss-appid-added = Yazılan genişletilmiş veriyi kullanan ve APPID tablosunda bulunmayan { $count } kayıtlı uygulama eklendi: { $names }.
+draft-dxf-loss-reference-nulled = Yazılmayan kayıt veya nesnelere verilen { $count } başvuru boş tutamaç olarak yazıldı.

@@ -44,3 +44,7 @@ draft-dxf-command-export = Export DXF
 draft-dxf-command-export-description = Writes a model space with its layers, linetypes, styles and blocks to a DXF file.
 draft-dxf-progress-import = Importing the DXF file
 draft-dxf-progress-export = Writing the DXF file
+draft-dxf-loss-xdata-omitted = Extended data of { $count } objects was not kept: it exceeds a size bound, the rows are full, or the object is a sub-record the import does not map.
+draft-dxf-loss-owner-substituted = { $count } preserved objects name an owner that is not written; the root dictionary is written as their owner.
+draft-dxf-loss-appid-added = { $count } registered applications used by written extended data were added to the APPID table: { $names }.
+draft-dxf-loss-reference-nulled = { $count } references to records or objects that the export does not write were written as the null handle.

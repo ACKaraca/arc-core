@@ -326,6 +326,44 @@ pub mod reasons {
         message_id: "draft-dxf-loss-header-unscaled",
     };
 
+    /// Extended data of an object was not kept: it is over the size bound of one object or the
+    /// total bound, or the import holds the most rows it keeps, or the object is a sub-record
+    /// (a block definition record, a polyline vertex or an attribute) that is not mapped.
+    pub const XDATA_OMITTED: Reason = Reason {
+        code: "draft.dxf.xdata_omitted",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "draft-dxf-loss-xdata-omitted",
+    };
+
+    /// A preserved object or dictionary names an owner the export does not write, so the owner
+    /// written is the root dictionary the export assigns.
+    pub const OWNER_SUBSTITUTED: Reason = Reason {
+        code: "draft.dxf.owner_substituted",
+        outcome: Outcome::Approximated,
+        severity: Severity::Warning,
+        message_id: "draft-dxf-loss-owner-substituted",
+    };
+
+    /// The export added a registered application (APPID entry) that written extended data names
+    /// and the file's APPID table lacks.
+    pub const APPID_ADDED: Reason = Reason {
+        code: "draft.dxf.appid_added",
+        outcome: Outcome::Approximated,
+        severity: Severity::Info,
+        message_id: "draft-dxf-loss-appid-added",
+    };
+
+    /// References that name no record of the output were written as the null handle (zero): the
+    /// number of them is in the item. The object keeps its data, and the number is never an old
+    /// handle that may name another object.
+    pub const REFERENCE_NULLED: Reason = Reason {
+        code: "draft.dxf.reference_nulled",
+        outcome: Outcome::Approximated,
+        severity: Severity::Warning,
+        message_id: "draft-dxf-loss-reference-nulled",
+    };
+
     /// Every reason of this crate, for the registry check.
     pub const ALL: &[Reason] = &[
         ENTITY_UNMAPPED,
@@ -362,6 +400,10 @@ pub mod reasons {
         HANDLE_DUPLICATE,
         HANDLE_REASSIGNED,
         BINDING_MOVED,
+        XDATA_OMITTED,
+        OWNER_SUBSTITUTED,
+        APPID_ADDED,
+        REFERENCE_NULLED,
     ];
 }
 

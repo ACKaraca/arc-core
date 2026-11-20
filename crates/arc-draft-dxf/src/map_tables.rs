@@ -148,6 +148,7 @@ impl Mapper<'_> {
             DimStyleSpec {
                 name: name.clone(),
                 values: Vec::new(),
+                xdata: Vec::new(),
                 source: None,
             },
         );
@@ -179,6 +180,7 @@ impl Mapper<'_> {
         } else {
             1.0
         };
+        let xdata = self.extended(&entry.xdata, "STYLE", handle);
         let spec = TextStyleSpec {
             name: name.clone(),
             font,
@@ -188,6 +190,7 @@ impl Mapper<'_> {
             backwards: data.generation & 2 != 0,
             upside_down: data.generation & 4 != 0,
             vertical: entry.flags & 4 != 0,
+            xdata,
             source: handle,
         };
         if self.text_styles.add(&name, spec)
@@ -228,10 +231,12 @@ impl Mapper<'_> {
             return;
         }
         let name = self.clip_name(&entry.name, "LTYPE", handle);
+        let xdata = self.extended(&entry.xdata, "LTYPE", handle);
         let spec = LinetypeSpec {
             name: name.clone(),
             description: truncate(&entry.data.description, 4096),
             elements,
+            xdata,
             source: handle,
         };
         self.linetypes.add(&name, spec);
@@ -304,6 +309,7 @@ impl Mapper<'_> {
         });
         let transparency =
             extra_int(&entry.extras, 440).map_or(0.0, |v| transparency_of(v).unwrap_or(0.0));
+        let xdata = self.extended(&entry.xdata, "LAYER", handle);
         let spec = LayerSpec {
             name: name.clone(),
             color,
@@ -314,6 +320,7 @@ impl Mapper<'_> {
             frozen: entry.flags & 1 != 0,
             locked: entry.flags & 4 != 0,
             plottable: data.plot.unwrap_or(true),
+            xdata,
             source: handle,
         };
         self.layers.add(&name, spec);
@@ -343,11 +350,13 @@ impl Mapper<'_> {
             #[expect(clippy::cast_precision_loss, reason = "a value of 0 to 8")]
             values.push(("precision", p as f64));
         }
+        let xdata = self.extended(&entry.xdata, "DIMSTYLE", handle);
         self.dim_styles.add(
             &name.clone(),
             DimStyleSpec {
                 name,
                 values,
+                xdata,
                 source: handle,
             },
         );
@@ -410,6 +419,8 @@ impl Mapper<'_> {
         });
         let record_units = record.and_then(|e| crate::units::unit_of_code(i64::from(e.flags)));
         let source = record.and_then(|e| e.head.handle);
+        let record_xdata = record.map(|e| e.xdata.clone()).unwrap_or_default();
+        let xdata = self.extended(&record_xdata, "BLOCK_RECORD", source);
         let unit = record_units.unwrap_or_else(|| self.file_unit());
         let mut seen = BTreeSet::new();
         let mut attributes = Vec::new();
@@ -436,6 +447,7 @@ impl Mapper<'_> {
             base: arc_base::math::Point2::new(begin.base[0], begin.base[1]),
             unit,
             attributes,
+            xdata,
             source,
         }
     }
@@ -485,6 +497,7 @@ fn default_layer(name: &str) -> LayerSpec {
         frozen: false,
         locked: false,
         plottable: true,
+        xdata: Vec::new(),
         source: None,
     }
 }
@@ -499,6 +512,7 @@ fn default_text_style(name: &str) -> TextStyleSpec {
         backwards: false,
         upside_down: false,
         vertical: false,
+        xdata: Vec::new(),
         source: None,
     }
 }

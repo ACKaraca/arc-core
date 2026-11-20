@@ -87,9 +87,10 @@ What a product does not model is kept. Readers emit unmodeled records as **prese
 format, version, source identifier, record kind, and data in a form the same crate's writer accepts
 (raw tag groups for DXF, entity instances for IFC, prim specs for USD, extension JSON for glTF).
 Products store them in the package (`arc_foreign`) attached to the nearest object they model. On
-export to the same format, the writer re-emits preserved records whose owners still exist, with
-references remapped; preserved records whose owners were deleted are dropped and listed in the
-export loss report.
+export to the same format, the writer re-emits preserved records with their references remapped to the
+handles the export writes. A reference to an object the export does not write is never written with its
+old number: an owner is replaced by the owner the export assigns, and any other reference is written as the
+null handle. The loss report lists every such replacement and every nulled reference.
 
 ## Loss reports
 
@@ -123,6 +124,11 @@ handle, records whose handle a preserved record of the file also holds, repeated
 first, paper-space entities, the `BLOCK` and `ENDBLK` records of a block, attribute definitions and
 attribute values, and records kept as preserved data. The rules, the reasons and the limits are in
 the crate specification.
+
+The drafting import also keeps the extended data of the objects it maps, the class records, the
+registered applications and the dictionaries of a DXF file as preserved rows, and the export writes them
+back with the references mapped to the handles it writes. The rules, the bounds and the parts of a file
+that are not preserved are in the crate specification.
 
 ## The Arc exchange package
 
