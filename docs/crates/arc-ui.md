@@ -762,13 +762,26 @@ Module `hooks` (feature `viewport`). A product gives the viewport a `ProductInpu
   - Navigation (wheel, pinch, keys, and the middle-button pan and orbit) stays with the widget. The
     handler sees middle-button events too and may consume them to keep the widget from panning.
 - `ProductOverlay` is painted over the image with the theme's viewport tokens, in model
-  coordinates projected by the current camera; at most `MAX_OVERLAYS` (256) primitives, each with at
-  most `MAX_POINTS` (4096) points, are drawn: `Line` (rubber band), `Band` (window: solid outline,
+  coordinates projected by the current camera: `Line` (rubber band), `Band` (window: solid outline,
   crossing: dashed outline, both over the faint fill; the rectangle is the screen rectangle of the
   two projected corners), `Path` (polyline, optionally dashed), `Snap` (a snap marker by
-  `SnapKind`, drawn by `snap::paint` with the kind's name) and `Label` (text at a point that
+  `SnapKind`, drawn by `snap::paint` with the kind's name), `Label` (text at a point that
   faces the screen, shown as given on a plate; the product localizes it; a label that would cover
-  an earlier one steps down until it does not, so the order given is the order of the stack).
+  an earlier one steps down (at most 64 steps) until it does not, so the order given is the order
+  of the stack) and `Fill` (a polygon: the first ring is the outline, the others holes).
+  - Color: `ProductOverlay::Styled { color, item }` (or `item.colored(color)`) gives a `Line`, a
+    `Path`, a `Label` or a `Fill` its own `OverlayColor`: the roles `Accent`, `Muted` and `Warning`
+    of the theme, or `Rgba`. A named role is opaque for lines and text and translucent (alpha 64)
+    for fills. Without the wrapper the items keep their theme tokens (a fill is a translucent
+    accent). A `Styled` inside a `Styled` is not drawn.
+  - Fills are projected, triangulated on the screen (bridges to the holes, then ear clipping) and
+    painted first as one mesh, then the other items in order. A fill is skipped when a point does
+    not project, a ring is not finite or has no area, the rings cross each other, or it has more
+    than `MAX_FILL_POINTS` (512) points in all.
+  - Budget of one frame: `MAX_OVERLAYS` (10,000) items in all (a `Styled` counts once),
+    `MAX_LABELS` (1,000) labels, `MAX_POINTS` (4,096) points per `Path` and `MAX_FRAME_POINTS`
+    (200,000) projected points over all paths and fills. Items beyond a limit are not drawn.
+    Each path is one polyline shape, and the shapes are batched by the painter.
 - Highlight: the widget does not highlight objects. The shell passes the selection the product
   supplies to `arc_gpu::Viewport::set_highlight` (see the application's interaction hook).
 - Decisions with the rejected alternatives:

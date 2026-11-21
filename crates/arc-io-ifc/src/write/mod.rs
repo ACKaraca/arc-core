@@ -2,7 +2,7 @@
 //! building.
 //!
 //! [`WriteModel`] describes a project, a site, a building, its storeys and elements (walls, slabs,
-//! doors, windows and openings) with their placement, body geometry, voids and fills, property
+//! doors, windows, openings and spaces) with their placement, body geometry, voids and fills, property
 //! sets and base quantities. [`write()`] turns it into the bytes of an ISO 10303-21 clear text file
 //! with the IFC4 schema and a loss report of what it did not write. It knows nothing of any
 //! product: the caller maps its own objects to this description.
@@ -172,6 +172,10 @@ pub enum ElementKind {
     Window,
     /// `IfcOpeningElement`, which voids a host element.
     Opening,
+    /// `IfcSpace`, aggregated by its storey (IFC4 decomposes a storey into its spaces; it does not
+    /// contain them). By convention `Element::name` holds the room number and
+    /// `Element::long_name` the room name.
+    Space,
 }
 
 impl ElementKind {
@@ -182,6 +186,7 @@ impl ElementKind {
             Self::Door => "IFCDOOR",
             Self::Window => "IFCWINDOW",
             Self::Opening => "IFCOPENINGELEMENT",
+            Self::Space => "IFCSPACE",
         }
     }
 
@@ -202,6 +207,7 @@ impl ElementKind {
             Self::Door => &["DOOR", "GATE", "TRAPDOOR"],
             Self::Window => &["WINDOW", "SKYLIGHT", "LIGHTDOME"],
             Self::Opening => &["OPENING", "RECESS"],
+            Self::Space => &["SPACE", "PARKING", "GFA", "INTERNAL", "EXTERNAL"],
         }
     }
 }
@@ -359,10 +365,13 @@ pub struct Element {
     pub id: u128,
     /// The kind.
     pub kind: ElementKind,
-    /// The name.
+    /// The name. For a space, the room number.
     pub name: String,
+    /// Spaces: the `LongName`, by convention the room name; `None` omits it. Ignored for the other
+    /// kinds.
+    pub long_name: Option<String>,
     /// The identifier of the storey the element is placed relative to and contained in. An
-    /// opening is placed relative to the storey and not contained.
+    /// opening is placed relative to the storey and not contained; a space is aggregated by it.
     pub storey: u128,
     /// The placement relative to the storey.
     pub placement: Placement,
@@ -399,6 +408,7 @@ impl Element {
             id,
             kind,
             name: name.to_owned(),
+            long_name: None,
             storey,
             placement: Placement::default(),
             body: None,
@@ -608,7 +618,7 @@ fn check_references(model: &WriteModel) -> Result<BTreeMap<u128, ElementKind>> {
         let allowed = match element.kind {
             ElementKind::Opening => host_kind.is_some_and(|k| k != ElementKind::Opening),
             ElementKind::Door | ElementKind::Window => host_kind == Some(ElementKind::Opening),
-            ElementKind::Wall | ElementKind::Slab => false,
+            ElementKind::Wall | ElementKind::Slab | ElementKind::Space => false,
         };
         if !allowed {
             return Err(bad_reference(host));
@@ -1023,8 +1033,24 @@ impl Writer<'_> {
             user_type.unwrap_or(Parameter::Omitted),
             reference(placement),
             representation,
-            Parameter::Omitted,
         ];
+        if element.kind == ElementKind::Space {
+            // `LongName`, `CompositionType`, `PredefinedType`, `ElevationWithFlooring`.
+            parameters.extend([
+                element
+                    .long_name
+                    .as_deref()
+                    .map_or(Parameter::Omitted, label),
+                enumeration("ELEMENT"),
+                predefined,
+                Parameter::Omitted,
+            ]);
+            let instance = self.add(element.kind.entity(), &parameters)?;
+            context.elements.insert(element.id, instance);
+            self.property_sets(element, instance)?;
+            return self.quantity_sets(element, instance);
+        }
+        parameters.push(Parameter::Omitted);
         let operations = match element.kind {
             ElementKind::Door => Some(DOOR_OPERATIONS),
             ElementKind::Window => Some(WINDOW_PARTITIONINGS),
@@ -1430,12 +1456,26 @@ impl Writer<'_> {
                 .elements
                 .iter()
                 .filter(|e| e.storey == storey.id)
-                .filter(|e| e.kind != ElementKind::Opening)
+                .filter(|e| !matches!(e.kind, ElementKind::Opening | ElementKind::Space))
+                .filter_map(|e| context.elements.get(&e.id).copied())
+                .collect();
+            let spaces: Vec<u64> = model
+                .elements
+                .iter()
+                .filter(|e| e.storey == storey.id && e.kind == ElementKind::Space)
                 .filter_map(|e| context.elements.get(&e.id).copied())
                 .collect();
             let Some(&(instance, _)) = context.storeys.get(&storey.id) else {
                 continue;
             };
+            if !spaces.is_empty() {
+                self.relationship(
+                    aggregates,
+                    derived_id(storey.id, role::AGGREGATES, 0),
+                    reference(instance),
+                    references(&spaces),
+                )?;
+            }
             if !contained.is_empty() {
                 self.relationship(
                     "IFCRELCONTAINEDINSPATIALSTRUCTURE",

@@ -591,6 +591,138 @@ fn limits_are_respected() {
     );
 }
 
+const SPACES: [u128; 2] = [0x700, 0x701];
+
+/// The house with two spaces on the ground storey: a rectangle and an L-shape with a hole.
+fn house_with_spaces() -> WriteModel {
+    let mut model = house();
+    let mut room = Element::new(SPACES[0], ElementKind::Space, "101", GROUND);
+    room.long_name = Some("Living \u{c7}".into());
+    room.predefined_type = Some("internal".into());
+    room.body = Some(extrusion(4.0, 3.0, 2.8));
+    room.property_sets.push(PropertySet::new(
+        "Pset_SpaceCommon",
+        vec![Property::new(
+            "Reference",
+            PropertyValue::Label("101".into()),
+        )],
+    ));
+    room.quantity_sets.push(QuantitySet::new(
+        "Qto_SpaceBaseQuantities",
+        vec![
+            Quantity::new("NetFloorArea", QuantityValue::Area(12.0)),
+            Quantity::new("NetVolume", QuantityValue::Volume(33.6)),
+        ],
+    ));
+    let mut ell = Element::new(SPACES[1], ElementKind::Space, "102", GROUND);
+    ell.placement = placed(5.0, 0.0, 0.0, Vector3::x());
+    ell.body = Some(Body::Extrusion {
+        outer: vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(4.0, 0.0),
+            Point2::new(4.0, 2.0),
+            Point2::new(2.0, 2.0),
+            Point2::new(2.0, 4.0),
+            Point2::new(0.0, 4.0),
+        ],
+        holes: vec![vec![
+            Point2::new(0.5, 0.5),
+            Point2::new(0.5, 1.5),
+            Point2::new(1.5, 1.5),
+            Point2::new(1.5, 0.5),
+        ]],
+        direction: Vector3::z(),
+        depth: 2.5,
+    });
+    model.elements.extend([room, ell]);
+    model
+}
+
+#[test]
+fn spaces_are_aggregated_by_their_storey_and_read_back() {
+    let model = house_with_spaces();
+    let output = write(&model, &options()).unwrap();
+    assert_eq!(output.bytes, write(&model, &options()).unwrap().bytes);
+    let file = read_back(&output.bytes);
+    let views = file
+        .typed_views(&Limits::CONSTRAINED, &Cancel::new())
+        .unwrap();
+    assert!(!views.report.has_loss(), "{:?}", views.report);
+    let storey = &views.spatial[0].children[0].children[0].children[0];
+    let spaces: Vec<_> = storey
+        .children
+        .iter()
+        .map(|n| (n.entity.type_name.as_str(), n.entity.name.clone().unwrap()))
+        .collect();
+    assert_eq!(
+        spaces,
+        [
+            ("IFCSPACE", "101".to_owned()),
+            ("IFCSPACE", "102".to_owned())
+        ]
+    );
+    // Spaces are not contained in the storey.
+    assert!(storey.contained.iter().all(|e| e.type_name != "IFCSPACE"));
+    // LongName 7, CompositionType 8, PredefinedType 9, ElevationWithFlooring 10.
+    let space = file.instance(instance_of(&file, SPACES[0])).unwrap();
+    let parameters = &space.records[0].parameters;
+    assert_eq!(parameters[7], Parameter::Text("Living \u{c7}".into()));
+    assert_eq!(parameters[8], Parameter::Enumeration("ELEMENT".into()));
+    assert_eq!(parameters[9], Parameter::Enumeration("INTERNAL".into()));
+    assert_eq!(parameters[10], Parameter::Omitted);
+    let ell = file.instance(instance_of(&file, SPACES[1])).unwrap();
+    assert_eq!(ell.records[0].parameters[7], Parameter::Omitted);
+    assert_eq!(
+        ell.records[0].parameters[9],
+        Parameter::Enumeration("NOTDEFINED".into())
+    );
+    let has_set = |n: &str| {
+        views
+            .property_sets
+            .iter()
+            .any(|p| p.definition.name.as_deref() == Some(n))
+    };
+    assert!(has_set("Pset_SpaceCommon"));
+    assert!(
+        views
+            .quantity_sets
+            .iter()
+            .any(|q| q.definition.name.as_deref() == Some("Qto_SpaceBaseQuantities"))
+    );
+    let (volumes, _) = volumes(&file);
+    let volume_of = |id| volumes.get(&global_id(id)).copied();
+    assert!((volume_of(SPACES[0]).unwrap() - 33.6).abs() < 1e-9);
+    // L-shape 12 m2 minus a 1 m2 hole, 2.5 m high.
+    assert!((volume_of(SPACES[1]).unwrap() - 27.5).abs() < 1e-9);
+}
+
+#[test]
+fn space_refusals_match_the_other_elements() {
+    let code = |model: &WriteModel| write(model, &options()).unwrap_err().code();
+    let mut model = house_with_spaces();
+    model.elements[9].host = Some(WALLS[0]);
+    assert_eq!(code(&model), "io.ifc.write_reference_invalid");
+    let mut model = house_with_spaces();
+    if let Some(Body::Extrusion { depth, .. }) = &mut model.elements[9].body {
+        *depth = f64::INFINITY;
+    }
+    assert_eq!(code(&model), "io.ifc.write_value_invalid");
+    let mut model = house_with_spaces();
+    model.elements[9].long_name = Some("a\0b".into());
+    assert_eq!(code(&model), "io.ifc.write_value_invalid");
+    // An empty profile is written without a body and reported.
+    let mut model = house_with_spaces();
+    model.elements[9].body = Some(Body::Extrusion {
+        outer: Vec::new(),
+        holes: Vec::new(),
+        direction: Vector3::z(),
+        depth: 2.0,
+    });
+    let output = write(&model, &options()).unwrap();
+    assert_eq!(output.report.items.len(), 1);
+    assert_eq!(output.report.items[0].reason, "io.ifc.not_written");
+}
+
 /// Writes the sample files for an external check when `ARC_IFC_WRITE_SAMPLES` names a directory.
 #[test]
 fn samples_for_external_validation() {
@@ -601,6 +733,11 @@ fn samples_for_external_validation() {
     std::fs::write(
         directory.join("house.ifc"),
         write(&house(), &options()).unwrap().bytes,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("house-spaces.ifc"),
+        write(&house_with_spaces(), &options()).unwrap().bytes,
     )
     .unwrap();
     let mut model = house();

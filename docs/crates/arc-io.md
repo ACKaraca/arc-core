@@ -1505,7 +1505,7 @@ The structs of the model are marked non-exhaustive and are built with their `new
 `PropertySet::new`, `Property::new`, `QuantitySet::new`, `Quantity::new`); their fields are public and
 set after construction.
 
-An `Element` has an identifier, a kind (`ElementKind`: wall, slab, door, window, opening), a name, the
+An `Element` has an identifier, a kind (`ElementKind`: wall, slab, door, window, opening, space), a name, a long name (spaces), the
 identifier of its storey, a `Placement` relative to the storey (origin, local z axis, local x axis), an
 optional `Body`, a predefined type, an operation type (doors) or partitioning type (windows), the overall
 width and height (doors and windows), a host, property sets and quantity sets. A `Body` is an extrusion
@@ -1536,6 +1536,17 @@ it, is refused.
   contained in its storey by one `IfcRelContainedInSpatialStructure` per storey, in model order.
   `IfcRelVoidsElement` links an opening to its host and `IfcRelFillsElement` a door or window to its
   opening.
+- Spaces: `IfcSpace` with `Name` = the element's name and `LongName` = its long name. By convention
+  the name holds the room number and the long name the room name; `LongName` is omitted when
+  `long_name` is `None`. A space is not contained in its storey: the storey aggregates its spaces
+  with one `IfcRelAggregates` (relating object the storey, `derived_id(storey, AGGREGATES, 0)`), in
+  model order. `CompositionType` is `ELEMENT`; the predefined type accepts `SPACE`, `INTERNAL`,
+  `EXTERNAL`, `PARKING` and `GFA` (another text is `USERDEFINED`, none is `NOTDEFINED`);
+  `ElevationWithFlooring` is omitted. The body is an ordinary extrusion (the boundary profile with
+  holes, depth = height); a space has no host. The caller supplies `Qto_SpaceBaseQuantities`
+  (`NetFloorArea`, `GrossFloorArea`, `NetPerimeter`, `Height`, `NetVolume`) as a quantity set and
+  `Pset_SpaceCommon` (for example `Reference`) as a property set. Spaces are refused and reported
+  like the other elements (a number that is not finite, a NUL, an empty or flat profile).
 - Types: the predefined type, compared in upper case with the values IFC4 defines for the kind, is
   written as given; another text is written as `USERDEFINED` with the text as `ObjectType`; no value
   is `NOTDEFINED`. A door's `OperationType` and a window's `PartitioningType` follow the same rule with
@@ -1611,7 +1622,7 @@ with the element's `GlobalId` as the source and the entity that was not written 
 - an empty property set (`IFCPROPERTYSET`) or quantity set (`IFCELEMENTQUANTITY`).
 
 The writer does not check that a profile is simple (a self-intersecting profile with area is written),
-that holes lie inside the outer loop, or that a B-rep is closed and planar. It writes no element types, materials, spaces, axis representations, owner
+that holes lie inside the outer loop, or that a B-rep is closed and planar. It writes no element types, materials, space boundaries, axis representations, owner
 history, classification or other element kinds, and no IFC4X3 schema.
 
 ### Verification

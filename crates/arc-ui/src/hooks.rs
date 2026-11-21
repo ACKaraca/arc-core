@@ -16,15 +16,30 @@ use arc_base::math::Point3;
 use arc_geom::view::ViewFrame;
 use egui::{Color32, FontId, Modifiers, Pos2, Rect, Stroke, Ui};
 
+use crate::fill;
 use crate::gesture::{BandKind, plane_point, work_point};
 use crate::snap::{self, Snap, SnapKind};
 use crate::text::Localize;
 use crate::theme::Colors;
 
-/// Overlay primitives painted in one frame; more are not drawn.
-pub const MAX_OVERLAYS: usize = 256;
-/// Points of one overlay primitive; more are not drawn.
+/// The overlay budget of one frame: primitives painted; the ones after these are not drawn. A
+/// `Styled` primitive counts once. Painting costs shape batches, not one draw call each, so this
+/// is large; the limits below bound the costlier kinds.
+pub const MAX_OVERLAYS: usize = 10_000;
+/// Points of one `Path`; more are not drawn.
 pub const MAX_POINTS: usize = 4096;
+/// Text labels painted in one frame; each is laid out as text and kept clear of the earlier ones.
+pub const MAX_LABELS: usize = 1_000;
+/// Projected points of all `Path` and `Fill` primitives of one frame; a primitive that would pass
+/// this total is not drawn.
+pub const MAX_FRAME_POINTS: usize = 200_000;
+/// Points of all rings of one `Fill` (the outer ring and its holes); a fill with more is not drawn.
+/// Ear clipping is quadratic in this.
+pub const MAX_FILL_POINTS: usize = 512;
+/// The most steps down a label takes to clear the earlier ones.
+const MAX_LABEL_STEPS: usize = 64;
+/// The alpha of a fill in a named color.
+const FILL_ALPHA: u8 = 64;
 /// Dash and gap lengths of dashed lines, in logical points.
 const DASH: f32 = 6.0;
 const GAP: f32 = 4.0;
@@ -157,6 +172,38 @@ pub trait PointerHandler {
     fn pointer(&mut self, event: &PointerEvent) -> bool;
 }
 
+/// The color of an overlay primitive: a named role of the theme, or an explicit color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OverlayColor {
+    /// The theme's accent color.
+    #[default]
+    Accent,
+    /// The theme's secondary text color: a quiet mark.
+    Muted,
+    /// The theme's warning color.
+    Warning,
+    /// Red, green, blue and alpha, not premultiplied.
+    Rgba([u8; 4]),
+}
+
+impl OverlayColor {
+    /// The color under `colors`; a fill in a named role is translucent, a line or text is opaque.
+    #[must_use]
+    pub fn resolve(self, colors: &Colors, fill: bool) -> Color32 {
+        let base = match self {
+            Self::Accent => colors.accent,
+            Self::Muted => colors.text_muted,
+            Self::Warning => colors.warning,
+            Self::Rgba([r, g, b, a]) => return Color32::from_rgba_unmultiplied(r, g, b, a),
+        };
+        if fill {
+            Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), FILL_ALPHA)
+        } else {
+            base
+        }
+    }
+}
+
 /// A primitive a product draws over the scene, in model coordinates. The widget projects each
 /// point through the current camera; a point that the camera cannot project is skipped.
 #[derive(Debug, Clone, PartialEq)]
@@ -199,6 +246,37 @@ pub enum ProductOverlay {
         /// The text.
         text: String,
     },
+    /// A filled polygon: the first ring is the outline and every other ring a hole, each a list
+    /// of points (a closing point equal to the first is dropped; the direction of a ring is free).
+    /// It is projected, triangulated on the screen and drawn with the color of a `Styled`
+    /// wrapper (a translucent accent without one). A ring with a point the camera cannot
+    /// project, a ring that is not finite or has no area, more than [`MAX_FILL_POINTS`] points,
+    /// or a polygon whose rings cross each other is not drawn. Every fill is painted before the
+    /// other primitives, in the order given.
+    Fill {
+        /// The outline and the holes.
+        rings: Vec<Vec<Point3>>,
+    },
+    /// An item with its own color: the color of a `Line`, a `Path`, a `Label`'s text or a `Fill`.
+    /// A `Band`, a `Snap` and a `Styled` inside a `Styled` keep their own look and are drawn
+    /// as without the wrapper (a nested one is not drawn).
+    Styled {
+        /// The color.
+        color: OverlayColor,
+        /// The item.
+        item: Box<ProductOverlay>,
+    },
+}
+
+impl ProductOverlay {
+    /// This item in `color`.
+    #[must_use]
+    pub fn colored(self, color: OverlayColor) -> Self {
+        Self::Styled {
+            color,
+            item: Box::new(self),
+        }
+    }
 }
 
 /// The screen position of a model point in logical points, given the image rectangle.
@@ -219,7 +297,9 @@ fn screen(projection: &ViewProjection, rect: Rect, ppp: f64, p: &Point3) -> Opti
 }
 
 /// Paints `overlays` over the viewport image at `rect`, whose logical points are `ppp` pixels
-/// each. At most [`MAX_OVERLAYS`] primitives and [`MAX_POINTS`] points per primitive are drawn.
+/// each. At most [`MAX_OVERLAYS`] primitives, [`MAX_LABELS`] labels, [`MAX_POINTS`] points per
+/// path and [`MAX_FRAME_POINTS`] projected points in all are drawn; the rest is skipped. All fills
+/// are painted first as one batch of triangles, then the other primitives in order.
 pub fn paint_overlays(
     ui: &Ui,
     localize: &dyn Localize,
@@ -235,61 +315,58 @@ pub fn paint_overlays(
         BandKind::Window => colors.viewport_selection,
         BandKind::Crossing => colors.viewport_preselection,
     };
-    let mut placed: Vec<Rect> = Vec::new();
+    let mut budget = MAX_FRAME_POINTS;
+    let mut mesh = egui::Mesh::default();
     for overlay in overlays.iter().take(MAX_OVERLAYS) {
-        match overlay {
+        let (color, item) = unstyled(overlay);
+        if let Some(ProductOverlay::Fill { rings }) = item {
+            let color = color.unwrap_or_default().resolve(colors, true);
+            add_fill(&mut mesh, &at, rings, color, &mut budget);
+        }
+    }
+    if !mesh.is_empty() {
+        painter.add(egui::Shape::mesh(mesh));
+    }
+    let mut placed: Vec<Rect> = Vec::new();
+    let mut labels = 0_usize;
+    for overlay in overlays.iter().take(MAX_OVERLAYS) {
+        let (color, Some(item)) = unstyled(overlay) else {
+            continue;
+        };
+        match item {
             ProductOverlay::Line { from, to } => {
                 if let (Some(a), Some(b)) = (at(from), at(to)) {
-                    let stroke = Stroke::new(1.0, colors.viewport_preselection);
-                    painter.line_segment([a, b], stroke);
+                    let color =
+                        color.map_or(colors.viewport_preselection, |c| c.resolve(colors, false));
+                    painter.line_segment([a, b], Stroke::new(1.0, color));
                 }
             }
             ProductOverlay::Band { start, end, kind } => {
-                let (Some(a), Some(b)) = (at(start), at(end)) else {
-                    continue;
-                };
-                let rect = Rect::from_two_pos(a, b);
-                let color = style(*kind);
-                let fill = Color32::from_rgba_unmultiplied(
-                    color.r(),
-                    color.g(),
-                    color.b(),
-                    BAND_FILL_ALPHA,
-                );
-                painter.rect_filled(rect, 0.0, fill);
-                let stroke = Stroke::new(1.0, color);
-                let corners = [
-                    rect.left_top(),
-                    rect.right_top(),
-                    rect.right_bottom(),
-                    rect.left_bottom(),
-                ];
-                for (p, q) in corners.iter().zip(corners.iter().cycle().skip(1)) {
-                    let (p, q) = (*p, *q);
-                    match kind {
-                        BandKind::Window => {
-                            painter.line_segment([p, q], stroke);
-                        }
-                        BandKind::Crossing => dashed(&painter, [p, q], stroke),
-                    }
+                if let (Some(a), Some(b)) = (at(start), at(end)) {
+                    paint_band(&painter, Rect::from_two_pos(a, b), *kind, style(*kind));
                 }
             }
             ProductOverlay::Path {
                 points,
                 dashed: is_dashed,
             } => {
-                let stroke = Stroke::new(1.0, colors.viewport_preselection);
-                let mut screen_points = points.iter().take(MAX_POINTS).filter_map(at);
-                let mut previous = screen_points.next();
-                for next in screen_points {
-                    if let Some(p) = previous {
-                        if *is_dashed {
-                            dashed(&painter, [p, next], stroke);
-                        } else {
-                            painter.line_segment([p, next], stroke);
+                let color =
+                    color.map_or(colors.viewport_preselection, |c| c.resolve(colors, false));
+                let stroke = Stroke::new(1.0, color);
+                let take = points.len().min(MAX_POINTS);
+                if take > budget {
+                    continue;
+                }
+                budget -= take;
+                let shown: Vec<Pos2> = points.iter().take(MAX_POINTS).filter_map(at).collect();
+                if *is_dashed {
+                    for pair in shown.windows(2) {
+                        if let [p, q] = *pair {
+                            dashed(&painter, [p, q], stroke);
                         }
                     }
-                    previous = Some(next);
+                } else if shown.len() > 1 {
+                    painter.add(egui::Shape::line(shown, stroke));
                 }
             }
             ProductOverlay::Snap { kind, at: p } => {
@@ -306,10 +383,96 @@ pub fn paint_overlays(
                 }
             }
             ProductOverlay::Label { at: p, text } => {
-                if let Some(position) = at(p) {
-                    paint_label(&painter, colors, position, text, &mut placed);
+                if labels < MAX_LABELS
+                    && let Some(position) = at(p)
+                {
+                    labels += 1;
+                    let color =
+                        color.map_or(colors.viewport_selection, |c| c.resolve(colors, false));
+                    paint_label(&painter, color, position, text, &mut placed);
                 }
             }
+            ProductOverlay::Fill { .. } | ProductOverlay::Styled { .. } => {}
+        }
+    }
+}
+
+/// Paints a band: the faint fill and a solid (window) or dashed (crossing) outline.
+fn paint_band(painter: &egui::Painter, rect: Rect, kind: BandKind, color: Color32) {
+    let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), BAND_FILL_ALPHA);
+    painter.rect_filled(rect, 0.0, fill);
+    let stroke = Stroke::new(1.0, color);
+    let corners = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
+    for (p, q) in corners.iter().zip(corners.iter().cycle().skip(1)) {
+        let (p, q) = (*p, *q);
+        match kind {
+            BandKind::Window => {
+                painter.line_segment([p, q], stroke);
+            }
+            BandKind::Crossing => dashed(painter, [p, q], stroke),
+        }
+    }
+}
+
+/// The color of a `Styled` wrapper and its item; `None` for a `Styled` inside a `Styled`.
+fn unstyled(overlay: &ProductOverlay) -> (Option<OverlayColor>, Option<&ProductOverlay>) {
+    match overlay {
+        ProductOverlay::Styled { color, item } => (
+            Some(*color),
+            Some(&**item).filter(|i| !matches!(i, ProductOverlay::Styled { .. })),
+        ),
+        other => (None, Some(other)),
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "screen positions that came from f32"
+)]
+/// Adds the triangles of one fill to `mesh`, spending the points from `budget`.
+fn add_fill(
+    mesh: &mut egui::Mesh,
+    at: &dyn Fn(&Point3) -> Option<Pos2>,
+    rings: &[Vec<Point3>],
+    color: Color32,
+    budget: &mut usize,
+) {
+    let total: usize = rings.iter().map(Vec::len).sum();
+    if total > MAX_FILL_POINTS || total > *budget {
+        return;
+    }
+    let projected: Option<Vec<Vec<[f64; 2]>>> = rings
+        .iter()
+        .map(|ring| {
+            ring.iter()
+                .map(|p| at(p).map(|q| [f64::from(q.x), f64::from(q.y)]))
+                .collect()
+        })
+        .collect();
+    let Some(triangles) = projected.and_then(|r| fill::triangulate(&r, MAX_FILL_POINTS)) else {
+        return;
+    };
+    *budget -= total;
+    let base = u32::try_from(mesh.vertices.len()).unwrap_or(u32::MAX);
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "screen positions that came from f32"
+    )]
+    mesh.vertices
+        .extend(triangles.vertices.iter().map(|p| egui::epaint::Vertex {
+            pos: Pos2::new(p[0] as f32, p[1] as f32),
+            uv: egui::epaint::WHITE_UV,
+            color,
+        }));
+    for [a, b, c] in &triangles.triangles {
+        for i in [a, b, c] {
+            mesh.indices
+                .push(base.saturating_add(u32::try_from(*i).unwrap_or(0)));
         }
     }
 }
@@ -319,19 +482,15 @@ pub fn paint_overlays(
 /// project close together (levels seen from above) stay readable, in the order they were given.
 fn paint_label(
     painter: &egui::Painter,
-    colors: &Colors,
+    color: Color32,
     position: Pos2,
     text: &str,
     placed: &mut Vec<Rect>,
 ) {
-    let galley = painter.layout_no_wrap(
-        text.to_owned(),
-        FontId::proportional(12.0),
-        colors.viewport_selection,
-    );
+    let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(12.0), color);
     let size = galley.size();
     let mut rect = Rect::from_min_size(position + egui::vec2(8.0, -8.0 - size.y), size);
-    for _ in 0..MAX_OVERLAYS {
+    for _ in 0..MAX_LABEL_STEPS {
         if !placed.iter().any(|r| r.expand(1.0).intersects(rect)) {
             break;
         }
@@ -343,7 +502,7 @@ fn paint_label(
         2.0,
         Color32::from_black_alpha(LABEL_PLATE_ALPHA),
     );
-    painter.galley(rect.min, galley, colors.viewport_selection);
+    painter.galley(rect.min, galley, color);
 }
 
 /// Draws the segment `from`–`to` as dashes, at most [`MAX_DASHES`] of them.
@@ -746,6 +905,101 @@ mod tests {
         let mut widget = ViewportWidget::new();
         let (_, bare) = frame_with(&ctx, Vec::new(), &mut widget, &mut picker, None, &[], None);
         assert_eq!(colored(&bare).3, 0);
+    }
+
+    #[test]
+    fn fills_are_triangulated_colored_and_the_budget_is_bounded() {
+        let ctx = egui::Context::default();
+        let mut widget = ViewportWidget::new();
+        let mut picker = Fake::new(&[]);
+        let p = |x: f64, y: f64| arc_base::math::Point3::new(x, y, 0.0);
+        // A concave L with a hole, in the Warning role, and a ring that cannot be drawn.
+        let overlays = vec![
+            ProductOverlay::Fill {
+                rings: vec![
+                    vec![
+                        p(-30.0, -30.0),
+                        p(30.0, -30.0),
+                        p(30.0, 0.0),
+                        p(0.0, 0.0),
+                        p(0.0, 30.0),
+                        p(-30.0, 30.0),
+                    ],
+                    vec![
+                        p(-20.0, -20.0),
+                        p(-20.0, -10.0),
+                        p(-10.0, -10.0),
+                        p(-10.0, -20.0),
+                    ],
+                ],
+            }
+            .colored(OverlayColor::Warning),
+            ProductOverlay::Fill {
+                rings: vec![vec![p(0.0, 0.0), p(f64::NAN, 1.0), p(1.0, 1.0)]],
+            },
+        ];
+        let (_, shapes) = frame_with(
+            &ctx,
+            Vec::new(),
+            &mut widget,
+            &mut picker,
+            None,
+            &overlays,
+            None,
+        );
+        let meshes: Vec<&egui::Mesh> = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                Shape::Mesh(m) => Some(&**m),
+                _ => None,
+            })
+            .filter(|m| m.texture_id == egui::TextureId::default() && m.vertices.len() > 4)
+            .collect();
+        assert_eq!(meshes.len(), 1, "one batch for all fills");
+        let warning = ThemeId::Light.theme().colors.warning;
+        let expected = Color32::from_rgba_unmultiplied(warning.r(), warning.g(), warning.b(), 64);
+        assert!(meshes[0].vertices.iter().all(|v| v.color == expected));
+        assert!(
+            meshes[0].indices.len() >= 3 * 8,
+            "L minus a hole needs at least 8 triangles"
+        );
+        // The budget: a million lines paint at most MAX_OVERLAYS of them.
+        let many: Vec<ProductOverlay> = (0..MAX_OVERLAYS * 2)
+            .map(|_| ProductOverlay::Line {
+                from: p(0.0, 0.0),
+                to: p(5.0, 5.0),
+            })
+            .collect();
+        let mut widget = ViewportWidget::new();
+        let (_, shapes) = frame_with(
+            &ctx,
+            Vec::new(),
+            &mut widget,
+            &mut picker,
+            None,
+            &many,
+            None,
+        );
+        let (lines, ..) = colored(&shapes);
+        assert!(
+            (MAX_OVERLAYS..MAX_OVERLAYS + 100).contains(&lines),
+            "{lines}"
+        );
+        // A fill over the point budget is skipped.
+        let ring: Vec<_> = (0..=u32::try_from(MAX_FILL_POINTS).unwrap_or(0))
+            .map(|k| p(f64::from(k), f64::from(k * k % 7)))
+            .collect();
+        let mut widget = ViewportWidget::new();
+        let (_, shapes) = frame_with(
+            &ctx,
+            Vec::new(),
+            &mut widget,
+            &mut picker,
+            None,
+            &[ProductOverlay::Fill { rings: vec![ring] }],
+            None,
+        );
+        assert!(!shapes.iter().any(|s| matches!(&s.shape, Shape::Mesh(m) if m.vertices.len() > 4 && m.texture_id == egui::TextureId::default())));
     }
 
     #[test]

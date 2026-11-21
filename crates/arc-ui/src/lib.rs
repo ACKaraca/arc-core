@@ -44,6 +44,8 @@ pub mod dock;
 pub mod dynamic_input;
 pub mod error;
 #[cfg(feature = "viewport")]
+mod fill;
+#[cfg(feature = "viewport")]
 pub mod gesture;
 #[cfg(feature = "viewport")]
 pub mod hooks;
@@ -85,7 +87,8 @@ pub use gesture::{
 };
 #[cfg(feature = "viewport")]
 pub use hooks::{
-    PointerEvent, PointerHandler, PointerKind, ProductOverlay, ViewProjection, WorkPlane,
+    OverlayColor, PointerEvent, PointerHandler, PointerKind, ProductOverlay, ViewProjection,
+    WorkPlane,
 };
 pub use icons::{IconAtlas, Icons};
 pub use keys::{Binding, ChordResolver, KeyCombo, KeyOutcome, KeySequence, Keymap};
