@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use arc_app::application::{AppConfig, Application, CloseAnswer, Closed, TabId};
 use arc_app::commands;
-use arc_app::product::{Entry, FileType, ProductBuilder};
+use arc_app::product::{Entry, FileType, PathDialog, PathFilter, PathMode, ProductBuilder};
 use arc_app::recent::RecentFiles;
 use arc_app::shell::platform::{self, Done, FileDialogs, NativeMenu};
 use arc_app::shell::{
@@ -26,7 +26,7 @@ use arc_app::shell::{
 use arc_base::error::Value;
 use arc_base::{IdGenerator, Limits};
 use arc_command::prompt::{Accept, PointDims, Prompt};
-use arc_command::{FixedClock, Permission, Session, Surface};
+use arc_command::{CommandSpec, FixedClock, Permission, Session, Surface, UndoBehavior};
 use arc_doc::package::{LockOwner, Metadata, Package};
 use arc_ui::egui::{self, accesskit};
 use arc_ui::{
@@ -34,11 +34,23 @@ use arc_ui::{
     OptionControl, PointerEvent, PointerKind, PromptControls,
 };
 
+/// The paths the test command `test.file.export` ran with.
+static EXPORTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 struct Names;
 impl Localize for Names {
-    fn message(&self, id: &str, _: &[(&str, Value)]) -> Option<String> {
+    fn message(&self, id: &str, args: &[(&str, Value)]) -> Option<String> {
+        if id == "app-history-command" {
+            let (_, Value::Text(text)) = args.iter().find(|(k, _)| *k == "text")? else {
+                return None;
+            };
+            return Some(format!("Command: {text}"));
+        }
         Some(
             match id {
+                "app-close-save" => "Save",
+                "app-close-discard" => "Discard",
+                "app-close-cancel" => "Cancel",
                 "app-menu-file" => "File",
                 "app-menu-edit" => "Edit",
                 "app-command-file-new" => "New",
@@ -80,6 +92,34 @@ fn app_with(data: &Path, extra_panel: bool, seen: Option<Arc<Mutex<Seen>>>) -> A
         .with_types(arc_shell_sample::types().unwrap())
         .with_commands(arc_shell_sample::registry().unwrap());
     commands::register(b.commands_mut()).unwrap();
+    b.commands_mut()
+        .register(
+            CommandSpec::new(
+                "test.file.export",
+                "test-export",
+                "test-export-description",
+                |_, p: commands::PathParams| {
+                    EXPORTED.lock().unwrap().push(p.path.unwrap_or_default());
+                    Ok(())
+                },
+            )
+            .with_exposure([Surface::Ui, Surface::CommandLine])
+            .with_undo(UndoBehavior::NotUndoable)
+            .with_permissions([Permission::Read]),
+        )
+        .unwrap();
+    b.path_dialog(
+        "test.file.export",
+        PathDialog {
+            mode: PathMode::Save,
+            title: "test-export-title".into(),
+            filters: vec![PathFilter {
+                message_id: "test-export-filter".into(),
+                extensions: vec!["txt".into()],
+            }],
+            default_name: Some("{document}.txt".into()),
+        },
+    );
     b.file_type(FileType {
         extension: "arc".into(),
         message_id: "shell-file-arc".into(),
@@ -165,6 +205,9 @@ struct FakeDialogs {
     save: Option<PathBuf>,
     close: Vec<CloseAnswer>,
     asked: Vec<String>,
+    path: Option<PathBuf>,
+    /// The platform has no native question dialog.
+    no_question: bool,
 }
 
 impl FileDialogs for FakeDialogs {
@@ -176,6 +219,16 @@ impl FileDialogs for FakeDialogs {
     fn pick_save(&mut self, _: &[FileType], _: Option<&str>) -> Option<PathBuf> {
         self.asked.push("save".into());
         self.save.clone()
+    }
+
+    fn pick_path(&mut self, _: &PathDialog, name: Option<&str>) -> Option<PathBuf> {
+        self.asked
+            .push(format!("path {}", name.unwrap_or_default()));
+        self.path.clone()
+    }
+
+    fn can_ask(&self) -> bool {
+        !self.no_question
     }
 
     fn ask_close(&mut self, _: &str) -> CloseAnswer {
@@ -461,6 +514,8 @@ struct Seen {
     closings: Vec<(TabId, bool)>,
     /// The commands of `Invoke` actions.
     invoked: Vec<String>,
+    /// The document path the controller read at each call.
+    paths: Vec<Option<PathBuf>>,
     /// The language, the decimal separator and the session's `app.language` of the last line.
     context: Option<(String, char, Option<serde_json::Value>)>,
     /// An idle controller shows no prompt, no option and no history, and has no selection of its
@@ -468,6 +523,8 @@ struct Seen {
     idle: bool,
     /// The controller leaves undo, redo and clearing the selection to the shell.
     leaves_edit_to_shell: bool,
+    /// The controller's history and the sequence number of its first line, when set.
+    history: Option<(u64, Vec<String>)>,
 }
 
 /// A controller that keeps a prompt, one option and one history line, consumes viewport clicks
@@ -509,6 +566,7 @@ impl shell::Interaction for FakeController {
         action: LineAction,
     ) -> arc_base::Result<()> {
         let mut seen = self.seen.lock().unwrap();
+        seen.paths.push(cx.document_path().map(Path::to_path_buf));
         seen.context = Some((
             cx.language().to_owned(),
             cx.decimal_separator(),
@@ -526,7 +584,11 @@ impl shell::Interaction for FakeController {
     }
 
     fn output(&self) -> shell::InteractionOutput {
-        if self.seen.lock().unwrap().idle {
+        let (idle, history) = {
+            let seen = self.seen.lock().unwrap();
+            (seen.idle, seen.history.clone())
+        };
+        if idle {
             return shell::InteractionOutput::default();
         }
         shell::InteractionOutput {
@@ -551,7 +613,10 @@ impl shell::Interaction for FakeController {
                 }],
                 parameters: Vec::new(),
             },
-            history: vec!["test-history-line".into()],
+            history: history
+                .clone()
+                .map_or_else(|| vec!["test-history-line".into()], |h| h.1),
+            history_first: history.map_or(0, |h| h.0),
             ..shell::InteractionOutput::default()
         }
     }
@@ -991,5 +1056,254 @@ fn a_key_the_product_binds_runs_once_and_the_command_line_does_not_run_it_again(
         document.undo_step_list(10).len(),
         1,
         "one key press, one step"
+    );
+}
+
+/// Starts the test command without a path, as a menu entry would, on a new document.
+fn export_request(shell: &mut Shell, app: &mut Application, ctx: &egui::Context) -> Request {
+    open_new_document(shell, app, ctx);
+    let mut run = frame(
+        shell,
+        app,
+        ctx,
+        Vec::new(),
+        vec![Intent::new("test.file.export")],
+        false,
+    );
+    assert_eq!(run.requests.len(), 1);
+    run.requests.remove(0)
+}
+
+#[test]
+fn a_path_dialog_request_runs_the_command_with_the_chosen_path() {
+    let dir = TempDir::new("path-dialog");
+    let mut app = app(&dir.0.join("data"), false);
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let request = export_request(&mut shell, &mut app, &ctx);
+    let Request::PathDialog { dialog, then, .. } = &request else {
+        panic!("{request:?}");
+    };
+    assert_eq!(then.command, "test.file.export");
+    assert_eq!(dialog.mode, PathMode::Save);
+
+    // A cancelled dialog runs nothing.
+    let mut dialogs = FakeDialogs::default();
+    let before = EXPORTED.lock().unwrap().len();
+    assert_eq!(
+        platform::carry_out(&mut shell, &mut app, &mut dialogs, &request).unwrap(),
+        Done::Cancelled
+    );
+    assert_eq!(EXPORTED.lock().unwrap().len(), before);
+    assert_eq!(dialogs.asked, ["path untitled.txt"]);
+
+    // The chosen file becomes the command's `path`.
+    let chosen = dir.0.join("out.txt");
+    dialogs.path = Some(chosen.clone());
+    assert_eq!(
+        platform::carry_out(&mut shell, &mut app, &mut dialogs, &request).unwrap(),
+        Done::Ran
+    );
+    assert!(
+        EXPORTED
+            .lock()
+            .unwrap()
+            .contains(&chosen.to_string_lossy().into_owned())
+    );
+}
+
+#[test]
+fn a_controller_reads_the_document_path_after_the_first_save() {
+    let dir = TempDir::new("doc-path");
+    let seen = Arc::new(Mutex::new(Seen {
+        idle: true,
+        ..Seen::default()
+    }));
+    let mut app = app_with(&dir.0.join("data"), false, Some(seen.clone()));
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    open_new_document(&mut shell, &mut app, &ctx);
+    let tab = app.active().unwrap();
+    let start = |shell: &mut Shell, app: &mut Application| {
+        frame(
+            shell,
+            app,
+            &ctx,
+            Vec::new(),
+            vec![Intent::new("test.other")],
+            false,
+        );
+    };
+    start(&mut shell, &mut app);
+    let file = dir.0.join("doc.arc");
+    app.save_as(tab, &file).unwrap();
+    start(&mut shell, &mut app);
+    assert_eq!(seen.lock().unwrap().paths, [None, Some(file)]);
+}
+
+#[test]
+fn the_history_echoes_typed_lines_and_keeps_earlier_results() {
+    let dir = TempDir::new("echo");
+    let mut app = app(&dir.0.join("data"), false);
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    open_new_document(&mut shell, &mut app, &ctx);
+    submit(&mut shell, &mut app, &ctx, "no.such.command");
+    submit(&mut shell, &mut app, &ctx, "also.missing");
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    assert!(shows(&run.nodes, "Command: no.such.command"));
+    assert!(shows(&run.nodes, "Command: also.missing"));
+}
+
+/// Dirties the active document with a point.
+fn dirty(app: &mut Application) -> TabId {
+    let tab = app.active().unwrap();
+    let session = Session::new(Surface::Ui, [Permission::Edit]);
+    let mut create = arc_command::Invocation::new(
+        "shell.point.create",
+        serde_json::json!({"position": [1.0, 2.0, 3.0]}),
+    );
+    create.seed = 1;
+    app.invoke(tab, &session, create).unwrap();
+    tab
+}
+
+#[test]
+fn the_window_asks_to_save_discard_or_keep_when_no_dialog_can() {
+    let dir = TempDir::new("window-close");
+    let mut app = app(&dir.0.join("data"), false);
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut dialogs = FakeDialogs {
+        no_question: true,
+        ..FakeDialogs::default()
+    };
+    open_new_document(&mut shell, &mut app, &ctx);
+    let file = dir.0.join("kept.arc");
+    let tab = app.active().unwrap();
+    app.save_as(tab, &file).unwrap();
+    dirty(&mut app);
+    let ask = |shell: &mut Shell, app: &mut Application, dialogs: &mut FakeDialogs| {
+        let request = Request::AskClose(tab);
+        assert_eq!(
+            platform::carry_out(shell, app, dialogs, &request).unwrap(),
+            Done::Asking
+        );
+        // The first frame measures the modal; the buttons are where a click lands from the next.
+        frame(shell, app, &ctx, Vec::new(), Vec::new(), false);
+        frame(shell, app, &ctx, Vec::new(), Vec::new(), false).nodes
+    };
+
+    // Cancel keeps the document, unsaved.
+    let nodes = ask(&mut shell, &mut app, &mut dialogs);
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        click(button(&nodes, "Cancel")),
+        Vec::new(),
+        false,
+    );
+    assert!(app.tab(tab).unwrap().is_dirty());
+    assert!(dialogs.asked.is_empty());
+
+    // Save writes the file, then closes.
+    let nodes = ask(&mut shell, &mut app, &mut dialogs);
+    let before = std::fs::metadata(&file).unwrap().modified().unwrap();
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        click(button(&nodes, "Save")),
+        Vec::new(),
+        false,
+    );
+    assert!(app.tab(tab).is_err());
+    assert!(std::fs::metadata(&file).unwrap().modified().unwrap() >= before);
+
+    // Discard closes without saving.
+    open_new_document(&mut shell, &mut app, &ctx);
+    let tab = dirty(&mut app);
+    let request = Request::AskClose(tab);
+    platform::carry_out(&mut shell, &mut app, &mut dialogs, &request).unwrap();
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    let nodes = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false).nodes;
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        click(button(&nodes, "Discard")),
+        Vec::new(),
+        false,
+    );
+    assert!(app.tab(tab).is_err());
+}
+
+/// The labels of a frame in drawing order.
+fn labels(nodes: &[accesskit::Node]) -> Vec<&str> {
+    nodes
+        .iter()
+        .filter_map(|n| n.label().or_else(|| n.value()))
+        .collect()
+}
+
+#[test]
+fn an_answer_completes_its_prompt_line_and_stays_in_place_when_the_controller_drops_lines() {
+    let dir = TempDir::new("answer");
+    let seen = Arc::new(Mutex::new(Seen {
+        history: Some((0, vec!["h0".into(), "h1".into()])),
+        ..Seen::default()
+    }));
+    let mut app = app_with(&dir.0.join("data"), false, Some(seen.clone()));
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    open_new_document(&mut shell, &mut app, &ctx);
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    submit(&mut shell, &mut app, &ctx, "x");
+    // The controller drops its oldest line and adds one: the answer stays between h1 and h2.
+    seen.lock().unwrap().history = Some((1, vec!["h1".into(), "h2".into()]));
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    // Lines are placed by their position in the panel.
+    let top = |text: &str| {
+        run.nodes
+            .iter()
+            .find(|n| n.label() == Some(text) || n.value() == Some(text))
+            .and_then(accesskit::Node::bounds)
+            .map(|b| b.y0)
+            .unwrap_or_else(|| panic!("{text}"))
+    };
+    assert!(top("h1") < top("test-prompt: x"));
+    assert!(top("test-prompt: x") < top("h2"));
+}
+
+#[test]
+fn a_command_that_changed_the_document_says_it_is_done_and_escape_at_a_prompt_says_cancel() {
+    let dir = TempDir::new("done");
+    let mut app = app(&dir.0.join("data"), false);
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    open_new_document(&mut shell, &mut app, &ctx);
+    submit(
+        &mut shell,
+        &mut app,
+        &ctx,
+        r#"shell.point.create position=[1,2,3]"#,
+    );
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    assert!(shows(
+        &run.nodes,
+        "Command: shell.point.create position=[1,2,3]"
+    ));
+    // The command's label is unresolved here, so only the message of the completion line shows.
+    assert!(
+        shows(&run.nodes, "app-history-ran"),
+        "{:?}",
+        labels(&run.nodes)
     );
 }

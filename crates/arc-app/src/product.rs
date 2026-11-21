@@ -104,6 +104,40 @@ pub struct FileType {
     pub save: bool,
 }
 
+/// Whether a [`PathDialog`] asks for a file to open or a file to save to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathMode {
+    /// An existing file.
+    Open,
+    /// A file to write; confirming an overwrite is the dialog's task.
+    Save,
+}
+
+/// One filter of a [`PathDialog`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathFilter {
+    /// The Fluent identifier of the label shown in the dialog (`IFC files (*.ifc)`).
+    pub message_id: String,
+    /// The extensions without the dot.
+    pub extensions: Vec<String>,
+}
+
+/// The file dialog a product command asks the shell for: a command registered with
+/// [`ProductBuilder::path_dialog`] that is started without a `path` parameter opens it, and runs
+/// with the chosen file as `path`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathDialog {
+    /// Open or save.
+    pub mode: PathMode,
+    /// The Fluent identifier of the dialog title.
+    pub title: String,
+    /// The filters, in order.
+    pub filters: Vec<PathFilter>,
+    /// The file name the dialog starts with; `{document}` stands for the name of the active
+    /// document without its extension (`untitled` for a document never saved).
+    pub default_name: Option<String>,
+}
+
 /// The reader of a product's own format: the document of a file, made with the configuration the
 /// application gives a document, and the session to run product commands with.
 type NativeOpen = dyn Fn(&Path, DocumentConfig, &Session) -> Result<Document> + Send + Sync;
@@ -184,6 +218,7 @@ pub struct Product {
     view_renderer: Option<Arc<dyn ViewRenderer>>,
     openers: BTreeMap<String, Arc<NativeFormat>>,
     new_document: Option<String>,
+    path_dialogs: BTreeMap<String, PathDialog>,
     #[cfg(feature = "window")]
     interaction: Option<crate::shell::interaction::Factory>,
 }
@@ -204,6 +239,13 @@ impl Product {
     #[must_use]
     pub fn new_document_command(&self) -> Option<&str> {
         self.new_document.as_deref()
+    }
+
+    /// The file dialog the shell opens for `command` when it starts without a `path` (see
+    /// [`ProductBuilder::path_dialog`]).
+    #[must_use]
+    pub fn path_dialog(&self, command: &str) -> Option<&PathDialog> {
+        self.path_dialogs.get(command)
     }
 
     /// The renderer of `view.render` and of the automation socket, when the product has one.
@@ -300,6 +342,7 @@ pub struct ProductBuilder {
     openers: BTreeMap<String, Arc<NativeFormat>>,
     package_extension: Option<String>,
     new_document: Option<String>,
+    path_dialogs: BTreeMap<String, PathDialog>,
 }
 
 impl std::fmt::Debug for ProductBuilder {
@@ -354,6 +397,7 @@ impl ProductBuilder {
             openers: BTreeMap::new(),
             package_extension: None,
             new_document: None,
+            path_dialogs: BTreeMap::new(),
         }
     }
 
@@ -500,6 +544,15 @@ impl ProductBuilder {
         self.new_document = Some(command.into());
     }
 
+    /// Makes the shell ask for a file through `dialog` whenever the registered command `command`
+    /// is started without a `path` parameter (a menu entry, a toolbar button, a typed line or a
+    /// controller's request); the command then runs with the chosen file as `path`. When the
+    /// dialog returns nothing the history says that no file was chosen. Checked by
+    /// [`ProductBuilder::build`].
+    pub fn path_dialog(&mut self, command: impl Into<String>, dialog: PathDialog) {
+        self.path_dialogs.insert(command.into(), dialog);
+    }
+
     /// Gives the keyword `last` its meaning in every session the product serves: `hook` returns
     /// the objects the product names as the last one, live or not. Without it, `last` fails with
     /// `cmd.selection.unavailable`.
@@ -529,13 +582,21 @@ impl ProductBuilder {
     /// Builds the product with the process clock and edit-lock owner.
     ///
     /// # Errors
-    /// `app.product.unknown_type` when an extractor names a type that is not registered.
+    /// `app.product.unknown_type` when an extractor names a type that is not registered;
+    /// `app.product.invalid_id` when a path dialog names an unregistered command.
     pub fn build(self, clock: Arc<dyn Clock>, owner: LockOwner) -> Result<Product> {
         for extension in self.openers.keys() {
             let declared = self.file_types.iter().any(|t| t.extension == *extension);
             if !declared || self.package_extension.as_deref() == Some(extension.as_str()) {
                 return Err(invalid(extension));
             }
+        }
+        if let Some(id) = self
+            .path_dialogs
+            .keys()
+            .find(|id| self.commands.get(id).is_none())
+        {
+            return Err(invalid(id));
         }
         let known: BTreeSet<&str> = self.types.iter().map(|d| d.key.as_str()).collect();
         for extractor in &self.extractors {
@@ -567,6 +628,7 @@ impl ProductBuilder {
             interaction: self.interaction,
             openers: self.openers,
             new_document: self.new_document,
+            path_dialogs: self.path_dialogs,
         })
     }
 }

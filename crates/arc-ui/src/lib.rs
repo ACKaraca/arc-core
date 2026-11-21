@@ -73,7 +73,7 @@ pub use egui;
 
 pub use command::{AllEnabled, CommandState, CommandView, Intent, Lookup, object_list};
 pub use command_line::{
-    CommandLineView, History, LineAction, LineCommands, LineContext, LineStatus,
+    CommandLineView, History, LineAction, LineCommands, LineContext, LineStatus, prompt_text,
 };
 pub use diagnostics::{DiagnosticsFilter, DiagnosticsPanel, filter_in};
 pub use dock::{Axis, Dock, DockArea, DockLayout, Floating, Side, Target};

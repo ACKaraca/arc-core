@@ -24,7 +24,7 @@ app-locale-catalog-too-large = The message catalog for { $tag } is too large.
 app-locale-fallback-missing = The catalog for the fallback language { $tag } is missing.
 app-log-invalid-config = The logging setting { $field } is not valid.
 app-log-io = The log file could not be written.
-app-file-none-chosen = No file was chosen. If no file dialog opens on this system, type app.file.open path=<file> or app.file.save_as path=<file> in the command line.
+app-file-none-chosen = No file was chosen. If no file dialog opens on this system, type { $command } path=<file> in the command line.
 app-macro-write-failed = The macro could not be written to the file.
 app-recent-not-found = The file { $path } is not in the recent files.
 app-thumbnail-too-large = The preview image is larger than the allowed size.
@@ -113,6 +113,12 @@ app-command-macro-record-stop = Stop Recording Macro
 app-command-macro-record-stop-description = Stops recording and saves the macro to a file.
 
 app-dialog-unsaved = This document has unsaved changes. Save them before closing?
+app-history-command = Command: { $text }
+app-history-ran = Done: { $command }
+app-history-cancel = *Cancel*
+app-close-save = Save
+app-close-discard = Don't Save
+app-close-cancel = Cancel
 app-window-failed = The application window could not be opened.
 app-window-surface-failed = The graphics device cannot draw into the application window.
 
@@ -128,5 +134,5 @@ app-file-opened = Opened { $name }
 app-file-saved = Saved { $name }
 app-file-closed = Closed { $name }
 app-file-closed-new = Closed the document.
-app-file-kept-open = The document was not closed because it has unsaved changes. Save it first. If no question was shown, no dialog is available here: save by typing app.file.save_as path=<file> in the command line, then close it.
+app-file-kept-open = The document was not closed because it has unsaved changes.
 app-tab-close = Close this document

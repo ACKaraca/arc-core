@@ -295,6 +295,8 @@ Objects are listed as hyphenated identifier texts.
   text; otherwise they walk the history entries that contain the text typed before the walk
   (ignoring case), and Down past the newest restores that text.
 
+- `prompt_text(prompt, localize)` is the text of a prompt as the field label shows it (the
+  message and its default); a host that lists prompts in a history uses it.
 - `CommandLineView::show_with` draws the field for a prompt and a `LineStatus` the caller supplies,
   instead of a `CommandLine`, so a product whose controller keeps the line uses the same keys.
   With `keywords: false` the prompt's keyword options are not drawn as buttons; the caller shows

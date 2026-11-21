@@ -572,6 +572,8 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
   instantiates or renders them yet: the shell does not read `Product::tools`. Tools are not a
   working surface; a product that needs its own tool surface uses an interaction controller
   (below).
+- `ProductBuilder::path_dialog(command, PathDialog)` makes the shell ask for a file when the
+  command starts without `path` (see the menus and dialogs section).
 - `ProductBuilder::interaction(factory)` (feature `window`) registers the product's interaction
   controller: a factory that creates one `Interaction` per tab (see
   [Interaction controller](#interaction-controller-extension)).
@@ -818,15 +820,20 @@ it is registered. Without a registration the shell behaves as before.
   `Application::close` without the shell drops the controller without this call.
 - `InteractionOutput`: `status` (a `LineStatus`: active, answers, selection, repeatable), `prompt`
   (a `Prompt`, which labels the command panel), `options` (a `PromptControls` for the tool option
-  bar: keyword buttons and parameter fields), `history` (lines shown above the field, at most 16,
-  most recent last), `overlays` (`ProductOverlay`s), `dynamic` (a `DynamicOutput`: a prompt message
+  bar: keyword buttons and parameter fields), `history` (lines shown above the field, at most 500,
+  most recent last), `history_first` (the sequence number of `history[0]`, default 0: a controller that
+  drops its oldest lines raises it by the number dropped, so the lines the shell keeps among them stay
+  in place) and `reports_results` (default `false`: the shell adds `Done: <command>` for each
+  undoable command the controller ran through `InteractionContext::invoke`, and `*Cancel*` for Escape
+  at a prompt; `true` when the controller writes those lines itself), `overlays` (`ProductOverlay`s), `dynamic` (a `DynamicOutput`: a prompt message
   and `DynamicField`s, shown beside the pointer) and `selection` (`Option<Vec<ObjectId>>`: the
   objects of the controller's own that the viewport highlights and counts; `None`, the default,
   shows the tab's selection, which follows a click, Escape or a command at once, and the shell then
   also sets `status.has_selection` from it, so Escape on a selection clears it).
 - `InteractionContext` gives what a controller needs: `document()` (the tab's `arc_doc::Document`),
   `invoke(Invocation)` (a document command, seeing the tab's selection when it names none, through `Application::invoke` in the shell's command
-  session), `session()`, `read_only()`, `selection()` (the tab's shell selection), `camera()` (the
+  session), `session()`, `read_only()`, `selection()` (the tab's shell selection), `document_path()` (the file of the tab's document, `None`
+  before its first save), `camera()` (the
   tab's camera, which is the view the controller's input is in), `language()` (the interface language
   tag, also the session setting `app.language` of `session()`), `decimal_separator()` (`,` or `.`
   for that language), `ask(Intent)` and `tab()`. The foundation has no
@@ -904,9 +911,13 @@ needs no window:
   activate it and a close button (`ShellAction::ActivateTab`, `ShellAction::CloseTab`; closing asks
   about unsaved changes like `app.file.close`). The window title carries the same mark.
 - The command panel keeps the input row at the bottom of the panel whatever its height, and the
-  history above it scrolls, newest line at the bottom. The history shows the latest result: an
-  action that does something removes the result lines of earlier ones, so an error that a later
-  edit made stale does not stay. File actions add a line (`Saved <name>`, `Opened <name>`, a new
+  history above it scrolls to the newest line, which is at the bottom. The shell keeps the last 500
+  lines of its own per tab, placed among the controller's lines by sequence number: a typed command
+  on an idle line as `Command: <text>`, a command started by a menu, key or button as `Command: <name>`
+  (the command's label), each prompt the command line asks as a line that an answer typed to it
+  completes (`Specify next point: 5,4`), `*Cancel*` for Escape at a prompt, `Done: <name>` when an
+  undoable command finished, and errors. A controller's own history lines come with them in order.
+  Lines can be selected and copied with Ctrl+C. File actions add a line (`Saved <name>`, `Opened <name>`, a new
   document, a closed document); a dialog that returned no file says `No file was chosen` and how
   to continue by typing a path; a close or quit that is not carried out because the question was
   answered with Cancel, or could not be shown, says so.
@@ -978,7 +989,7 @@ needs no window:
   dialog (`macro.jsonl` suggested; `app.macro.write_failed` when the write fails); without a
   recording it does nothing.
 - The frame returns the egui output, the `Request`s for the platform (`OpenDialog`,
-  `SaveDialog(tab)`, `AskClose(tab)`, `Quit`, `SaveMacro(text)`), whether more frames are on their way and whether
+  `SaveDialog(tab)`, `AskClose(tab)`, `Quit`, `SaveMacro(text)`, `PathDialog`), whether more frames are on their way and whether
   a setting changed.
 
 ### Start-up, prompts and settings in the shell (CORE-APP-004, 005, 006, 010, 011, 012, 015)
@@ -1036,6 +1047,24 @@ needs no window:
   request)` drives `Application::open`, `save_as` and `close` from them. Closing a dirty
   document never saved asks for a file after the answer to save; quitting closes every tab in
   order and stops at the first one the user keeps.
+- A product command registered with `ProductBuilder::path_dialog(command, PathDialog)` (mode open
+  or save, title message, filters of a label message and extensions, default name where
+  `{document}` is the active document's name without extension) opens that file dialog when it
+  starts without a `path`, whether from a menu entry, a toolbar button, a typed line or a
+  controller's `ask`. The frame returns `Request::PathDialog { tab, dialog, then }`;
+  `carry_out` shows it through `FileDialogs::pick_path` (the dialog implementation of the open and
+  save dialogs) and runs `then` with the chosen file as `path`, through the tab's controller when
+  it has one (`LineAction::Invoke`). A dialog that returns nothing says `No file was chosen`.
+  `ProductBuilder::build` fails with `app.product.invalid_id` for a dialog naming an unregistered
+  command.
+- `FileDialogs::can_ask` tells whether the question about unsaved changes can be shown natively.
+  When it cannot, `carry_out` returns `Done::Asking` for `AskClose` and `Quit`, and the shell shows
+  a modal in its own window (the document's name, the text of the question, Save, Discard and
+  Cancel; Escape cancels). Cancel keeps the document, Discard closes it, Save saves and closes it
+  (a document never saved asks for a file first and is asked about again if it is still unsaved);
+  after a quit, the next dirty tab is asked in turn. `NativeDialogs::can_ask` is true on Windows
+  and macOS, where `rfd` shows the question with the system library, and on Linux only when
+  `zenity` is on the search path.
 - `NativeDialogs` uses `rfd`: the desktop portal on Linux (where `rfd` asks the question
   through `zenity`), the system dialogs on Windows and macOS; the question's answers map to
   save (yes), discard (no) and cancel (anything else). `native_menu()` is a `muda` menu bar on macOS, item identifiers being command

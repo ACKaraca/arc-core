@@ -220,7 +220,9 @@ pub struct CommandLineView {
     recall: Option<(String, usize)>,
 }
 
-pub(crate) fn prompt_text(prompt: &Prompt, localize: &dyn Localize) -> String {
+/// The text of `prompt` in the language of `localize`, with the default it shows, if any.
+#[must_use]
+pub fn prompt_text(prompt: &Prompt, localize: &dyn Localize) -> String {
     let args: Vec<(&str, Value)> = prompt
         .message
         .args

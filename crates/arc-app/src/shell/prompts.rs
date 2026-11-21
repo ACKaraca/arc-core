@@ -51,6 +51,18 @@ const OBJECTS: Message = Message {
 const RECORDS: Message = Message {
     message_id: "app-recovery-compare-records",
 };
+const CLOSE_SAVE: Message = Message {
+    message_id: "app-close-save",
+};
+const CLOSE_DISCARD: Message = Message {
+    message_id: "app-close-discard",
+};
+const CLOSE_CANCEL: Message = Message {
+    message_id: "app-close-cancel",
+};
+const UNSAVED: Message = Message {
+    message_id: "app-dialog-unsaved",
+};
 const TAKE_OVER: Message = Message {
     message_id: "app-banner-take-over",
 };
@@ -81,6 +93,8 @@ pub enum Choice {
     Later,
     /// Take over the stale edit lock of the tab.
     TakeOver(TabId),
+    /// The answer to the close question of the window.
+    Close(crate::application::CloseAnswer),
 }
 
 fn count(n: u64) -> Value {
@@ -209,4 +223,29 @@ pub fn banners(ui: &mut Ui, tab: &Tab, localize: &dyn Localize, choices: &mut Ve
             });
         }
     });
+}
+
+/// Draws the question about closing the document `name` with unsaved changes as a modal: Save,
+/// Discard or Cancel (Escape cancels). The shell asks it when the platform has no native dialog.
+pub fn close_question(ui: &Ui, name: &str, localize: &dyn Localize, choices: &mut Vec<Choice>) {
+    use crate::application::CloseAnswer;
+    let modal = egui::Modal::new(egui::Id::unique("arc-app-close")).show(ui.ctx(), |ui| {
+        ui.heading(name);
+        ui.label(UNSAVED.text(localize));
+        ui.separator();
+        ui.horizontal(|ui| {
+            for (message, answer) in [
+                (CLOSE_SAVE, CloseAnswer::Save),
+                (CLOSE_DISCARD, CloseAnswer::Discard),
+                (CLOSE_CANCEL, CloseAnswer::Cancel),
+            ] {
+                if ui.button(message.text(localize)).clicked() {
+                    choices.push(Choice::Close(answer));
+                }
+            }
+        });
+    });
+    if modal.should_close() && choices.is_empty() {
+        choices.push(Choice::Close(CloseAnswer::Cancel));
+    }
 }

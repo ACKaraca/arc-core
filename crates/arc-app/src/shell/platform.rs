@@ -12,7 +12,7 @@ use arc_ui::{Entry, Intent, Localize};
 use super::{Request, Shell};
 use crate::application::{Application, CloseAnswer, Closed};
 use crate::error::codes;
-use crate::product::FileType;
+use crate::product::{FileType, PathDialog, PathMode};
 
 /// File and question dialogs.
 pub trait FileDialogs {
@@ -21,8 +21,16 @@ pub trait FileDialogs {
     /// A file to save to among `types`, or `None` when the user cancelled. Confirming an
     /// overwrite is the dialog's task.
     fn pick_save(&mut self, types: &[FileType], name: Option<&str>) -> Option<PathBuf>;
+    /// A file the product's `dialog` asks for, or `None` when the user cancelled. `name` is the
+    /// default file name of a save dialog.
+    fn pick_path(&mut self, dialog: &PathDialog, name: Option<&str>) -> Option<PathBuf>;
     /// Whether to save, discard or keep the document `title` with unsaved changes.
     fn ask_close(&mut self, title: &str) -> CloseAnswer;
+    /// Whether [`Self::ask_close`] can show its question. When it cannot, the shell asks in its
+    /// own window instead (see [`Request::AskClose`]). The default is true.
+    fn can_ask(&self) -> bool {
+        true
+    }
 }
 
 /// A menu bar outside the window.
@@ -161,6 +169,43 @@ impl FileDialogs for NativeDialogs<'_> {
         dialog.save_file()
     }
 
+    fn pick_path(&mut self, dialog: &PathDialog, name: Option<&str>) -> Option<PathBuf> {
+        let mut native = rfd::FileDialog::new();
+        if let Some(l) = self.localize {
+            native = native.set_title(arc_ui::resolve(l, &dialog.title, &[]));
+        }
+        for filter in &dialog.filters {
+            let label = self.localize.map_or_else(
+                || filter.message_id.clone(),
+                |l| arc_ui::resolve(l, &filter.message_id, &[]),
+            );
+            native = native.add_filter(label, &filter.extensions);
+        }
+        match dialog.mode {
+            PathMode::Open => native.pick_file(),
+            PathMode::Save => match name {
+                Some(name) => native.set_file_name(name).save_file(),
+                None => native.save_file(),
+            },
+        }
+    }
+
+    /// The question is a `zenity` dialog on Linux: without that program on the search path the
+    /// library answers Cancel without showing anything. Windows and macOS have the question
+    /// in the system library.
+    fn can_ask(&self) -> bool {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            std::env::var_os("PATH").is_some_and(|path| {
+                std::env::split_paths(&path).any(|dir| dir.join("zenity").is_file())
+            })
+        }
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        {
+            true
+        }
+    }
+
     fn ask_close(&mut self, title: &str) -> CloseAnswer {
         let id = UNSAVED.message_id;
         let text = self
@@ -192,6 +237,10 @@ pub enum Done {
     Closed(Closed),
     /// Every tab closed: the application may end.
     Quit,
+    /// A product command ran with the file a dialog returned.
+    Ran,
+    /// The close question is shown in the window; its answer arrives with a later frame.
+    Asking,
 }
 
 fn untitled(app: &Application, tab: crate::application::TabId) -> String {
@@ -234,9 +283,33 @@ pub fn carry_out(
                 .map_err(|e| Error::new(codes::MACRO_WRITE_FAILED).with_source(e)),
             None => Ok(Done::Cancelled),
         },
+        Request::PathDialog { tab, dialog, then } => {
+            let name = dialog.default_name.as_deref().map(|n| {
+                let title = untitled(app, *tab);
+                let stem = Path::new(&title).file_stem().and_then(|s| s.to_str());
+                n.replace(
+                    "{document}",
+                    stem.filter(|s| !s.is_empty()).unwrap_or("untitled"),
+                )
+            });
+            match dialogs.pick_path(dialog, name.as_deref()) {
+                Some(path) => shell
+                    .run_with_path(app, *tab, then.clone(), &path)
+                    .map(|()| Done::Ran),
+                None => Ok(Done::Cancelled),
+            }
+        }
+        Request::AskClose(tab) if !dialogs.can_ask() && app.tab(*tab)?.is_dirty() => {
+            shell.ask_in_window(app, *tab, false);
+            Ok(Done::Asking)
+        }
         Request::AskClose(tab) => close(shell, app, dialogs, *tab).map(Done::Closed),
         Request::Quit => {
             while let Some(tab) = app.tabs().first().map(crate::application::Tab::id) {
+                if !dialogs.can_ask() && app.tab(tab)?.is_dirty() {
+                    shell.ask_in_window(app, tab, true);
+                    return Ok(Done::Asking);
+                }
                 if close(shell, app, dialogs, tab)? == Closed::Cancelled {
                     return Ok(Done::Closed(Closed::Cancelled));
                 }

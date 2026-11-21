@@ -146,6 +146,14 @@ pub struct InteractionOutput {
     /// takes inline arguments (`app.file.open path=<file>`). The default ends the input at a
     /// space like Enter, as a product with keyword answers and one-letter commands expects.
     pub inline_arguments: bool,
+    /// The sequence number of `history[0]`: a controller that drops its oldest lines raises it
+    /// by the number dropped, so the lines the shell keeps among them (typed commands, prompts)
+    /// stay where they were. The default is 0.
+    pub history_first: u64,
+    /// The controller writes the completion and cancel lines itself. The default is false: the
+    /// shell adds `Done: <command>` for each command the controller ran through
+    /// [`InteractionContext::invoke`] and `*Cancel*` for Escape at a prompt.
+    pub reports_results: bool,
 }
 
 /// The most commands one call of a controller can ask the shell for.
@@ -161,6 +169,7 @@ pub struct InteractionContext<'a> {
     camera: ViewFrame,
     language: &'a str,
     asked: RefCell<Vec<Intent>>,
+    ran: RefCell<Vec<String>>,
 }
 
 impl<'a> InteractionContext<'a> {
@@ -180,12 +189,18 @@ impl<'a> InteractionContext<'a> {
             camera,
             language,
             asked: RefCell::new(Vec::new()),
+            ran: RefCell::new(Vec::new()),
         }
     }
 
     /// The commands the controller asked for during the call, taken once.
     pub(crate) fn take_asked(&self) -> Vec<Intent> {
         std::mem::take(&mut *self.asked.borrow_mut())
+    }
+
+    /// The commands the controller ran through [`Self::invoke`] during the call, taken once.
+    pub(crate) fn take_ran(&self) -> Vec<String> {
+        std::mem::take(&mut *self.ran.borrow_mut())
     }
 
     /// The interface language tag in effect (for example `tr`), also the session setting
@@ -217,6 +232,12 @@ impl<'a> InteractionContext<'a> {
     #[must_use]
     pub fn tab(&self) -> TabId {
         self.tab
+    }
+
+    /// The file of the tab's document; `None` before its first save (and when the tab is closed).
+    #[must_use]
+    pub fn document_path(&self) -> Option<&'a std::path::Path> {
+        self.app.tab(self.tab).ok()?.path()
     }
 
     /// The tab's document.
@@ -266,7 +287,10 @@ impl<'a> InteractionContext<'a> {
         if invocation.selection.is_empty() {
             invocation.selection = self.selection.to_vec();
         }
-        self.app.invoke(self.tab, self.session, invocation)
+        let command = invocation.command.clone();
+        let outcome = self.app.invoke(self.tab, self.session, invocation)?;
+        self.ran.borrow_mut().push(command);
+        Ok(outcome)
     }
 }
 

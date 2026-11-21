@@ -583,9 +583,19 @@ impl Handler {
             // The dialog library cannot tell a cancel from a missing dialog service, so both read
             // as a neutral line that also says how to go on without a dialog, instead of silence.
             Ok(Done::Cancelled)
-                if matches!(request, Request::OpenDialog | Request::SaveDialog(_)) =>
+                if matches!(
+                    request,
+                    Request::OpenDialog | Request::SaveDialog(_) | Request::PathDialog { .. }
+                ) =>
             {
-                let error = Error::new(crate::error::codes::NO_FILE_CHOSEN);
+                // The line names the command to type, so it fits the dialog that did not show.
+                let command = match request {
+                    Request::OpenDialog => crate::commands::FILE_OPEN,
+                    Request::PathDialog { then, .. } => then.command.as_str(),
+                    _ => crate::commands::FILE_SAVE_AS,
+                };
+                let error =
+                    Error::new(crate::error::codes::NO_FILE_CHOSEN).with_arg("command", command);
                 self.shell.report(&self.app, error);
             }
             Ok(Done::Opened(tab)) => {
@@ -606,7 +616,7 @@ impl Handler {
                     self.shell.announce_closed(&self.app, closing);
                 }
             }
-            Ok(Done::Cancelled) => {}
+            Ok(Done::Cancelled | Done::Ran | Done::Asking) => {}
             Err(e) => self.shell.report(&self.app, e),
         }
         self.shell.save_recent(&self.app);

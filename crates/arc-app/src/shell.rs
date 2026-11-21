@@ -72,8 +72,10 @@ use crate::settings_editor;
 use interaction::Hook;
 use prompts::{Choice, RecoveryEntry};
 
-/// Submitted lines of a controller the command panel shows, most recent last.
-const MAX_SHOWN_HISTORY: usize = 16;
+/// Lines of a controller's history the command panel shows, most recent last.
+const MAX_SHOWN_HISTORY: usize = 500;
+/// The most lines the shell keeps in a tab's command history of its own.
+const MAX_CONSOLE: usize = 500;
 
 /// How long a pick or a settle waits for the render and extraction threads.
 pub const WAIT: Duration = Duration::from_secs(5);
@@ -141,6 +143,9 @@ pub enum Action {
     Dispatch(Intent),
     /// An answer for the active prompt from the viewport.
     Answer(PromptInput),
+    /// A command a controller ran through [`InteractionContext::invoke`]; the history says so
+    /// unless the controller reports its results itself.
+    Ran(String),
     /// An error to show.
     Error(Error),
     /// A shell action: panel management or the camera.
@@ -179,7 +184,7 @@ pub fn extractor(
 }
 
 /// What the platform layer must do for the shell.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Request {
     /// Ask for a file to open and open it.
     OpenDialog,
@@ -191,6 +196,19 @@ pub enum Request {
     Quit,
     /// Ask for a file and write this macro text to it.
     SaveMacro(String),
+    /// A product command registered with
+    /// [`ProductBuilder::path_dialog`](crate::product::ProductBuilder::path_dialog) started
+    /// without a `path`: show `dialog` and run `then` with the chosen file as its `path`, through
+    /// the tab's controller when it has one. A dialog that returns nothing leaves
+    /// `app.file.none_chosen` in the history.
+    PathDialog {
+        /// The tab the command started on.
+        tab: TabId,
+        /// The dialog to show.
+        dialog: crate::product::PathDialog,
+        /// The command and its parameters; the chosen file is added as `path`.
+        then: Intent,
+    },
 }
 
 /// What one frame reads.
@@ -347,9 +365,42 @@ pub struct View {
     /// Frames still wanted after the viewport went clean: the last rendered frame is registered
     /// as a texture by a redraw that follows the render.
     settle: std::cell::Cell<u8>,
-    /// Errors of the command panel's actions with the history length they came after, shown in
-    /// the history.
-    console: Vec<(usize, ConsoleError)>,
+    /// What the shell says in the command panel's history (typed lines, prompts, results and
+    /// errors, at most [`MAX_CONSOLE`]) with the length of the controller's history each came
+    /// after.
+    console: Vec<(u64, ConsoleEntry)>,
+    /// The prompt the history last showed, so a change of prompt adds one line.
+    shown_prompt: Option<arc_command::prompt::Prompt>,
+}
+
+/// The document the window asks about, and whether the application ends once it is closed.
+#[derive(Debug, Clone, Copy)]
+struct PendingClose {
+    tab: TabId,
+    quit: bool,
+}
+
+/// Appends `line` anchored at `at`, dropping the oldest lines beyond [`MAX_CONSOLE`].
+fn push_bounded<T>(lines: &mut Vec<(u64, T)>, at: u64, line: T) {
+    if lines.len() >= MAX_CONSOLE {
+        lines.remove(0);
+    }
+    lines.push((at, line));
+}
+
+/// A line the shell adds to the command panel's history.
+#[derive(Debug, Clone)]
+enum ConsoleEntry {
+    /// A message: an error or a result.
+    Message(ConsoleError),
+    /// A command typed on an idle line: `Command: <text>`.
+    Typed(String),
+    /// A command a menu, a key or a button started: `Command: <display name>`.
+    Started(String),
+    /// A prompt, with the answer typed to it: `Specify next point: 5,4`.
+    Prompt(arc_command::prompt::Prompt, Option<String>),
+    /// A command that finished: `Done: <display name>`.
+    Done(String),
 }
 
 /// An error kept for the command panel's history: its message and arguments, which the panel
@@ -467,6 +518,10 @@ pub struct Shell {
     base_appearance: Appearance,
     notifications: Notifications,
     recovery: Vec<RecoveryEntry>,
+    /// The close question shown in the window (see [`Shell::ask_in_window`]).
+    closing: Option<PendingClose>,
+    /// Requests that running a command after a file dialog produced; the next frame returns them.
+    pending: Vec<Request>,
     files: Option<UserFiles>,
     recent_written: Option<Vec<RecentEntry>>,
     log_ring: Option<LogRing>,
@@ -633,6 +688,8 @@ impl Shell {
             base_appearance: config.appearance,
             notifications: Notifications::default(),
             recovery: Vec::new(),
+            closing: None,
+            pending: Vec::new(),
             files: None,
             recent_written: None,
             log_ring: None,
@@ -845,16 +902,97 @@ impl Shell {
         self.push_result(app, ConsoleError::info(message_id, args));
     }
 
-    /// Puts a result line at the end of the active tab's history. Only the latest result shows:
-    /// the lines of earlier results go, so an error that a later edit made stale does not stay.
+    /// Puts a result line at the end of the active tab's history.
     fn push_result(&mut self, app: &Application, line: ConsoleError) {
+        self.push_entry(app, ConsoleEntry::Message(line));
+    }
+
+    /// Puts `entry` at the end of the active tab's history, after the lines of the controller
+    /// that exist now (by their sequence numbers, so a controller that drops its oldest lines
+    /// does not move the shell's). The oldest lines go beyond [`MAX_CONSOLE`].
+    fn push_entry(&mut self, app: &Application, entry: ConsoleEntry) {
         if let Some(view) = app.active().and_then(|t| self.views.get_mut(&t)) {
-            let at = view
-                .interaction
-                .as_ref()
-                .map_or(0, |i| i.output().history.len());
-            view.console.clear();
-            view.console.push((at, line));
+            let at = view.interaction.as_ref().map_or(0, |i| {
+                let out = i.output();
+                out.history_first
+                    .saturating_add(u64::try_from(out.history.len()).unwrap_or(u64::MAX))
+            });
+            push_bounded(&mut view.console, at, entry);
+        }
+    }
+
+    /// Whether the controller of the active tab writes the completion and cancel lines itself.
+    fn reports_results(&self, app: &Application) -> bool {
+        app.active()
+            .and_then(|t| self.views.get(&t))
+            .and_then(|v| v.interaction.as_ref())
+            .is_some_and(|i| i.output().reports_results)
+    }
+
+    /// Echoes the typed line or answer `text`: an answer to the active prompt completes the
+    /// prompt's line (`Specify next point: 5,4`), anything else is a command (`Command: wall`).
+    fn echo(&mut self, app: &Application, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        // A toolbar button submits the identifier of its command: it reads as the command's name,
+        // also while a prompt is active (the command then cancels it).
+        if app.product().headless().registry.get(text).is_some() {
+            self.push_entry(app, ConsoleEntry::Started(text.to_owned()));
+            return;
+        }
+        let Some(view) = app.active().and_then(|t| self.views.get_mut(&t)) else {
+            return;
+        };
+        let Some(prompt) = view.shown_prompt.clone() else {
+            self.push_entry(app, ConsoleEntry::Typed(text.to_owned()));
+            return;
+        };
+        if let Some((_, ConsoleEntry::Prompt(last, answer @ None))) = view.console.last_mut()
+            && last.key == prompt.key
+            && last.message.id == prompt.message.id
+        {
+            *answer = Some(text.to_owned());
+            return;
+        }
+        self.push_entry(app, ConsoleEntry::Prompt(prompt, Some(text.to_owned())));
+    }
+
+    /// Adds a line when the active prompt of the active tab changed since the last frame.
+    fn note_prompt(&mut self, app: &Application) {
+        let Some(view) = app.active().and_then(|t| self.views.get_mut(&t)) else {
+            return;
+        };
+        let now = match view.interaction.as_deref() {
+            Some(c) => controller_output(c, &view.selection).prompt,
+            None => view.line.active().and_then(|s| s.prompt()).cloned(),
+        };
+        let same = match (&now, &view.shown_prompt) {
+            (Some(a), Some(b)) => a.key == b.key && a.message.id == b.message.id,
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        view.shown_prompt.clone_from(&now);
+        if let Some(prompt) = now {
+            self.push_entry(app, ConsoleEntry::Prompt(prompt, None));
+        }
+    }
+
+    /// Says that `command` finished, when it changed the document (a query or a selection
+    /// leaves no line) and the controller does not say so itself.
+    fn note_done(&mut self, app: &Application, command: &str) {
+        let undoable = app
+            .product()
+            .headless()
+            .registry
+            .get(command)
+            .is_some_and(|s| s.undo() != arc_command::UndoBehavior::NotUndoable);
+        if undoable && !self.reports_results(app) {
+            self.push_entry(app, ConsoleEntry::Done(command.to_owned()));
         }
     }
 
@@ -909,6 +1047,7 @@ impl Shell {
             previous: Vec::new(),
             settle: std::cell::Cell::new(0),
             console: Vec::new(),
+            shown_prompt: None,
         })
     }
 
@@ -1182,6 +1321,7 @@ impl Shell {
             };
             let notifications = &mut self.notifications;
             let recovery = &self.recovery;
+            let closing = self.closing;
             let log_ring = self.log_ring.as_ref();
             let mut view = active.and_then(|t| self.views.get_mut(&t));
             if let (Some(v), Some(gpu)) = (view.as_deref_mut(), gpu.as_ref())
@@ -1208,6 +1348,12 @@ impl Shell {
                         prompts::banners(ui, tab, input.localize, &mut choices);
                     }
                     prompts::recovery(ui, recovery, input.localize, &mut choices);
+                    if let Some(title) = closing
+                        .and_then(|p| tab_views.iter().find(|t| t.id == p.tab))
+                        .map(|t| t.title.as_str())
+                    {
+                        prompts::close_question(ui, title, input.localize, &mut choices);
+                    }
                 }
                 let Some(layout) = layout.as_deref_mut() else {
                     return;
@@ -1264,9 +1410,9 @@ impl Shell {
         choices: Vec<Choice>,
         actions: Vec<Action>,
     ) -> FrameOutput {
-        let mut requests = Vec::new();
+        let mut requests = std::mem::take(&mut self.pending);
         for choice in choices {
-            if let Err(e) = self.choose(app, choice) {
+            if let Err(e) = self.choose(app, choice, &mut requests) {
                 self.error(e);
             }
         }
@@ -1276,6 +1422,7 @@ impl Shell {
             self.act(app, action, &mut requests);
         }
         self.pump(app, None);
+        self.note_prompt(app);
         self.save_recent(app);
         FrameOutput {
             full,
@@ -1304,8 +1451,14 @@ impl Shell {
     }
 
     /// Carries out a choice of the recovery prompt or of a banner.
-    fn choose(&mut self, app: &mut Application, choice: Choice) -> Result<()> {
+    fn choose(
+        &mut self,
+        app: &mut Application,
+        choice: Choice,
+        requests: &mut Vec<Request>,
+    ) -> Result<()> {
         match choice {
+            Choice::Close(answer) => self.answer_close(app, answer, requests),
             Choice::Later => {
                 self.recovery.clear();
                 Ok(())
@@ -1335,6 +1488,49 @@ impl Shell {
         }
     }
 
+    /// Shows the question about the unsaved document `tab` in the window (Save, Discard,
+    /// Cancel) instead of a native dialog; `quit` ends the application after the close.
+    pub(crate) fn ask_in_window(&mut self, app: &mut Application, tab: TabId, quit: bool) {
+        // A tab that cannot be activated is closed already; the question then names nothing.
+        if app.activate(tab).is_ok() {
+            self.closing = Some(PendingClose { tab, quit });
+        }
+    }
+
+    /// Carries out the answer to the question of [`Shell::ask_in_window`]. A document never
+    /// saved asks for a file first and is asked about again when it is still unsaved.
+    fn answer_close(
+        &mut self,
+        app: &mut Application,
+        answer: crate::application::CloseAnswer,
+        requests: &mut Vec<Request>,
+    ) -> Result<()> {
+        use crate::application::CloseAnswer;
+        let Some(PendingClose { tab, quit }) = self.closing.take() else {
+            return Ok(());
+        };
+        let title = app.tab(tab)?.title();
+        match answer {
+            CloseAnswer::Cancel => self.announce_kept(app),
+            CloseAnswer::Save if app.tab(tab)?.path().is_none() => {
+                requests.push(Request::SaveDialog(tab));
+                requests.push(if quit {
+                    Request::Quit
+                } else {
+                    Request::AskClose(tab)
+                });
+            }
+            CloseAnswer::Save | CloseAnswer::Discard => {
+                self.close_tab(app, tab, |_| answer)?;
+                self.announce_closed(app, title);
+                if quit {
+                    requests.push(Request::Quit);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Sets or resets a setting in the user scope and writes the user settings file.
     fn set_setting(
         &mut self,
@@ -1355,25 +1551,38 @@ impl Shell {
 
     /// Carries out one action of a frame.
     fn act(&mut self, app: &mut Application, action: Action, requests: &mut Vec<Request>) {
-        // An action that does something replaces the result lines of earlier ones: an error a
-        // later edit made stale does not stay in the history.
-        let works = match &action {
-            Action::Start(intent) | Action::Intent(intent) | Action::Dispatch(intent) => !matches!(
-                intent.command.as_str(),
-                commands::SELECT_SET | commands::SELECT_CLEAR
-            ),
-            Action::Line(line) => !matches!(
-                line,
-                LineAction::ClearInput | LineAction::Cancel | LineAction::Back
-            ),
-            Action::Answer(_) => true,
-            _ => false,
-        };
-        if works && let Some(view) = app.active().and_then(|t| self.views.get_mut(&t)) {
-            view.console.clear();
+        match &action {
+            Action::Line(LineAction::Submit(text)) => self.echo(app, text),
+            Action::Answer(input) => {
+                if let Some(text) = answer_text(input) {
+                    self.echo(app, &text);
+                }
+            }
+            Action::Start(intent)
+                if !matches!(
+                    intent.command.as_str(),
+                    commands::SELECT_SET | commands::SELECT_CLEAR
+                ) =>
+            {
+                self.push_entry(app, ConsoleEntry::Started(intent.command.clone()));
+            }
+            Action::Line(LineAction::Cancel | LineAction::CancelThen(_))
+                if app
+                    .active()
+                    .and_then(|t| self.views.get(&t))
+                    .is_some_and(|v| v.shown_prompt.is_some())
+                    && !self.reports_results(app) =>
+            {
+                self.announce(app, HISTORY_CANCEL.message_id, Vec::new());
+            }
+            _ => {}
         }
         let result = match action {
             Action::Error(e) => Err(e),
+            Action::Ran(command) => {
+                self.note_done(app, &command);
+                Ok(())
+            }
             Action::Shell(action) => self.shell_action(app, action, requests),
             Action::Setting { key, value } => self.set_setting(app, &key, value),
             // A command of a menu or a key binding starts the way a toolbar button's does: through
@@ -1412,6 +1621,7 @@ impl Shell {
         if let Err(e) = result {
             self.report(app, e);
         }
+        self.note_prompt(app);
     }
 
     /// Carries out a panel or camera action of the View menu or the toolbar.
@@ -1549,11 +1759,46 @@ impl Shell {
             Some(controller) => controller.line(&cx, line),
             None => Ok(()),
         };
-        let asked = cx.take_asked();
+        let (asked, ran) = (cx.take_asked(), cx.take_ran());
+        for command in ran {
+            self.note_done(app, &command);
+        }
         for intent in asked {
             self.dispatch(app, intent, requests)?;
         }
         result
+    }
+
+    /// Runs `then` with the file a path dialog returned as its `path`, on `tab`: through the
+    /// tab's controller when it has one, else on the shell's command line. A dialog never
+    /// asks again for a command that has its path.
+    pub(crate) fn run_with_path(
+        &mut self,
+        app: &mut Application,
+        tab: TabId,
+        mut then: Intent,
+        path: &std::path::Path,
+    ) -> Result<()> {
+        app.activate(tab)?;
+        // shortcut: a path that is not valid text loses the invalid parts; upgrade when a
+        // command takes paths as bytes.
+        then.params.insert(
+            "path".to_owned(),
+            Json::String(path.to_string_lossy().into_owned()),
+        );
+        let mut requests = Vec::new();
+        let result = if self.controlled(app) {
+            self.controlled_line(app, LineAction::Invoke(then), &mut requests)
+        } else {
+            self.dispatch(app, then, &mut requests)
+        };
+        if let Err(e) = result {
+            self.report(app, e);
+        }
+        // What the command asked for (a file dialog of its own) goes out with the next frame.
+        self.pending.extend(requests);
+        self.note_prompt(app);
+        Ok(())
     }
 
     fn cancel_line(&mut self, app: &Application) {
@@ -1577,6 +1822,17 @@ impl Shell {
     ) -> Result<()> {
         if commands::is_shell_command(&intent.command) {
             return self.shell_command(app, &intent.command, intent.params, requests);
+        }
+        if !intent.params.contains_key("path")
+            && let (Some(dialog), Some(tab)) =
+                (app.product().path_dialog(&intent.command), app.active())
+        {
+            requests.push(Request::PathDialog {
+                tab,
+                dialog: dialog.clone(),
+                then: intent,
+            });
+            return Ok(());
         }
         self.line_step(
             app,
@@ -1669,8 +1925,12 @@ impl Shell {
         }
         self.views.insert(tab, view);
         let submitted = result?;
-        if let Submitted::Rejected { error, .. } = submitted {
-            self.report(app, error);
+        match submitted {
+            Submitted::Rejected { error, .. } => self.report(app, error),
+            Submitted::Ran(outcome) if !commands::is_shell_command(&outcome.command) => {
+                self.note_done(app, &outcome.command);
+            }
+            _ => {}
         }
         for (command, params) in deferred {
             let params = match params {
@@ -1818,6 +2078,15 @@ const FILE_CLOSED: Message = Message {
 };
 const FILE_CLOSED_NEW: Message = Message {
     message_id: "app-file-closed-new",
+};
+const HISTORY_COMMAND: Message = Message {
+    message_id: "app-history-command",
+};
+const HISTORY_CANCEL: Message = Message {
+    message_id: "app-history-cancel",
+};
+const HISTORY_RAN: Message = Message {
+    message_id: "app-history-ran",
 };
 const FILE_KEPT: Message = Message {
     message_id: "app-file-kept-open",
@@ -2211,6 +2480,8 @@ impl Panel for ViewportPanel {
         // What the controller asked for during a pointer event or a dynamic input edit.
         if let Some(icx) = icx.as_ref() {
             cx.actions
+                .extend(icx.take_ran().into_iter().map(Action::Ran));
+            cx.actions
                 .extend(icx.take_asked().into_iter().map(Action::Dispatch));
         }
         if let Some(c) = out.camera {
@@ -2570,15 +2841,65 @@ enum ConsoleLine {
 }
 
 impl ConsoleLine {
-    fn error(error: &ConsoleError, localize: &dyn Localize) -> Self {
-        let args: Vec<(&str, arc_base::error::Value)> =
-            error.args.iter().map(|(k, v)| (*k, v.clone())).collect();
-        let text = arc_ui::resolve(localize, error.message_id, &args);
-        if error.info {
-            Self::Text(text)
-        } else {
-            Self::Error(text)
+    fn of(entry: &ConsoleEntry, localize: &dyn Localize, registry: &arc_command::Registry) -> Self {
+        // The name a person reads for a command: its label, else the identifier.
+        let name = |id: &str| {
+            registry.get(id).map_or_else(
+                || id.to_owned(),
+                |s| arc_ui::resolve(localize, s.label(), &[]),
+            )
+        };
+        match entry {
+            ConsoleEntry::Message(error) => {
+                let args: Vec<(&str, arc_base::error::Value)> =
+                    error.args.iter().map(|(k, v)| (*k, v.clone())).collect();
+                let text = arc_ui::resolve(localize, error.message_id, &args);
+                if error.info {
+                    Self::Text(text)
+                } else {
+                    Self::Error(text)
+                }
+            }
+            ConsoleEntry::Typed(text) => Self::Text(arc_ui::resolve(
+                localize,
+                HISTORY_COMMAND.message_id,
+                &[("text", text.as_str().into())],
+            )),
+            ConsoleEntry::Started(id) => Self::Text(arc_ui::resolve(
+                localize,
+                HISTORY_COMMAND.message_id,
+                &[("text", name(id).into())],
+            )),
+            ConsoleEntry::Prompt(prompt, answer) => {
+                let mut text = arc_ui::prompt_text(prompt, localize);
+                if let Some(answer) = answer {
+                    if !text.ends_with(':') {
+                        text.push(':');
+                    }
+                    text.push(' ');
+                    text.push_str(answer);
+                }
+                Self::Text(text)
+            }
+            ConsoleEntry::Done(id) => Self::Text(arc_ui::resolve(
+                localize,
+                HISTORY_RAN.message_id,
+                &[("command", name(id).into())],
+            )),
         }
+    }
+}
+
+/// The text of an answer the viewport or the option bar gave, for the history; `None` for the
+/// answers that are points or objects, which the viewport shows itself.
+fn answer_text(input: &PromptInput) -> Option<String> {
+    match input {
+        PromptInput::Keyword(t) | PromptInput::Text(t) | PromptInput::Expression(t) => {
+            Some(t.clone())
+        }
+        PromptInput::Distance(d) => Some(d.to_string()),
+        PromptInput::Angle(a) => Some(a.to_degrees().to_string()),
+        _ => None,
     }
 }
 
@@ -2595,7 +2916,11 @@ fn show_console(ui: &mut Ui, lines: &[ConsoleLine], colors: &Colors) {
                     ConsoleLine::Text(t) => (t.as_str(), colors.text),
                     ConsoleLine::Error(t) => (t.as_str(), colors.error),
                 };
-                ui.add(egui::Label::new(egui::RichText::new(text).monospace().color(color)).wrap());
+                ui.add(
+                    egui::Label::new(egui::RichText::new(text).monospace().color(color))
+                        .wrap()
+                        .selectable(true),
+                );
             }
         });
 }
@@ -2645,15 +2970,19 @@ impl Panel for CommandLinePanel {
             let errors = view.console.iter();
             let mut pending = errors.peekable();
             for (index, line) in out.history.iter().enumerate() {
-                while let Some((_, e)) = pending.next_if(|(at, _)| *at <= index) {
-                    lines.push(ConsoleLine::error(e, cx.localize));
+                // Sequence numbers, so lines the controller dropped do not move the shell's.
+                let number = out
+                    .history_first
+                    .saturating_add(u64::try_from(index).unwrap_or(u64::MAX));
+                while let Some((_, e)) = pending.next_if(|(at, _)| *at <= number) {
+                    lines.push(ConsoleLine::of(e, cx.localize, registry));
                 }
                 if index >= skip {
                     lines.push(ConsoleLine::Text(line.clone()));
                 }
             }
             for (_, e) in pending {
-                lines.push(ConsoleLine::error(e, cx.localize));
+                lines.push(ConsoleLine::of(e, cx.localize, registry));
             }
             view.line_view.command.clone_from(&out.command);
             view.line_view.space_submits = !out.inline_arguments;
@@ -2684,7 +3013,7 @@ impl Panel for CommandLinePanel {
         let lines: Vec<ConsoleLine> = view
             .console
             .iter()
-            .map(|(_, e)| ConsoleLine::error(e, cx.localize))
+            .map(|(_, e)| ConsoleLine::of(e, cx.localize, registry))
             .collect();
         let localized = BTreeMap::new();
         let target = Target {
@@ -2914,6 +3243,17 @@ impl Panel for LogPanel {
 mod tests {
     use super::*;
     use arc_base::id::Identifier;
+
+    #[test]
+    fn the_shell_history_keeps_the_newest_lines() {
+        let mut lines = Vec::new();
+        for n in 0..MAX_CONSOLE + 10 {
+            push_bounded(&mut lines, 0, n);
+        }
+        assert_eq!(lines.len(), MAX_CONSOLE);
+        assert_eq!(lines.first().map(|l| l.1), Some(10));
+        assert_eq!(lines.last().map(|l| l.1), Some(MAX_CONSOLE + 9));
+    }
 
     #[test]
     fn selection_modes() {

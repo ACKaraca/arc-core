@@ -24,7 +24,7 @@ app-locale-catalog-too-large = { $tag } için ileti kataloğu çok büyük.
 app-locale-fallback-missing = Yedek dil { $tag } için katalog eksik.
 app-log-invalid-config = { $field } günlük ayarı geçerli değil.
 app-log-io = Günlük dosyasına yazılamadı.
-app-file-none-chosen = Dosya seçilmedi. Bu sistemde dosya penceresi açılmıyorsa komut satırına app.file.open path=<dosya> ya da app.file.save_as path=<dosya> yazın.
+app-file-none-chosen = Dosya seçilmedi. Bu sistemde dosya penceresi açılmıyorsa komut satırına { $command } path=<dosya> yazın.
 app-macro-write-failed = Makro dosyaya yazılamadı.
 app-recent-not-found = { $path } dosyası son kullanılanlar arasında yok.
 app-thumbnail-too-large = Önizleme resmi izin verilen boyuttan büyük.
@@ -89,6 +89,12 @@ app-command-macro-record-stop = Makro Kaydını Durdur
 app-command-macro-record-stop-description = Kaydı durdurur ve makroyu bir dosyaya kaydeder.
 
 app-dialog-unsaved = Bu belgede kaydedilmemiş değişiklikler var. Kapatmadan önce kaydedilsin mi?
+app-history-command = Komut: { $text }
+app-history-ran = Tamamlandı: { $command }
+app-history-cancel = *İptal*
+app-close-save = Kaydet
+app-close-discard = Kaydetme
+app-close-cancel = Vazgeç
 app-window-failed = Uygulama penceresi açılamadı.
 app-window-surface-failed = Grafik aygıtı uygulama penceresine çizim yapamıyor.
 
@@ -130,5 +136,5 @@ app-file-opened = { $name } açıldı
 app-file-saved = { $name } kaydedildi
 app-file-closed = { $name } kapatıldı
 app-file-closed-new = Belge kapatıldı.
-app-file-kept-open = Belge, kaydedilmemiş değişiklikleri olduğu için kapatılmadı. Önce kaydedin. Soru görüntülenmediyse bu sistemde iletişim penceresi yok: komut satırına app.file.save_as path=<dosya> yazarak kaydedin, sonra kapatın.
+app-file-kept-open = Belge, kaydedilmemiş değişiklikleri olduğu için kapatılmadı.
 app-tab-close = Bu belgeyi kapat

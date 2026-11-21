@@ -72,6 +72,11 @@ impl FileDialogs for FakeDialogs {
         self.save.clone()
     }
 
+    fn pick_path(&mut self, _: &arc_app::product::PathDialog, _: Option<&str>) -> Option<PathBuf> {
+        self.asked.push("path");
+        None
+    }
+
     fn ask_close(&mut self, _: &str) -> CloseAnswer {
         self.asked.push("close");
         self.close.unwrap_or(CloseAnswer::Cancel)
