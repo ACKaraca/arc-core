@@ -746,6 +746,7 @@ Module `hooks` (feature `viewport`). A product gives the viewport a `ProductInpu
   (a click with a point prompt active) and the `model` of every `PointerEvent` lie on, such as a
   storey's level plane. `None` is the plane through the camera target that faces the eye.
   `gesture::work_point(frame, width, height, pixel, &plane)` is the intersection.
+- `DynamicField` has `Default`. `escape_cancels` makes Escape in the field a `DynamicEvent::Cancel` (consumed, so the shell does not also clear the selection); `select_all` selects the field's text when it gains the focus, so typing replaces it.
 - `PointerHandler::pointer(&mut self, &PointerEvent) -> bool` receives `PointerEvent`s before the
   widget's own handling. Its kinds are `Move`, `Press`, `Release` and `Click` (a primary press and
   release without a drag beyond the drag threshold). Each event carries the button (`None` for a
@@ -756,6 +757,14 @@ Module `hooks` (feature `viewport`). A product gives the viewport a `ProductInpu
   - A move is offered only while the widget holds no press (a band or pan in progress).
   - A press the handler consumes belongs to the handler: its release is offered to the handler,
     and the widget does not see it.
+  - A product claims a press by consuming its `Press` (it decides from the pixel, the model point
+    and the modifiers: whether the pointer is on a handle or an object it drags). The drag then
+    belongs to the product: the widget starts no rubber band, every move and the release are
+    offered with their modifiers and model point, and a release within the drag threshold is also
+    offered as a `Click`. Escape while the product holds a claimed press is consumed by the
+    widget (no selection is cleared and the release after it is offered to nobody); the product
+    learns of the cancel through `ViewportOutput::claim_cancelled` (the shell then sends the controller `Cancel` and leaves the keyboard focus in the viewport). `ViewportWidget::holds_product_press` says whether a claimed press is held. A press the product does not claim starts a
+    band as before, so a product that claims nothing behaves as without a handler.
   - A press the handler does not consume goes to the widget. Its release is offered to the handler
     too, but a consumed release does not stop the widget; a click the handler consumes ends the
     widget's press without an answer.

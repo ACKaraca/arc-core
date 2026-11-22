@@ -207,7 +207,7 @@ pub const MAX_FIELDS: usize = 8;
 
 /// A field a product supplies to the dynamic input. The product owns the text and the lock: the
 /// widget shows what it is given and reports what the user does.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DynamicField {
     /// The label's message identifier.
     pub label: String,
@@ -217,6 +217,11 @@ pub struct DynamicField {
     pub locked: bool,
     /// Whether the field takes the keyboard focus this frame.
     pub focused: bool,
+    /// Whether the text is selected when the field gains the focus, so typing replaces it.
+    pub select_all: bool,
+    /// Whether Escape in the field is consumed and reported as [`DynamicEvent::Cancel`]. Off,
+    /// Escape is left to the shell.
+    pub escape_cancels: bool,
 }
 
 /// What the user did in the dynamic input, for the product to apply.
@@ -228,6 +233,11 @@ pub enum DynamicEvent {
         index: usize,
         /// The new text.
         text: String,
+    },
+    /// Escape in field `index`, which asked for it with [`DynamicField::escape_cancels`].
+    Cancel {
+        /// The field the key was pressed in.
+        index: usize,
     },
     /// Tab in field `index`: the product moves the focus.
     Tab {
@@ -275,6 +285,16 @@ pub fn show_fields(
             }
         }
     }
+    // egui drops the focus at the start of a pass in which Escape is pressed, so the field that
+    // had it in the previous frame is the one Escape was pressed in.
+    let focus_id = Id::unique("arc-dynamic-input-fields-focus");
+    let was = ctx.data(|d| d.get_temp::<usize>(focus_id));
+    if let Some(index) = was
+        && fields.get(index).is_some_and(|f| f.escape_cancels)
+        && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+    {
+        keys.push(DynamicEvent::Cancel { index });
+    }
     let position = place(pointer, size, viewport);
     let response = Area::new(Id::unique("arc-dynamic-input-fields"))
         .order(Order::Foreground)
@@ -297,6 +317,18 @@ pub fn show_fields(
                         if field.focused && !edit.has_focus() {
                             edit.request_focus();
                         }
+                        if field.select_all && edit.gained_focus() {
+                            let mut state = egui::TextEdit::load_state(ui.ctx(), field_id(index))
+                                .unwrap_or_default();
+                            let end = egui::text::CCursor::new(text.chars().count());
+                            state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::two(
+                                    egui::text::CCursor::new(0),
+                                    end,
+                                )));
+                            state.store(ui.ctx(), field_id(index));
+                        }
                         if edit.changed() {
                             events.push(DynamicEvent::Edited { index, text });
                         }
@@ -306,6 +338,14 @@ pub fn show_fields(
         })
         .response;
     ctx.data_mut(|d| d.insert_temp(size_id, response.rect.size()));
+    let now = ctx.memory(|m| ids.iter().position(|id| m.has_focus(*id)));
+    ctx.data_mut(|d| {
+        if let Some(index) = now {
+            d.insert_temp(focus_id, index);
+        } else {
+            d.remove::<usize>(focus_id);
+        }
+    });
     let name = messages::DYNAMIC_INPUT.text(localize);
     response.widget_info(|| WidgetInfo::labeled(Role::Group, true, name.as_str()));
     keys.extend(events);

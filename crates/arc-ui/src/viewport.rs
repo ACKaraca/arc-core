@@ -186,6 +186,8 @@ pub struct ViewportOutput {
     pub dynamic: Vec<DynamicEvent>,
     /// The model point under the pointer, when it is over the viewport.
     pub pointer_model: Option<Point3>,
+    /// Escape ended a press the product had claimed this frame; the product cancels its gesture.
+    pub claim_cancelled: bool,
 }
 
 /// What the viewport draws under the scene and over it: the grid, the axes with the origin
@@ -236,6 +238,8 @@ pub struct ViewportWidget {
     press_start: Option<(egui::PointerButton, [f64; 2])>,
     /// The button a product consumed the press of; its events are the product's until release.
     product_press: Option<egui::PointerButton>,
+    /// Escape ended a claimed press since the last frame's output.
+    claim_cancelled: bool,
 }
 
 impl ViewportWidget {
@@ -252,6 +256,12 @@ impl ViewportWidget {
             link: Some(link),
             ..Self::default()
         }
+    }
+
+    /// Whether the product holds a claimed press (a drag it owns) right now.
+    #[must_use]
+    pub fn holds_product_press(&self) -> bool {
+        self.product_press.is_some()
     }
 
     /// The gesture state.
@@ -336,11 +346,13 @@ impl ViewportWidget {
             projection: ViewProjection::new(frame, size[0], size[1]).with_work_plane(work_plane),
             dynamic: Vec::new(),
             pointer_model: None,
+            claim_cancelled: false,
         };
         let moved_here = self.route(&mut view, &events, &mut handler, modifiers, scale, &mut out);
         if moved_here && let Some(link) = &self.link {
             self.seen = link.publish(view.frame);
         }
+        out.claim_cancelled = std::mem::take(&mut self.claim_cancelled);
         out.hover = self.gestures.hover();
         out.projection =
             ViewProjection::new(view.frame, size[0], size[1]).with_work_plane(work_plane);
@@ -470,6 +482,16 @@ impl ViewportWidget {
                 if is_click(press, button, at, DRAG_THRESHOLD * scale) {
                     send(PointerKind::Click, Some(button), at);
                 }
+                true
+            }
+            ViewEvent::Key {
+                key: egui::Key::Escape,
+                ..
+            } if self.product_press.is_some() => {
+                // Escape ends the product's press: the widget neither clears the selection nor
+                // answers the release, and the product learns of it as the shell's cancel.
+                self.product_press = None;
+                self.claim_cancelled = true;
                 true
             }
             ViewEvent::Released { at, button } if self.gestures.is_pressed() => {
@@ -897,6 +919,43 @@ pub fn band_overlay(band: &Band, colors: &Colors, scale: f64) -> Overlay {
 mod tests {
     use super::*;
     use crate::theme::ThemeId;
+
+    struct Claim;
+
+    impl PointerHandler for Claim {
+        fn pointer(&mut self, _: &PointerEvent) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn escape_ends_a_claimed_press_and_its_release_belongs_to_nobody() {
+        let frame = crate::gesture::tests::top();
+        let projection = ViewProjection::new(frame, 100, 100);
+        let mut widget = ViewportWidget::new();
+        let mut claim = Claim;
+        let mut handler: Option<&mut dyn PointerHandler> = Some(&mut claim);
+        let mut offer = |event: ViewEvent| {
+            widget.offer(&mut handler, &projection, Modifiers::NONE, &event, 1.0)
+        };
+        let button = egui::PointerButton::Primary;
+        assert!(offer(ViewEvent::Pressed {
+            at: [10.0, 10.0],
+            button,
+            modifiers: Modifiers::NONE,
+            time: 0.0,
+        }));
+        assert!(offer(ViewEvent::Key {
+            key: egui::Key::Escape,
+            modifiers: Modifiers::NONE,
+        }));
+        assert!(!offer(ViewEvent::Released {
+            at: [50.0, 50.0],
+            button,
+        }));
+        assert!(widget.claim_cancelled);
+        assert!(!widget.holds_product_press());
+    }
 
     #[test]
     fn grid_spacing_steps_in_one_two_five_and_keeps_lines_apart() {

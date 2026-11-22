@@ -753,6 +753,74 @@ mod tests {
         assert!(recorder.seen.iter().any(|e| e.kind == PointerKind::Release));
     }
 
+    fn button(at: Pos2, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn a_claimed_press_delivers_its_drag_and_the_unclaimed_one_starts_a_band() {
+        let ctx = egui::Context::default();
+        let (from, to) = (Pos2::new(10.0, 10.0), Pos2::new(90.0, 90.0));
+        // Claimed: every move of the drag and the release reach the handler; no band.
+        let mut widget = ViewportWidget::new();
+        let mut picker = Fake::new(&[]);
+        let mut recorder = Recorder {
+            consume: true,
+            seen: Vec::new(),
+        };
+        let drag = vec![button(from, true), Event::PointerMoved(to)];
+        let (_, _) = frame_with(
+            &ctx,
+            drag,
+            &mut widget,
+            &mut picker,
+            Some(&mut recorder),
+            &[],
+            None,
+        );
+        assert!(widget.gestures().band().is_none());
+        let moves = recorder
+            .seen
+            .iter()
+            .filter(|e| e.kind == PointerKind::Move)
+            .count();
+        assert!(moves >= 1, "the drag's moves reach the handler");
+        let (_, _) = frame_with(
+            &ctx,
+            vec![button(to, false)],
+            &mut widget,
+            &mut picker,
+            Some(&mut recorder),
+            &[],
+            None,
+        );
+        let last = recorder.seen.last().expect("the release");
+        assert_eq!(last.kind, PointerKind::Release);
+        assert!(last.pixel[0] > 80.0);
+        // Unclaimed: the same drag is a band.
+        let mut widget = ViewportWidget::new();
+        let mut recorder = Recorder {
+            consume: false,
+            seen: Vec::new(),
+        };
+        let drag = vec![button(from, true), Event::PointerMoved(to)];
+        let (_, _) = frame_with(
+            &ctx,
+            drag,
+            &mut widget,
+            &mut picker,
+            Some(&mut recorder),
+            &[],
+            None,
+        );
+        assert!(widget.gestures().band().is_some());
+    }
+
     #[test]
     fn a_consumed_move_does_not_preselect() {
         let ctx = egui::Context::default();
@@ -1010,6 +1078,7 @@ mod tests {
             text: String::new(),
             locked: false,
             focused: true,
+            ..DynamicField::default()
         }];
         let prompt = "prompt-point";
         let viewport = Rect::from_min_size(Pos2::ZERO, vec2(100.0, 100.0));
@@ -1056,6 +1125,50 @@ mod tests {
     }
 
     #[test]
+    fn escape_in_a_field_that_asks_for_it_is_reported_and_consumed() {
+        let ctx = egui::Context::default();
+        let fields = [DynamicField {
+            label: "label-distance".into(),
+            text: "5".into(),
+            focused: true,
+            escape_cancels: true,
+            ..DynamicField::default()
+        }];
+        let viewport = Rect::from_min_size(Pos2::ZERO, vec2(100.0, 100.0));
+        let show = |events: Vec<Event>, cancels: bool| {
+            let mut got = Vec::new();
+            let mut fields = fields.clone();
+            fields[0].escape_cancels = cancels;
+            let mut run = ctx.run_ui(screen(events), |ui| {
+                got = crate::dynamic_input::show_fields(
+                    ui.ctx(),
+                    &NoText,
+                    "prompt-point",
+                    viewport,
+                    Pos2::new(50.0, 50.0),
+                    &fields,
+                );
+            });
+            run.textures_delta.clear();
+            got
+        };
+        // The first frame gives the field the focus.
+        let _ = show(Vec::new(), true);
+        let escape = |pressed| Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        let events = show(vec![escape(true)], true);
+        assert!(events.contains(&DynamicEvent::Cancel { index: 0 }));
+        // A field that does not ask leaves Escape to the shell.
+        let events = show(vec![escape(true)], false);
+        assert!(!events.contains(&DynamicEvent::Cancel { index: 0 }));
+    }
+
+    #[test]
     fn the_viewport_passes_dynamic_input_through_its_output() {
         let ctx = egui::Context::default();
         let mut widget = ViewportWidget::new();
@@ -1065,6 +1178,7 @@ mod tests {
             text: "2".into(),
             locked: true,
             focused: true,
+            ..DynamicField::default()
         }];
         let panel = DynamicPanel {
             prompt: "prompt-point",

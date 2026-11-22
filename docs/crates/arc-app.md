@@ -805,7 +805,7 @@ it is registered. Without a registration the shell behaves as before.
 
 - `Interaction` (`Send`) has five methods, called on the shell's frame: `pointer(cx, &PointerEvent)
   -> bool` for each viewport pointer event before the widget handles it (`true` consumes it),
-  `dynamic(cx, &DynamicEvent)` for dynamic input edits, `line(cx, LineAction) -> Result<()>` for
+  `dynamic(cx, &DynamicEvent)` for dynamic input edits, `frame(cx)` once per viewport frame before `output` is read (default no-op; it refreshes what the controller derives from the document and selection, and must not change the document), `line(cx, LineAction) -> Result<()>` for
   every action of the command panel (a submitted line or option, Escape as `Cancel`, `Back` or
   `ClearInput`, undo and redo as `Invoke` or `CancelThen`, and repeat), and `output(&self) ->
   InteractionOutput` for what the shell shows. `closing(cx)` has a default no-op. The shell calls
@@ -829,7 +829,9 @@ it is registered. Without a registration the shell behaves as before.
   and `DynamicField`s, shown beside the pointer) and `selection` (`Option<Vec<ObjectId>>`: the
   objects of the controller's own that the viewport highlights and counts; `None`, the default,
   shows the tab's selection, which follows a click, Escape or a command at once, and the shell then
-  also sets `status.has_selection` from it, so Escape on a selection clears it).
+  also sets `status.has_selection` from it, so Escape on a selection clears it) and `pointer_icon`
+  (`Option<egui::CursorIcon>`, default `None`: the viewport keeps the crosshair; a value hides the
+  crosshair over the viewport and sets that mouse pointer, for example a resize arrow over a handle).
 - `InteractionContext` gives what a controller needs: `document()` (the tab's `arc_doc::Document`),
   `invoke(Invocation)` (a document command, seeing the tab's selection when it names none, through `Application::invoke` in the shell's command
   session), `session()`, `read_only()`, `selection()` (the tab's shell selection), `document_path()` (the file of the tab's document, `None`

@@ -1298,7 +1298,25 @@ impl Shell {
         if main && let Some(view) = active.and_then(|t| self.views.get_mut(&t)) {
             let focused = ctx.memory(|m| m.focused());
             let other = focused.is_some() && focused != view.widget.id;
-            if chrome::wants_command_line(&input.raw.events, ctx.text_edit_focused(), other) {
+            // Escape ends a claimed drag where it is: the focus stays in the viewport.
+            let dragging = view.widget.holds_product_press();
+            let events: Vec<egui::Event> = input
+                .raw
+                .events
+                .iter()
+                .filter(|e| {
+                    !(dragging
+                        && matches!(
+                            e,
+                            egui::Event::Key {
+                                key: egui::Key::Escape,
+                                ..
+                            }
+                        ))
+                })
+                .cloned()
+                .collect();
+            if chrome::wants_command_line(&events, ctx.text_edit_focused(), other) {
                 view.line_view.take_focus = true;
             }
         }
@@ -2387,10 +2405,6 @@ impl Panel for ViewportPanel {
         } = view;
         // With a controller the controller's prompt and overlays are the viewport's; its
         // selection is too, when it reports one of its own.
-        let frame = match (interaction.as_deref(), cx.tab) {
-            (Some(controller), Some(_)) => Some(controller_output(controller, selection)),
-            _ => None,
-        };
         let controlled = cx
             .tab
             .map(|tab| controller_session(cx.app, tab, cx.language));
@@ -2404,6 +2418,15 @@ impl Panel for ViewportPanel {
                 cx.language,
             )
         });
+        // The controller sees the document and the selection as they are this frame before it
+        // says what to show, so overlays follow an undo or a selection made elsewhere.
+        if let (Some(controller), Some(icx)) = (interaction.as_deref_mut(), icx.as_ref()) {
+            controller.frame(icx);
+        }
+        let frame = match (interaction.as_deref(), cx.tab) {
+            (Some(controller), Some(_)) => Some(controller_output(controller, selection)),
+            _ => None,
+        };
         let prompt = match frame {
             Some(_) => None,
             None => line.active().and_then(|s| s.prompt()),
@@ -2469,6 +2492,9 @@ impl Panel for ViewportPanel {
                 product,
             },
         );
+        if out.claim_cancelled {
+            cx.actions.push(Action::Line(LineAction::Cancel));
+        }
         if hook.as_ref().is_some_and(|h| h.used) {
             ui.ctx().request_repaint();
         }
@@ -2516,6 +2542,7 @@ impl Panel for ViewportPanel {
             camera,
             (cx.localize, cx.colors),
             at,
+            frame.as_ref().and_then(|f| f.pointer_icon),
             cx.actions,
         );
         *cursor = out.pointer_model.map(|p| resolved.unwrap_or([p.x, p.y]));
@@ -2560,6 +2587,7 @@ fn cube_and_crosshair(
     camera: &mut ViewFrame,
     (localize, colors): (&dyn Localize, &Colors),
     at: Option<egui::Pos2>,
+    icon: Option<egui::CursorIcon>,
     actions: &mut Vec<Action>,
 ) {
     let cube = ViewCubeInput {
@@ -2589,7 +2617,10 @@ fn cube_and_crosshair(
         && rect.contains(pointer)
     {
         let pointer = at.filter(|p| rect.contains(*p)).unwrap_or(pointer);
-        arc_ui::paint_crosshair(ui, *rect, colors, pointer);
+        match icon {
+            Some(icon) => ui.ctx().set_cursor_icon(icon),
+            None => arc_ui::paint_crosshair(ui, *rect, colors, pointer),
+        }
     }
 }
 

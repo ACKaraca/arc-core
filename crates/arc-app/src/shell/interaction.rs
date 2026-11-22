@@ -45,6 +45,11 @@ pub trait Interaction: Send {
     /// it. Returns `true` when the event is consumed.
     fn pointer(&mut self, cx: &InteractionContext<'_>, event: &PointerEvent) -> bool;
 
+    /// Called once per frame of the tab's viewport, before [`Self::output`] is read, with the
+    /// document and selection of this frame. A controller refreshes what it derives from them
+    /// here (handles, highlights). The default does nothing. It must not change the document.
+    fn frame(&mut self, _cx: &InteractionContext<'_>) {}
+
     /// An edit of the dynamic input fields the controller supplied.
     fn dynamic(&mut self, cx: &InteractionContext<'_>, event: &DynamicEvent);
 
@@ -150,6 +155,10 @@ pub struct InteractionOutput {
     /// by the number dropped, so the lines the shell keeps among them (typed commands, prompts)
     /// stay where they were. The default is 0.
     pub history_first: u64,
+    /// The mouse pointer the viewport shows over the drawing (a resize or grab arrow over a
+    /// handle, for example). `None` (the default) keeps the crosshair; a value hides the crosshair
+    /// and sets this icon.
+    pub pointer_icon: Option<arc_ui::egui::CursorIcon>,
     /// The controller writes the completion and cancel lines itself. The default is false: the
     /// shell adds `Done: <command>` for each command the controller ran through
     /// [`InteractionContext::invoke`] and `*Cancel*` for Escape at a prompt.

@@ -508,6 +508,8 @@ fn factories_of_the_wrong_type_are_reported() {
 struct Seen {
     lines: Vec<String>,
     clicks: usize,
+    /// The `frame` calls the controller got.
+    frames: usize,
     /// For each pointer event: whether the tab is read-only and whether the session has `edit`.
     access: Vec<(bool, bool)>,
     /// For each `closing` call: the tab and whether its document was still open.
@@ -543,6 +545,12 @@ impl shell::Interaction for FakeController {
             return true;
         }
         false
+    }
+
+    fn frame(&mut self, cx: &shell::InteractionContext<'_>) {
+        if cx.document().is_ok() {
+            self.seen.lock().unwrap().frames += 1;
+        }
     }
 
     fn dynamic(&mut self, _: &shell::InteractionContext<'_>, _: &DynamicEvent) {}
@@ -681,6 +689,8 @@ fn a_registered_controller_owns_the_command_panel_option_bar_and_viewport_clicks
         false,
     );
     assert_eq!(seen.lock().unwrap().clicks, 1);
+    // The controller was given every frame of the viewport, with the document open.
+    assert!(seen.lock().unwrap().frames >= 3);
 
     // The option button submits its identifier to the controller.
     frame(&mut shell, &mut app, &ctx, click(option), Vec::new(), false);
