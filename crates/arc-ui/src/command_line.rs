@@ -216,6 +216,9 @@ pub struct CommandLineView {
     /// Moves keyboard focus to the input field in the next pass; cleared by [`Self::show_with`].
     /// A host sets it when the user types outside any text field.
     pub take_focus: bool,
+    /// Another text field had the keyboard focus when the frame began: Enter and Escape that field
+    /// gave up in this frame are not the line's. A host sets it before each frame.
+    pub defer_keys: bool,
     highlighted: Option<usize>,
     recall: Option<(String, usize)>,
 }
@@ -319,7 +322,7 @@ impl CommandLineView {
         }
         let focused = ui.memory(|m| m.focused());
         let in_field = focused == Some(id);
-        let ours = in_field || focused.is_none();
+        let ours = in_field || (focused.is_none() && !self.defer_keys);
         let shown = completion.candidates.len().min(MAX_SHOWN_CANDIDATES);
         let mut action = None;
         if in_field {

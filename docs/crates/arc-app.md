@@ -862,6 +862,40 @@ it is registered. Without a registration the shell behaves as before.
   toolbar button start a tool the same way (the commands of panels, such as the property grid's
   edit and a click's selection command, still run on the shell's command line); a controller maps
   `Invoke` of a command that needs prompts to the start of its own prompts.
+- Keys over the viewport. `Interaction::key(cx, &KeyInput) -> KeyReply` (default `Pass`) is offered, on
+  the frame and after the shell's key bindings, the Tab key, key presses with the command key that
+  no binding took (the platform's copy, cut and paste events arrive as `C`, `X` and `V` with the
+  command key) and typed text, while the pointer is over the viewport or the viewport has the focus
+  and no text field has it. `Consumed` removes the event from the frame, `Text(s)` replaces typed
+  text (what a controller held back, for the command line), `Pass` leaves it: typing then starts the
+  command line as before. `KeyInput` and `KeyReply` are `non_exhaustive`.
+- Command-line text. `Interaction::input_changed(cx, text) -> Option<LineAction>` (default `None`) is
+  offered the text typed in the command line every frame while it is not empty; an action it returns
+  is sent to `line` and the shell clears the input, so a controller can complete a shortcut as it
+  is typed. Typing over the viewport reaches the command line as before (the controller passes
+  it). Tab over the viewport is offered to `key` even while a text field has the focus. Escape on an
+  empty command line gives the focus to the viewport. An Enter or Escape that another text field gave
+  up in the frame is not the command line's (`CommandLineView::defer_keys`).
+- Context menu. `Interaction::context_menu(&self, cx) -> Vec<ContextEntry>` (default empty) is asked
+  every frame while a menu opened by a secondary click over the viewport is shown; an empty list
+  opens no menu, so a controller without entries keeps handling the secondary button itself. A `ContextEntry` has a message identifier, a `LineAction` (Enter is
+  `Submit(String::new())`, Cancel is `Cancel`, a command is `Invoke(intent)`), `enabled` and a
+  separator flag, and the constructors `new`, `command`, `separator` and `disabled`. Choosing an
+  entry sends its action to `line`.
+- Display state and banner. `InteractionOutput::hidden` (default empty) lists objects the viewport
+  does not draw and does not pick; `isolated` (default `None`) lists the only objects it draws and
+  picks. The shell hands them to the renderer as display overrides (`arc-gpu`) and filters the hits
+  of its own picking by them. `banner` (default `None`) is a text, already localized, shown in a
+  frame around the viewport with a label at its top left corner while a temporary display state is
+  active. None of this is saved.
+- `InteractionContext` also has `setting(key) -> Option<SettingValue>` (the effective value),
+  `ask_setting(key, Option<SettingValue>)` (set in the user scope, or remove from it, after the call;
+  at most 16 per call), `ask_panel(panel)` (show a panel, or bring it to the front of its group)
+  and `ask_clipboard_text(text)` (put at most 4096 bytes on the operating system clipboard when the
+  frame ends; a controller that keeps its own clipboard does this on copy, because the platform
+  reports a paste shortcut only while the system clipboard holds something).
+- `PointerKind::DoubleClick` reaches `pointer` after the second click of a double click (see
+  [arc-ui](arc-ui.md)).
 - `InteractionOutput::inline_arguments` (default `false`): the command line ends the input at a
   space like Enter (one-letter commands, keyword answers); `true` keeps the space as text so an idle
   line takes inline arguments such as `app.file.open path=<file>`.
@@ -887,8 +921,9 @@ it is registered. Without a registration the shell behaves as before.
   - The controller's session carries `app.language`; the foundation's parsers read `.` as the
     decimal separator whatever the language, so a product that accepts a decimal comma converts it
     itself where the prompt cannot be a point (a point's coordinates are separated by `,`).
-- Not verified here: a registered controller through a real window, and the option bar's layout
-  with a long option list.
+- Verified through a real window with a product controller: Tab, typed text and the paste shortcut
+  over the viewport, the context menu, double click and the banner. Not verified here: the option
+  bar's layout with a long option list.
 
 ### Frame composition (CORE-APP-025, feature `window`)
 

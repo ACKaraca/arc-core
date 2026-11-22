@@ -527,6 +527,14 @@ struct Seen {
     leaves_edit_to_shell: bool,
     /// The controller's history and the sequence number of its first line, when set.
     history: Option<(u64, Vec<String>)>,
+    /// The Escape actions (`Cancel`) the controller got.
+    cancels: usize,
+    /// The double clicks the controller was told of.
+    doubles: usize,
+    /// The keys and typed text the controller was offered.
+    keys: Vec<(Option<egui::Key>, Option<String>)>,
+    /// The labels of the context menu the controller offers; none opens no menu.
+    menu: Vec<String>,
 }
 
 /// A controller that keeps a prompt, one option and one history line, consumes viewport clicks
@@ -540,6 +548,9 @@ impl shell::Interaction for FakeController {
         let mut seen = self.seen.lock().unwrap();
         let edit = cx.session().permissions.contains(&Permission::Edit);
         seen.access.push((cx.read_only(), edit));
+        if event.kind == PointerKind::DoubleClick {
+            seen.doubles += 1;
+        }
         if event.kind == PointerKind::Click {
             seen.clicks += 1;
             return true;
@@ -554,6 +565,38 @@ impl shell::Interaction for FakeController {
     }
 
     fn dynamic(&mut self, _: &shell::InteractionContext<'_>, _: &DynamicEvent) {}
+
+    fn key(
+        &mut self,
+        _: &shell::InteractionContext<'_>,
+        input: &shell::KeyInput,
+    ) -> shell::KeyReply {
+        self.seen
+            .lock()
+            .unwrap()
+            .keys
+            .push((input.key, input.text.clone()));
+        match (input.key, input.text.as_deref()) {
+            (Some(egui::Key::Tab), _) | (None, Some("w")) => shell::KeyReply::Consumed,
+            (None, Some("x")) => shell::KeyReply::Text("xy".into()),
+            _ => shell::KeyReply::Pass,
+        }
+    }
+
+    fn input_changed(
+        &mut self,
+        _: &shell::InteractionContext<'_>,
+        text: &str,
+    ) -> Option<LineAction> {
+        (text == "q").then(|| LineAction::Submit("resolved".into()))
+    }
+
+    fn context_menu(&self, _: &shell::InteractionContext<'_>) -> Vec<shell::ContextEntry> {
+        let menu = self.seen.lock().unwrap().menu.clone();
+        menu.iter()
+            .map(|label| shell::ContextEntry::command(label.clone(), "test.menu"))
+            .collect()
+    }
 
     fn handles(&self, command: &str) -> bool {
         !self.seen.lock().unwrap().leaves_edit_to_shell
@@ -586,6 +629,7 @@ impl shell::Interaction for FakeController {
             }
             LineAction::Submit(text) => seen.lines.push(text),
             LineAction::Invoke(intent) => seen.invoked.push(intent.command),
+            LineAction::Cancel => seen.cancels += 1,
             _ => {}
         }
         Ok(())
@@ -1316,4 +1360,208 @@ fn a_command_that_changed_the_document_says_it_is_done_and_escape_at_a_prompt_sa
         "{:?}",
         labels(&run.nodes)
     );
+}
+
+#[test]
+fn keys_over_the_viewport_go_to_the_controller() {
+    let (_dir, seen, mut app, mut shell, ctx) = controlled("keys", &[]);
+    // Away from the viewport (over the command line) nothing is offered.
+    let typed = |text: &str| egui::Event::Text(text.into());
+    let tab = key(egui::Key::Tab, egui::Modifiers::NONE);
+    let low = egui::pos2(400.0, 590.0);
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        vec![egui::Event::PointerMoved(low)],
+        Vec::new(),
+        false,
+    );
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        vec![tab.clone()],
+        Vec::new(),
+        false,
+    );
+    assert!(seen.lock().unwrap().keys.is_empty());
+
+    // Over the viewport the controller is offered Tab and the typed text, in order.
+    let over = egui::pos2(200.0, 200.0);
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        vec![egui::Event::PointerMoved(over)],
+        Vec::new(),
+        false,
+    );
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        vec![tab, typed("w"), typed("x"), typed("q")],
+        Vec::new(),
+        false,
+    );
+    let keys = seen.lock().unwrap().keys.clone();
+    assert_eq!(
+        keys,
+        [
+            (Some(egui::Key::Tab), None),
+            (None, Some("w".into())),
+            (None, Some("x".into())),
+            (None, Some("q".into())),
+        ]
+    );
+}
+
+#[test]
+fn the_platforms_copy_and_paste_events_reach_the_controller_as_keys() {
+    let (_dir, seen, mut app, mut shell, ctx) = controlled("copy", &[]);
+    let over = egui::pos2(200.0, 200.0);
+    let moved = vec![egui::Event::PointerMoved(over)];
+    frame(&mut shell, &mut app, &ctx, moved, Vec::new(), false);
+    let events = vec![egui::Event::Copy, egui::Event::Paste("x".into())];
+    frame(&mut shell, &mut app, &ctx, events, Vec::new(), false);
+    assert_eq!(
+        seen.lock().unwrap().keys,
+        [(Some(egui::Key::C), None), (Some(egui::Key::V), None)]
+    );
+}
+
+/// A controlled shell with an open document, whose controller offers the context menu `menu`.
+fn controlled(
+    name: &str,
+    menu: &[&str],
+) -> (TempDir, Arc<Mutex<Seen>>, Application, Shell, egui::Context) {
+    let dir = TempDir::new(name);
+    let seen = Arc::new(Mutex::new(Seen {
+        idle: true,
+        menu: menu.iter().map(|m| (*m).to_owned()).collect(),
+        ..Seen::default()
+    }));
+    let mut app = app_with(&dir.0, false, Some(seen.clone()));
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    open_new_document(&mut shell, &mut app, &ctx);
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    (dir, seen, app, shell, ctx)
+}
+
+#[test]
+fn a_secondary_click_opens_the_controllers_menu_and_a_double_click_reaches_it() {
+    let (_dir, seen, mut app, mut shell, ctx) = controlled("menu", &["test-enter", "test-cancel"]);
+    let over = egui::pos2(200.0, 200.0);
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        vec![egui::Event::PointerMoved(over)],
+        Vec::new(),
+        false,
+    );
+    // A secondary click opens the menu; choosing an entry reaches the controller as a command.
+    let secondary = |pressed| egui::Event::PointerButton {
+        pos: over,
+        button: egui::PointerButton::Secondary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        vec![secondary(true), secondary(false)],
+        Vec::new(),
+        false,
+    );
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    assert!(shows(&run.nodes, "test-cancel"));
+    // Escape closes the menu and is nothing else: the controller gets no Cancel from it.
+    let escape = key(egui::Key::Escape, egui::Modifiers::NONE);
+    frame(&mut shell, &mut app, &ctx, vec![escape], Vec::new(), false);
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    assert!(!shows(&run.nodes, "test-cancel"));
+    assert_eq!(seen.lock().unwrap().cancels, 0);
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        vec![secondary(true), secondary(false)],
+        Vec::new(),
+        false,
+    );
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    let entry = button(&run.nodes, "test-enter");
+    frame(&mut shell, &mut app, &ctx, click(entry), Vec::new(), false);
+    assert_eq!(seen.lock().unwrap().invoked, ["test.menu"]);
+
+    // Two quick primary clicks at one place are told as a double click after the second click.
+    let elsewhere = egui::pos2(500.0, 300.0);
+    let primary = |pressed| egui::Event::PointerButton {
+        pos: elsewhere,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let events = vec![
+        egui::Event::PointerMoved(elsewhere),
+        primary(true),
+        primary(false),
+    ];
+    frame(&mut shell, &mut app, &ctx, events, Vec::new(), false);
+    assert_eq!(seen.lock().unwrap().doubles, 0);
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        vec![primary(true), primary(false)],
+        Vec::new(),
+        false,
+    );
+    assert_eq!(seen.lock().unwrap().doubles, 1);
+
+    // A controller without entries opens no menu.
+    seen.lock().unwrap().menu.clear();
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        vec![secondary(true), secondary(false)],
+        Vec::new(),
+        false,
+    );
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    assert!(!shows(&run.nodes, "test-cancel"));
+}
+
+#[test]
+fn text_typed_in_the_command_line_can_be_resolved_at_once_by_the_controller() {
+    let (_dir, seen, mut app, mut shell, ctx) = controlled("resolve", &[]);
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        click(text_input(&run.nodes)),
+        Vec::new(),
+        false,
+    );
+    frame(
+        &mut shell,
+        &mut app,
+        &ctx,
+        vec![egui::Event::Text("q".into())],
+        Vec::new(),
+        false,
+    );
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    assert_eq!(seen.lock().unwrap().lines, ["resolved"]);
+    // The input was cleared: a later frame does not resolve it again.
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    assert_eq!(seen.lock().unwrap().lines.len(), 1);
 }

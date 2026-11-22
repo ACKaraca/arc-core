@@ -748,8 +748,10 @@ Module `hooks` (feature `viewport`). A product gives the viewport a `ProductInpu
   `gesture::work_point(frame, width, height, pixel, &plane)` is the intersection.
 - `DynamicField` has `Default`. `escape_cancels` makes Escape in the field a `DynamicEvent::Cancel` (consumed, so the shell does not also clear the selection); `select_all` selects the field's text when it gains the focus, so typing replaces it.
 - `PointerHandler::pointer(&mut self, &PointerEvent) -> bool` receives `PointerEvent`s before the
-  widget's own handling. Its kinds are `Move`, `Press`, `Release` and `Click` (a primary press and
-  release without a drag beyond the drag threshold). Each event carries the button (`None` for a
+  widget's own handling. Its kinds are `Move`, `Press`, `Release`, `Click` (a primary press and
+  release without a drag beyond the drag threshold) and `DoubleClick` (the primary button clicked twice
+  in quick succession at one place; it follows the second `Click`, is a notification and its return
+  value is ignored). Each event carries the button (`None` for a
   move), the modifiers, the pixel, the model point (`None` when the pixel has none) and
   `pixels_per_unit`, so a product converts a pixel aperture to model units by dividing by it.
   Returning `true` consumes the event; the widget then does not handle it, so no selection, prompt

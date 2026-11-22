@@ -22,6 +22,7 @@
 pub mod chrome;
 pub mod event_loop;
 pub mod interaction;
+mod over_viewport;
 pub mod platform;
 pub mod prefs;
 pub mod prompts;
@@ -31,7 +32,8 @@ pub use chrome::{
     ToolItem, WorkPlaneProbe,
 };
 pub use interaction::{
-    DynamicOutput, Interaction, InteractionContext, InteractionOutput, ViewRequest,
+    ContextEntry, DynamicOutput, Interaction, InteractionContext, InteractionOutput, KeyInput,
+    KeyReply, ViewRequest,
 };
 
 use std::collections::BTreeMap;
@@ -371,6 +373,11 @@ pub struct View {
     console: Vec<(u64, ConsoleEntry)>,
     /// The prompt the history last showed, so a change of prompt adds one line.
     shown_prompt: Option<arc_command::prompt::Prompt>,
+    /// Where the viewport was drawn in the last frame, in logical points: keys and typing go
+    /// to the controller while the pointer is over it.
+    viewport_rect: Option<egui::Rect>,
+    /// The temporary hide and isolation the controller asked for.
+    display: over_viewport::DisplayState,
 }
 
 /// The document the window asks about, and whether the application ends once it is closed.
@@ -526,6 +533,8 @@ pub struct Shell {
     recent_written: Option<Vec<RecentEntry>>,
     log_ring: Option<LogRing>,
     settings_changed: bool,
+    /// Text a controller asked to put on the operating system clipboard this frame.
+    copy_text: Option<String>,
     recorder: Option<Recorder>,
     default_layout: DockLayout,
     toolbar: Vec<ToolItem>,
@@ -694,6 +703,7 @@ impl Shell {
             recent_written: None,
             log_ring: None,
             settings_changed: false,
+            copy_text: None,
             recorder: None,
             default_layout: config.layout,
             toolbar: config.toolbar,
@@ -1048,6 +1058,8 @@ impl Shell {
             settle: std::cell::Cell::new(0),
             console: Vec::new(),
             shown_prompt: None,
+            viewport_rect: None,
+            display: over_viewport::DisplayState::default(),
         })
     }
 
@@ -1208,6 +1220,29 @@ impl Shell {
             .chain(input.menu_intents)
             .map(Action::Start)
             .collect();
+        // Escape that closes a menu or a popup closes only that: it is not also the viewport's or
+        // the command line's Escape (which would clear the selection).
+        if egui::Popup::is_any_open(ctx) {
+            let escape = |e: &egui::Event| {
+                matches!(
+                    e,
+                    egui::Event::Key {
+                        key: egui::Key::Escape,
+                        pressed: true,
+                        ..
+                    }
+                )
+            };
+            if input.raw.events.iter().any(escape) {
+                input.raw.events.retain(|e| !escape(e));
+                egui::Popup::close_all(ctx);
+            }
+        }
+        // Typing and Tab over the viewport go to the product's controller first.
+        if window.is_none() {
+            self.offer_viewport_keys(app, ctx, &mut input.raw, &mut actions);
+            self.poll_line_input(app, &mut actions);
+        }
         let entries = if input.native_menu || window.is_some() {
             Vec::new()
         } else {
@@ -1296,6 +1331,7 @@ impl Shell {
         }
         // Typing outside a text field starts the command line.
         if main && let Some(view) = active.and_then(|t| self.views.get_mut(&t)) {
+            view.line_view.defer_keys = ctx.text_edit_focused();
             let focused = ctx.memory(|m| m.focused());
             let other = focused.is_some() && focused != view.widget.id;
             // Escape ends a claimed drag where it is: the focus stays in the viewport.
@@ -1409,6 +1445,96 @@ impl Shell {
         self.finish(app, full, choices, actions)
     }
 
+    /// Offers the text typed in the active tab's command line to its controller, which may
+    /// resolve it at once; the shell then clears the input and sends the action to the controller.
+    fn poll_line_input(&mut self, app: &Application, actions: &mut Vec<Action>) {
+        let Some(tab) = app.active() else {
+            return;
+        };
+        let session = controller_session(app, tab, &self.language);
+        let Some(view) = self.views.get_mut(&tab) else {
+            return;
+        };
+        let View {
+            interaction,
+            selection,
+            camera,
+            line_view,
+            ..
+        } = view;
+        if line_view.input.is_empty() {
+            return;
+        }
+        let Some(controller) = interaction.as_deref_mut() else {
+            return;
+        };
+        let cx = InteractionContext::new(app, tab, &session, selection, *camera, &self.language);
+        if let Some(action) = controller.input_changed(&cx, &line_view.input) {
+            line_view.input.clear();
+            actions.push(Action::Line(action));
+        }
+        actions.extend(cx.take_asked().into_iter().map(Action::Dispatch));
+    }
+
+    /// Offers the Tab presses and typed text of the frame to the active tab's controller while
+    /// the pointer is over the viewport or the viewport has the focus; what it consumes leaves
+    /// the frame's events.
+    fn offer_viewport_keys(
+        &mut self,
+        app: &Application,
+        ctx: &egui::Context,
+        raw: &mut egui::RawInput,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(tab) = app.active() else {
+            return;
+        };
+        let session = controller_session(app, tab, &self.language);
+        let Some(view) = self.views.get_mut(&tab) else {
+            return;
+        };
+        let over = view
+            .viewport_rect
+            .zip(ctx.pointer_latest_pos())
+            .is_some_and(|(rect, at)| rect.contains(at));
+        let focused = view.widget.id.is_some() && ctx.memory(|m| m.focused()) == view.widget.id;
+        if !(over || focused) {
+            return;
+        }
+        let View {
+            interaction,
+            selection,
+            camera,
+            ..
+        } = view;
+        let Some(controller) = interaction.as_deref_mut() else {
+            return;
+        };
+        let cx = InteractionContext::new(app, tab, &session, selection, *camera, &self.language);
+        let modifiers = ctx.input(|i| i.modifiers);
+        // A text field keeps its typing, but Tab over the viewport still steps the candidates.
+        let tab_only = ctx.text_edit_focused();
+        if tab_only && !over {
+            return;
+        }
+        over_viewport::offer_keys(controller, &cx, modifiers, &mut raw.events, tab_only);
+        if let Some(text) = cx.take_clipboard_text() {
+            self.copy_text = Some(text);
+        }
+        actions.extend(cx.take_ran().into_iter().map(Action::Ran));
+        actions.extend(cx.take_asked().into_iter().map(Action::Dispatch));
+        actions.extend(
+            cx.take_settings()
+                .into_iter()
+                .map(|(key, value)| Action::Setting { key, value }),
+        );
+        actions.extend(
+            cx.take_panels()
+                .into_iter()
+                .map(|p| Action::Shell(ShellAction::ShowPanel(p))),
+        );
+    }
+
     /// The position of window `window`'s floating tree and that tree as a layout of its own,
     /// which the window draws and [`Shell::write_back`] puts back.
     fn own_layout(&self, window: Option<&str>) -> (Option<usize>, Option<DockLayout>) {
@@ -1424,7 +1550,7 @@ impl Shell {
     fn finish(
         &mut self,
         app: &mut Application,
-        full: egui::FullOutput,
+        mut full: egui::FullOutput,
         choices: Vec<Choice>,
         actions: Vec<Action>,
     ) -> FrameOutput {
@@ -1442,6 +1568,12 @@ impl Shell {
         self.pump(app, None);
         self.note_prompt(app);
         self.save_recent(app);
+        // What a controller copied goes to the operating system clipboard.
+        if let Some(text) = self.copy_text.take() {
+            full.platform_output
+                .commands
+                .push(egui::OutputCommand::CopyText(text));
+        }
         FrameOutput {
             full,
             requests,
@@ -1655,6 +1787,10 @@ impl Shell {
                 app.activate(tab)?;
                 self.shell_command(app, commands::FILE_CLOSE, Map::new(), requests)
             }
+            // A panel that is shown already comes to the front of its group.
+            ShellAction::ShowPanel(panel) if self.layout.contains(&panel) => {
+                self.layout.activate(&panel)
+            }
             ShellAction::ShowPanel(panel) => {
                 chrome::show_panel(&mut self.layout, &self.default_layout, &panel)
             }
@@ -1777,9 +1913,19 @@ impl Shell {
             Some(controller) => controller.line(&cx, line),
             None => Ok(()),
         };
-        let (asked, ran) = (cx.take_asked(), cx.take_ran());
+        let (asked, ran, settings) = (cx.take_asked(), cx.take_ran(), cx.take_settings());
+        let panels = cx.take_panels();
+        if let Some(text) = cx.take_clipboard_text() {
+            self.copy_text = Some(text);
+        }
         for command in ran {
             self.note_done(app, &command);
+        }
+        for panel in panels {
+            self.shell_action(app, ShellAction::ShowPanel(panel), requests)?;
+        }
+        for (key, value) in settings {
+            self.set_setting(app, &key, value)?;
         }
         for intent in asked {
             self.dispatch(app, intent, requests)?;
@@ -2245,7 +2391,7 @@ fn frame_drawing(
     let Some(viewport) = viewport else {
         return;
     };
-    let bounds = ViewportPicker(Some(viewport)).bounds();
+    let bounds = ViewportPicker(Some(viewport), None).bounds();
     let Some((center, radius)) = bounds else {
         *requested = false;
         return;
@@ -2333,7 +2479,10 @@ fn apply_view(
 }
 
 /// Picking through a tab's [`Viewport`] on its render thread.
-struct ViewportPicker<'a>(Option<&'a Viewport>);
+struct ViewportPicker<'a>(
+    Option<&'a Viewport>,
+    Option<&'a over_viewport::DisplayState>,
+);
 
 impl ViewPicker for ViewportPicker<'_> {
     fn pick(
@@ -2347,9 +2496,14 @@ impl ViewPicker for ViewportPicker<'_> {
             return Ok(Vec::new());
         };
         let (frame, region) = (*frame, *region);
-        viewport.with_scene(WAIT, move |renderer, scene, settings| {
+        let mut hits = viewport.with_scene(WAIT, move |renderer, scene, settings| {
             renderer.pick(scene, &frame, width, height, settings, &region)
-        })?
+        })??;
+        // Hidden and isolated-out objects are not picked.
+        if let Some(display) = self.1 {
+            hits.retain(|hit| display.visible(&hit.key.object));
+        }
+        Ok(hits)
     }
 
     fn bounds(&mut self) -> Option<(Point3, f64)> {
@@ -2401,6 +2555,8 @@ impl Panel for ViewportPanel {
             zoom_extents,
             previous,
             cursor_digits,
+            viewport_rect,
+            display,
             ..
         } = view;
         // With a controller the controller's prompt and overlays are the viewport's; its
@@ -2436,7 +2592,7 @@ impl Panel for ViewportPanel {
             .and_then(|f| f.selection.as_deref())
             .unwrap_or(selection.as_slice());
         let selected = highlight.len();
-        let mut picker = ViewportPicker(viewport.as_ref());
+        let mut picker = ViewportPicker(viewport.as_ref(), Some(&*display));
         let mut hook = match (interaction.as_deref_mut(), icx.as_ref()) {
             (Some(controller), Some(cx)) => Some(Hook {
                 controller,
@@ -2509,6 +2665,37 @@ impl Panel for ViewportPanel {
                 .extend(icx.take_ran().into_iter().map(Action::Ran));
             cx.actions
                 .extend(icx.take_asked().into_iter().map(Action::Dispatch));
+            cx.actions.extend(
+                icx.take_settings()
+                    .into_iter()
+                    .map(|(key, value)| Action::Setting { key, value }),
+            );
+            cx.actions.extend(
+                icx.take_panels()
+                    .into_iter()
+                    .map(|p| Action::Shell(ShellAction::ShowPanel(p))),
+            );
+        }
+        *viewport_rect = Some(out.response.rect);
+        // The controller's context menu, its temporary display state and the banner that says so.
+        if let (Some(controller), Some(icx)) = (interaction.as_deref(), icx.as_ref()) {
+            over_viewport::context_menu(
+                &out.response,
+                cx.localize,
+                &|| controller.context_menu(icx),
+                cx.actions,
+            );
+        }
+        if let Some(f) = &frame {
+            display.update(&f.hidden, f.isolated.as_deref());
+            if let Some(text) = &f.banner {
+                over_viewport::paint_banner(ui, out.response.rect, text, cx.colors);
+            }
+        }
+        if let (Some(vp), Some(overrides)) = (viewport.as_ref(), display.pending())
+            && let Err(e) = vp.set_overrides(overrides)
+        {
+            cx.actions.push(Action::Error(e));
         }
         if let Some(c) = out.camera {
             *camera = c;
@@ -2974,6 +3161,10 @@ fn command_panel(ui: &mut Ui, colors: &Colors, lines: &[ConsoleLine], input: imp
 pub struct CommandLinePanel;
 
 impl Panel for CommandLinePanel {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the controlled line, then the shell's own"
+    )]
     fn show(&mut self, ui: &mut Ui, cx: &mut PanelContext<'_>) {
         let (Some(view), Some(tab_id)) = (cx.view.as_deref_mut(), cx.tab) else {
             return;
@@ -3019,6 +3210,8 @@ impl Panel for CommandLinePanel {
             view.line_view.space_submits = !out.inline_arguments;
             let completion = arc_command::line::Completion::default();
             let status: LineStatus = out.status;
+            let viewport_id = view.widget.id;
+            let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
             let line_view = &mut view.line_view;
             let option_bar = &mut view.option_bar;
             let actions = &mut *cx.actions;
@@ -3035,6 +3228,13 @@ impl Panel for CommandLinePanel {
                     actions.push(Action::Line(action));
                 }
                 actions.extend(line_view.take_queued().into_iter().map(Action::Line));
+                // Escape on an empty line gives the keyboard back to the viewport.
+                if escaped
+                    && line_view.input.is_empty()
+                    && let Some(id) = viewport_id
+                {
+                    ui.memory_mut(|m| m.request_focus(id));
+                }
                 if let Some(text) = option_bar.show(ui, &out.options, localize) {
                     actions.push(Action::Line(LineAction::Submit(text)));
                 }
@@ -3218,29 +3418,31 @@ impl Panel for SettingsPanel {
             .labelled_by(search.id);
         let store = cx.app.settings();
         let query = self.query.trim().to_lowercase();
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for row in settings_editor::rows(store) {
-                let description = arc_ui::resolve(cx.localize, row.message_id, &[]);
-                if !query.is_empty()
-                    && !row.key.contains(&query)
-                    && !description.to_lowercase().contains(&query)
-                {
-                    continue;
+        egui::ScrollArea::vertical()
+            .id_salt("arc-app-settings-rows")
+            .show(ui, |ui| {
+                for row in settings_editor::rows(store) {
+                    let description = arc_ui::resolve(cx.localize, row.message_id, &[]);
+                    if !query.is_empty()
+                        && !row.key.contains(&query)
+                        && !description.to_lowercase().contains(&query)
+                    {
+                        continue;
+                    }
+                    let Some(setting) = store.registry().get(row.key) else {
+                        continue;
+                    };
+                    // Values above the user scope's reach are shown, not edited.
+                    let editable = row.scope >= Scope::User && !row.locked;
+                    ui.horizontal(|ui| {
+                        ui.add_enabled_ui(editable, |ui| {
+                            self.row(ui, &row, &setting.ty, cx.localize, cx.actions);
+                        })
+                        .response
+                        .on_hover_text(description);
+                    });
                 }
-                let Some(setting) = store.registry().get(row.key) else {
-                    continue;
-                };
-                // Values above the user scope's reach are shown, not edited.
-                let editable = row.scope >= Scope::User && !row.locked;
-                ui.horizontal(|ui| {
-                    ui.add_enabled_ui(editable, |ui| {
-                        self.row(ui, &row, &setting.ty, cx.localize, cx.actions);
-                    })
-                    .response
-                    .on_hover_text(description);
-                });
-            }
-        });
+            });
     }
 }
 

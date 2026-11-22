@@ -34,6 +34,7 @@ use arc_ui::{
 };
 
 use crate::application::{Application, TabId};
+use crate::settings::SettingValue;
 
 /// The factory a product registers: it creates one controller per tab.
 pub type Factory = Arc<dyn Fn() -> Box<dyn Interaction> + Send + Sync>;
@@ -72,6 +73,32 @@ pub trait Interaction: Send {
         false
     }
 
+    /// A key press or typed text while the viewport has the keyboard focus or the pointer is over
+    /// it, and no text field has the focus. The shell offers [`KeyInput`]s for the Tab key, for key
+    /// presses with the command key that no binding took, and for typed text, after its own key
+    /// bindings; `KeyReply::Consumed` removes the event from the
+    /// frame, [`KeyReply::Text`] replaces typed text (what the controller held back, for the
+    /// command line), `KeyReply::Pass` leaves it. The default passes everything, which keeps the
+    /// shell's behavior (typing starts the command line).
+    fn key(&mut self, _cx: &InteractionContext<'_>, _input: &KeyInput) -> KeyReply {
+        KeyReply::Pass
+    }
+
+    /// The text typed in the command line, offered each frame while it is not empty. The
+    /// controller may resolve it at once (a shortcut that is complete): it returns the action to
+    /// carry out, and the shell clears the input and sends the action to [`Self::line`]. The
+    /// default returns `None`, so the line keeps the text until Enter.
+    fn input_changed(&mut self, _cx: &InteractionContext<'_>, _text: &str) -> Option<LineAction> {
+        None
+    }
+
+    /// The entries of the context menu a secondary click opens over the viewport, in order. The
+    /// shell computes them while the menu is open, so they follow the selection and the running
+    /// command. An empty list (the default) opens no menu.
+    fn context_menu(&self, _cx: &InteractionContext<'_>) -> Vec<ContextEntry> {
+        Vec::new()
+    }
+
     /// What the shell shows this frame.
     fn output(&self) -> InteractionOutput;
 
@@ -92,6 +119,106 @@ pub trait Interaction: Send {
     /// Not called when a close is cancelled or fails. Closing a tab through
     /// [`Application::close`] directly, without the shell, drops the controller without this call.
     fn closing(&mut self, _cx: &InteractionContext<'_>) {}
+}
+
+/// A key or typed text the shell offers to [`Interaction::key`].
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct KeyInput {
+    /// The key, for a key press (`Tab` or a key with the command key); `None` for typed text.
+    pub key: Option<arc_ui::egui::Key>,
+    /// The typed text (a printable character or more), for text input; `None` for a key press.
+    pub text: Option<String>,
+    /// The modifiers held.
+    pub modifiers: arc_ui::egui::Modifiers,
+}
+
+impl KeyInput {
+    /// A key press of `key` with no modifier.
+    #[must_use]
+    pub fn key(key: arc_ui::egui::Key) -> Self {
+        Self {
+            key: Some(key),
+            text: None,
+            modifiers: arc_ui::egui::Modifiers::NONE,
+        }
+    }
+
+    /// Typed `text`.
+    #[must_use]
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            key: None,
+            text: Some(text.into()),
+            modifiers: arc_ui::egui::Modifiers::NONE,
+        }
+    }
+}
+
+/// What a controller did with a [`KeyInput`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KeyReply {
+    /// Not the controller's: the shell handles the event as before.
+    Pass,
+    /// The controller took the event; the shell removes it from the frame.
+    Consumed,
+    /// The controller took the event and gives this typed text back in its place, so the
+    /// command line receives what the controller had held (letters of a shortcut that did not
+    /// complete).
+    Text(String),
+}
+
+/// One entry of a context menu.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ContextEntry {
+    /// The Fluent identifier of the label; empty for a separator.
+    pub label: String,
+    /// What choosing the entry does: the action goes to the controller like a command-line action
+    /// (`LineAction::Submit(String::new())` is Enter, `LineAction::Invoke` starts a command).
+    pub action: arc_ui::LineAction,
+    /// Whether the entry can be chosen; a disabled entry is shown dimmed.
+    pub enabled: bool,
+    /// Whether the entry is a separator line (its label and action are unused).
+    pub separator: bool,
+}
+
+impl ContextEntry {
+    /// An enabled entry that does `action`.
+    #[must_use]
+    pub fn new(label: impl Into<String>, action: arc_ui::LineAction) -> Self {
+        Self {
+            label: label.into(),
+            action,
+            enabled: true,
+            separator: false,
+        }
+    }
+
+    /// An enabled entry that starts the command `command`.
+    #[must_use]
+    pub fn command(label: impl Into<String>, command: &str) -> Self {
+        Self::new(label, arc_ui::LineAction::Invoke(Intent::new(command)))
+    }
+
+    /// A separator.
+    #[must_use]
+    pub fn separator() -> Self {
+        Self {
+            label: String::new(),
+            action: arc_ui::LineAction::ClearInput,
+            enabled: false,
+            separator: true,
+        }
+    }
+
+    /// This entry, shown dimmed and not choosable.
+    #[must_use]
+    pub fn disabled(mut self) -> Self {
+        self.enabled = false;
+        self
+    }
 }
 
 /// A change of the camera a controller asks for. Corners are model coordinates in drawing units.
@@ -163,6 +290,15 @@ pub struct InteractionOutput {
     /// shell adds `Done: <command>` for each command the controller ran through
     /// [`InteractionContext::invoke`] and `*Cancel*` for Escape at a prompt.
     pub reports_results: bool,
+    /// A short text the viewport shows in a framed banner while a temporary display state is
+    /// active (isolated or hidden objects), already localized. `None` (the default) shows none.
+    pub banner: Option<String>,
+    /// Objects the viewport does not draw and does not pick (a temporary hide; never saved).
+    pub hidden: Vec<ObjectId>,
+    /// When set, the only objects the viewport draws and picks (a temporary isolation); the
+    /// other objects are hidden. `None` (the default) shows every object that is not in
+    /// [`Self::hidden`].
+    pub isolated: Option<Vec<ObjectId>>,
 }
 
 /// The most commands one call of a controller can ask the shell for.
@@ -179,6 +315,9 @@ pub struct InteractionContext<'a> {
     language: &'a str,
     asked: RefCell<Vec<Intent>>,
     ran: RefCell<Vec<String>>,
+    settings: RefCell<Vec<(String, Option<SettingValue>)>>,
+    panels: RefCell<Vec<String>>,
+    clipboard: RefCell<Option<String>>,
 }
 
 impl<'a> InteractionContext<'a> {
@@ -199,7 +338,25 @@ impl<'a> InteractionContext<'a> {
             language,
             asked: RefCell::new(Vec::new()),
             ran: RefCell::new(Vec::new()),
+            settings: RefCell::new(Vec::new()),
+            panels: RefCell::new(Vec::new()),
+            clipboard: RefCell::new(None),
         }
+    }
+
+    /// The text the controller asked to put on the operating system clipboard, taken once.
+    pub(crate) fn take_clipboard_text(&self) -> Option<String> {
+        self.clipboard.borrow_mut().take()
+    }
+
+    /// The panels the controller asked to show during the call, taken once.
+    pub(crate) fn take_panels(&self) -> Vec<String> {
+        std::mem::take(&mut *self.panels.borrow_mut())
+    }
+
+    /// The settings the controller asked to change during the call, taken once.
+    pub(crate) fn take_settings(&self) -> Vec<(String, Option<SettingValue>)> {
+        std::mem::take(&mut *self.settings.borrow_mut())
     }
 
     /// The commands the controller asked for during the call, taken once.
@@ -234,6 +391,38 @@ impl<'a> InteractionContext<'a> {
         let mut asked = self.asked.borrow_mut();
         if asked.len() < MAX_ASKED {
             asked.push(intent);
+        }
+    }
+
+    /// Asks the shell to set the setting `key` in the user scope (`Some`) or to remove it from
+    /// there (`None`) after the controller's call returns; the shell writes the user settings
+    /// file as it does for an edit in the settings panel. At most 16 changes per call are kept.
+    pub fn ask_setting(&self, key: &str, value: Option<SettingValue>) {
+        let mut settings = self.settings.borrow_mut();
+        if settings.len() < MAX_ASKED {
+            settings.push((key.to_owned(), value));
+        }
+    }
+
+    /// Asks the shell to put `text` (at most 4096 bytes; a longer text is cut) on the operating
+    /// system clipboard when the frame ends. A controller that keeps its own clipboard does this
+    /// on copy: the platform reports a paste shortcut only while the system clipboard holds
+    /// something, so the internal clipboard is pasted by that shortcut.
+    pub fn ask_clipboard_text(&self, text: &str) {
+        let mut end = text.len().min(4096);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        *self.clipboard.borrow_mut() = text.get(..end).map(str::to_owned);
+    }
+
+    /// Asks the shell to show the panel `panel` (its identifier among the product's panels) after
+    /// the controller's call returns: a hidden panel opens where it belongs, one in a tab group
+    /// comes to the front. At most 16 requests per call are kept.
+    pub fn ask_panel(&self, panel: &str) {
+        let mut panels = self.panels.borrow_mut();
+        if panels.len() < MAX_ASKED {
+            panels.push(panel.to_owned());
         }
     }
 
@@ -272,6 +461,12 @@ impl<'a> InteractionContext<'a> {
     #[must_use]
     pub fn session(&self) -> &'a Session {
         self.session
+    }
+
+    /// The effective value of the setting `key`, or `None` when it is not registered.
+    #[must_use]
+    pub fn setting(&self, key: &str) -> Option<crate::settings::SettingValue> {
+        self.app.settings().get(key).ok().map(|entry| entry.value)
     }
 
     /// The tab's selection in selection order.

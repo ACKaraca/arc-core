@@ -349,6 +349,26 @@ impl ViewportWidget {
             claim_cancelled: false,
         };
         let moved_here = self.route(&mut view, &events, &mut handler, modifiers, scale, &mut out);
+        // A double click is told to the product after the clicks that made it.
+        let primary = egui::PointerButton::Primary;
+        if (response.double_clicked_by(primary) || response.triple_clicked_by(primary))
+            && let (Some(h), Some(pos)) = (handler.as_mut(), response.interact_pointer_pos())
+        {
+            let at = [
+                f64::from(pos.x - rect.min.x) * ppp,
+                f64::from(pos.y - rect.min.y) * ppp,
+            ];
+            let projection =
+                ViewProjection::new(view.frame, size[0], size[1]).with_work_plane(view.work_plane);
+            h.pointer(&PointerEvent {
+                kind: PointerKind::DoubleClick,
+                button: Some(egui::PointerButton::Primary),
+                modifiers,
+                pixel: at,
+                model: projection.pixel_to_model(at),
+                pixels_per_unit: projection.pixels_per_unit(),
+            });
+        }
         if moved_here && let Some(link) = &self.link {
             self.seen = link.publish(view.frame);
         }

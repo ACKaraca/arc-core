@@ -145,6 +145,9 @@ pub enum PointerKind {
     Release,
     /// A button went down and up without a drag beyond the drag threshold (primary button).
     Click,
+    /// The primary button was clicked twice in quick succession at one place. It follows the
+    /// second [`Self::Click`] and is a notification: its return value is ignored.
+    DoubleClick,
 }
 
 /// A pointer event for a product, in model coordinates of the viewed space.
@@ -673,6 +676,7 @@ mod tests {
         );
         assert!(consumed.intent.is_none());
         assert!(consumed.answer.is_none());
+        // The first frame's click at the same place makes this one a double click: told last.
         let kinds: Vec<PointerKind> = recorder.seen.iter().map(|e| e.kind).collect();
         assert_eq!(
             kinds,
@@ -680,14 +684,55 @@ mod tests {
                 PointerKind::Move,
                 PointerKind::Press,
                 PointerKind::Release,
-                PointerKind::Click
+                PointerKind::Click,
+                PointerKind::DoubleClick
             ]
         );
-        let click = recorder.seen.last().copied().expect("a click");
+        let click = recorder.seen.iter().find(|e| e.kind == PointerKind::Click);
+        let click = click.copied().expect("a click");
         let model = click.model.expect("the pixel has a model point");
         assert!(model.coords.norm() < 1e-9, "the center is the origin");
         assert_eq!(click.button, Some(PointerButton::Primary));
         assert!((click.pixels_per_unit.expect("a scale") - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_second_click_in_quick_succession_is_told_as_a_double_click_after_the_click() {
+        let ctx = egui::Context::default();
+        let mut widget = ViewportWidget::new();
+        let mut picker = object_at_center();
+        let mut recorder = Recorder {
+            consume: false,
+            seen: Vec::new(),
+        };
+        for _ in 0..2 {
+            frame_with(
+                &ctx,
+                click_at(50.0, 50.0),
+                &mut widget,
+                &mut picker,
+                Some(&mut recorder),
+                &[],
+                None,
+            );
+        }
+        let clicks: Vec<PointerKind> = recorder
+            .seen
+            .iter()
+            .map(|e| e.kind)
+            .filter(|k| matches!(k, PointerKind::Click | PointerKind::DoubleClick))
+            .collect();
+        assert_eq!(
+            clicks,
+            [
+                PointerKind::Click,
+                PointerKind::Click,
+                PointerKind::DoubleClick
+            ]
+        );
+        let double = recorder.seen.last().copied().expect("an event");
+        assert_eq!(double.button, Some(PointerButton::Primary));
+        assert!(double.model.expect("a model point").coords.norm() < 1e-9);
     }
 
     #[test]
