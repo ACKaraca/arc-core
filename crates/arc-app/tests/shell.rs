@@ -628,8 +628,15 @@ impl shell::Interaction for FakeController {
                 cx.ask(Intent::new(commands::FILE_NEW));
             }
             LineAction::Submit(text) => seen.lines.push(text),
-            LineAction::Invoke(intent) => seen.invoked.push(intent.command),
-            LineAction::Cancel => seen.cancels += 1,
+            LineAction::Invoke(intent) => {
+                // `test.ends` stands for a command that ends what the controller asked.
+                seen.idle |= intent.command == "test.ends";
+                seen.invoked.push(intent.command);
+            }
+            LineAction::Cancel => {
+                seen.cancels += 1;
+                seen.idle = true;
+            }
             _ => {}
         }
         Ok(())
@@ -1564,4 +1571,42 @@ fn text_typed_in_the_command_line_can_be_resolved_at_once_by_the_controller() {
     // The input was cleared: a later frame does not resolve it again.
     frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
     assert_eq!(seen.lock().unwrap().lines.len(), 1);
+}
+
+#[test]
+fn a_shell_command_that_cancels_a_controller_prompt_says_cancel() {
+    let (_dir, seen, mut app, mut shell, ctx) = controlled("cancel-by-shell", &[]);
+    seen.lock().unwrap().idle = false;
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    let first = app.active().unwrap();
+    submit(&mut shell, &mut app, &ctx, commands::FILE_NEW);
+    assert_eq!(seen.lock().unwrap().cancels, 1);
+    app.activate(first).unwrap();
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    assert!(
+        shows(&run.nodes, "app-history-cancel"),
+        "{:?}",
+        labels(&run.nodes)
+    );
+}
+
+#[test]
+fn a_menu_command_that_ends_a_controller_prompt_says_cancel_before_its_line() {
+    let (_dir, seen, mut app, mut shell, ctx) = controlled("cancel-by-menu", &[]);
+    seen.lock().unwrap().idle = false;
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    // A command that keeps the prompt says nothing.
+    let keeps = vec![Intent::new("shell.layer.create")];
+    frame(&mut shell, &mut app, &ctx, Vec::new(), keeps, false);
+    let ends = vec![Intent::new("test.ends")];
+    frame(&mut shell, &mut app, &ctx, Vec::new(), ends, false);
+    let run = frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    let labels = labels(&run.nodes);
+    let cancels: Vec<_> = labels
+        .iter()
+        .filter(|l| l.contains("app-history-cancel"))
+        .collect();
+    assert_eq!(cancels.len(), 1, "{labels:?}");
+    let at = |text: &str| labels.iter().position(|l| l.contains(text));
+    assert!(at("app-history-cancel") < at("test.ends"), "{labels:?}");
 }

@@ -825,7 +825,10 @@ it is registered. Without a registration the shell behaves as before.
   drops its oldest lines raises it by the number dropped, so the lines the shell keeps among them stay
   in place) and `reports_results` (default `false`: the shell adds `Done: <command>` for each
   undoable command the controller ran through `InteractionContext::invoke`, and `*Cancel*` for Escape
-  at a prompt; `true` when the controller writes those lines itself), `overlays` (`ProductOverlay`s), `dynamic` (a `DynamicOutput`: a prompt message
+  at a prompt, including one the controller's `output` gives that the history has not recorded yet,
+  and before the line of a command started from a menu, a key, a button or a typed command when it
+  ends the prompt (the prompt is gone or another one asks afterwards; claimed commands and
+  selection changes excepted); `true` when the controller writes those lines itself), `overlays` (`ProductOverlay`s), `dynamic` (a `DynamicOutput`: a prompt message
   and `DynamicField`s, shown beside the pointer) and `selection` (`Option<Vec<ObjectId>>`: the
   objects of the controller's own that the viewport highlights and counts; `None`, the default,
   shows the tab's selection, which follows a click, Escape or a command at once, and the shell then
@@ -856,8 +859,8 @@ it is registered. Without a registration the shell behaves as before.
   undo, such as one that steps back one answer, claims `app.edit.undo`, `app.edit.redo` and
   `app.select.clear`. A submitted line (the first word, with its parameters) or an
   `Invoke` or `CancelThen` intent naming an unclaimed shell command never reaches `line`: the shell
-  cancels a running tool first (`LineAction::Cancel`), except for save and save as, and carries the
-  command out. Every other command a menu, a key binding (`Action::Start`) or a toolbar button
+  cancels a running tool first (`LineAction::Cancel`),
+  except for save and save as, and carries the command out. Every other command a menu, a key binding (`Action::Start`) or a toolbar button
   starts reaches `line` as `LineAction::Invoke(intent)` with its parameters, so a menu item and a
   toolbar button start a tool the same way (the commands of panels, such as the property grid's
   edit and a click's selection command, still run on the shell's command line); a controller maps

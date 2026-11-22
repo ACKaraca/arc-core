@@ -14,8 +14,9 @@ use std::collections::BTreeMap;
 use arc_base::math::{Point2, Point3, Vector2, Vector3};
 use arc_base::{Cancel, Limits};
 use arc_io_ifc::write::{
-    AngleUnit, Body, Element, ElementKind, LengthUnit, Placement, Property, PropertySet,
-    PropertyValue, Quantity, QuantitySet, QuantityValue, Spatial, Storey,
+    AngleUnit, Body, Element, ElementKind, ElementType, LayerDirection, LayerSetUsage, LengthUnit,
+    MaterialLayer, Placement, Property, PropertySet, PropertyValue, Quantity, QuantitySet,
+    QuantityValue, Spatial, Storey,
 };
 use arc_io_ifc::{
     IfcFile, Parameter, ReadOptions, SpatialNode, WriteModel, WriteOptions, global_id, read,
@@ -723,6 +724,168 @@ fn space_refusals_match_the_other_elements() {
     assert_eq!(output.report.items[0].reason, "io.ifc.not_written");
 }
 
+const WALL_TYPE: u128 = 0x700;
+const SLAB_TYPE: u128 = 0x701;
+const DOOR_TYPE: u128 = 0x702;
+const WINDOW_TYPE: u128 = 0x703;
+
+/// The house with a layered wall type for its walls, a slab type with a membrane, and a door and a
+/// window type.
+fn house_with_types() -> WriteModel {
+    let mut model = house();
+    let mut wall = ElementType::new(WALL_TYPE, ElementKind::Wall, "Cavity 300");
+    wall.predefined_type = Some("STANDARD".into());
+    let mut brick = MaterialLayer::new("Brick", 0.1);
+    brick.category = Some("Finish".into());
+    let mut block = MaterialLayer::new("Concrete block", 0.15);
+    block.category = Some("LoadBearing".into());
+    wall.layers = vec![
+        brick,
+        MaterialLayer::new("Air", 0.05),
+        block,
+        MaterialLayer::new("Brick", 0.0),
+    ];
+    let mut slab = ElementType::new(SLAB_TYPE, ElementKind::Slab, "Slab 200");
+    slab.predefined_type = Some("FLOOR".into());
+    slab.layers = vec![
+        MaterialLayer::new("Screed", 0.05),
+        MaterialLayer::new("Membrane", 0.0),
+        MaterialLayer::new("Concrete", 0.15),
+    ];
+    let mut door = ElementType::new(DOOR_TYPE, ElementKind::Door, "Double 1500");
+    door.predefined_type = Some("DOOR".into());
+    door.operation_type = Some("DOUBLE_DOOR_SINGLE_SWING".into());
+    // Layers of a door type are not written.
+    door.layers = vec![MaterialLayer::new("Wood", 0.04)];
+    let mut window = ElementType::new(WINDOW_TYPE, ElementKind::Window, "Sliding");
+    window.operation_type = Some("DOUBLE_PANEL_VERTICAL".into());
+    model.types = vec![wall, slab, door, window];
+    for element in &mut model.elements {
+        match element.kind {
+            ElementKind::Wall => {
+                element.element_type = Some(WALL_TYPE);
+                element.layer_usage = Some(LayerSetUsage::new(LayerDirection::Axis2, false, 0.15));
+            }
+            ElementKind::Slab => {
+                element.element_type = Some(SLAB_TYPE);
+                element.layer_usage = Some(LayerSetUsage::new(LayerDirection::Axis3, false, 0.0));
+            }
+            ElementKind::Door => element.element_type = Some(DOOR_TYPE),
+            _ => {}
+        }
+    }
+    model
+}
+
+#[test]
+fn types_and_layer_sets_read_back() {
+    let output = write(&house_with_types(), &options()).unwrap();
+    let file = read_back(&output.bytes);
+    let views = file
+        .typed_views(&Limits::CONSTRAINED, &Cancel::new())
+        .unwrap();
+    // Every wall, the slab and the door are typed; the window type has no occurrence.
+    let assigned: Vec<(String, String)> = views
+        .types
+        .iter()
+        .map(|t| {
+            (
+                t.element.global_id.clone().unwrap(),
+                t.element_type.type_name.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(assigned.len(), 6, "{assigned:?}");
+    assert!(assigned.contains(&(global_id(WALLS[3]), "IFCWALLTYPE".to_owned())));
+    assert!(assigned.contains(&(global_id(SLAB), "IFCSLABTYPE".to_owned())));
+    assert!(assigned.contains(&(global_id(DOOR), "IFCDOORTYPE".to_owned())));
+    assert_eq!(file.instances_of("IFCWINDOWTYPE").count(), 1);
+    let door_type = file.instance(instance_of(&file, DOOR_TYPE)).unwrap();
+    assert_eq!(
+        door_type.records[0].parameters[10],
+        Parameter::Enumeration("DOUBLE_DOOR_SINGLE_SWING".into())
+    );
+
+    // Two layer sets (the door's layers are reported), one material per name.
+    assert_eq!(file.instances_of("IFCMATERIALLAYERSET").count(), 2);
+    assert_eq!(file.instances_of("IFCMATERIALLAYER").count(), 7);
+    assert_eq!(file.instances_of("IFCMATERIAL").count(), 6);
+    let layer = file.instances_of("IFCMATERIALLAYER").next().unwrap();
+    assert_eq!(layer.records[0].parameters[1], Parameter::Real(0.1));
+    assert_eq!(
+        layer.records[0].parameters[2],
+        Parameter::Enumeration("U".into())
+    );
+    assert_eq!(
+        layer.records[0].parameters[5],
+        Parameter::Text("Finish".into())
+    );
+    let usages: Vec<&[Parameter]> = file
+        .instances_of("IFCMATERIALLAYERSETUSAGE")
+        .map(|i| &i.records[0].parameters[1..4])
+        .collect();
+    assert_eq!(usages.len(), 5);
+    assert_eq!(
+        usages[0],
+        [
+            Parameter::Enumeration("AXIS2".into()),
+            Parameter::Enumeration("NEGATIVE".into()),
+            Parameter::Real(0.15)
+        ]
+    );
+    assert_eq!(usages[4][0], Parameter::Enumeration("AXIS3".into()));
+    // Two types and five elements associate a material; the door's layers are the one loss.
+    assert_eq!(file.instances_of("IFCRELASSOCIATESMATERIAL").count(), 7);
+    assert_eq!(output.report.items.len(), 1, "{:?}", output.report);
+    assert_eq!(
+        output.report.items[0].record_kind.as_deref(),
+        Some("IFCMATERIALLAYERSET")
+    );
+    assert_eq!(output.report.summary.mapped, 13);
+
+    // The same model gives the same bytes.
+    assert_eq!(
+        write(&house_with_types(), &options()).unwrap().bytes,
+        output.bytes
+    );
+}
+
+#[test]
+fn type_references_and_layers_are_checked() {
+    let code = |model: &WriteModel| write(model, &options()).unwrap_err().code().to_owned();
+    // A type of another kind, a missing type, a type of a space.
+    let mut model = house_with_types();
+    model.elements[0].element_type = Some(SLAB_TYPE);
+    assert_eq!(code(&model), "io.ifc.write_reference_invalid");
+    model.elements[0].element_type = Some(0x799);
+    assert_eq!(code(&model), "io.ifc.write_reference_invalid");
+    let mut model = house_with_types();
+    model.types[3].kind = ElementKind::Space;
+    assert_eq!(code(&model), "io.ifc.write_reference_invalid");
+    // A type with an element's identifier.
+    let mut model = house_with_types();
+    model.types[3].id = WALLS[0];
+    assert_eq!(code(&model), "io.ifc.write_id_duplicate");
+    // A negative layer and an offset that is not a number.
+    let mut model = house_with_types();
+    model.types[0].layers[1].thickness = -0.01;
+    assert_eq!(code(&model), "io.ifc.write_value_invalid");
+    let mut model = house_with_types();
+    model.elements[0].layer_usage = Some(LayerSetUsage::new(LayerDirection::Axis2, true, f64::NAN));
+    assert_eq!(code(&model), "io.ifc.write_value_invalid");
+    // A usage without a layer set is reported.
+    let mut model = house_with_types();
+    model.elements[0].element_type = None;
+    let output = write(&model, &options()).unwrap();
+    assert!(
+        output
+            .report
+            .items
+            .iter()
+            .any(|i| i.record_kind.as_deref() == Some("IFCMATERIALLAYERSETUSAGE"))
+    );
+}
+
 /// Writes the sample files for an external check when `ARC_IFC_WRITE_SAMPLES` names a directory.
 #[test]
 fn samples_for_external_validation() {
@@ -733,6 +896,11 @@ fn samples_for_external_validation() {
     std::fs::write(
         directory.join("house.ifc"),
         write(&house(), &options()).unwrap().bytes,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("house-types.ifc"),
+        write(&house_with_types(), &options()).unwrap().bytes,
     )
     .unwrap();
     std::fs::write(

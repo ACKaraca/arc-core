@@ -52,6 +52,11 @@ pub mod role {
     /// The opening of an insert (a door or window) whose model object has no opening of its own:
     /// the caller derives the opening's identifier from the insert's with this role and index 0.
     pub const INSERT_OPENING: u32 = 9;
+    /// The `IfcRelDefinesByType` of the owner element type.
+    pub const TYPED: u32 = 10;
+    /// The `IfcRelAssociatesMaterial` of the owner: an element type with its layer set, or an
+    /// element with its layer set usage.
+    pub const MATERIAL: u32 = 11;
     /// The first role reserved for the caller's own derived identifiers.
     pub const CALLER_FIRST: u32 = 0x1_0000;
 }

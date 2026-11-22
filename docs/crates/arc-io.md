@@ -1502,19 +1502,31 @@ meters or millimeters), the plane angle unit (`AngleUnit`: radians or degrees) a
 north direction. Every length, area and volume of the model is in the length unit, squared or cubed.
 The structs of the model are marked non-exhaustive and are built with their `new` constructors
 (`WriteModel::new`, `Spatial::new`, `Storey::new`, `Element::new`, `Placement::new`,
-`PropertySet::new`, `Property::new`, `QuantitySet::new`, `Quantity::new`); their fields are public and
-set after construction.
+`PropertySet::new`, `Property::new`, `QuantitySet::new`, `Quantity::new`, `ElementType::new`,
+`MaterialLayer::new`, `LayerSetUsage::new`); their fields are public and set after construction.
 
 An `Element` has an identifier, a kind (`ElementKind`: wall, slab, door, window, opening, space), a name, a long name (spaces), the
 identifier of its storey, a `Placement` relative to the storey (origin, local z axis, local x axis), an
 optional `Body`, a predefined type, an operation type (doors) or partitioning type (windows), the overall
-width and height (doors and windows), a host, property sets and quantity sets. A `Body` is an extrusion
+width and height (doors and windows), a host, property sets, quantity sets, the identifier of its
+element type and a layer set usage (walls and slabs). A `Body` is an extrusion
 (a closed polyline profile with optional holes in the plane `z = 0`, a direction and a depth) or a faceted
 B-rep (vertices and polygon faces given as index loops, counterclockwise seen from outside). The host of
 an opening is the element it voids (a wall, slab, door or window) and is required, because an opening
 voids exactly one element; the host of a door or window is the opening it fills; walls and slabs have
 no host. A chain of hosts that returns to its start, such as an opening hosted by the door that fills
 it, is refused.
+
+`WriteModel::types` holds the element types. An `ElementType` has an identifier, the kind of its
+occurrences (wall, slab, door or window; an opening or space kind is refused), a name, a predefined
+type, an operation type (doors) or partitioning type (windows) and, for walls and slabs, its
+`MaterialLayer`s in order: a material name, a thickness (zero for a membrane; negative or not finite
+is refused), an optional layer name and an optional category. An element names its type by
+identifier; a missing type or a type of another kind is refused. A `LayerSetUsage` says how the
+type's layers lie in the element: the axis of the element's placement they are stacked along
+(`LayerDirection::Axis2`, the local y axis across a wall, or `Axis3`, the local z axis through a
+slab), whether they follow toward the positive or the negative side, and the offset of the first
+layer from the reference line or plane (an offset that is not finite is refused).
 
 ### What is written
 
@@ -1547,6 +1559,19 @@ it, is refused.
   (`NetFloorArea`, `GrossFloorArea`, `NetPerimeter`, `Height`, `NetVolume`) as a quantity set and
   `Pset_SpaceCommon` (for example `Reference`) as a property set. Spaces are refused and reported
   like the other elements (a number that is not finite, a NUL, an empty or flat profile).
+- Element types: `IfcWallType`, `IfcSlabType`, `IfcDoorType` and `IfcWindowType`, after the
+  elements, in model order, with the rules of the predefined type below (the text of a user-defined
+  predefined type is the `ElementType` attribute) and, for doors and windows, the operation or
+  partitioning type; `ParameterTakesPrecedence` is omitted. Each type with at least one occurrence
+  gets one `IfcRelDefinesByType` (`derived_id(type, TYPED, 0)`) listing its occurrences in model
+  order; a type without occurrences is written alone.
+- Materials: each wall or slab type with layers gets an `IfcMaterialLayerSet` named after the type,
+  of one `IfcMaterialLayer` per layer (the `IfcMaterial`, the thickness, `IsVentilated` unknown, the
+  layer name and category; one `IfcMaterial` per distinct material name in the file), associated
+  with the type by an `IfcRelAssociatesMaterial` (`derived_id(type, MATERIAL, 0)`). Each element
+  with a layer set usage whose type has a layer set gets an `IfcMaterialLayerSetUsage` (the set, the
+  direction `AXIS2` or `AXIS3`, the sense `POSITIVE` or `NEGATIVE`, the offset, no reference
+  extent) associated with it by an `IfcRelAssociatesMaterial` (`derived_id(element, MATERIAL, 0)`).
 - Types: the predefined type, compared in upper case with the values IFC4 defines for the kind, is
   written as given; another text is written as `USERDEFINED` with the text as `ObjectType`; no value
   is `NOTDEFINED`. A door's `OperationType` and a window's `PartitioningType` follow the same rule with
@@ -1587,7 +1612,9 @@ has the same `GlobalId` in every export. The relationships and the property and 
 writer adds take a version 8 UUID from `derived_id(owner, role, index)`: the identifier of their object,
 a role number of the module `role` and the index of the set (0 for a relationship), so they are stable
 too and never equal a version 7 identifier. The roles are `AGGREGATES` 1, `CONTAINS` 2, `VOIDS` 3,
-`FILLS` 4, `PROPERTY_SET` 5, `PROPERTY_REL` 6, `QUANTITY_SET` 7 and `QUANTITY_REL` 8. `INSERT_OPENING` 9
+`FILLS` 4, `PROPERTY_SET` 5, `PROPERTY_REL` 6, `QUANTITY_SET` 7, `QUANTITY_REL` 8, `TYPED` 10
+(the type relationship of an element type) and `MATERIAL` 11 (the material association of a type or
+an element). Element types take their `GlobalId` from the caller's identifier. `INSERT_OPENING` 9
 is for the caller: a product whose door or window has no opening object of its own derives the
 opening's identifier from the insert's with this role and index 0. The roles from `CALLER_FIRST`
 (`0x10000`) up are never used by the writer. Two objects with the same `GlobalId` are refused with
@@ -1603,8 +1630,9 @@ table: numbers that are not finite, negative quantities, door or window sizes th
 placement axes or a true north not longer than the square root of the `f64` machine epsilon (about
 1.5E-8, below which the angle of a direction is not defined), placement axes parallel within
 `Tolerance::angular`, repeated names within a set or among the property and quantity sets of one
-element, storeys or hosts that are missing or of the wrong kind, openings without a host, and chains of
-hosts that return to their start.
+element, storeys, hosts or element types that are missing or of the wrong kind, openings without a
+host, chains of hosts that return to their start, negative layer thicknesses and layer set usage
+offsets that are not finite.
 
 ### What is not written
 
@@ -1619,11 +1647,17 @@ with the element's `GlobalId` as the source and the entity that was not written 
 - a B-rep without faces or with a face of fewer than three vertices, an index outside the vertices or a
   repeated index (`IFCFACETEDBREP`); a last index equal to the first closes the loop and is dropped
   first; the element is written without a representation;
-- an empty property set (`IFCPROPERTYSET`) or quantity set (`IFCELEMENTQUANTITY`).
+- an empty property set (`IFCPROPERTYSET`) or quantity set (`IFCELEMENTQUANTITY`);
+- the layers of a door or window type (`IFCMATERIALLAYERSET`), with the type's `GlobalId`;
+- a layer set usage of an element whose type has no layer set, or that has no type
+  (`IFCMATERIALLAYERSETUSAGE`).
+
+The loss report counts the element types as mapped too.
 
 The writer does not check that a profile is simple (a self-intersecting profile with area is written),
-that holes lie inside the outer loop, or that a B-rep is closed and planar. It writes no element types, materials, space boundaries, axis representations, owner
-history, classification or other element kinds, and no IFC4X3 schema.
+that holes lie inside the outer loop, or that a B-rep is closed and planar. It writes no property sets of element types, representation maps, materials other than layer sets,
+space boundaries, axis representations, owner history, classification or other element kinds, and
+no IFC4X3 schema.
 
 ### Verification
 
@@ -1632,5 +1666,8 @@ The tests read every written file back with `read`, `typed_views` and `geometry`
 walls, on two storeys. The spatial structure, the containment, the `GlobalId`s, the voids and fills, the
 property and quantity sets and the body volumes (6.0 m³ for a 10 × 0.2 × 3 m wall, 15.8 m³ for the slab)
 are compared with the model; `geometry` does not subtract openings, so each body keeps its own volume.
+The same house with a layered wall type, a slab type with a membrane layer and door and window types
+reads back with its type assignments, layer sets, layers and layer set usages, and the refusals of
+type references and layer values are checked.
 The out-of-process oracle of the [interchange architecture](../architecture/interchange.md) is not part
 of the gate.

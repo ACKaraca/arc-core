@@ -1701,6 +1701,77 @@ impl Shell {
 
     /// Carries out one action of a frame.
     fn act(&mut self, app: &mut Application, action: Action, requests: &mut Vec<Request>) {
+        // A command started while the controller asks ends what it asked when the prompt is
+        // gone or another one afterwards: `*Cancel*` then goes before the command's line.
+        let command = match &action {
+            Action::Start(i) | Action::Line(LineAction::Invoke(i)) => Some(i.command.clone()),
+            // A typed line is an answer unless it names a command (a toolbar button submits its
+            // command's identifier).
+            Action::Line(LineAction::Submit(t)) => t
+                .split_whitespace()
+                .next()
+                .filter(|w| {
+                    commands::is_shell_command(w)
+                        || app.product().headless().registry.get(w).is_some()
+                })
+                .map(str::to_owned),
+            _ => None,
+        };
+        let before = command
+            .filter(|c| self.ends_prompt(app, c))
+            .and_then(|_| Some((app.active()?, self.asking(app)?)));
+        let mark = before
+            .as_ref()
+            .and_then(|(tab, _)| self.views.get(tab))
+            .map(|v| v.console.len());
+        self.act_inner(app, action, requests);
+        let Some(((tab, asked), mark)) = before.zip(mark) else {
+            return;
+        };
+        if self.asking_in(tab).as_ref() != Some(&asked)
+            && let Some(view) = self.views.get_mut(&tab)
+        {
+            let at = view.console.get(mark).map_or(0, |(at, _)| *at);
+            let line =
+                ConsoleEntry::Message(ConsoleError::info(HISTORY_CANCEL.message_id, Vec::new()));
+            view.console
+                .insert(mark.min(view.console.len()), (at, line));
+            if view.console.len() > MAX_CONSOLE {
+                view.console.remove(0);
+            }
+        }
+    }
+
+    /// The prompt the controller of the active tab asks now, by key and message.
+    fn asking(&self, app: &Application) -> Option<(String, String)> {
+        self.asking_in(app.active()?)
+    }
+
+    /// The prompt the controller of `tab` asks now, by key and message.
+    fn asking_in(&self, tab: TabId) -> Option<(String, String)> {
+        let view = self.views.get(&tab)?;
+        let prompt = controller_output(view.interaction.as_deref()?, &view.selection).prompt?;
+        Some((prompt.key, prompt.message.id))
+    }
+
+    /// Whether starting `command` may end the controller's prompt with `*Cancel*`: not a claimed
+    /// command (an undo that steps back) or a selection change, and the controller leaves the
+    /// cancel line to the shell.
+    fn ends_prompt(&self, app: &Application, command: &str) -> bool {
+        let Some(controller) = app
+            .active()
+            .and_then(|t| self.views.get(&t))
+            .and_then(|v| v.interaction.as_deref())
+        else {
+            return false;
+        };
+        !controller.handles(command)
+            && !matches!(command, commands::SELECT_SET | commands::SELECT_CLEAR)
+            && !controller.output().reports_results
+    }
+
+    /// [`Self::act`] without the cancel line of a command that ends a prompt.
+    fn act_inner(&mut self, app: &mut Application, action: Action, requests: &mut Vec<Request>) {
         match &action {
             Action::Line(LineAction::Submit(text)) => self.echo(app, text),
             Action::Answer(input) => {
@@ -1716,11 +1787,18 @@ impl Shell {
             {
                 self.push_entry(app, ConsoleEntry::Started(intent.command.clone()));
             }
+            // A prompt counts whether or not the history recorded it yet: a command a controller
+            // started this frame (a typed shortcut) cancels with the same line as any other.
             Action::Line(LineAction::Cancel | LineAction::CancelThen(_))
                 if app
                     .active()
                     .and_then(|t| self.views.get(&t))
-                    .is_some_and(|v| v.shown_prompt.is_some())
+                    .is_some_and(|v| {
+                        v.shown_prompt.is_some()
+                            || v.interaction.as_deref().is_some_and(|c| {
+                                controller_output(c, &v.selection).prompt.is_some()
+                            })
+                    })
                     && !self.reports_results(app) =>
             {
                 self.announce(app, HISTORY_CANCEL.message_id, Vec::new());

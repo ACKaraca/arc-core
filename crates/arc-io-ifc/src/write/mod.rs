@@ -3,7 +3,9 @@
 //!
 //! [`WriteModel`] describes a project, a site, a building, its storeys and elements (walls, slabs,
 //! doors, windows, openings and spaces) with their placement, body geometry, voids and fills, property
-//! sets and base quantities. [`write()`] turns it into the bytes of an ISO 10303-21 clear text file
+//! sets and base quantities, and the element types of walls, slabs, doors and windows
+//! ([`ElementType`]) with the material layers of wall and slab types and the layer set usage of
+//! their occurrences ([`LayerSetUsage`]). [`write()`] turns it into the bytes of an ISO 10303-21 clear text file
 //! with the IFC4 schema and a loss report of what it did not write. It knows nothing of any
 //! product: the caller maps its own objects to this description.
 //!
@@ -357,6 +359,119 @@ impl QuantitySet {
     }
 }
 
+/// A layer of a material layer set (`IfcMaterialLayer` with its `IfcMaterial`).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct MaterialLayer {
+    /// The material name. Layers with the same name share one `IfcMaterial`.
+    pub material: String,
+    /// The thickness in the length unit; zero for a membrane, never negative.
+    pub thickness: f64,
+    /// The `Name` of the layer; `None` omits it.
+    pub name: Option<String>,
+    /// The `Category` of the layer, such as `LoadBearing`, `Insulation` or `Finish`; `None` omits
+    /// it.
+    pub category: Option<String>,
+}
+
+impl MaterialLayer {
+    /// A layer of `thickness` of the material `material`, without name or category. Whether it
+    /// is ventilated is written as unknown.
+    #[must_use]
+    pub fn new(material: &str, thickness: f64) -> Self {
+        Self {
+            material: material.to_owned(),
+            thickness,
+            name: None,
+            category: None,
+        }
+    }
+}
+
+/// The axis of an element's placement along which the layers of its type are stacked
+/// (`IfcLayerSetDirectionEnum`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerDirection {
+    /// The local y axis: across a wall whose x axis runs along its axis.
+    Axis2,
+    /// The local z axis: through the thickness of a slab.
+    Axis3,
+}
+
+/// How the layers of an element's type lie in the element (`IfcMaterialLayerSetUsage`): the
+/// first layer starts at `offset` from the reference line (or plane) of the placement along
+/// `direction` and the layers follow toward the positive or the negative side.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct LayerSetUsage {
+    /// The axis the layers are stacked along.
+    pub direction: LayerDirection,
+    /// True when the layers follow in the positive direction of the axis.
+    pub positive: bool,
+    /// Where the first layer starts, in the length unit, along the axis.
+    pub offset: f64,
+}
+
+impl LayerSetUsage {
+    /// A usage along `direction`, starting at `offset`, toward the positive side when `positive`.
+    #[must_use]
+    pub fn new(direction: LayerDirection, positive: bool, offset: f64) -> Self {
+        Self {
+            direction,
+            positive,
+            offset,
+        }
+    }
+}
+
+/// An element type (`IfcWallType`, `IfcSlabType`, `IfcDoorType` or `IfcWindowType`), assigned to
+/// the elements whose [`Element::element_type`] names it (`IfcRelDefinesByType`).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ElementType {
+    /// The identifier its `GlobalId` is made from.
+    pub id: u128,
+    /// The kind of its occurrences: a wall, slab, door or window.
+    pub kind: ElementKind,
+    /// The name.
+    pub name: String,
+    /// The `PredefinedType`, handled like [`Element::predefined_type`]; the text of another value
+    /// is written as the `ElementType`.
+    pub predefined_type: Option<String>,
+    /// Doors: the `OperationType`; windows: the `PartitioningType`, handled like
+    /// [`Element::operation_type`]. Ignored for walls and slabs.
+    pub operation_type: Option<String>,
+    /// Walls and slabs: the layers, written as an `IfcMaterialLayerSet` associated with the type;
+    /// empty writes no material. Doors and windows: must be empty; layers are reported, not
+    /// written.
+    pub layers: Vec<MaterialLayer>,
+}
+
+impl ElementType {
+    /// A type of `kind` without predefined type, operation or layers.
+    #[must_use]
+    pub fn new(id: u128, kind: ElementKind, name: &str) -> Self {
+        Self {
+            id,
+            kind,
+            name: name.to_owned(),
+            predefined_type: None,
+            operation_type: None,
+            layers: Vec::new(),
+        }
+    }
+
+    fn entity(&self) -> Option<&'static str> {
+        match self.kind {
+            ElementKind::Wall => Some("IFCWALLTYPE"),
+            ElementKind::Slab => Some("IFCSLABTYPE"),
+            ElementKind::Door => Some("IFCDOORTYPE"),
+            ElementKind::Window => Some("IFCWINDOWTYPE"),
+            ElementKind::Opening | ElementKind::Space => None,
+        }
+    }
+}
+
 /// An element of the building.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -398,6 +513,12 @@ pub struct Element {
     pub property_sets: Vec<PropertySet>,
     /// The quantity sets.
     pub quantity_sets: Vec<QuantitySet>,
+    /// Walls, slabs, doors and windows: the identifier of the [`ElementType`] of the model the
+    /// element is an occurrence of; it must be a type of the same kind. `None` assigns no type.
+    pub element_type: Option<u128>,
+    /// Walls and slabs: how the layers of the element's type lie in it. Written when the type
+    /// has layers; otherwise it is reported, not written.
+    pub layer_usage: Option<LayerSetUsage>,
 }
 
 impl Element {
@@ -419,6 +540,8 @@ impl Element {
             host: None,
             property_sets: Vec::new(),
             quantity_sets: Vec::new(),
+            element_type: None,
+            layer_usage: None,
         }
     }
 }
@@ -437,6 +560,8 @@ pub struct WriteModel {
     pub storeys: Vec<Storey>,
     /// The elements, written in this order.
     pub elements: Vec<Element>,
+    /// The element types, written in this order after the elements.
+    pub types: Vec<ElementType>,
     /// The length unit.
     pub length_unit: LengthUnit,
     /// The plane angle unit.
@@ -456,6 +581,7 @@ impl WriteModel {
             building,
             storeys: Vec::new(),
             elements: Vec::new(),
+            types: Vec::new(),
             length_unit: LengthUnit::Metre,
             angle_unit: AngleUnit::Radian,
             true_north: None,
@@ -521,8 +647,10 @@ pub struct WriteOutput {
 /// window size that is not positive, a placement whose axes or a true north that is zero, shorter
 /// than about 1.5E-8 or parallel, a NUL in a text, two properties or quantities of one set with
 /// the same name, or two sets of one element with the same name;
-/// `io.ifc.write_reference_invalid` for a storey or host that is not in the model or of the wrong
-/// kind, an opening without a host, or a chain of hosts that returns to its start;
+/// `io.ifc.write_reference_invalid` for a storey, host or element type that is not in the model or
+/// of the wrong kind, an element type of an opening or space, an opening without a host, or a chain
+/// of hosts that returns to its start; `io.ifc.write_value_invalid` also for a layer thickness that
+/// is negative or not finite and a layer set usage offset that is not finite;
 /// `io.ifc.write_id_duplicate` when two objects give the same `GlobalId`; `io.limit_exceeded` for
 /// `record_count` (instances), `string_bytes`, `array_length`, `nesting_depth` and `memory_bytes`
 /// (the size of the output); `base.cancelled` when the token was cancelled.
@@ -544,9 +672,16 @@ pub fn write(model: &WriteModel, options: &WriteOptions) -> Result<WriteOutput> 
         options.cancel.check()?;
         writer.element(element, &mut context)?;
     }
+    for element_type in &model.types {
+        options.cancel.check()?;
+        writer.element_type(element_type, &mut context)?;
+    }
     writer.relationships(model, &context, &kinds)?;
+    writer.materials(model, &context)?;
     writer.data.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
-    writer.loss.add_mapped(len64(model.elements.len()));
+    writer
+        .loss
+        .add_mapped(len64(model.elements.len() + model.types.len()));
     let report = writer.loss.finish(LossHeader::new(
         "ifc",
         "IFC4",
@@ -595,9 +730,28 @@ fn check_references(model: &WriteModel) -> Result<BTreeMap<u128, ElementKind>> {
                 .with_arg("global_id", global_id(element.id)));
         }
     }
+    let mut type_kinds = BTreeMap::new();
+    for element_type in &model.types {
+        if element_type.entity().is_none() {
+            return Err(bad_reference(element_type.id));
+        }
+        if kinds.contains_key(&element_type.id)
+            || type_kinds
+                .insert(element_type.id, element_type.kind)
+                .is_some()
+        {
+            return Err(Error::new(codes::IFC_WRITE_ID_DUPLICATE)
+                .with_arg("global_id", global_id(element_type.id)));
+        }
+    }
     for element in &model.elements {
         if !storeys.contains(&element.storey) {
             return Err(bad_reference(element.storey));
+        }
+        if let Some(id) = element.element_type
+            && type_kinds.get(&id) != Some(&element.kind)
+        {
+            return Err(bad_reference(id));
         }
         let mut set_names = BTreeSet::new();
         let names = element.property_sets.iter().map(|p| &p.name);
@@ -710,6 +864,7 @@ struct Context {
     body: u64,
     storeys: BTreeMap<u128, (u64, u64)>,
     elements: BTreeMap<u128, u64>,
+    types: BTreeMap<u128, u64>,
 }
 
 struct Writer<'a> {
@@ -918,6 +1073,7 @@ impl Writer<'_> {
             body,
             storeys,
             elements: BTreeMap::new(),
+            types: BTreeMap::new(),
         })
     }
 
@@ -1077,6 +1233,178 @@ impl Writer<'_> {
         context.elements.insert(element.id, instance);
         self.property_sets(element, instance)?;
         self.quantity_sets(element, instance)
+    }
+
+    /// An element type: the rooted attributes, the `ElementType` text of a user-defined
+    /// predefined type and the `PredefinedType`; for doors and windows also the operation.
+    fn element_type(&mut self, element_type: &ElementType, context: &mut Context) -> Result<()> {
+        let entity = element_type
+            .entity()
+            .ok_or_else(|| bad_reference(element_type.id))?;
+        let id = self.global_id(element_type.id)?;
+        let (predefined, user_type) = choice(
+            element_type.predefined_type.as_deref(),
+            element_type.kind.predefined(),
+        );
+        let mut parameters = vec![
+            id,
+            Parameter::Omitted,
+            label(&element_type.name),
+            Parameter::Omitted,
+            Parameter::Omitted,
+            Parameter::Omitted,
+            Parameter::Omitted,
+            Parameter::Omitted,
+            user_type.unwrap_or(Parameter::Omitted),
+            predefined,
+        ];
+        let operations = match element_type.kind {
+            ElementKind::Door => Some(DOOR_OPERATIONS),
+            ElementKind::Window => Some(WINDOW_PARTITIONINGS),
+            _ => None,
+        };
+        if let Some(operations) = operations {
+            let (operation, user_operation) =
+                choice(element_type.operation_type.as_deref(), operations);
+            // `OperationType` (or `PartitioningType`), `ParameterTakesPrecedence`, the user text.
+            parameters.extend([
+                operation,
+                Parameter::Omitted,
+                user_operation.unwrap_or(Parameter::Omitted),
+            ]);
+        }
+        let instance = self.add(entity, &parameters)?;
+        context.types.insert(element_type.id, instance);
+        Ok(())
+    }
+
+    /// The material layer sets of the wall and slab types, associated with their types, and the
+    /// layer set usage of each element that has one, associated with the element. Layers of door
+    /// and window types and a usage without a layer set are reported, not written.
+    fn materials(&mut self, model: &WriteModel, context: &Context) -> Result<()> {
+        let mut materials: BTreeMap<&str, u64> = BTreeMap::new();
+        let mut sets: BTreeMap<u128, u64> = BTreeMap::new();
+        for element_type in &model.types {
+            if element_type.layers.is_empty() {
+                continue;
+            }
+            if !matches!(element_type.kind, ElementKind::Wall | ElementKind::Slab) {
+                self.loss.add(
+                    reasons::NOT_WRITTEN,
+                    "IFCMATERIALLAYERSET",
+                    Some(Source::Text(&global_id(element_type.id))),
+                    1,
+                );
+                continue;
+            }
+            let mut layers = Vec::with_capacity(element_type.layers.len());
+            for layer in &element_type.layers {
+                if !layer.thickness.is_finite() || layer.thickness < 0.0 {
+                    return Err(invalid("layer thickness"));
+                }
+                let material = match materials.get(layer.material.as_str()) {
+                    Some(&material) => material,
+                    None => {
+                        let material = self.add(
+                            "IFCMATERIAL",
+                            &[
+                                label(&layer.material),
+                                Parameter::Omitted,
+                                Parameter::Omitted,
+                            ],
+                        )?;
+                        materials.insert(&layer.material, material);
+                        material
+                    }
+                };
+                let optional =
+                    |text: &Option<String>| text.as_deref().map_or(Parameter::Omitted, label);
+                layers.push(self.add(
+                    "IFCMATERIALLAYER",
+                    &[
+                        reference(material),
+                        Parameter::Real(layer.thickness),
+                        // `IsVentilated`: unknown.
+                        enumeration("U"),
+                        optional(&layer.name),
+                        Parameter::Omitted,
+                        optional(&layer.category),
+                        Parameter::Omitted,
+                    ],
+                )?);
+            }
+            let set = self.add(
+                "IFCMATERIALLAYERSET",
+                &[
+                    references(&layers),
+                    label(&element_type.name),
+                    Parameter::Omitted,
+                ],
+            )?;
+            sets.insert(element_type.id, set);
+            if let Some(&instance) = context.types.get(&element_type.id) {
+                self.relationship(
+                    "IFCRELASSOCIATESMATERIAL",
+                    derived_id(element_type.id, role::MATERIAL, 0),
+                    references(&[instance]),
+                    reference(set),
+                )?;
+            }
+        }
+        self.layer_usages(model, context, &sets)
+    }
+
+    /// The layer set usage of each element that has one and whose type has a layer set in `sets`.
+    fn layer_usages(
+        &mut self,
+        model: &WriteModel,
+        context: &Context,
+        sets: &BTreeMap<u128, u64>,
+    ) -> Result<()> {
+        for element in &model.elements {
+            let Some(usage) = element.layer_usage else {
+                continue;
+            };
+            if !usage.offset.is_finite() {
+                return Err(invalid("layer set usage"));
+            }
+            let set = element.element_type.and_then(|t| sets.get(&t).copied());
+            let (Some(set), Some(&instance)) = (set, context.elements.get(&element.id)) else {
+                self.loss.add(
+                    reasons::NOT_WRITTEN,
+                    "IFCMATERIALLAYERSETUSAGE",
+                    Some(Source::Text(&global_id(element.id))),
+                    1,
+                );
+                continue;
+            };
+            let direction = match usage.direction {
+                LayerDirection::Axis2 => "AXIS2",
+                LayerDirection::Axis3 => "AXIS3",
+            };
+            let sense = if usage.positive {
+                "POSITIVE"
+            } else {
+                "NEGATIVE"
+            };
+            let usage = self.add(
+                "IFCMATERIALLAYERSETUSAGE",
+                &[
+                    reference(set),
+                    enumeration(direction),
+                    enumeration(sense),
+                    Parameter::Real(usage.offset),
+                    Parameter::Omitted,
+                ],
+            )?;
+            self.relationship(
+                "IFCRELASSOCIATESMATERIAL",
+                derived_id(element.id, role::MATERIAL, 0),
+                references(&[instance]),
+                reference(usage),
+            )?;
+        }
+        Ok(())
     }
 
     /// The product definition shape of a body, or `None` with a loss item when the body is
@@ -1418,7 +1746,7 @@ impl Writer<'_> {
     }
 
     /// The aggregation of the spatial structure, the containment of the elements in their storeys,
-    /// and the voids and fills.
+    /// the voids and fills, and the type of each typed element.
     fn relationships(
         &mut self,
         model: &WriteModel,
@@ -1506,6 +1834,33 @@ impl Writer<'_> {
                     reference(other),
                     reference(own),
                 )?,
+            }
+        }
+        self.type_relationships(model, context)
+    }
+
+    /// One `IfcRelDefinesByType` per element type with occurrences.
+    fn type_relationships(&mut self, model: &WriteModel, context: &Context) -> Result<()> {
+        let mut occurrences: BTreeMap<u128, Vec<u64>> = BTreeMap::new();
+        for element in &model.elements {
+            if let (Some(element_type), Some(&instance)) =
+                (element.element_type, context.elements.get(&element.id))
+            {
+                occurrences.entry(element_type).or_default().push(instance);
+            }
+        }
+        for element_type in &model.types {
+            // `RelatedObjects` holds at least one object: a type without occurrences stands alone.
+            if let (Some(related), Some(&instance)) = (
+                occurrences.get(&element_type.id),
+                context.types.get(&element_type.id),
+            ) {
+                self.relationship(
+                    "IFCRELDEFINESBYTYPE",
+                    derived_id(element_type.id, role::TYPED, 0),
+                    references(related),
+                    reference(instance),
+                )?;
             }
         }
         Ok(())
