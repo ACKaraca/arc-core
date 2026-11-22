@@ -568,7 +568,8 @@ mod tests {
             prop_assert_eq!(segment.point_at_fraction(0.0), a);
             prop_assert_eq!(segment.point_at_fraction(1.0), b);
             prop_assert_eq!(p.point_at(1.0), b);
-            let scale = scale(a, b, bulge);
+            // Rounding grows with the coordinates' own size, not only with the chord.
+            let scale = scale(a, b, bulge).max(a.coords.norm()).max(b.coords.norm());
             let close = 16.0 * f64::EPSILON * scale;
             // The middle of the arc lies the sagitta (half chord times bulge) off the chord.
             let c = b - a;
