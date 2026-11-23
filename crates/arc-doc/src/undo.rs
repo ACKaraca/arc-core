@@ -148,6 +148,24 @@ pub struct UndoManager {
     expected: Option<usize>,
     /// The steps dropped from the oldest end of the undo stack by the limits.
     trimmed: u64,
+    /// The `merge` and `migration` transactions reported, which change the document outside the
+    /// stacks.
+    outside: u64,
+}
+
+/// A place in the history of a document: two positions are equal when the document reached the
+/// same state through its undo stack (an edit and its undo return to the position before the
+/// edit) and nothing changed it outside the stacks in between. A save records one, so a document
+/// undone back to what it saved counts as unmodified. Opaque; compared only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndoPosition {
+    /// The last transaction of the step on top of the undo stack, so a transaction coalesced into
+    /// it moves the position; `None` for an empty stack.
+    step: Option<TransactionId>,
+    /// The last transaction of the step an open group collects.
+    open: Option<TransactionId>,
+    trimmed: u64,
+    outside: u64,
 }
 
 /// A position in the undo stack.
@@ -547,9 +565,20 @@ impl UndoManager {
                     self.trim();
                 }
             }
-            TxnKind::Merge | TxnKind::Migration => {}
+            TxnKind::Merge | TxnKind::Migration => self.outside = self.outside.saturating_add(1),
         }
         Ok(())
+    }
+
+    /// The position in the history now (see [`UndoPosition`]).
+    #[must_use]
+    pub fn position(&self) -> UndoPosition {
+        UndoPosition {
+            step: self.undo.back().and_then(|s| s.txns.last().copied()),
+            open: self.open.txns.last().copied(),
+            trimmed: self.trimmed,
+            outside: self.outside,
+        }
     }
 
     fn outside_group(&self) -> Result<()> {

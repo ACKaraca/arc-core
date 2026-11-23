@@ -101,6 +101,6 @@ pub use subkey::SubKey;
 pub use txn::{
     MAX_OPERATIONS, MAX_SAVEPOINTS, Txn, TxnKind, TxnLimits, TxnMeta, TxnParts, TxnSavepoint,
 };
-pub use undo::{MAX_MARK_NAME_BYTES, MAX_MARKS, Step, UndoLimits, UndoManager};
+pub use undo::{MAX_MARK_NAME_BYTES, MAX_MARKS, Step, UndoLimits, UndoManager, UndoPosition};
 pub use validate::DocumentValidator;
 pub use version::{NewerMajor, ReadOnlyReason};

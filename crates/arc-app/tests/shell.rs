@@ -535,6 +535,8 @@ struct Seen {
     keys: Vec<(Option<egui::Key>, Option<String>)>,
     /// The labels of the context menu the controller offers; none opens no menu.
     menu: Vec<String>,
+    /// The camera change the controller asks for next.
+    view: Option<shell::ViewRequest>,
 }
 
 /// A controller that keeps a prompt, one option and one history line, consumes viewport clicks
@@ -596,6 +598,10 @@ impl shell::Interaction for FakeController {
         menu.iter()
             .map(|label| shell::ContextEntry::command(label.clone(), "test.menu"))
             .collect()
+    }
+
+    fn take_view(&mut self) -> Option<shell::ViewRequest> {
+        self.seen.lock().unwrap().view.take()
     }
 
     fn handles(&self, command: &str) -> bool {
@@ -1609,4 +1615,76 @@ fn a_menu_command_that_ends_a_controller_prompt_says_cancel_before_its_line() {
     assert_eq!(cancels.len(), 1, "{labels:?}");
     let at = |text: &str| labels.iter().position(|l| l.contains(text));
     assert!(at("app-history-cancel") < at("test.ends"), "{labels:?}");
+}
+
+/// A drag with Shift and the middle button over the viewport from `at` (an orbit), over three
+/// frames. Two drags in a row start apart, so the second press is no double click (zoom extents).
+fn orbit(shell: &mut Shell, app: &mut Application, ctx: &egui::Context, at: egui::Pos2) {
+    let to = at + egui::vec2(60.0, 25.0);
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Middle,
+        pressed,
+        modifiers: egui::Modifiers::SHIFT,
+    };
+    let moved = egui::Event::PointerMoved(to);
+    frame(
+        shell,
+        app,
+        ctx,
+        vec![egui::Event::PointerMoved(at), button(at, true)],
+        Vec::new(),
+        false,
+    );
+    frame(shell, app, ctx, vec![moved], Vec::new(), false);
+    frame(shell, app, ctx, vec![button(to, false)], Vec::new(), false);
+}
+
+#[test]
+fn a_plan_request_looks_straight_down_and_locks_rotation_until_a_camera_request() {
+    let dir = TempDir::new("plan-camera");
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let mut app = app_with(&dir.0, false, Some(seen.clone()));
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    open_new_document(&mut shell, &mut app, &ctx);
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    let tab = app.active().unwrap();
+    let camera = |shell: &Shell| *shell.view(tab).unwrap().camera();
+    // Without a lock an orbit turns the camera.
+    let first = camera(&shell);
+    orbit(&mut shell, &mut app, &ctx, egui::pos2(200.0, 200.0));
+    let before = camera(&shell);
+    assert!((before.forward() - first.forward()).norm() > 1e-3);
+
+    seen.lock().unwrap().view = Some(shell::ViewRequest::Plan {
+        a: [0.0, 0.0],
+        b: [10.0, 4.0],
+        z: 3.0,
+    });
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    let plan = camera(&shell);
+    assert!((plan.forward() - arc_base::math::Vector3::new(0.0, 0.0, -1.0)).norm() < 1e-9);
+    assert!((plan.up() - arc_base::math::Vector3::y()).norm() < 1e-9);
+    let target = plan.target();
+    assert!((target.x - 5.0).abs() < 1e-9 && (target.y - 2.0).abs() < 1e-9);
+    assert!((target.z - 3.0).abs() < 1e-9);
+    let arc_geom::view::Projection::Orthographic { height } = plan.projection() else {
+        panic!("not orthographic");
+    };
+    // The rectangle fits, with a narrow margin: 4 m tall at least, never twice the larger side.
+    assert!((4.0..20.0).contains(&height), "{height}");
+
+    // The orientation is locked: an orbit leaves the camera as it was.
+    orbit(&mut shell, &mut app, &ctx, egui::pos2(320.0, 260.0));
+    assert_eq!(camera(&shell).forward(), plan.forward());
+    assert_eq!(camera(&shell).up(), plan.up());
+
+    // A camera request puts the earlier camera back and releases the lock.
+    seen.lock().unwrap().view = Some(shell::ViewRequest::Camera(before));
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    assert_eq!(camera(&shell), before);
+    orbit(&mut shell, &mut app, &ctx, egui::pos2(200.0, 200.0));
+    assert!((camera(&shell).forward() - before.forward()).norm() > 1e-3);
 }

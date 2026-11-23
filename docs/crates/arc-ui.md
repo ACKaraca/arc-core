@@ -666,7 +666,9 @@ added: picking and navigation errors keep their `arc-gpu` and `arc-geom` codes.
   and holds no selection; the caller supplies the camera, image size, active prompt, selection
   count, tolerance and a `ViewPicker` (the identifier pass of `arc-gpu` over the shown scene and
   the scene's bounding sphere). `ScenePicker` implements it with an `arc_gpu::Renderer` and
-  `Scene`; tests use a fake.
+  `Scene`; tests use a fake. The pre-selection under a moving pointer asks `ViewPicker::hover`,
+  which by default is `pick`; a picker whose picks wait for another thread returns no hits instead
+  of waiting long.
 - Thresholds are logical points multiplied by the pixels-per-point factor and the UI scale:
   drag distance 4, cycle radius 3, pick square half side 4 (also the line pick tolerance).
   Double-click time is 0.4 s on the caller's clock; a clock running backwards counts as no time

@@ -570,6 +570,14 @@ impl Viewport {
             .ok_or_else(|| Error::new(codes::TIMEOUT))
     }
 
+    /// Whether the thread has handled every call made so far, including the frame they cause:
+    /// `false` while it applies extraction results or draws. It does not wait.
+    #[must_use]
+    pub fn caught_up(&self) -> bool {
+        let state = lock(&self.shared);
+        state.processed >= state.requested
+    }
+
     /// Waits at most `timeout` until the thread has handled every call made before this one,
     /// including the frame they cause.
     ///
@@ -1112,6 +1120,22 @@ mod tests {
         // The held frame and one frame for the latest camera.
         assert_eq!(viewport.frames(), 3);
         assert_eq!(lock(&viewport.shared).inputs.frame, view(1011.0));
+    }
+
+    #[test]
+    fn a_frame_being_drawn_is_not_caught_up_though_nothing_is_dirty() {
+        let viewport = viewport(false);
+        viewport.sync(WAIT).unwrap();
+        assert!(viewport.caught_up());
+        let (started, release) = hold(&viewport);
+        viewport.update_scene(vec![line(3, 1, 0.0)]).unwrap();
+        started.recv_timeout(WAIT).unwrap();
+        // The thread took the reasons when it started drawing: only `caught_up` tells.
+        assert!(!viewport.dirty().any());
+        assert!(!viewport.caught_up());
+        release.send(()).unwrap();
+        viewport.sync(WAIT).unwrap();
+        assert!(viewport.caught_up());
     }
 
     #[test]

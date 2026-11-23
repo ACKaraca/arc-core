@@ -441,7 +441,9 @@ the thread, which draws the first frame.
   device and, when `ViewportConfig::readback` is set, the read-back `Image`. Without readback the
   thread waits for the device to finish each frame, so at most one frame is in flight.
   `latest_frame` returns the newest frame without waiting; `wait_frame` and `sync` (every
-  earlier call handled) wait with a caller-given bound and fail with `gpu.timeout`.
+  earlier call handled) wait with a caller-given bound and fail with `gpu.timeout`; `caught_up`
+  says without waiting whether every call so far is handled (false while a frame is drawn, when
+  `dirty` is already empty).
 - **Jobs on the scene.** `with_scene(timeout, job)` runs `job` on the render thread with the
   renderer, the scene (after every extraction result queued before the call is applied) and the
   render settings of the frame drawn with it (lowered while the camera moves, see

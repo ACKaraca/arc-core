@@ -585,10 +585,12 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
   reused, its document (with its own undo history), the package when it has a file, the
   recovery journal, the banners and the view states (`views`, `views_mut`; opaque
   `Box<dyn Any + Send>` values the shell keeps).
-- A tab is dirty when its document's revision differs from the revision of its saved state. The
-  revision is read before a save, so a commit that races the save leaves the tab dirty, never
-  falsely clean. Undoing back to the saved state is a new revision, so the tab stays dirty. A
-  new document is clean until edited; a recovered document is dirty until saved.
+- A tab is dirty when its document's revision differs from the revision of its saved state and
+  the document is not at the saved state's place in its undo history (`Document::undo_position`).
+  Both are read before a save, so a commit that races the save leaves the tab dirty, never falsely
+  clean. Undoing back to the saved state is a new revision but the saved place, so the tab is clean
+  again; a redo forms a new undo step, so redoing past the save leaves it dirty. A new document is
+  clean until edited; a recovered document is dirty until saved.
 - A silent commit (`Context::commit_silently`) counts as a modification: it is a committed
   transaction, so the revision moves and a clean package tab becomes dirty. The rows it adds are
   document content: a package closed without saving them would lose them, so the close prompt is
@@ -890,7 +892,26 @@ it is registered. Without a registration the shell behaves as before.
   picks. The shell hands them to the renderer as display overrides (`arc-gpu`) and filters the hits
   of its own picking by them. `banner` (default `None`) is a text, already localized, shown in a
   frame around the viewport with a label at its top left corner while a temporary display state is
-  active. None of this is saved.
+  active. None of this is saved. Framing everything (a zoom-extents request, the first framing of a
+  document) frames only the objects the display state shows.
+- Camera requests. `Interaction::take_view` (default `None`) returns a `ViewRequest`, taken once
+  per frame: `Extents`, `Previous` (the camera before the last request), `Window { a, b }`,
+  `Scale(factor)`, `Plan { a, b, z }` and `Camera(frame)` (the enum is non-exhaustive). `Plan` sets an orthographic camera
+  looking down −z with +y up, framed on the rectangle between the corners at height `z` with a 5 %
+  margin, and locks the orientation: the viewport then takes pans and zooms but no rotation, and
+  the view cube is not shown. `Camera(frame)` sets a camera the controller read from
+  `InteractionContext::camera` earlier and releases the lock, so a product returns to the camera
+  it left.
+- Extraction on request. `InteractionContext::ask_extraction(objects)` (at most 10 000 per call,
+  from `frame`, `line` and `key`) queues the objects for extraction from the tab's current snapshot
+  on the extraction workers, as a commit that changed them would. A product uses it when what an
+  object draws depends on state outside the document (a drawing shown only while a view is open,
+  filtered by a temporary display state). While extraction is queued or running the shell counts
+  as busy, so frames keep coming and a result is drawn when it arrives without further input.
+- A hover pick (the pre-selection) waits at most 40 ms for the render thread and keeps at most one
+  pick queued: while the render thread applies a large extraction result, the pointer highlights
+  nothing instead of holding up the frame. A click, a rubber band and a pick of the product wait
+  as before.
 - `InteractionContext` also has `setting(key) -> Option<SettingValue>` (the effective value),
   `ask_setting(key, Option<SettingValue>)` (set in the user scope, or remove from it, after the call;
   at most 16 per call), `ask_panel(panel)` (show a panel, or bring it to the front of its group)

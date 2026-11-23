@@ -126,6 +126,23 @@ pub trait ViewPicker {
         region: &PickRegion,
     ) -> Result<Vec<PickHit>>;
 
+    /// The hits for the hover highlight, as [`Self::pick`] returns them. A picker whose picks wait
+    /// for another thread returns what it has without waiting (no hits while that thread is busy),
+    /// so a moving pointer never holds up the frame; the default is [`Self::pick`].
+    ///
+    /// # Errors
+    ///
+    /// The picking errors of `arc-gpu`.
+    fn hover(
+        &mut self,
+        frame: &ViewFrame,
+        width: u32,
+        height: u32,
+        region: &PickRegion,
+    ) -> Result<Vec<PickHit>> {
+        self.pick(frame, width, height, region)
+    }
+
     /// The bounding sphere of the whole scene, or `None` when it is empty.
     fn bounds(&mut self) -> Option<(Point3, f64)>;
 }
@@ -666,7 +683,8 @@ impl Gestures {
         );
         #[allow(clippy::cast_possible_truncation, reason = "a few pixels")]
         let tolerance = (PICK_APERTURE * self.scale) as f32;
-        match self.pick(view, region(x, y, x + 1, y + 1, tolerance)) {
+        let r = region(x, y, x + 1, y + 1, tolerance)?;
+        match view.picker.hover(&view.frame, view.width, view.height, &r) {
             Ok(hits) => hits.first().map(|h| h.key.object),
             Err(e) => {
                 out.error = Some(e);

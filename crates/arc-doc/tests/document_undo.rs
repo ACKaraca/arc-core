@@ -374,3 +374,29 @@ fn labels_and_the_journal_follow_the_commits() {
     assert_eq!(error.code(), "doc.undo.sequence_invalid");
     assert_eq!(state(&document.snapshot()), State::from([(1, 1)]));
 }
+
+#[test]
+fn a_coalesced_edit_moves_the_undo_position() {
+    let document = Document::new(registry(), Arc::new(Evaluators::new())).unwrap();
+    document.begin_gesture().wait().unwrap();
+    let edit = |n: i64, create: bool| {
+        document
+            .submit_with(SubmitOptions::coalesce("k".to_owned()), move |txn| {
+                let id = ObjectId::from_u128(1);
+                if create {
+                    txn.create(KEY, id, Header::default(), vec![Some(Value::I64(n))])
+                        .map(drop)
+                } else {
+                    txn.modify(id, FieldPath::new("n"), Some(Value::I64(n)))
+                }
+            })
+            .wait()
+            .unwrap();
+    };
+    edit(1, true);
+    let saved = document.undo_position();
+    edit(2, false);
+    // The second edit joined the first step; a save taken before it must not look current.
+    assert_ne!(document.undo_position(), saved);
+    document.end_gesture().wait().unwrap();
+}

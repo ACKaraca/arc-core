@@ -364,6 +364,10 @@ pub struct View {
     zoom_extents: bool,
     /// The cameras before the zoom requests of the product, the last one on top.
     previous: Vec<ViewFrame>,
+    /// The orientation is locked by a [`ViewRequest::Plan`]: navigation pans and zooms only.
+    locked: bool,
+    /// A hover pick is queued on the render thread and has not run yet.
+    hover_pick: Arc<std::sync::atomic::AtomicBool>,
     /// Frames still wanted after the viewport went clean: the last rendered frame is registered
     /// as a texture by a redraw that follows the render.
     settle: std::cell::Cell<u8>,
@@ -1055,6 +1059,8 @@ impl Shell {
             framed: false,
             zoom_extents: false,
             previous: Vec::new(),
+            locked: false,
+            hover_pick: Arc::default(),
             settle: std::cell::Cell::new(0),
             console: Vec::new(),
             shown_prompt: None,
@@ -1093,7 +1099,8 @@ impl Shell {
                 // scene of a document that was open before its first frame.
                 if let Some(viewport) = &view.viewport {
                     let results = driver.take_results();
-                    view.pending = !results.is_empty();
+                    // Work still running delivers later: frames keep coming until it is drawn.
+                    view.pending = !results.is_empty() || !driver.wait_idle(Duration::ZERO);
                     if !results.is_empty()
                         && let Err(e) = viewport.update_scene(results)
                     {
@@ -1126,7 +1133,12 @@ impl Shell {
     #[must_use]
     pub fn busy(&self) -> bool {
         self.views.values().any(|v| {
-            let working = v.pending || v.viewport.as_ref().is_some_and(|vp| vp.dirty().any());
+            // A frame the render thread is still drawing (it took the dirty reasons when it
+            // started) counts too: its image must reach the screen without further input.
+            let working = v.pending
+                || v.viewport
+                    .as_ref()
+                    .is_some_and(|vp| vp.dirty().any() || !vp.caught_up());
             if working {
                 v.settle.set(4);
                 true
@@ -1505,6 +1517,7 @@ impl Shell {
             interaction,
             selection,
             camera,
+            extraction,
             ..
         } = view;
         let Some(controller) = interaction.as_deref_mut() else {
@@ -1518,6 +1531,7 @@ impl Shell {
             return;
         }
         over_viewport::offer_keys(controller, &cx, modifiers, &mut raw.events, tab_only);
+        submit_extraction(app, tab, extraction.as_ref(), cx.take_extraction());
         if let Some(text) = cx.take_clipboard_text() {
             self.copy_text = Some(text);
         }
@@ -1993,6 +2007,7 @@ impl Shell {
         };
         let (asked, ran, settings) = (cx.take_asked(), cx.take_ran(), cx.take_settings());
         let panels = cx.take_panels();
+        submit_extraction(app, tab, view.extraction.as_ref(), cx.take_extraction());
         if let Some(text) = cx.take_clipboard_text() {
             self.copy_text = Some(text);
         }
@@ -2455,11 +2470,11 @@ fn render_settings(_colors: &Colors) -> arc_gpu::RenderSettings {
     }
 }
 
-/// Frames the camera on everything in the viewport's scene: after a document opens (until its
-/// first change) and on a zoom-extents request. A scene that is not known yet waits for a later
-/// pass; an empty one ends an explicit request.
+/// Frames the camera on everything the viewport shows (not what is hidden or isolated out): after a
+/// document opens (until its first change) and on a zoom-extents request. A scene that is not known
+/// yet waits for a later pass; an empty one ends an explicit request.
 fn frame_drawing(
-    viewport: Option<&Viewport>,
+    (viewport, display): (Option<&Viewport>, &over_viewport::DisplayState),
     size: [u32; 2],
     camera: &mut ViewFrame,
     framed: &mut bool,
@@ -2469,7 +2484,7 @@ fn frame_drawing(
     let Some(viewport) = viewport else {
         return;
     };
-    let bounds = ViewportPicker(Some(viewport), None).bounds();
+    let bounds = ViewportPicker(Some(viewport), Some(display), None).bounds();
     let Some((center, radius)) = bounds else {
         *requested = false;
         return;
@@ -2506,11 +2521,37 @@ fn point_at(rect: egui::Rect, px: [f64; 2], ppp: f64) -> egui::Pos2 {
     )
 }
 
+/// How far above a plan drawing a [`ViewRequest::Plan`] camera stands at least, in model units:
+/// the projection is orthographic, so the distance only keeps the drawing between near and far.
+const PLAN_EYE: f64 = 100.0;
+
+/// Queues the extraction of `objects` from `tab`'s current snapshot on its driver.
+fn submit_extraction(
+    app: &Application,
+    tab: TabId,
+    driver: Option<&ExtractionDriver>,
+    objects: Vec<ObjectId>,
+) {
+    if objects.is_empty() {
+        return;
+    }
+    if let (Some(driver), Ok(t)) = (driver, app.tab(tab)) {
+        driver.submit(&t.document().snapshot(), objects);
+    }
+}
+
+/// Whether `next` looks the way `camera` does (same forward and up directions): what a pan or a
+/// zoom keeps and a rotation changes.
+fn same_orientation(camera: &ViewFrame, next: &ViewFrame) -> bool {
+    let tol = Tolerance::DEFAULT.angular;
+    (next.forward() - camera.forward()).norm() <= tol && (next.up() - camera.up()).norm() <= tol
+}
+
 /// Applies a view request of the product to the camera: the framing itself is the zoom-extents pass.
 fn apply_view(
     request: ViewRequest,
     camera: &mut ViewFrame,
-    previous: &mut Vec<ViewFrame>,
+    (previous, locked): (&mut Vec<ViewFrame>, &mut bool),
     zoom_extents: &mut bool,
     size: [u32; 2],
     actions: &mut Vec<Action>,
@@ -2549,6 +2590,29 @@ fn apply_view(
         ViewRequest::Scale(factor) => {
             arc_gpu::navigation::zoom_at(camera, factor, &camera.target())
         }
+        ViewRequest::Plan { a, b, z } => {
+            let (w, h) = ((a[0] - b[0]).abs(), (a[1] - b[1]).abs());
+            // The rectangle fills the viewport in its tighter direction, with a narrow margin.
+            let height = (h.max(w / aspect) * 1.05).max(Tolerance::DEFAULT.linear);
+            let center = Point3::new((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, z);
+            let distance = height.max(PLAN_EYE);
+            let frame = ViewFrame::new(
+                center + Vector3::z() * distance,
+                center,
+                Vector3::y(),
+                Projection::Orthographic { height },
+                camera.near().min(distance / 2.0),
+                camera.far().max(distance * 2.0),
+            );
+            if frame.is_ok() {
+                *locked = true;
+            }
+            frame
+        }
+        ViewRequest::Camera(frame) => {
+            *locked = false;
+            Ok(frame)
+        }
     };
     match next {
         Ok(frame) => *camera = frame,
@@ -2556,10 +2620,17 @@ fn apply_view(
     }
 }
 
-/// Picking through a tab's [`Viewport`] on its render thread.
+/// How long a hover pick waits for the render thread: a few frames at most. A render thread that is
+/// busy (applying a large extraction result, drawing a slow frame) gives no hover highlight for
+/// that frame instead of holding the interface up.
+const HOVER_WAIT: Duration = Duration::from_millis(40);
+
+/// Picking through a tab's [`Viewport`] on its render thread, with the display state that hides
+/// objects from picks and the flag of a hover pick still on its way.
 struct ViewportPicker<'a>(
     Option<&'a Viewport>,
     Option<&'a over_viewport::DisplayState>,
+    Option<&'a Arc<std::sync::atomic::AtomicBool>>,
 );
 
 impl ViewPicker for ViewportPicker<'_> {
@@ -2584,9 +2655,62 @@ impl ViewPicker for ViewportPicker<'_> {
         Ok(hits)
     }
 
+    fn hover(
+        &mut self,
+        frame: &ViewFrame,
+        width: u32,
+        height: u32,
+        region: &PickRegion,
+    ) -> Result<Vec<PickHit>> {
+        use std::sync::atomic::Ordering;
+        let (Some(viewport), Some(queued)) = (self.0, self.2) else {
+            return self.pick(frame, width, height, region);
+        };
+        // One hover pick at a time: while one waits behind the render thread's work, the pointer
+        // highlights nothing rather than queue more.
+        if queued.swap(true, Ordering::AcqRel) {
+            return Ok(Vec::new());
+        }
+        let (frame, region, done) = (*frame, *region, Arc::clone(queued));
+        let hits = viewport.with_scene(HOVER_WAIT, move |renderer, scene, settings| {
+            let hits = renderer.pick(scene, &frame, width, height, settings, &region);
+            done.store(false, Ordering::Release);
+            hits
+        });
+        let mut hits = match hits {
+            Ok(hits) => hits?,
+            // Still queued: it clears the flag when it runs.
+            Err(e) if e.code() == arc_gpu::error::codes::TIMEOUT.code => return Ok(Vec::new()),
+            Err(e) => {
+                queued.store(false, Ordering::Release);
+                return Err(e);
+            }
+        };
+        if let Some(display) = self.1 {
+            hits.retain(|hit| display.visible(&hit.key.object));
+        }
+        Ok(hits)
+    }
+
     fn bounds(&mut self) -> Option<(Point3, f64)> {
-        self.0?
-            .with_scene(WAIT, |_, scene, _| scene.bounding_sphere(None))
+        let viewport = self.0?;
+        // Hidden and isolated-out objects are not framed either.
+        let Some(display) = self.1.filter(|d| d.active()) else {
+            return viewport
+                .with_scene(WAIT, |_, scene, _| scene.bounding_sphere(None))
+                .ok()
+                .flatten();
+        };
+        let keys = viewport.with_scene(WAIT, |_, scene, _| scene.keys()).ok()?;
+        let mut shown: Vec<ObjectId> = keys
+            .into_iter()
+            .map(|k| k.object)
+            .filter(|o| display.visible(o))
+            .collect();
+        shown.sort_unstable();
+        shown.dedup();
+        viewport
+            .with_scene(WAIT, move |_, scene, _| scene.bounding_sphere(Some(&shown)))
             .ok()
             .flatten()
     }
@@ -2632,9 +2756,12 @@ impl Panel for ViewportPanel {
             framed,
             zoom_extents,
             previous,
+            locked,
             cursor_digits,
             viewport_rect,
             display,
+            extraction,
+            hover_pick,
             ..
         } = view;
         // With a controller the controller's prompt and overlays are the viewport's; its
@@ -2670,7 +2797,7 @@ impl Panel for ViewportPanel {
             .and_then(|f| f.selection.as_deref())
             .unwrap_or(selection.as_slice());
         let selected = highlight.len();
-        let mut picker = ViewportPicker(viewport.as_ref(), Some(&*display));
+        let mut picker = ViewportPicker(viewport.as_ref(), Some(&*display), Some(&*hover_pick));
         let mut hook = match (interaction.as_deref_mut(), icx.as_ref()) {
             (Some(controller), Some(cx)) => Some(Hook {
                 controller,
@@ -2704,10 +2831,12 @@ impl Panel for ViewportPanel {
                 work_plane: cx.work_plane,
             }),
         };
-        widget.blocked = Some(ViewCube::rect(
-            ui.available_rect_before_wrap(),
-            ui.spacing().interact_size.y * 4.0,
-        ));
+        widget.blocked = (!*locked).then(|| {
+            ViewCube::rect(
+                ui.available_rect_before_wrap(),
+                ui.spacing().interact_size.y * 4.0,
+            )
+        });
         let out = widget.show(
             ui,
             ViewportInput {
@@ -2753,6 +2882,12 @@ impl Panel for ViewportPanel {
                     .into_iter()
                     .map(|p| Action::Shell(ShellAction::ShowPanel(p))),
             );
+            submit_extraction(
+                cx.app,
+                icx.tab(),
+                extraction.as_ref(),
+                icx.take_extraction(),
+            );
         }
         *viewport_rect = Some(out.response.rect);
         // The controller's context menu, its temporary display state and the banner that says so.
@@ -2775,7 +2910,11 @@ impl Panel for ViewportPanel {
         {
             cx.actions.push(Action::Error(e));
         }
-        if let Some(c) = out.camera {
+        // A locked orientation (a plan) takes pans and zooms, not rotations.
+        if let Some(c) = out
+            .camera
+            .filter(|c| !*locked || same_orientation(camera, c))
+        {
             *camera = c;
             // The user's own navigation settles the framing.
             *framed = true;
@@ -2784,7 +2923,7 @@ impl Panel for ViewportPanel {
             apply_view(
                 request,
                 camera,
-                previous,
+                (previous, locked),
                 zoom_extents,
                 out.size,
                 cx.actions,
@@ -2804,7 +2943,7 @@ impl Panel for ViewportPanel {
         cube_and_crosshair(
             ui,
             &out.response.rect,
-            camera,
+            (camera, *locked),
             (cx.localize, cx.colors),
             at,
             frame.as_ref().and_then(|f| f.pointer_icon),
@@ -2819,7 +2958,7 @@ impl Panel for ViewportPanel {
             .map(|t| t.document().snapshot().revision());
         if *zoom_extents || (!*framed && revision == Some(*frame_revision)) {
             frame_drawing(
-                viewport.as_ref(),
+                (viewport.as_ref(), display),
                 out.size,
                 camera,
                 framed,
@@ -2849,7 +2988,7 @@ impl Panel for ViewportPanel {
 fn cube_and_crosshair(
     ui: &mut Ui,
     rect: &egui::Rect,
-    camera: &mut ViewFrame,
+    (camera, locked): (&mut ViewFrame, bool),
     (localize, colors): (&dyn Localize, &Colors),
     at: Option<egui::Pos2>,
     icon: Option<egui::CursorIcon>,
@@ -2861,7 +3000,12 @@ fn cube_and_crosshair(
         colors,
         size: ui.spacing().interact_size.y * 4.0,
     };
-    let out = ViewCube.show_over_dragged(ui, *rect, &cube);
+    // A locked orientation offers no cube: it would only rotate.
+    let out = if locked {
+        arc_ui::CubeOutput::default()
+    } else {
+        ViewCube.show_over_dragged(ui, *rect, &cube)
+    };
     if let Some(intent) = out.intent {
         match intent
             .frame_from(camera)

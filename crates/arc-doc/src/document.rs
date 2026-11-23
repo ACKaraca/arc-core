@@ -638,6 +638,13 @@ impl Document {
         history.undo.group().is_none() && history.undo.undo_steps().next_back().is_some()
     }
 
+    /// The document's position in its history ([`crate::UndoPosition`]): equal again after an
+    /// edit is undone. Jobs still queued may change it.
+    #[must_use]
+    pub fn undo_position(&self) -> crate::UndoPosition {
+        lock(&self.shared.history).undo.position()
+    }
+
     /// True when [`Document::redo`] would redo a step now.
     #[must_use]
     pub fn can_redo(&self) -> bool {

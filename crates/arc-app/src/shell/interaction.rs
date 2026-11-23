@@ -222,7 +222,9 @@ impl ContextEntry {
 }
 
 /// A change of the camera a controller asks for. Corners are model coordinates in drawing units.
+/// Variants may be added; a match needs a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum ViewRequest {
     /// Frame everything in the viewport's scene.
     Extents,
@@ -237,6 +239,21 @@ pub enum ViewRequest {
     },
     /// Scale the view about its center by a factor above zero.
     Scale(f64),
+    /// Look straight down (along −z, with +y up on the screen) with an orthographic camera
+    /// framed on the rectangle between two corners at the height `z`, and lock the orientation:
+    /// until a [`ViewRequest::Camera`] request, navigation pans and zooms but does not rotate,
+    /// and the view cube is not shown. A product shows a plan drawing this way.
+    Plan {
+        /// One corner.
+        a: [f64; 2],
+        /// The opposite corner.
+        b: [f64; 2],
+        /// The height of the drawing.
+        z: f64,
+    },
+    /// Use this camera (one the controller read from [`InteractionContext::camera`] earlier) and
+    /// release the orientation lock of [`ViewRequest::Plan`].
+    Camera(ViewFrame),
 }
 
 /// The dynamic input panel a controller asks for: its prompt message and fields.
@@ -304,6 +321,9 @@ pub struct InteractionOutput {
 /// The most commands one call of a controller can ask the shell for.
 const MAX_ASKED: usize = 16;
 
+/// The most objects one call of a controller can ask the shell to extract again.
+const MAX_EXTRACT: usize = 10_000;
+
 /// What a controller reads: the application, the tab, the session the command line runs in, the
 /// tab's selection, its camera (the view the controller's input is in) and the interface language.
 pub struct InteractionContext<'a> {
@@ -318,6 +338,7 @@ pub struct InteractionContext<'a> {
     settings: RefCell<Vec<(String, Option<SettingValue>)>>,
     panels: RefCell<Vec<String>>,
     clipboard: RefCell<Option<String>>,
+    extract: RefCell<Vec<ObjectId>>,
 }
 
 impl<'a> InteractionContext<'a> {
@@ -341,7 +362,13 @@ impl<'a> InteractionContext<'a> {
             settings: RefCell::new(Vec::new()),
             panels: RefCell::new(Vec::new()),
             clipboard: RefCell::new(None),
+            extract: RefCell::new(Vec::new()),
         }
+    }
+
+    /// The objects the controller asked to extract again during the call, taken once.
+    pub(crate) fn take_extraction(&self) -> Vec<ObjectId> {
+        std::mem::take(&mut *self.extract.borrow_mut())
     }
 
     /// The text the controller asked to put on the operating system clipboard, taken once.
@@ -424,6 +451,19 @@ impl<'a> InteractionContext<'a> {
         if panels.len() < MAX_ASKED {
             panels.push(panel.to_owned());
         }
+    }
+
+    /// Asks the shell to extract `objects` again from the tab's current snapshot after the
+    /// controller's call returns, as a commit that changed them would: on the extraction
+    /// workers, cancelling an older extraction of the same object, and drawn when the result
+    /// arrives. A controller uses it when what an object draws depends on state outside the
+    /// document (a drawing filtered by a temporary display state, a view opened). Honored from
+    /// [`Interaction::frame`], [`Interaction::line`] and [`Interaction::key`]; at most
+    /// 10 000 objects per call are kept.
+    pub fn ask_extraction(&self, objects: &[ObjectId]) {
+        let mut extract = self.extract.borrow_mut();
+        let room = MAX_EXTRACT.saturating_sub(extract.len());
+        extract.extend(objects.iter().take(room));
     }
 
     /// The tab the controller belongs to.

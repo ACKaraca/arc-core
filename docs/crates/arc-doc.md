@@ -961,7 +961,10 @@ occurred when the thread was descheduled.
   stacks change only after the commit succeeded (a rollback that fails to commit leaves the group
   open). `begin_group`, `end_group`, `begin_gesture` and `end_gesture` run in submission order as
   jobs that commit nothing. `can_undo`, `can_redo`, `undo_label` and `redo_label` serve the user
-  interface; `with_journal` and `with_undo` read under the lock. The journal append and the
+  interface; `undo_position` returns an opaque `UndoPosition` (the first transaction of the top
+  undo step and of an open group, the trimmed steps and the count of `merge` and `migration`
+  transactions) that is equal again after an edit is undone, which the application uses to tell a
+  document undone back to its saved state; `with_journal` and `with_undo` read under the lock. The journal append and the
   report cannot fail for a record the same process produced; if one does (a defect, or a record
   beyond the encoding limits), the transaction stays published, a `doc.executor.fault` diagnostic
   (detail `step` = `history`) is delivered and returned, and the history is cut there: a failed

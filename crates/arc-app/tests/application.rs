@@ -601,3 +601,57 @@ fn a_new_document_starts_with_its_command_content_which_is_no_undo_step_and_save
     let reopened = again.open(&file).unwrap();
     assert_eq!(again.tab(reopened).unwrap().document().snapshot().len(), 1);
 }
+
+#[test]
+fn an_edit_undone_back_to_the_saved_state_is_not_dirty_and_a_redo_is() {
+    let dir = TempDir::new("undo-clean");
+    let mut app = app_in(&dir.join("data"), "a", 3);
+    let tab = app.new_document().unwrap();
+    add_point(&app, tab, 1.0).unwrap();
+    let path = dir.join("saved.arc");
+    app.save_as(tab, &path).unwrap();
+    assert!(!app.tab(tab).unwrap().is_dirty());
+    add_point(&app, tab, 2.0).unwrap();
+    assert!(app.tab(tab).unwrap().is_dirty());
+    // Undone back to what was saved: the revision moved on, the document is as saved.
+    assert!(
+        app.tab(tab)
+            .unwrap()
+            .document()
+            .undo()
+            .wait()
+            .unwrap()
+            .value
+    );
+    assert!(!app.tab(tab).unwrap().is_dirty());
+    // Undone past the save: dirty.
+    assert!(
+        app.tab(tab)
+            .unwrap()
+            .document()
+            .undo()
+            .wait()
+            .unwrap()
+            .value
+    );
+    assert!(app.tab(tab).unwrap().is_dirty());
+    assert!(
+        app.tab(tab)
+            .unwrap()
+            .document()
+            .redo()
+            .wait()
+            .unwrap()
+            .value
+    );
+    assert!(
+        app.tab(tab)
+            .unwrap()
+            .document()
+            .redo()
+            .wait()
+            .unwrap()
+            .value
+    );
+    assert!(app.tab(tab).unwrap().is_dirty());
+}

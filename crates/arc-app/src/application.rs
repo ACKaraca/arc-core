@@ -108,6 +108,9 @@ pub struct Tab {
     /// The revision of the saved state; `None` when the state was never saved (a recovered
     /// document), which is always dirty.
     saved_revision: Option<u64>,
+    /// The position in the undo history of the saved state: a document undone back to it is not
+    /// dirty although its revision moved on.
+    saved_position: Option<arc_doc::UndoPosition>,
     banners: Vec<Banner>,
     views: Vec<Box<dyn Any + Send>>,
 }
@@ -155,10 +158,12 @@ impl Tab {
         &self.document
     }
 
-    /// True when the document's revision differs from the saved one.
+    /// True when the document differs from the saved state: its revision moved on and it is not
+    /// at the saved place of its undo history (an edit undone back to the save is not dirty).
     #[must_use]
     pub fn is_dirty(&self) -> bool {
         self.saved_revision != Some(self.document.snapshot().revision())
+            && self.saved_position.as_ref() != Some(&self.document.undo_position())
     }
 
     /// True when the package is open read-only: it cannot be saved in place and commands of the
@@ -590,6 +595,7 @@ impl Application {
             return Err(error);
         }
         let revision = document.snapshot().revision();
+        let position = document.undo_position();
         Ok(self.push(Tab {
             id: TabId(0),
             path: None,
@@ -598,6 +604,7 @@ impl Application {
             document,
             journal,
             saved_revision: Some(revision),
+            saved_position: Some(position),
             banners,
             views: Vec::new(),
         }))
@@ -656,6 +663,7 @@ impl Application {
             None
         };
         let revision = document.snapshot().revision();
+        let position = document.undo_position();
         self.recent.touch(path);
         Ok(self.push(Tab {
             id: TabId(0),
@@ -665,6 +673,7 @@ impl Application {
             document,
             journal,
             saved_revision: Some(revision),
+            saved_position: Some(position),
             banners,
             views: Vec::new(),
         }))
@@ -678,6 +687,7 @@ impl Application {
         let scoped = self.native_session(path, false)?;
         let document = format.read(path, config, &scoped)?;
         let revision = document.snapshot().revision();
+        let position = document.undo_position();
         self.recent.touch(path);
         Ok(self.push(Tab {
             id: TabId(0),
@@ -687,6 +697,7 @@ impl Application {
             document,
             journal: None,
             saved_revision: Some(revision),
+            saved_position: Some(position),
             banners: vec![unprotected_banner()],
             views: Vec::new(),
         }))
@@ -761,8 +772,10 @@ impl Application {
             let scoped = self.native_session(&path, true)?;
             let tab = self.tabs.get_mut(at).ok_or_else(no_path)?;
             let revision = tab.document.snapshot().revision();
+            let position = tab.document.undo_position();
             write_native(&format, &scoped, &tab.document, &path)?;
             tab.saved_revision = Some(revision);
+            tab.saved_position = Some(position);
             self.recent.touch(&path);
             return Ok(());
         }
@@ -778,6 +791,7 @@ impl Application {
         // Read before the save: a commit racing the save then leaves the tab dirty, never
         // falsely clean.
         let revision = tab.document.snapshot().revision();
+        let position = tab.document.undo_position();
         let result =
             package.save_document(&tab.document, &[], tab.journal.as_deref(), &mut |_| Ok(()));
         match result {
@@ -788,6 +802,7 @@ impl Application {
             Err(error) => return Err(error),
         }
         tab.saved_revision = Some(revision);
+        tab.saved_position = Some(position);
         let path = package.path().to_path_buf();
         self.recent.touch(&path);
         Ok(())
@@ -851,6 +866,7 @@ impl Application {
         };
         let tab = self.tabs.get(at).ok_or_else(no_path)?;
         let revision = tab.document.snapshot().revision();
+        let position = tab.document.undo_position();
         let result =
             package.save_document(&tab.document, &[], tab.journal.as_deref(), &mut |_| Ok(()));
         let mut banners = Vec::new();
@@ -876,6 +892,7 @@ impl Application {
         tab.package = Some(package);
         tab.path = Some(target.to_path_buf());
         tab.saved_revision = Some(revision);
+        tab.saved_position = Some(position);
         tab.banners = banners;
         self.tabs.insert(at, tab);
         self.recent.touch(target);
@@ -897,6 +914,7 @@ impl Application {
             return Err(unsupported_path(target));
         }
         let revision = tab.document.snapshot().revision();
+        let position = tab.document.undo_position();
         let scoped = self.native_session(target, true)?;
         write_native(format, &scoped, &tab.document, target)?;
         let tab = self.tabs.get_mut(at).ok_or_else(no_path)?;
@@ -906,6 +924,7 @@ impl Application {
         tab.path = Some(target.to_path_buf());
         tab.format = Some(Arc::clone(format));
         tab.saved_revision = Some(revision);
+        tab.saved_position = Some(position);
         tab.banners = vec![unprotected_banner()];
         self.recent.touch(target);
         Ok(())
@@ -1037,6 +1056,7 @@ impl Application {
             document: recovered.document,
             journal: Some(recovered.journal),
             saved_revision: None,
+            saved_position: None,
             banners,
             views: Vec::new(),
         }))
