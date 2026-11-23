@@ -10,8 +10,8 @@ Arc product depends on one tagged release of it; it contains no product function
 
 ## Status and where to start reading
 
-Foundation phase: the workspace, `xtask`, `arc-base` and the first parts of `arc-geom`, `arc-mesh`, `arc-solve`, `arc-doc`, `arc-command`, `arc-draft`, `arc-gpu`, `arc-ui`, `arc-app`, `arc-io-dxf`, `arc-io-pdf`, `arc-io-mesh`, `arc-draft-dxf`, `arc-io-common`, `arc-io-ifc` and `arc-io-dwg`
-exist, and the reference windowed shell `apps/arc-shell`, the reference headless CLI `apps/arc-shell-cli` and their sample set `arc-shell-sample` exist; every other crate is still a specification. `arc-io-ifc` reads IFC files and writes IFC4 files from a neutral building description. Read, in order: [README.md](README.md),
+Foundation phase: the workspace, `xtask`, `arc-base` and the first parts of `arc-geom`, `arc-mesh`, `arc-solve`, `arc-doc`, `arc-command`, `arc-draft`, `arc-gpu`, `arc-ui`, `arc-app`, `arc-io-dxf`, `arc-io-pdf`, `arc-io-mesh`, `arc-draft-dxf`, `arc-io-common`, `arc-io-ifc`, `arc-io-dwg` and `arc-view`
+exist, and the reference windowed shell `apps/arc-shell`, the reference headless CLI `apps/arc-shell-cli` and their sample set `arc-shell-sample` exist; every other crate is still a specification. `arc-io-ifc` reads IFC files and writes IFC4 files from a neutral building description; `arc-view` draws plan views with cut regions and hidden lines. Read, in order: [README.md](README.md),
 [docs/architecture/overview.md](docs/architecture/overview.md), the architecture document for your
 area, and the crate specification you are changing under [docs/crates](docs/crates/README.md).
 Capability identifiers (`CORE-<AREA>-NNN`) are defined in the crate specifications.

@@ -417,6 +417,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-view"
+version = "0.1.0"
+dependencies = [
+ "arc-base",
+ "arc-doc",
+ "arc-draft",
+ "arc-geom",
+ "arc-mesh",
+ "proptest",
+]
+
+[[package]]
 name = "arc-winsec"
 version = "0.1.0"
 dependencies = [

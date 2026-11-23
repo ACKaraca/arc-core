@@ -1,0 +1,22 @@
+[package]
+name = "arc-view"
+description = "Derived drawings of 3D models for the Arc suite: plan views with cut planes and ranges, section cut regions, polyhedral hidden-line removal and back-links to source objects."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+arc-base = { workspace = true }
+arc-doc = { workspace = true }
+arc-draft = { workspace = true }
+arc-geom = { workspace = true }
+arc-mesh = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true
