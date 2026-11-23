@@ -1,0 +1,1 @@
+cc 81a64dbaa0c9dd8f36cdeb4820736ecd4437605039d9af05e085175e2f949a23 # shrinks to c = Nurbs2 { degree: 4, .. }, f = 0.47265089587328807

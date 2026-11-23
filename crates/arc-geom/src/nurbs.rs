@@ -2239,7 +2239,11 @@ pub(crate) mod tests {
                 curve.length_between(a, u, &TOL),
                 curve.length_between(u, b, &TOL),
             ) {
-                prop_assert!((whole - left - right).abs() <= TOL.linear);
+                // Each length is adaptive quadrature that aims at a share of the tolerance; a
+                // narrow speed peak between nodes can still leave a relative 1e-8 error, so the
+                // bound grows with the length itself, not only with the tolerance.
+                let slack = TOL.linear + 1e-7 * whole;
+                prop_assert!((whole - left - right).abs() <= slack, "{whole} {left} {right}");
                 // Speeds with sharp peaks can exhaust the quadrature, with a code.
                 match curve.parameter_at_length(left, &TOL) {
                     Ok(back) => prop_assert!(close(c.point_at(back), c.point_at(u), 1e-5)),
