@@ -2,9 +2,9 @@
 //! building.
 //!
 //! [`WriteModel`] describes a project, a site, a building, its storeys and elements (walls, slabs,
-//! doors, windows, openings, spaces and roofs) with their placement, body geometry, voids and fills, property
-//! sets and base quantities, and the element types of walls, slabs, doors, windows and roofs
-//! ([`ElementType`]) with the material layers of wall, slab and roof types and the layer set usage of
+//! doors, windows, openings, spaces, roofs and coverings) with their placement, body geometry, voids and fills, property
+//! sets and base quantities, and the element types of walls, slabs, doors, windows, roofs and coverings
+//! ([`ElementType`]) with the material layers of wall, slab, roof and covering types and the layer set usage of
 //! their occurrences ([`LayerSetUsage`]). [`write()`] turns it into the bytes of an ISO 10303-21 clear text file
 //! with the IFC4 schema and a loss report of what it did not write. It knows nothing of any
 //! product: the caller maps its own objects to this description.
@@ -177,6 +177,10 @@ pub enum ElementKind {
     /// `IfcRoof`, an element with its own body (`PredefinedType` from `IfcRoofTypeEnum`); its
     /// type is an `IfcRoofType`, whose layers are written as for a slab type.
     Roof,
+    /// `IfcCovering`, an element with its own body (`PredefinedType` from `IfcCoveringTypeEnum`,
+    /// for example `CEILING`); its type is an `IfcCoveringType`, whose layers are written as for
+    /// a slab type. A covering may be the host of an opening.
+    Covering,
     /// `IfcSpace`, aggregated by its storey (IFC4 decomposes a storey into its spaces; it does not
     /// contain them). By convention `Element::name` holds the room number and
     /// `Element::long_name` the room name.
@@ -193,6 +197,7 @@ impl ElementKind {
             Self::Opening => "IFCOPENINGELEMENT",
             Self::Space => "IFCSPACE",
             Self::Roof => "IFCROOF",
+            Self::Covering => "IFCCOVERING",
         }
     }
 
@@ -214,6 +219,18 @@ impl ElementKind {
             Self::Window => &["WINDOW", "SKYLIGHT", "LIGHTDOME"],
             Self::Opening => &["OPENING", "RECESS"],
             Self::Space => &["SPACE", "PARKING", "GFA", "INTERNAL", "EXTERNAL"],
+            Self::Covering => &[
+                "CEILING",
+                "FLOORING",
+                "CLADDING",
+                "ROOFING",
+                "MOLDING",
+                "SKIRTINGBOARD",
+                "INSULATION",
+                "MEMBRANE",
+                "SLEEVING",
+                "WRAPPING",
+            ],
             Self::Roof => &[
                 "FLAT_ROOF",
                 "SHED_ROOF",
@@ -443,7 +460,8 @@ impl LayerSetUsage {
     }
 }
 
-/// An element type (`IfcWallType`, `IfcSlabType`, `IfcDoorType`, `IfcWindowType` or `IfcRoofType`), assigned to
+/// An element type (`IfcWallType`, `IfcSlabType`, `IfcDoorType`, `IfcWindowType`, `IfcRoofType` or
+/// `IfcCoveringType`), assigned to
 /// the elements whose [`Element::element_type`] names it (`IfcRelDefinesByType`).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -487,6 +505,7 @@ impl ElementType {
             ElementKind::Door => Some("IFCDOORTYPE"),
             ElementKind::Window => Some("IFCWINDOWTYPE"),
             ElementKind::Roof => Some("IFCROOFTYPE"),
+            ElementKind::Covering => Some("IFCCOVERINGTYPE"),
             ElementKind::Opening | ElementKind::Space => None,
         }
     }
@@ -792,7 +811,11 @@ fn check_references(model: &WriteModel) -> Result<BTreeMap<u128, ElementKind>> {
         let allowed = match element.kind {
             ElementKind::Opening => host_kind.is_some_and(|k| k != ElementKind::Opening),
             ElementKind::Door | ElementKind::Window => host_kind == Some(ElementKind::Opening),
-            ElementKind::Wall | ElementKind::Slab | ElementKind::Space | ElementKind::Roof => false,
+            ElementKind::Wall
+            | ElementKind::Slab
+            | ElementKind::Space
+            | ElementKind::Roof
+            | ElementKind::Covering => false,
         };
         if !allowed {
             return Err(bad_reference(host));
@@ -1310,7 +1333,7 @@ impl Writer<'_> {
             }
             if !matches!(
                 element_type.kind,
-                ElementKind::Wall | ElementKind::Slab | ElementKind::Roof
+                ElementKind::Wall | ElementKind::Slab | ElementKind::Roof | ElementKind::Covering
             ) {
                 self.loss.add(
                     reasons::NOT_WRITTEN,

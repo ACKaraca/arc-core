@@ -886,6 +886,54 @@ fn type_references_and_layers_are_checked() {
     );
 }
 
+fn file_voids(model: &WriteModel) -> usize {
+    let output = write(model, &options()).unwrap();
+    read_back(&output.bytes)
+        .instances_of("IFCRELVOIDSELEMENT")
+        .count()
+}
+
+const COVERING: u128 = 0x900;
+const COVERING_TYPE: u128 = 0x901;
+const COVERING_OPENING: u128 = 0x902;
+
+#[test]
+fn ceilings_are_coverings_with_a_type_a_layer_set_and_voids() {
+    let mut model = house_with_types();
+    let before = file_voids(&model);
+    let mut covering_type = ElementType::new(COVERING_TYPE, ElementKind::Covering, "Board 20");
+    covering_type.predefined_type = Some("ceiling".into());
+    covering_type.layers = vec![MaterialLayer::new("Board", 0.02)];
+    model.types.push(covering_type);
+    let mut covering = Element::new(COVERING, ElementKind::Covering, "Ceiling 1", UPPER);
+    covering.body = Some(box_brep(10.0, 6.0, 0.02));
+    covering.predefined_type = Some("ceiling".into());
+    covering.element_type = Some(COVERING_TYPE);
+    model.elements.push(covering);
+    let mut opening = Element::new(COVERING_OPENING, ElementKind::Opening, "Shaft", UPPER);
+    opening.body = Some(box_brep(1.0, 1.0, 0.5));
+    opening.host = Some(COVERING);
+    model.elements.push(opening);
+    let output = write(&model, &options()).unwrap();
+    let file = read_back(&output.bytes);
+    let covering = file.instance(instance_of(&file, COVERING)).unwrap();
+    assert_eq!(covering.records[0].type_name, "IFCCOVERING");
+    assert_eq!(
+        covering.records[0].parameters[8],
+        Parameter::Enumeration("CEILING".into())
+    );
+    assert_eq!(file.instances_of("IFCCOVERINGTYPE").count(), 1);
+    assert_eq!(file.instances_of("IFCRELVOIDSELEMENT").count(), before + 1);
+    // A covering cannot have a host.
+    if let Some(e) = model.elements.iter_mut().find(|e| e.id == COVERING) {
+        e.host = Some(WALLS[0]);
+    }
+    assert_eq!(
+        write(&model, &options()).unwrap_err().code(),
+        "io.ifc.write_reference_invalid"
+    );
+}
+
 const ROOF: u128 = 0x800;
 const ROOF_TYPE: u128 = 0x801;
 

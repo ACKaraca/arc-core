@@ -1543,7 +1543,7 @@ layer from the reference line or plane (an offset that is not finite is refused)
 - Spatial structure: `IfcProject`, `IfcSite`, `IfcBuilding` and one `IfcBuildingStorey` per storey,
   linked by `IfcRelAggregates`. The site is placed at the origin, the building on the site, and each
   storey on the building at its elevation.
-- Elements: `IfcWall`, `IfcSlab`, `IfcRoof`, `IfcDoor`, `IfcWindow` and `IfcOpeningElement`, each with an
+- Elements: `IfcWall`, `IfcSlab`, `IfcRoof`, `IfcCovering`, `IfcDoor`, `IfcWindow` and `IfcOpeningElement`, each with an
   `IfcLocalPlacement` relative to its storey's placement. Every element except an opening is
   contained in its storey by one `IfcRelContainedInSpatialStructure` per storey, in model order.
   `IfcRelVoidsElement` links an opening to its host and `IfcRelFillsElement` a door or window to its
@@ -1566,7 +1566,13 @@ layer from the reference line or plane (an offset that is not finite is refused)
   same predefined values, whose layers are written as for a slab type. The writer does not
   decompose a roof into slabs; a caller that wants roof slab parts writes them as `IfcSlab`
   elements with the predefined type `ROOF`.
-- Element types: `IfcWallType`, `IfcSlabType`, `IfcRoofType`, `IfcDoorType` and `IfcWindowType`, after the
+- Coverings: `IfcCovering` is an element with its own body (an extrusion or a B-rep for a sloped
+  covering) and no host; it may host an opening (`IfcRelVoidsElement`). Its predefined type accepts
+  the values of `IfcCoveringTypeEnum` that classify a covering (`CEILING`, `FLOORING`, `CLADDING`,
+  `ROOFING`, `MOLDING`, `SKIRTINGBOARD`, `INSULATION`, `MEMBRANE`, `SLEEVING`, `WRAPPING`). Its type
+  is an `IfcCoveringType` with the same predefined values, whose layers are written as for a slab
+  type (`ElementKind::Covering`).
+- Element types: `IfcWallType`, `IfcSlabType`, `IfcRoofType`, `IfcCoveringType`, `IfcDoorType` and `IfcWindowType`, after the
   elements, in model order, with the rules of the predefined type below (the text of a user-defined
   predefined type is the `ElementType` attribute) and, for doors and windows, the operation or
   partitioning type; `ParameterTakesPrecedence` is omitted. Each type with at least one occurrence
