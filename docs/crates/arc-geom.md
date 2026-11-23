@@ -586,6 +586,11 @@ The codes `arc-geom` owns. A code is never reused for a different meaning; messa
 | `geom.solid.clip_degenerate` | `failed_operation` | The cutting plane meets the solid in a way that does not give a valid result, such as a section that touches itself at a vertex or a plane nearly parallel to a face it crosses |
 | `geom.solid.opening_unsupported` | `unsupported` | A prism to subtract does not pass fully through two parallel faces of the solid with its whole outline inside both faces and clear of every other face, or its region has holes |
 | `geom.solid.opening_splits` | `invalid_input` | A prism to subtract would leave the solid in more connected shells than it had, and `PrismTool::allow_split` is false |
+| `geom.skeleton.polygon_invalid` | `invalid_input` | The polygon of a weighted straight skeleton is not simple, has fewer than 3 or more than 256 edges, an edge shorter than `tolerance.linear`, or a speed that is negative or not finite |
+| `geom.skeleton.no_slope` | `invalid_input` | Every edge of a weighted straight skeleton has speed zero |
+| `geom.skeleton.collinear_speeds` | `invalid_input` | Two adjacent edges of a weighted straight skeleton lie on one line with different speeds; the vertex is in `x` and `y` |
+| `geom.skeleton.unclosed` | `invalid_input` | No continuous surface covers a part of the polygon: it is enclosed only by edges of speed zero, or an edge of speed zero meets a reflex corner (its vertical plane would run into the polygon); a point of it is in `x` and `y` |
+| `geom.skeleton.degenerate` | `failed_operation` | The skeleton needs too many events, a vertex velocity is not finite, or the cells do not cover the polygon; a nearby point is in `x` and `y` |
 | `geom.corner.segment_invalid` | `invalid_input` | A polyline segment index is outside the polyline or the two indices are equal |
 | `geom.construct.coincident_points` | `invalid_input` | Two points that a construction needs distinct are closer than the linear tolerance, or a center and a start point are |
 | `geom.construct.collinear_points` | `invalid_input` | The three points of a circle or of an arc through three points lie on one line |
@@ -1217,3 +1222,36 @@ and that an extruded volume is area times height, with exact cases (unit cube, a
 a prism with a hole, cuts through vertices, edges and faces, the head, sill and jambs of the
 openings of a wall at 5 x 3 m, a plane in the step of an L-shaped solid, cuts within a tolerance of
 a vertex, and a slanted wall 500 km from the origin carried through extrusion, opening and cut).
+
+### Weighted straight skeleton (CORE-GEOM-035)
+
+| ID | Capability | Description | Tier | Phase |
+|---|---|---|---|---|
+| CORE-GEOM-035 | Weighted straight skeleton | Computes the surface that rises from every edge of a simple polygon at its own rate (a roof over its outline), with gable edges that do not move, as convex planar cells per edge and the ridge, hip and valley lines; degenerate input is refused with a located error. | T1 | 2 |
+
+`weighted_skeleton(polygon, speeds, tolerance)` takes a simple polygon (either orientation; edge
+`i` runs from vertex `i` to the next) and, per edge, the horizontal distance it moves inward per
+unit of height. Speed zero is an edge that does not move: its plane is vertical. The result,
+`Skeleton`, holds convex `SkeletonCell`s, each in the plane of one edge (counterclockwise seen
+from above, vertical for an edge of speed zero), which together cover the polygon once; the
+`SkeletonArc`s, each a `Ridge` (level), `Hip` (from a convex vertex) or `Valley` (from a reflex
+vertex) between the planes of two edges; the height of the top; `edge_height(edge, point)`, the
+height of an edge's plane over a point; and `height_at(point, tolerance)`, the height of the
+surface over a point of the polygon.
+
+- The front of moving edges is simulated from event to event (an edge shrinking to no length, a
+  reflex vertex reaching another edge); at each event height the front is cleaned up within
+  `tolerance.linear` (meeting vertices merge, a vertex on an edge splits its polygon, edges folded
+  onto each other end in a ridge), so several events at one height are one step. The work is
+  `O(n²)` per event and there are at most `8n + 16` events.
+- Adjacent collinear edges of one speed are merged (the second edge gets no cell); with different
+  speeds they are refused. The plan areas of the cells must add up to the polygon's area within
+  `tolerance.linear` times the length of the cell boundaries, else `geom.skeleton.degenerate`:
+  a wrong surface is never returned.
+
+The tests check a hip roof over a rectangle (ridge length and height), vertical gable cells, the
+valley of an L shape, a shed roof, unequal speeds, every refusal, and as property tests over
+random convex and star-shaped polygons with random speeds (some zero) that every cell corner lies
+in its edge's plane, that the cells cover the polygon and that sloped cells agree on the height at
+shared corners.
+

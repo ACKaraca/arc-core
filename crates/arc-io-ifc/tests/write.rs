@@ -886,6 +886,58 @@ fn type_references_and_layers_are_checked() {
     );
 }
 
+const ROOF: u128 = 0x800;
+const ROOF_TYPE: u128 = 0x801;
+
+/// The house with a hip roof (a B-rep body) of a layered roof type on the upper storey.
+fn house_with_roof() -> WriteModel {
+    let mut model = house_with_types();
+    let mut roof_type = ElementType::new(ROOF_TYPE, ElementKind::Roof, "Rafters 300");
+    roof_type.predefined_type = Some("HIP_ROOF".into());
+    roof_type.layers = vec![
+        MaterialLayer::new("Tiles", 0.05),
+        MaterialLayer::new("Insulation", 0.25),
+    ];
+    model.types.push(roof_type);
+    let mut roof = Element::new(ROOF, ElementKind::Roof, "Roof 1", UPPER);
+    roof.body = Some(box_brep(10.0, 6.0, 0.3));
+    roof.predefined_type = Some("hip_roof".into());
+    roof.element_type = Some(ROOF_TYPE);
+    model.elements.push(roof);
+    model
+}
+
+#[test]
+fn roofs_and_roof_types_read_back() {
+    let output = write(&house_with_roof(), &options()).unwrap();
+    let file = read_back(&output.bytes);
+    let roof = file.instance(instance_of(&file, ROOF)).unwrap();
+    assert_eq!(roof.records[0].type_name, "IFCROOF");
+    assert_eq!(
+        roof.records[0].parameters[8],
+        Parameter::Enumeration("HIP_ROOF".into())
+    );
+    let views = file
+        .typed_views(&Limits::CONSTRAINED, &Cancel::new())
+        .unwrap();
+    assert!(views.types.iter().any(|t| {
+        t.element.global_id.as_deref() == Some(global_id(ROOF).as_str())
+            && t.element_type.type_name == "IFCROOFTYPE"
+    }));
+    // The roof type's layers are a third layer set; the roof has no usage of its own.
+    assert_eq!(file.instances_of("IFCMATERIALLAYERSET").count(), 3);
+    assert_eq!(file.instances_of("IFCMATERIALLAYERSETUSAGE").count(), 5);
+    let (volumes, _) = volumes(&file);
+    assert!((volumes[&global_id(ROOF)] - 18.0).abs() < 1e-9);
+    // A roof cannot have a host.
+    let mut model = house_with_roof();
+    model.elements.last_mut().unwrap().host = Some(WALLS[0]);
+    assert_eq!(
+        write(&model, &options()).unwrap_err().code(),
+        "io.ifc.write_reference_invalid"
+    );
+}
+
 /// Writes the sample files for an external check when `ARC_IFC_WRITE_SAMPLES` names a directory.
 #[test]
 fn samples_for_external_validation() {
@@ -901,6 +953,11 @@ fn samples_for_external_validation() {
     std::fs::write(
         directory.join("house-types.ifc"),
         write(&house_with_types(), &options()).unwrap().bytes,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("house-roof.ifc"),
+        write(&house_with_roof(), &options()).unwrap().bytes,
     )
     .unwrap();
     std::fs::write(

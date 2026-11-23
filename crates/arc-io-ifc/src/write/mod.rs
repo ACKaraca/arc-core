@@ -2,9 +2,9 @@
 //! building.
 //!
 //! [`WriteModel`] describes a project, a site, a building, its storeys and elements (walls, slabs,
-//! doors, windows, openings and spaces) with their placement, body geometry, voids and fills, property
-//! sets and base quantities, and the element types of walls, slabs, doors and windows
-//! ([`ElementType`]) with the material layers of wall and slab types and the layer set usage of
+//! doors, windows, openings, spaces and roofs) with their placement, body geometry, voids and fills, property
+//! sets and base quantities, and the element types of walls, slabs, doors, windows and roofs
+//! ([`ElementType`]) with the material layers of wall, slab and roof types and the layer set usage of
 //! their occurrences ([`LayerSetUsage`]). [`write()`] turns it into the bytes of an ISO 10303-21 clear text file
 //! with the IFC4 schema and a loss report of what it did not write. It knows nothing of any
 //! product: the caller maps its own objects to this description.
@@ -174,6 +174,9 @@ pub enum ElementKind {
     Window,
     /// `IfcOpeningElement`, which voids a host element.
     Opening,
+    /// `IfcRoof`, an element with its own body (`PredefinedType` from `IfcRoofTypeEnum`); its
+    /// type is an `IfcRoofType`, whose layers are written as for a slab type.
+    Roof,
     /// `IfcSpace`, aggregated by its storey (IFC4 decomposes a storey into its spaces; it does not
     /// contain them). By convention `Element::name` holds the room number and
     /// `Element::long_name` the room name.
@@ -189,6 +192,7 @@ impl ElementKind {
             Self::Window => "IFCWINDOW",
             Self::Opening => "IFCOPENINGELEMENT",
             Self::Space => "IFCSPACE",
+            Self::Roof => "IFCROOF",
         }
     }
 
@@ -210,6 +214,21 @@ impl ElementKind {
             Self::Window => &["WINDOW", "SKYLIGHT", "LIGHTDOME"],
             Self::Opening => &["OPENING", "RECESS"],
             Self::Space => &["SPACE", "PARKING", "GFA", "INTERNAL", "EXTERNAL"],
+            Self::Roof => &[
+                "FLAT_ROOF",
+                "SHED_ROOF",
+                "GABLE_ROOF",
+                "HIP_ROOF",
+                "HIPPED_GABLE_ROOF",
+                "GAMBREL_ROOF",
+                "MANSARD_ROOF",
+                "BARREL_ROOF",
+                "RAINBOW_ROOF",
+                "BUTTERFLY_ROOF",
+                "PAVILION_ROOF",
+                "DOME_ROOF",
+                "FREEFORM",
+            ],
         }
     }
 }
@@ -424,14 +443,14 @@ impl LayerSetUsage {
     }
 }
 
-/// An element type (`IfcWallType`, `IfcSlabType`, `IfcDoorType` or `IfcWindowType`), assigned to
+/// An element type (`IfcWallType`, `IfcSlabType`, `IfcDoorType`, `IfcWindowType` or `IfcRoofType`), assigned to
 /// the elements whose [`Element::element_type`] names it (`IfcRelDefinesByType`).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ElementType {
     /// The identifier its `GlobalId` is made from.
     pub id: u128,
-    /// The kind of its occurrences: a wall, slab, door or window.
+    /// The kind of its occurrences: a wall, slab, door, window or roof.
     pub kind: ElementKind,
     /// The name.
     pub name: String,
@@ -441,7 +460,7 @@ pub struct ElementType {
     /// Doors: the `OperationType`; windows: the `PartitioningType`, handled like
     /// [`Element::operation_type`]. Ignored for walls and slabs.
     pub operation_type: Option<String>,
-    /// Walls and slabs: the layers, written as an `IfcMaterialLayerSet` associated with the type;
+    /// Walls, slabs and roofs: the layers, written as an `IfcMaterialLayerSet` associated with the type;
     /// empty writes no material. Doors and windows: must be empty; layers are reported, not
     /// written.
     pub layers: Vec<MaterialLayer>,
@@ -467,6 +486,7 @@ impl ElementType {
             ElementKind::Slab => Some("IFCSLABTYPE"),
             ElementKind::Door => Some("IFCDOORTYPE"),
             ElementKind::Window => Some("IFCWINDOWTYPE"),
+            ElementKind::Roof => Some("IFCROOFTYPE"),
             ElementKind::Opening | ElementKind::Space => None,
         }
     }
@@ -772,7 +792,7 @@ fn check_references(model: &WriteModel) -> Result<BTreeMap<u128, ElementKind>> {
         let allowed = match element.kind {
             ElementKind::Opening => host_kind.is_some_and(|k| k != ElementKind::Opening),
             ElementKind::Door | ElementKind::Window => host_kind == Some(ElementKind::Opening),
-            ElementKind::Wall | ElementKind::Slab | ElementKind::Space => false,
+            ElementKind::Wall | ElementKind::Slab | ElementKind::Space | ElementKind::Roof => false,
         };
         if !allowed {
             return Err(bad_reference(host));
@@ -1278,7 +1298,7 @@ impl Writer<'_> {
         Ok(())
     }
 
-    /// The material layer sets of the wall and slab types, associated with their types, and the
+    /// The material layer sets of the wall, slab and roof types, associated with their types, and the
     /// layer set usage of each element that has one, associated with the element. Layers of door
     /// and window types and a usage without a layer set are reported, not written.
     fn materials(&mut self, model: &WriteModel, context: &Context) -> Result<()> {
@@ -1288,7 +1308,10 @@ impl Writer<'_> {
             if element_type.layers.is_empty() {
                 continue;
             }
-            if !matches!(element_type.kind, ElementKind::Wall | ElementKind::Slab) {
+            if !matches!(
+                element_type.kind,
+                ElementKind::Wall | ElementKind::Slab | ElementKind::Roof
+            ) {
                 self.loss.add(
                     reasons::NOT_WRITTEN,
                     "IFCMATERIALLAYERSET",

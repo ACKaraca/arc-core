@@ -36,6 +36,7 @@ pub mod primitives;
 pub mod region;
 pub mod region_build;
 pub mod region_offset;
+pub mod skeleton;
 pub mod solid;
 pub mod solid_clip;
 pub mod solid_gen;
@@ -78,6 +79,9 @@ pub use primitives::{Arc2, Circle2, Ellipse2, EllipticalArc2, Line2, Ray2, Segme
 pub use region::{Containment, Loop2, Region, RegionPart};
 pub use region_build::build_region;
 pub use region_offset::offset_region;
+pub use skeleton::{
+    ArcKind, MAX_SKELETON_EDGES, Skeleton, SkeletonArc, SkeletonCell, weighted_skeleton,
+};
 pub use solid::{FaceTag, PLANARITY_FACTOR, PolyFace, Polyhedron};
 pub use solid_clip::ClipSide;
 pub use solid_gen::{extrude, extrude_between, prism};

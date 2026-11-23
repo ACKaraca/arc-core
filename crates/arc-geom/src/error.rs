@@ -529,6 +529,41 @@ pub mod codes {
         message_id: "geom-solid-opening-splits",
     };
 
+    /// The polygon of a skeleton is not simple, has fewer than three vertices or too many, an edge shorter than the tolerance, or a speed that is negative or not finite.
+    pub const SKELETON_POLYGON_INVALID: ErrorCode = ErrorCode {
+        code: "geom.skeleton.polygon_invalid",
+        category: Category::InvalidInput,
+        message_id: "geom-skeleton-polygon-invalid",
+    };
+
+    /// Every edge of a skeleton has speed zero, so nothing rises.
+    pub const SKELETON_NO_SLOPE: ErrorCode = ErrorCode {
+        code: "geom.skeleton.no_slope",
+        category: Category::InvalidInput,
+        message_id: "geom-skeleton-no-slope",
+    };
+
+    /// Two adjacent edges of a skeleton lie on one line with different speeds.
+    pub const SKELETON_COLLINEAR_SPEEDS: ErrorCode = ErrorCode {
+        code: "geom.skeleton.collinear_speeds",
+        category: Category::InvalidInput,
+        message_id: "geom-skeleton-collinear-speeds",
+    };
+
+    /// A part of a skeleton's polygon is enclosed only by edges that do not move, so no surface covers it.
+    pub const SKELETON_UNCLOSED: ErrorCode = ErrorCode {
+        code: "geom.skeleton.unclosed",
+        category: Category::InvalidInput,
+        message_id: "geom-skeleton-unclosed",
+    };
+
+    /// The skeleton could not be computed reliably: too many events, a velocity that is not finite, or cells that do not cover the polygon.
+    pub const SKELETON_DEGENERATE: ErrorCode = ErrorCode {
+        code: "geom.skeleton.degenerate",
+        category: Category::FailedOperation,
+        message_id: "geom-skeleton-degenerate",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         INPUT_NOT_FINITE,
@@ -616,6 +651,11 @@ pub mod codes {
         SOLID_CLIP_DEGENERATE,
         SOLID_OPENING_UNSUPPORTED,
         SOLID_OPENING_SPLITS,
+        SKELETON_POLYGON_INVALID,
+        SKELETON_NO_SLOPE,
+        SKELETON_COLLINEAR_SPEEDS,
+        SKELETON_UNCLOSED,
+        SKELETON_DEGENERATE,
     ];
 }
 

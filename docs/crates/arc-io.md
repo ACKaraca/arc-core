@@ -1543,7 +1543,7 @@ layer from the reference line or plane (an offset that is not finite is refused)
 - Spatial structure: `IfcProject`, `IfcSite`, `IfcBuilding` and one `IfcBuildingStorey` per storey,
   linked by `IfcRelAggregates`. The site is placed at the origin, the building on the site, and each
   storey on the building at its elevation.
-- Elements: `IfcWall`, `IfcSlab`, `IfcDoor`, `IfcWindow` and `IfcOpeningElement`, each with an
+- Elements: `IfcWall`, `IfcSlab`, `IfcRoof`, `IfcDoor`, `IfcWindow` and `IfcOpeningElement`, each with an
   `IfcLocalPlacement` relative to its storey's placement. Every element except an opening is
   contained in its storey by one `IfcRelContainedInSpatialStructure` per storey, in model order.
   `IfcRelVoidsElement` links an opening to its host and `IfcRelFillsElement` a door or window to its
@@ -1559,13 +1559,20 @@ layer from the reference line or plane (an offset that is not finite is refused)
   (`NetFloorArea`, `GrossFloorArea`, `NetPerimeter`, `Height`, `NetVolume`) as a quantity set and
   `Pset_SpaceCommon` (for example `Reference`) as a property set. Spaces are refused and reported
   like the other elements (a number that is not finite, a NUL, an empty or flat profile).
-- Element types: `IfcWallType`, `IfcSlabType`, `IfcDoorType` and `IfcWindowType`, after the
+- Roofs: `IfcRoof` is an element with its own body (a B-rep for a sloped roof) and no host; its
+  predefined type accepts the values of `IfcRoofTypeEnum` (`FLAT_ROOF`, `SHED_ROOF`, `GABLE_ROOF`,
+  `HIP_ROOF`, `HIPPED_GABLE_ROOF`, `GAMBREL_ROOF`, `MANSARD_ROOF`, `BARREL_ROOF`, `RAINBOW_ROOF`,
+  `BUTTERFLY_ROOF`, `PAVILION_ROOF`, `DOME_ROOF`, `FREEFORM`). Its type is an `IfcRoofType` with the
+  same predefined values, whose layers are written as for a slab type. The writer does not
+  decompose a roof into slabs; a caller that wants roof slab parts writes them as `IfcSlab`
+  elements with the predefined type `ROOF`.
+- Element types: `IfcWallType`, `IfcSlabType`, `IfcRoofType`, `IfcDoorType` and `IfcWindowType`, after the
   elements, in model order, with the rules of the predefined type below (the text of a user-defined
   predefined type is the `ElementType` attribute) and, for doors and windows, the operation or
   partitioning type; `ParameterTakesPrecedence` is omitted. Each type with at least one occurrence
   gets one `IfcRelDefinesByType` (`derived_id(type, TYPED, 0)`) listing its occurrences in model
   order; a type without occurrences is written alone.
-- Materials: each wall or slab type with layers gets an `IfcMaterialLayerSet` named after the type,
+- Materials: each wall, slab or roof type with layers gets an `IfcMaterialLayerSet` named after the type,
   of one `IfcMaterialLayer` per layer (the `IfcMaterial`, the thickness, `IsVentilated` unknown, the
   layer name and category; one `IfcMaterial` per distinct material name in the file), associated
   with the type by an `IfcRelAssociatesMaterial` (`derived_id(type, MATERIAL, 0)`). Each element
