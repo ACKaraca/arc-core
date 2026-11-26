@@ -682,22 +682,23 @@ pub fn tab_label(tab: &TabView) -> String {
 /// a close button. Returns what the user chose.
 pub fn show_tabs(ui: &mut Ui, tabs: &[TabView], localize: &dyn Localize) -> Option<ShellAction> {
     let mut chosen = None;
+    let close_name = TAB_CLOSE.text(localize);
     ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
         for tab in tabs {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let label = tab_label(tab);
-                if ui.selectable_label(tab.active, label).clicked() && !tab.active {
-                    chosen = Some(ShellAction::ActivateTab(tab.id));
-                }
-                let close = ui
-                    .small_button("\u{d7}")
-                    .on_hover_text(TAB_CLOSE.text(localize));
-                if close.clicked() {
-                    chosen = Some(ShellAction::CloseTab(tab.id));
-                }
-            });
-            ui.add_space(6.0);
+            let (tabr, x) = arc_ui::flat_tab(
+                ui,
+                &tab_label(tab),
+                &tab.title,
+                tab.active,
+                &close_name,
+                true,
+            );
+            if x.clicked() {
+                chosen = Some(ShellAction::CloseTab(tab.id));
+            } else if tabr.clicked() && !tab.active {
+                chosen = Some(ShellAction::ActivateTab(tab.id));
+            }
         }
     });
     chosen
