@@ -186,6 +186,57 @@ impl Bezier {
             .collect()
     }
 
+    /// The parameters in the segment where the speed is stationary: the roots of the numerator
+    /// of the derivative of its square (a root-finding failure leaves them out, which only
+    /// costs accuracy of the length estimate).
+    fn speed_stationary(&self) -> Vec<f64> {
+        let Some(origin) = self.points.first().copied() else {
+            return Vec::new();
+        };
+        let scale = self.extent(origin);
+        if scale == 0.0 {
+            return Vec::new();
+        }
+        let h = self.homogeneous(origin, scale);
+        let w: Vec<f64> = h.iter().map(|v| v[2]).collect();
+        let dw = bernstein_derivative(&w);
+        // The speed is sqrt(n) / w^2 with n = |a' w - a w'|^2 over both axes; its square has the
+        // derivative (n' w - 4 n w') / w^5.
+        let (mut n, mut abs_n) = (vec![0.0], vec![0.0]);
+        for axis in 0..2 {
+            let a: Vec<f64> = h.iter().map(|v| v[axis]).collect();
+            let da = bernstein_derivative(&a);
+            let d = bernstein_sub(&bernstein_mul(&da, &w), &bernstein_mul(&a, &dw));
+            let abs = |v: &[f64]| -> Vec<f64> { v.iter().map(|x| x.abs()).collect() };
+            let bound = bernstein_add(
+                &bernstein_mul(&abs(&da), &w),
+                &bernstein_mul(&abs(&a), &abs(&dw)),
+            );
+            n = bernstein_add(&n, &bernstein_mul(&d, &d));
+            abs_n = bernstein_add(&abs_n, &bernstein_mul(&bound, &bound));
+        }
+        let (dn, abs_dn) = (bernstein_derivative(&n), bernstein_derivative(&abs_n));
+        let four_w = |v: &[f64]| -> Vec<f64> { v.iter().map(|x| 4.0 * x).collect() };
+        let g = bernstein_sub(&bernstein_mul(&dn, &w), &bernstein_mul(&four_w(&n), &dw));
+        let magnitude = bernstein_add(
+            &bernstein_mul(&abs_dn, &w),
+            &bernstein_mul(
+                &four_w(&abs_n),
+                &dw.iter().map(|x| x.abs()).collect::<Vec<f64>>(),
+            ),
+        );
+        let width = self.hi - self.lo;
+        bernstein_roots(&g, &noise_of(&magnitude)).map_or_else(
+            |_| Vec::new(),
+            |roots| {
+                roots
+                    .into_iter()
+                    .map(|(u0, u1)| self.lo + 0.5 * (u0 + u1) * width)
+                    .collect()
+            },
+        )
+    }
+
     /// The largest coordinate magnitude of the control points relative to `origin`.
     fn extent(&self, origin: Point2) -> f64 {
         self.points.iter().fold(0.0_f64, |m, p| {
@@ -1136,7 +1187,7 @@ impl Nurbs2 {
     }
 
     /// The length between parameters `t0 <= t1` (clamped), by adaptive Gauss–Legendre
-    /// quadrature on each knot span.
+    /// quadrature on each knot span, cut where the speed is stationary.
     pub(crate) fn length_between(&self, t0: f64, t1: f64, tolerance: &Tolerance) -> Result<f64> {
         let (lo, hi) = self.parameter_range();
         let (a, b) = (t0.clamp(lo, hi), t1.clamp(lo, hi));
@@ -1166,6 +1217,24 @@ impl Nurbs2 {
         cuts.push(a);
         cuts.push(b);
         cuts.sort_by(f64::total_cmp);
+        // A near-cusp or narrow peak of the speed between the nodes of a rule and of its halves
+        // fools the error estimate, so the pieces are cut where the speed is stationary; the
+        // speed is then nearly monotone on each piece.
+        for (lo, hi, segment) in self
+            .bezier_segments()
+            .iter()
+            .map(|s| (s.lo.max(a), s.hi.min(b), s))
+            .filter(|(lo, hi, _)| hi > lo)
+        {
+            cuts.extend(
+                segment
+                    .speed_stationary()
+                    .into_iter()
+                    .filter(|t| *t > lo && *t < hi),
+            );
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup();
         let mut stack: Vec<(f64, f64, f64)> = cuts
             .windows(2)
             .filter_map(|w| match w {
@@ -2196,6 +2265,122 @@ pub(crate) mod tests {
 
     }
 
+    /// The curve of issue 114: a degree-4 rational curve whose speed has a narrow peak.
+    fn narrow_peak_curve() -> Nurbs2 {
+        let k = [
+            2.7472477515695424,
+            3.6438567229903307,
+            44.760704532483516,
+            45.17772502317716,
+            50.76312870575188,
+        ];
+        let knots = vec![
+            k[0], k[0], k[0], k[0], k[0], k[1], k[1], k[1], k[2], k[3], k[3], k[3], k[4], k[4],
+            k[4], k[4], k[4],
+        ];
+        let points = [
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [8.014884541757475, 97.95438105484342],
+            [-25.633837374174245, -82.4581946270172],
+            [-15.245296157265845, -28.063342615656037],
+            [9.550220787757112, -39.68474465302911],
+            [25.217538125257896, -93.57328070467427],
+            [20.980985553479417, 89.67909011151971],
+            [79.22473428981931, -27.776043103018292],
+            [-85.02987962245325, 37.18563800424525],
+            [-13.33780163915049, 59.01405957855415],
+            [-97.1206561878464, -90.73984261676664],
+        ]
+        .iter()
+        .map(|p| Point2::new(p[0], p[1]))
+        .collect();
+        let weights = vec![
+            0.06857373289412645,
+            0.921215172730425,
+            3.4372007793470765,
+            0.22358439121578708,
+            0.01670273380331322,
+            94.59240991343648,
+            1.9448460525472233,
+            0.02285824475896926,
+            34.06393289512653,
+            0.0328247147944479,
+            1.157672600845313,
+            0.012661608391848059,
+        ];
+        Nurbs2::new(4, knots, points, weights).unwrap()
+    }
+
+    /// An independent reference: composite Gauss-Legendre over a fine uniform split of every knot
+    /// span, graded geometrically towards the end points of the span and towards every local
+    /// minimum of the speed found by a dense scan with golden-section refinement.
+    fn reference_length(c: &Nurbs2, t0: f64, t1: f64) -> f64 {
+        let speed = |t: f64| crate::length(&c.derivatives(t).1);
+        let mut cuts: Vec<f64> = c
+            .breakpoints()
+            .into_iter()
+            .filter(|k| *k > t0 && *k < t1)
+            .collect();
+        cuts.insert(0, t0);
+        cuts.push(t1);
+        let mut kinks = Vec::new();
+        for w in cuts.windows(2) {
+            let at = |i: usize| w[0] + (w[1] - w[0]) * i as f64 / 20_000.0;
+            for i in 1..20_000 {
+                let (a, m, b) = (speed(at(i - 1)), speed(at(i)), speed(at(i + 1)));
+                if m < a && m <= b {
+                    let (mut x0, mut x1) = (at(i - 1), at(i + 1));
+                    for _ in 0..100 {
+                        let (p, q) = (x0 + (x1 - x0) / 3.0, x1 - (x1 - x0) / 3.0);
+                        if speed(p) < speed(q) { x1 = q } else { x0 = p }
+                    }
+                    kinks.push(0.5 * (x0 + x1));
+                }
+            }
+        }
+        cuts.extend(kinks);
+        cuts.sort_by(f64::total_cmp);
+        let mut total = 0.0;
+        for w in cuts.windows(2) {
+            let width = w[1] - w[0];
+            let mut pieces: Vec<f64> = (0..=2000)
+                .map(|i| w[0] + width * f64::from(i) / 2000.0)
+                .collect();
+            for k in 1..=50 {
+                let d = width * 0.5_f64.powi(k);
+                pieces.push(w[0] + d);
+                pieces.push(w[1] - d);
+            }
+            pieces.sort_by(f64::total_cmp);
+            for p in pieces.windows(2) {
+                let (mid, half) = (0.5 * (p[0] + p[1]), 0.5 * (p[1] - p[0]));
+                total += half
+                    * GAUSS_NODES
+                        .iter()
+                        .zip(GAUSS_WEIGHTS)
+                        .map(|(x, wt)| wt * (speed(mid - half * x) + speed(mid + half * x)))
+                        .sum::<f64>();
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn length_meets_its_target_on_a_narrow_speed_peak() {
+        let c = narrow_peak_curve();
+        let (a, b) = c.parameter_range();
+        let u = a + (b - a) * 0.47265089587328807;
+        for (t0, t1) in [(a, u), (u, b), (a, b)] {
+            let got = c.length_between(t0, t1, &TOL).unwrap();
+            let want = reference_length(&c, t0, t1);
+            assert!(
+                (got - want).abs() <= TOL.linear / 64.0,
+                "{t0} {t1}: {got} vs {want}"
+            );
+        }
+    }
+
     proptest! {
         // Projection and quadrature of NURBS curves are slow in unoptimized builds.
         #![proptest_config(ProptestConfig { cases: 12, ..ProptestConfig::default() })]
@@ -2239,10 +2424,8 @@ pub(crate) mod tests {
                 curve.length_between(a, u, &TOL),
                 curve.length_between(u, b, &TOL),
             ) {
-                // Each length is adaptive quadrature that aims at a share of the tolerance; a
-                // narrow speed peak between nodes can still leave a relative 1e-8 error, so the
-                // bound grows with the length itself, not only with the tolerance.
-                let slack = TOL.linear + 1e-7 * whole;
+                // Each length is adaptive quadrature that aims at a share of the tolerance.
+                let slack = TOL.linear;
                 prop_assert!((whole - left - right).abs() <= slack, "{whole} {left} {right}");
                 // Speeds with sharp peaks can exhaust the quadrature, with a code.
                 match curve.parameter_at_length(left, &TOL) {

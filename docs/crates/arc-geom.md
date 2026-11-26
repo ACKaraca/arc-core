@@ -259,6 +259,10 @@ form that cannot overflow when the plain one does, and stays exactly 0 at near a
   units in the last place of the length scale, when larger) and a bounded number of intervals;
   the parameter at a length is found by safeguarded Newton iteration, so its point is within
   the linear tolerance of the true point where `f64` resolves that.
+- NURBS curve lengths use the same rule and target, with every knot span first cut at the
+  parameters where the speed is stationary (the roots of the derivative of its square, found
+  per Bézier segment), so a narrow speed peak or a near-cusp cannot fall between the nodes of
+  the rule and of its halves.
 - Foot points are the parameters where the vector to the query point is perpendicular to the
   tangent within the linear tolerance. When every point of an arc or circle is one (the query
   is its center) the result is an interval covering it. Ellipse foot points are found by
