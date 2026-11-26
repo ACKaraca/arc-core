@@ -582,7 +582,8 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
 
 - `Application::new(product, config)` holds the product, a `SettingsStore` over the product's
   settings, the recent files and the tabs in display order. A `Tab` has a `TabId` that is never
-  reused, its document (with its own undo history), the package when it has a file, the
+  reused, not even by another `Application` of the process (one counter), its document (with
+  its own undo history), the package when it has a file, the
   recovery journal, the banners and the view states (`views`, `views_mut`; opaque
   `Box<dyn Any + Send>` values the shell keeps).
 - A tab is dirty when its document's revision differs from the revision of its saved state and
