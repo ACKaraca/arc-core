@@ -731,6 +731,10 @@ identifier and arguments.
   session holds (`arc_doc::package::recovery::scan`): each `Orphan` names its document, base
   file, record count and times. The application's own open documents hold their journals and are
   not listed.
+- `recovery_offers()` is `recoverable()` for the start-up prompt: a readable orphan with no
+  records (for example an application killed right after opening a document) has nothing to
+  recover, since its base file, if any, is the saved file itself, so it is deleted instead of
+  listed. An unreadable orphan is kept and offered for discard.
 - `compare(orphan)` changes nothing and replays nothing. It reports the base path, whether the
   base still has the recorded fingerprint, the number of objects in the base file as it is now
   (from `package::inspect`; none without a base or when it cannot be inspected) and the number
@@ -1059,7 +1063,8 @@ needs no window:
   settings file and the recent-files file) it loads the settings file into the user scope
   (`settings_file::load`; a malformed or oversized file is set aside and its error shown as a
   warning notification) and keeps both paths for writing. It applies the appearance settings and
-  lists `Application::recoverable()` in the recovery prompt; a failure to list is an error
+  lists `Application::recovery_offers()` in the recovery prompt (sessions without records are
+  discarded, not listed); a failure to list is an error
   notification.
 - Notifications (`arc_ui::Notifications`) are drawn at the top of the main window.
 - The recovery prompt is a modal over the main window while sessions are listed. Each entry

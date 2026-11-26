@@ -439,6 +439,51 @@ fn recovery_lists_recovers_and_discards_sessions_of_a_dropped_application() {
     assert!(reopened.recoverable().unwrap().is_empty());
 }
 
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+#[test]
+fn recovery_offers_skip_and_delete_sessions_without_records() {
+    let dir = TempDir::new("recovery-empty");
+    let data = dir.join("data");
+    let path = dir.join("doc.arc");
+    new_package(&path);
+
+    let mut crashed = app_in(&data, "a", 8);
+    // A save leaves the journal of the open tab with a base and no records; a kill keeps it,
+    // which a clean drop would not, so its files are put back after the drop.
+    let saved = crashed.open(&path).unwrap();
+    add_point(&crashed, saved, 5.0).unwrap();
+    crashed.save(saved).unwrap();
+    let kept = dir.join("kept");
+    copy_tree(&data.join("recovery"), &kept);
+    let changed = crashed.new_document().unwrap();
+    add_point(&crashed, changed, 1.0).unwrap();
+    drop(crashed);
+    copy_tree(&kept, &data.join("recovery"));
+
+    let app = app_in(&data, "a", 9);
+    let before = app.recoverable().unwrap();
+    assert_eq!(before.len(), 2);
+    assert!(before.iter().any(|o| o.records == 0 && o.base.is_some()));
+    let offers = app.recovery_offers().unwrap();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].records, 1);
+    let left = app.recoverable().unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].path, offers[0].path);
+}
+
 fn row(app: &Application, key: &str) -> settings_editor::Row {
     settings_editor::rows(app.settings())
         .into_iter()

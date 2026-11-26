@@ -989,6 +989,26 @@ impl Application {
         recovery::scan(&self.data_dir, &self.limits)
     }
 
+    /// The sessions the start-up prompt offers: [`Application::recoverable`] without the sessions
+    /// that hold no record, which are deleted here. A readable session without records only
+    /// restates its base file (or an empty document), so there is nothing to recover; an
+    /// unreadable one is kept, since the user alone decides to discard what cannot be inspected.
+    ///
+    /// # Errors
+    /// `doc.recovery.unavailable` when the recovery directory cannot be listed.
+    pub fn recovery_offers(&self) -> Result<Vec<Orphan>> {
+        let (empty, offers): (Vec<_>, Vec<_>) = self
+            .recoverable()?
+            .into_iter()
+            .partition(|o| o.records == 0 && o.problem.is_none());
+        for orphan in &empty {
+            if let Err(e) = self.discard_recovery(orphan) {
+                tracing::warn!(path = %orphan.path.display(), error = %e, "empty session kept");
+            }
+        }
+        Ok(offers)
+    }
+
     /// Compares a recoverable session with its base without replaying or changing anything.
     #[must_use]
     pub fn compare(&self, orphan: &Orphan) -> Comparison {
