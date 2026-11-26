@@ -94,6 +94,18 @@ pub enum ToolItem {
         /// The label's message identifier.
         label: String,
     },
+    /// [`ToolItem::ZoomExtents`] drawn like an [`ToolItem::IconButton`]; an unknown icon shows the
+    /// label as text.
+    ZoomExtentsIcon {
+        /// The label's message identifier (also the accessible name).
+        label: String,
+        /// The tooltip's message identifier.
+        hint: Option<String>,
+        /// The icon name.
+        icon: String,
+        /// How the button is laid out.
+        size: ButtonSize,
+    },
     /// A gap between groups.
     Separator,
 }
@@ -109,6 +121,9 @@ impl std::fmt::Debug for ToolItem {
             }
             Self::Choice { .. } => f.write_str("Choice"),
             Self::ZoomExtents { label } => write!(f, "ZoomExtents({label})"),
+            Self::ZoomExtentsIcon { label, icon, .. } => {
+                write!(f, "ZoomExtentsIcon({label}, {icon})")
+            }
             Self::Separator => f.write_str("Separator"),
         }
     }
@@ -753,6 +768,17 @@ pub enum ToolView {
         /// The label.
         label: String,
     },
+    /// Zoom to the extents, drawn as an icon button.
+    ZoomIcon {
+        /// The label.
+        label: String,
+        /// The tooltip.
+        hint: Option<String>,
+        /// The icon name.
+        icon: String,
+        /// The layout.
+        size: ButtonSize,
+    },
     /// A gap.
     Separator,
 }
@@ -793,6 +819,17 @@ pub fn tool_views(
                 pick: Arc::clone(pick),
             },
             ToolItem::ZoomExtents { label } => ToolView::Zoom { label: text(label) },
+            ToolItem::ZoomExtentsIcon {
+                label,
+                hint,
+                icon,
+                size,
+            } => ToolView::ZoomIcon {
+                label: text(label),
+                hint: hint.as_deref().map(text),
+                icon: icon.clone(),
+                size: *size,
+            },
             ToolItem::Separator => ToolView::Separator,
         })
         .collect()
@@ -816,6 +853,9 @@ const ROW_H: f32 = 72.0;
 const SMALL_H: f32 = 22.0;
 const GROUP_LABEL_H: f32 = 14.0;
 const PAD: f32 = 6.0;
+/// Horizontal padding of a command tab label, and the height of the tab row.
+const TAB_PAD: f32 = 12.0;
+const TAB_H: f32 = 26.0;
 const ROUNDING: u8 = 4;
 /// The most small buttons in one column.
 const STACK: usize = 3;
@@ -997,6 +1037,21 @@ fn draw_view(
                 *reply = Some(ToolReply::Shell(ShellAction::ZoomExtents));
             }
         }
+        ToolView::ZoomIcon {
+            label,
+            hint,
+            icon,
+            size,
+        } => {
+            let form = match (quick, size) {
+                (true, _) => Form::Quick,
+                (false, ButtonSize::Large) => Form::Large,
+                (false, ButtonSize::Small) => Form::Small,
+            };
+            if icon_button(ui, look, label, hint.as_deref(), icon, form).clicked() {
+                *reply = Some(ToolReply::Shell(ShellAction::ZoomExtents));
+            }
+        }
         ToolView::Choice { hint, state, pick } => {
             let current = state.current.clone().unwrap_or_default();
             let combo = egui::ComboBox::from_id_salt("arc-toolbar-choice")
@@ -1132,7 +1187,7 @@ pub fn show_commands(ui: &mut Ui, bar: &CommandBarView, look: &Look<'_>) -> Opti
     let colors = look.colors;
     let mut reply = None;
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.x = 2.0;
         for head in &bar.heads {
             let current = head.index == bar.current;
             let color = if head.contextual {
@@ -1142,15 +1197,32 @@ pub fn show_commands(ui: &mut Ui, bar: &CommandBarView, look: &Look<'_>) -> Opti
             } else {
                 colors.text_muted
             };
-            let response = ui.add(
-                egui::Button::new(egui::RichText::new(head.label.as_str()).color(color))
-                    .frame(false),
+            let galley = ui.painter().layout_no_wrap(
+                head.label.clone(),
+                egui::TextStyle::Button.resolve(ui.style()),
+                color,
             );
+            let size = egui::vec2(galley.size().x + 2.0 * TAB_PAD, TAB_H);
+            let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Tab, true, head.label.as_str())
+            });
+            if response.hovered() {
+                ui.painter().rect_filled(
+                    rect,
+                    egui::CornerRadius::same(ROUNDING),
+                    colors.control_hover,
+                );
+            }
+            let at = egui::pos2(
+                rect.left() + TAB_PAD,
+                rect.center().y - galley.size().y / 2.0,
+            );
+            ui.painter().galley(at, galley, color);
             if current {
-                let y = response.rect.bottom();
                 ui.painter().hline(
-                    response.rect.x_range(),
-                    y,
+                    rect.x_range(),
+                    rect.bottom() - 1.0,
                     egui::Stroke::new(2.0, colors.accent),
                 );
             }
@@ -1198,6 +1270,9 @@ fn show_group(ui: &mut Ui, group: &GroupView, look: &Look<'_>, reply: &mut Optio
         matches!(
             v,
             ToolView::Icon {
+                size: ButtonSize::Small,
+                ..
+            } | ToolView::ZoomIcon {
                 size: ButtonSize::Small,
                 ..
             }
@@ -1558,6 +1633,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_zoom_extents_icon_button_requests_the_zoom() {
+        let ctx = egui::Context::default();
+        let colors = arc_ui::ThemeId::Dark.theme().colors;
+        let icons = arc_ui::IconAtlas::build(arc_ui::icons::STARTER, 32)
+            .unwrap()
+            .upload(&ctx);
+        let look = Look {
+            icons: Some(&icons),
+            colors: &colors,
+        };
+        let view = ToolView::ZoomIcon {
+            label: "Zoom".into(),
+            hint: None,
+            icon: "plus".into(),
+            size: ButtonSize::Small,
+        };
+        let mut reply = None;
+        click_first(&ctx, |ui| draw_view(ui, &view, &look, false, &mut reply));
+        assert_eq!(reply, Some(ToolReply::Shell(ShellAction::ZoomExtents)));
     }
 
     #[test]

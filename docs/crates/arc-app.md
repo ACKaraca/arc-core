@@ -968,14 +968,16 @@ needs no window:
   bind Delete without a rename deleting objects). The command line handles Ctrl+Z, Ctrl+Y and
   Ctrl+Shift+Z whenever no text field has the focus, so a product needs no binding for them.
 - Command tabs (`ShellConfig::command_tabs`) replace the flat toolbar strip when given. A row of
-  tab labels (real, keyboard-reachable buttons) sits under the menu bar: the current tab has an
+  tab labels (real, keyboard-reachable tabs, each padded 12 points either side, highlighted on
+  hover) sits under the menu bar: the current tab has an
   accent underline, a double click on it folds the panel away or back (kept per window), and
   picking another tab while folded expands it. Below the row a fixed-height panel lays the
   current tab's groups out left to right in a horizontal scroll area, without wrapping: each
   group draws its items, its label centered underneath in the muted text color, and a thin
   separator divides groups. `ToolItem::IconButton` is large (a 32 point icon above a label of up
   to two lines, 64 points wide) or small (a 16 point icon beside the label; consecutive small
-  buttons stack three to a column); `Choice` and `ZoomExtents` draw as in the flat strip. A
+  buttons stack three to a column); `Choice` and `ZoomExtents` draw as in the flat strip; `ZoomExtentsIcon` is the zoom-extents
+  request drawn like an `IconButton` (large or small). A
   contextual tab (`CommandTab::context`, a probe of the application and the active document
   tab) is shown only while the probe is true, in the accent color; it becomes current when it
   appears and the tab chosen before returns when it goes. Labels and hints are message
