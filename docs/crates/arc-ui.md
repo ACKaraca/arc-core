@@ -103,6 +103,9 @@ return an `Intent` naming a command and never run one. Fallible functions return
   alpha. Drawing multiplies by a color token, so one atlas serves every theme. `edge_for` turns
   the icon token size and the pixels-per-point factor into the pixel edge.
 - References to files and embedded images in SVG sources are never resolved.
+- `icons::check` builds a list without keeping the atlas and returns the error codes above, so a
+  product tests its own icon set (`arc_app::shell::check_icons` adds the starter set first). The
+  shell draws command buttons from the atlas it builds at `edge_for(32, pixels_per_point)`.
 
 ### Localized strings (CORE-UI-024)
 
