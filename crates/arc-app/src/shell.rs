@@ -307,6 +307,13 @@ fn next_step_seed(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
+/// Whether the icon atlas is to be built for `ppp`: icons are used, it was not built for this
+/// scale and did not fail at it (a failure at one scale, such as an edge over the limit, says
+/// nothing about another).
+fn icon_atlas_due(any: bool, failed_at: Option<f32>, built_at: Option<f32>, ppp: f32) -> bool {
+    any && failed_at != Some(ppp) && built_at != Some(ppp)
+}
+
 /// The starter icons followed by the product's.
 fn merged_icons(product: &[(String, String)]) -> Vec<(&str, &str)> {
     arc_ui::icons::STARTER
@@ -587,8 +594,8 @@ pub struct Shell {
     product_icons: Vec<(String, String)>,
     /// The icon atlas of the last scale it was built for; `None` before the first build.
     icons: Option<(f32, arc_ui::Icons)>,
-    /// The atlas failed to build: labels are drawn as text.
-    icons_failed: bool,
+    /// The scale the atlas last failed to build at: labels are drawn as text until it changes.
+    icons_failed: Option<f32>,
     status: Vec<StatusToggle>,
     status_text: Option<StatusProbe>,
     display: Option<DisplayProbe>,
@@ -763,7 +770,7 @@ impl Shell {
             quick_access: config.quick_access,
             product_icons: config.icons,
             icons: None,
-            icons_failed: false,
+            icons_failed: None,
             status: config.status,
             status_text: config.status_text,
             display: config.display,
@@ -790,7 +797,12 @@ impl Shell {
                 .iter()
                 .any(|t| t.groups.iter().any(|g| uses(&g.items)));
         let ppp = ctx.pixels_per_point();
-        if !any || self.icons_failed || self.icons.as_ref().is_some_and(|(p, _)| *p == ppp) {
+        if !icon_atlas_due(
+            any,
+            self.icons_failed,
+            self.icons.as_ref().map(|(p, _)| *p),
+            ppp,
+        ) {
             return;
         }
         let edge = arc_ui::IconAtlas::edge_for(32.0, ppp);
@@ -801,7 +813,7 @@ impl Shell {
                     code = e.code(),
                     "icon atlas failed; labels are drawn as text"
                 );
-                self.icons_failed = true;
+                self.icons_failed = Some(ppp);
                 self.icons = None;
             }
         }
@@ -3808,6 +3820,15 @@ impl Panel for LogPanel {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_failed_icon_atlas_is_retried_at_another_scale() {
+        assert!(icon_atlas_due(true, None, None, 1.0));
+        assert!(!icon_atlas_due(true, Some(1.0), None, 1.0));
+        assert!(icon_atlas_due(true, Some(1.0), None, 2.0));
+        assert!(!icon_atlas_due(true, None, Some(2.0), 2.0));
+        assert!(!icon_atlas_due(false, None, None, 1.0));
+    }
+
     /// The command context derives its stream as `seed ^ revision * MIX`; with one revision per
     /// step the old additive sequence (`seed0 + n * MIX`) made every step's stream identical.
     #[test]
@@ -3826,9 +3847,6 @@ mod tests {
             assert_eq!(sorted.len(), streams.len());
         }
     }
-
-    use super::*;
-    use arc_base::id::Identifier;
 
     use super::*;
     use arc_base::id::Identifier;
