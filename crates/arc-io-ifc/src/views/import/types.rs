@@ -306,6 +306,24 @@ pub struct ResolvedQuantitySet {
     pub quantities: Vec<ResolvedQuantity>,
 }
 
+/// An `IfcMappedItem` of an object's representation: the shared representation of a type, placed
+/// by the mapping.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MappedView {
+    /// The `IfcMappedItem` instance.
+    pub instance: u64,
+    /// The `IfcRepresentationMap` instance (`MappingSource`).
+    pub map: Option<u64>,
+    /// The type object whose `RepresentationMaps` lists the map.
+    pub type_object: Option<u64>,
+    /// The `MappedRepresentation` of the map; its items are in the map's coordinates.
+    pub representation: Option<u64>,
+    /// The transform from the map's coordinates to the coordinates of the object's placement: the
+    /// `MappingTarget` composed with the `MappingOrigin`, translation in meters. `None` when it
+    /// cannot be evaluated; the loss report names the reason.
+    pub transform: Option<Matrix>,
+}
+
 /// An object of the file: a product, a type object or another object definition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectView {
@@ -362,6 +380,14 @@ pub struct ObjectView {
     pub material: Option<(MaterialAssociation, Origin)>,
     /// The surface styles of the object's representation items.
     pub styles: Vec<StyleView>,
+    /// The representation items of the object's own representations that are not mapped items
+    /// (bodies, curves and so on), in file order. Their geometry is evaluated by
+    /// `IfcFile::geometry`, which the views do not repeat.
+    pub bodies: Vec<u64>,
+    /// The `IfcMappedItem`s of the object's own representations, in file order.
+    pub mapped: Vec<MappedView>,
+    /// For a type object, the `IfcRepresentationMap`s in its `RepresentationMaps`.
+    pub representation_maps: Vec<u64>,
     /// For a host element, the opening elements that void it.
     pub openings: Vec<u64>,
     /// For an opening element, the element it voids.

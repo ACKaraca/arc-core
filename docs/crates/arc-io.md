@@ -1361,6 +1361,13 @@ inverse index (`IfcFile::inverse_index`) with the views above.
   (`Origin::Type`). A material's surface styles come from its `IfcMaterialDefinitionRepresentation`.
 - Styles: the `IfcStyledItem`s of a product's representation items, followed through `IfcMappedItem` to
   three levels, give surface style colors and transparency. Styles on deeper items stay unread.
+- Representations: `bodies` holds the items of a product's own representations that are not mapped
+  items, and `mapped` its `IfcMappedItem`s. A mapped item gives its `IfcRepresentationMap`, the
+  `IfcTypeProduct` whose `RepresentationMaps` lists the map (`type_object`) and a `transform` from the
+  map's coordinates to the product's placement: `MappingTarget` composed with `MappingOrigin`, translation
+  in meters, with the axes orthogonalized as the geometry evaluator does; `None` when it is not
+  evaluable. A type object gives its maps in `representation_maps`. The geometry itself is evaluated by
+  `IfcFile::geometry`; the bodies are not read here.
 - Classification: `IfcRelAssociatesClassification` gives references with identification (`ItemReference`
   in IFC2X3), name, location and the system found through `ReferencedSource`. A reference of the type is
   inherited unless the occurrence has one of the same system.

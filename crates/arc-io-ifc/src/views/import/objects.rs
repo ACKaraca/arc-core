@@ -336,6 +336,14 @@ impl<'f> Reader<'f> {
             ObjectKind::Product => self.object_styles(record, name)?,
             _ => Vec::new(),
         };
+        let (bodies, mapped) = match kind {
+            ObjectKind::Product => self.representation_items(record, name)?,
+            _ => (Vec::new(), Vec::new()),
+        };
+        let representation_maps = match kind {
+            ObjectKind::Type => self.representation_maps(record, name),
+            _ => Vec::new(),
+        };
         let owner_history = self.reference(record, "OwnerHistory", name);
         let imp = &self.imp;
         let get = |map: &BTreeMap<u64, Vec<u64>>| map.get(&name).cloned().unwrap_or_default();
@@ -367,6 +375,9 @@ impl<'f> Reader<'f> {
             classifications,
             material,
             styles,
+            bodies,
+            mapped,
+            representation_maps,
             openings: get(&imp.openings_of),
             voids: imp.host_of.get(&name).copied(),
             filled_by: get(&imp.fillers_of),

@@ -23,7 +23,7 @@ const IDENTITY: Matrix = [
 ];
 
 /// The product of two row-major transforms.
-fn mul(a: &Matrix, b: &Matrix) -> Matrix {
+pub(super) fn mul(a: &Matrix, b: &Matrix) -> Matrix {
     let mut out = [0.0; 16];
     for row in 0..4 {
         for col in 0..4 {
@@ -81,6 +81,44 @@ fn frame(origin: V3, z: Option<V3>, x_hint: Option<V3>) -> Matrix {
         x[2], y[2], z[2], origin[2], //
         0.0, 0.0, 0.0, 1.0,
     ]
+}
+
+/// The row-major transform of an operator: `x` made orthogonal to `z`, `y` made orthogonal to both
+/// (the z axis times x when absent), each axis scaled, and the origin. `None` for a degenerate
+/// axis; the geometry evaluator substitutes a perpendicular there, which is not repeated.
+fn operator_matrix(origin: V3, x: V3, y: Option<V3>, z: V3, scales: [f64; 3]) -> Option<Matrix> {
+    let z = unit(z)?;
+    let x = orthogonal(x, z)?;
+    let y = match y {
+        None => cross(z, x),
+        Some(v) => {
+            let (dz, dx) = (dot(v, z), dot(v, x));
+            unit([
+                v[0] - z[0] * dz - x[0] * dx,
+                v[1] - z[1] * dz - x[1] * dx,
+                v[2] - z[2] * dz - x[2] * dx,
+            ])?
+        }
+    };
+    let [sx, sy, sz] = scales;
+    Some([
+        x[0] * sx,
+        y[0] * sy,
+        z[0] * sz,
+        origin[0], //
+        x[1] * sx,
+        y[1] * sy,
+        z[1] * sz,
+        origin[1], //
+        x[2] * sx,
+        y[2] * sy,
+        z[2] * sz,
+        origin[2], //
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    ])
 }
 
 /// The numbers of a list parameter, padded with zeros to three.
@@ -159,9 +197,16 @@ impl Reader<'_> {
         let Some(axis) = self.reference(record, "RelativePlacement", source) else {
             return IDENTITY;
         };
+        self.axis_frame(axis, source, "IFCLOCALPLACEMENT")
+            .unwrap_or(IDENTITY)
+    }
+
+    /// The frame of an `IfcAxis2Placement2D` or `IfcAxis2Placement3D`, translation in meters. An
+    /// instance that is missing is reported under `kind`, the entity that refers to it.
+    pub(super) fn axis_frame(&mut self, axis: u64, source: u64, kind: &str) -> Option<Matrix> {
         let Some(axis_record) = self.rec(axis) else {
-            self.lose(reasons::TARGET_MISSING, "IFCLOCALPLACEMENT", source, 1);
-            return IDENTITY;
+            self.lose(reasons::TARGET_MISSING, kind, source, 1);
+            return None;
         };
         let scale = self.imp.units.length_to_meters;
         let origin = self
@@ -174,12 +219,129 @@ impl Reader<'_> {
             _ => None,
         };
         let x = self.direction(axis_record, "RefDirection", axis);
-        frame(origin, z, x)
+        Some(frame(origin, z, x))
     }
 
     fn direction(&mut self, record: &Record, attr: &str, source: u64) -> Option<V3> {
         let target = self.reference(record, attr, source)?;
         let direction = self.rec(target)?;
         numbers(self.file.attribute(direction, "DirectionRatios"))
+    }
+
+    /// `Some(None)` when the attribute is absent, `Some(Some(name))` for a reference, and `None`
+    /// when it is present but not a reference (logged by [`Reader::reference`]).
+    fn optional_reference(
+        &mut self,
+        record: &Record,
+        attr: &str,
+        source: u64,
+    ) -> Option<Option<u64>> {
+        match self.file.attribute(record, attr) {
+            None | Some(Parameter::Omitted | Parameter::Derived) => Some(None),
+            Some(_) => self.reference(record, attr, source).map(Some),
+        }
+    }
+
+    /// An optional direction attribute, with the same three states as [`Self::optional_reference`].
+    fn optional_direction(
+        &mut self,
+        record: &Record,
+        attr: &str,
+        source: u64,
+        kind: &str,
+    ) -> Option<Option<V3>> {
+        let Some(target) = self.optional_reference(record, attr, source)? else {
+            return Some(None);
+        };
+        let Some(direction) = self.rec(target) else {
+            self.lose(reasons::TARGET_MISSING, kind, source, 1);
+            return None;
+        };
+        match numbers(self.file.attribute(direction, "DirectionRatios")).and_then(unit) {
+            Some(v) => Some(Some(v)),
+            None => {
+                self.lose(reasons::VALUE_UNEXPECTED, kind, source, 1);
+                None
+            }
+        }
+    }
+
+    /// An optional real attribute; the default when it is absent.
+    fn optional_real(
+        &mut self,
+        record: &Record,
+        attr: &str,
+        source: u64,
+        default: f64,
+    ) -> Option<f64> {
+        match self.file.attribute(record, attr) {
+            None | Some(Parameter::Omitted | Parameter::Derived) => Some(default),
+            Some(_) => self.real(record, attr, source),
+        }
+    }
+
+    /// The transform of an `IfcCartesianTransformationOperator3D` or of its non-uniform form, in
+    /// meters, as `IfcFile::geometry` evaluates it: the axes orthogonalized in the same order, the
+    /// scale of each axis, and the local origin. `None` when an attribute is unusable; the loss
+    /// report names the reason.
+    pub(super) fn operator(&mut self, name: u64, source: u64) -> Option<Matrix> {
+        let Some(record) = self.rec(name) else {
+            self.lose(
+                reasons::TARGET_MISSING,
+                "IFCCARTESIANTRANSFORMATIONOPERATOR3D",
+                source,
+                1,
+            );
+            return None;
+        };
+        let kind = record.type_name.as_str();
+        let non_uniform = match kind {
+            "IFCCARTESIANTRANSFORMATIONOPERATOR3D" => false,
+            "IFCCARTESIANTRANSFORMATIONOPERATOR3DNONUNIFORM" => true,
+            _ => {
+                self.lose(reasons::NOT_MAPPED, kind, source, 1);
+                return None;
+            }
+        };
+        let z = self
+            .optional_direction(record, "Axis3", name, kind)?
+            .unwrap_or([0.0, 0.0, 1.0]);
+        let x = self
+            .optional_direction(record, "Axis1", name, kind)?
+            .unwrap_or([1.0, 0.0, 0.0]);
+        let y = self.optional_direction(record, "Axis2", name, kind)?;
+        let origin = match self.optional_reference(record, "LocalOrigin", name)? {
+            None => [0.0; 3],
+            Some(point) => {
+                let scale = self.imp.units.length_to_meters;
+                let coordinates = self
+                    .rec(point)
+                    .and_then(|p| numbers(self.file.attribute(p, "Coordinates")));
+                match coordinates {
+                    Some(c) => [c[0] * scale, c[1] * scale, c[2] * scale],
+                    None => {
+                        self.lose(reasons::TARGET_MISSING, kind, name, 1);
+                        return None;
+                    }
+                }
+            }
+        };
+        let uniform = self.optional_real(record, "Scale", name, 1.0)?;
+        let (second, third) = if non_uniform {
+            (
+                self.optional_real(record, "Scale2", name, uniform)?,
+                self.optional_real(record, "Scale3", name, uniform)?,
+            )
+        } else {
+            (uniform, uniform)
+        };
+        let scales = [uniform, second, third];
+        match operator_matrix(origin, x, y, z, scales) {
+            Some(matrix) if scales.iter().all(|s| *s > 0.0 && s.is_finite()) => Some(matrix),
+            _ => {
+                self.lose(reasons::VALUE_UNEXPECTED, kind, name, 1);
+                None
+            }
+        }
     }
 }

@@ -19,6 +19,7 @@ mod materials;
 mod misc;
 mod objects;
 mod placement;
+mod representation;
 mod styles;
 mod types;
 mod units;
@@ -35,10 +36,11 @@ use super::{Reader, got_reference};
 
 pub use types::{
     ClassCoverage, ClassificationRef, ClassificationSystem, Connection, ConstituentView, CrsView,
-    GeoReference, GeoSource, GroupView, ImportViews, LayerUsage, LayerView, MaterialAssociation,
-    MaterialRef, Matrix, ObjectKind, ObjectView, Origin, OwnerHistory, PlacementState,
-    PlacementView, ProfileView, ResolvedProperty, ResolvedPropertySet, ResolvedQuantity,
-    ResolvedQuantitySet, SpaceBoundary, StyleView, UnitKind, UnitSystem, UnitView,
+    GeoReference, GeoSource, GroupView, ImportViews, LayerUsage, LayerView, MappedView,
+    MaterialAssociation, MaterialRef, Matrix, ObjectKind, ObjectView, Origin, OwnerHistory,
+    PlacementState, PlacementView, ProfileView, ResolvedProperty, ResolvedPropertySet,
+    ResolvedQuantity, ResolvedQuantitySet, SpaceBoundary, StyleView, UnitKind, UnitSystem,
+    UnitView,
 };
 
 /// The entity types the import views read, besides those of `UNDERSTOOD` in the parent module.

@@ -59,10 +59,10 @@ pub use schema::{
 };
 pub use views::{
     ClassCoverage, ClassificationRef, ClassificationSystem, Connection, ConstituentView, CrsView,
-    GeoReference, GeoSource, GroupView, ImportViews, LayerUsage, LayerView, MaterialAssociation,
-    MaterialRef, Matrix, Nominal, Number, ObjectKind, ObjectView, Origin, OwnerHistory,
-    PlacementState, PlacementView, ProfileView, Property, PropertySet, PropertyValue, Quantity,
-    QuantityKind, QuantitySet, ResolvedProperty, ResolvedPropertySet, ResolvedQuantity,
+    GeoReference, GeoSource, GroupView, ImportViews, LayerUsage, LayerView, MappedView,
+    MaterialAssociation, MaterialRef, Matrix, Nominal, Number, ObjectKind, ObjectView, Origin,
+    OwnerHistory, PlacementState, PlacementView, ProfileView, Property, PropertySet, PropertyValue,
+    Quantity, QuantityKind, QuantitySet, ResolvedProperty, ResolvedPropertySet, ResolvedQuantity,
     ResolvedQuantitySet, RootedEntity, SpaceBoundary, SpatialNode, StyleView, TypeAssignment,
     TypedViews, UnitKind, UnitSystem, UnitView, Value,
 };

@@ -29,10 +29,11 @@ mod import;
 pub(crate) use import::UNDERSTOOD_IMPORT;
 pub use import::{
     ClassCoverage, ClassificationRef, ClassificationSystem, Connection, ConstituentView, CrsView,
-    GeoReference, GeoSource, GroupView, ImportViews, LayerUsage, LayerView, MaterialAssociation,
-    MaterialRef, Matrix, ObjectKind, ObjectView, Origin, OwnerHistory, PlacementState,
-    PlacementView, ProfileView, ResolvedProperty, ResolvedPropertySet, ResolvedQuantity,
-    ResolvedQuantitySet, SpaceBoundary, StyleView, UnitKind, UnitSystem, UnitView,
+    GeoReference, GeoSource, GroupView, ImportViews, LayerUsage, LayerView, MappedView,
+    MaterialAssociation, MaterialRef, Matrix, ObjectKind, ObjectView, Origin, OwnerHistory,
+    PlacementState, PlacementView, ProfileView, ResolvedProperty, ResolvedPropertySet,
+    ResolvedQuantity, ResolvedQuantitySet, SpaceBoundary, StyleView, UnitKind, UnitSystem,
+    UnitView,
 };
 
 /// The entity types the typed views read. Records of any other type are kept as generic instances
