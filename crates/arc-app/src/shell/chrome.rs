@@ -1199,6 +1199,10 @@ fn edit_state(ctx: &egui::Context, id: egui::Id, edit: impl FnOnce(&mut CommandT
 pub fn show_commands(ui: &mut Ui, bar: &CommandBarView, look: &Look<'_>) -> Option<ToolReply> {
     let colors = look.colors;
     let mut reply = None;
+    // Ctrl+F1 folds and unfolds the panel from anywhere.
+    if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F1)) {
+        edit_state(ui.ctx(), bar.state_id, |s| s.collapsed = !s.collapsed);
+    }
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         for head in &bar.heads {
@@ -1247,7 +1251,11 @@ pub fn show_commands(ui: &mut Ui, bar: &CommandBarView, look: &Look<'_>) -> Opti
                     egui::Stroke::new(2.0, colors.accent),
                 );
             }
-            if response.double_clicked() && current {
+            // A double click, or Enter or Space on the focused current tab, folds the panel.
+            let key = current
+                && response.has_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space));
+            if (response.double_clicked() && current) || key {
                 edit_state(ui.ctx(), bar.state_id, |s| s.collapsed = !s.collapsed);
             } else if response.clicked() && !current {
                 edit_state(ui.ctx(), bar.state_id, |s| {
@@ -1607,6 +1615,62 @@ mod tests {
         };
         assert_eq!(toggled("Home"), Some(egui::accesskit::Toggled::False));
         assert_eq!(toggled("Draw"), Some(egui::accesskit::Toggled::True));
+    }
+
+    fn collapsed_after(events: Vec<Vec<egui::Event>>) -> bool {
+        let ctx = egui::Context::default();
+        let colors = arc_ui::ThemeId::Dark.theme().colors;
+        let look = Look {
+            icons: None,
+            colors: &colors,
+        };
+        let id = egui::Id::NULL.with("tabs");
+        for events in events {
+            let bar = CommandBarView {
+                state_id: id,
+                heads: ["Home", "Draw"]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, l)| TabHead {
+                        index,
+                        label: (*l).into(),
+                        contextual: false,
+                    })
+                    .collect(),
+                current: 0,
+                collapsed: false,
+                groups: Vec::new(),
+            };
+            let raw = egui::RawInput {
+                events,
+                ..egui::RawInput::default()
+            };
+            let mut out = ctx.run_ui(raw, |ui| {
+                show_commands(ui, &bar, &look);
+            });
+            out.textures_delta.clear();
+        }
+        let state: CommandTabsState = ctx.data_mut(|d| d.get_temp(id)).unwrap_or_default();
+        state.collapsed
+    }
+
+    #[test]
+    fn the_panel_folds_from_the_keyboard() {
+        let none = egui::Modifiers::NONE;
+        assert!(collapsed_after(vec![vec![key(
+            egui::Key::F1,
+            egui::Modifiers::COMMAND
+        )]]));
+        // Tab focuses the first tab (the current one), Enter folds.
+        assert!(collapsed_after(vec![
+            vec![],
+            vec![key(egui::Key::Tab, none)],
+            vec![key(egui::Key::Enter, none)],
+        ]));
+        assert!(!collapsed_after(vec![
+            vec![],
+            vec![key(egui::Key::Enter, none)]
+        ]));
     }
 
     #[test]
