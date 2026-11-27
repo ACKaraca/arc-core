@@ -1,8 +1,7 @@
 //! IFC writing of ramps, curtain walls with plates and members, and grids (CORE-IO-016):
 //! attributes, aggregation of the parts, containment, grid axes and refusals.
 //!
-//! `ARC_IFC_OUT=<directory>` also writes the model of the first test there, for an independent
-//! validator.
+//! `ARC_IFC_DUMP=<directory>` writes the produced files there, for the independent oracle.
 
 #![allow(
     clippy::unwrap_used,
@@ -12,6 +11,8 @@
     clippy::cognitive_complexity,
     reason = "test code: fixtures and assertions"
 )]
+
+mod support;
 
 use arc_base::math::{Point2, Point3, Vector3};
 use arc_io_ifc::write::{
@@ -163,15 +164,9 @@ fn en(text: &str) -> Parameter {
 fn ramps_curtain_walls_and_grids_read_back() {
     let model = model();
     let output = write(&model, &options()).unwrap();
+    support::dump("ramps-grids.ifc", &output.bytes);
     assert_eq!(output.bytes, write(&model, &options()).unwrap().bytes);
     assert!(!output.report.has_loss(), "{:?}", output.report);
-    if let Ok(dir) = std::env::var("ARC_IFC_OUT") {
-        std::fs::write(
-            std::path::Path::new(&dir).join("ramps_grids.ifc"),
-            &output.bytes,
-        )
-        .unwrap();
-    }
     let file = read(&output.bytes, &mut ReadOptions::default())
         .unwrap()
         .file;
@@ -326,6 +321,7 @@ fn arc_angles_follow_the_angle_unit() {
     let mut model = model();
     model.angle_unit = AngleUnit::Degree;
     let output = write(&model, &options()).unwrap();
+    support::dump("ramps-degrees.ifc", &output.bytes);
     let text = String::from_utf8(output.bytes).unwrap();
     assert!(text.contains("IFCPARAMETERVALUE(90.)"), "{text}");
 }

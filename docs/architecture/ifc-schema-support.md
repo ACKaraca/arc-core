@@ -182,7 +182,8 @@ their restrictions) reads XML through `arc-io-common`; the IDS test files are wr
   every fixture; property tests and fuzz targets for the parser, the checker, the rule interpreter and
   the geometry evaluator.
 - **Oracle, outside the gate.** Scripts under `tools/ifc-oracle/` run IfcOpenShell out of process,
-  by hand and nightly, over the files the tests write when `ARC_IFC_DUMP=1` is set and over the
+  by hand and nightly, over the files the tests write when `ARC_IFC_DUMP=<directory>` is set (see
+  [`tools/ifc-oracle`](../../tools/ifc-oracle/README.md)) and over the
   corpus: schema and rule validation must report no issue; the generated tables must equal the
   oracle's attribute names, order, optionality, bounds, inverse attributes and enumeration items;
   conformance findings are compared rule by rule; per product, volume, surface area and bounding box
