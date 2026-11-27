@@ -3,7 +3,7 @@
 
 Usage: schema_diff.py <tables.json> [schema ...]
 
-The JSON is the output of the schema-table xtask (arc-core unit U1):
+The JSON is written by `ARC_IFC_SCHEMA_DUMP=<file> cargo test -p arc-io-ifc --test schema_tables`:
   {"IFC4": {"entities": {"IfcWall": {"supertype": "IfcBuiltElement", "abstract": false,
             "attributes": [{"name": "Tag", "optional": true}, ...]}}}, ...}
 Prints a JSON report and exits 1 on differences. When the file does not exist (U1 not merged

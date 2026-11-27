@@ -27,6 +27,9 @@ read as an older name of the same variable.
 | `run_all.sh [directory]` | runs the `arc-io-ifc` tests with `ARC_IFC_DUMP`, then `validate.py` and `geometry_compare.py` on every dumped file | 1 on any failure |
 
 `schema_diff.py` expects `{"<SCHEMA>": {"entities": {"<Name>": {"supertype", "abstract",
-"attributes": [{"name", "optional"}]}}}}`.
+"attributes": [{"name", "optional"}]}}}}`. With the generated tables present, write it with
+`ARC_IFC_SCHEMA_DUMP=<file> cargo test -p arc-io-ifc --test schema_tables`; the dump also holds the
+attribute types, the record positions with their derived flags, the inverse attributes, the
+enumerations and the selects.
 
 Run from the repository root: `tools/ifc-oracle/run_all.sh`.

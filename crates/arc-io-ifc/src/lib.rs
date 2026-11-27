@@ -35,6 +35,7 @@ pub mod loss;
 pub mod model;
 pub mod options;
 mod read;
+pub mod schema;
 mod step;
 mod text;
 pub mod views;
