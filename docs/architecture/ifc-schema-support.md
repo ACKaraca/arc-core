@@ -12,7 +12,7 @@ the target and does not claim that any of it exists.
 | Topic | Implemented |
 |---|---|
 | Schemas read | IFC2X3, IFC4 and IFC4X3, recognized from `FILE_SCHEMA`; no schema knowledge: every entity name is accepted and no attribute count, type, enumeration value, derived position, inverse attribute or rule is checked |
-| Schemas written | IFC4 |
+| Schemas written | IFC4 (as built), IFC4X3 ADD2 and IFC2X3 TC1 through the schema tables, self-checked at conformance levels 1 to 3; Reference View and Design Transfer View rule sets |
 | Encodings | STEP physical file (clear text) read and written; IFC-ZIP read and written |
 | Model | Generic instances, records and parameters, indexed by name and type; complex instances kept as several records; byte spans of the source, a serializer from a read file and an edit API (step 4) |
 | Typed views | Spatial structure, type assignment, property sets (four property kinds) and quantity sets (six kinds): 26 IFC4 entity types, with attribute positions written by hand |

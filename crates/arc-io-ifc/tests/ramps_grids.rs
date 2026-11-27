@@ -379,3 +379,40 @@ fn invalid_parts_and_grids_are_refused() {
     bad.grids.push(bad.grids[0].clone());
     assert_eq!(code(&bad), "io.ifc.write_id_duplicate");
 }
+
+/// The bytes of the default (IFC4) path for the ramp, curtain wall and grid model stay as written.
+#[test]
+fn ramp_output_bytes_are_pinned() {
+    let bytes = write(&model(), &options()).unwrap().bytes;
+    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    assert_eq!(hash, 12_422_165_792_295_622_897, "{} bytes", bytes.len());
+}
+
+/// Every model of this file in IFC4X3 and IFC2X3: written, self-checked and dumped for the oracle.
+#[test]
+fn models_write_in_every_schema() {
+    use arc_io_ifc::write::OutputSchema;
+    let models: Vec<(&str, WriteModel)> = vec![("ramps", model())];
+    for (name, model) in &models {
+        for (schema, tag, available) in [
+            (OutputSchema::Ifc4, "ifc4", true),
+            (OutputSchema::Ifc4x3, "ifc4x3", true),
+            (
+                OutputSchema::Ifc2x3,
+                "ifc2x3",
+                arc_io_ifc::write::OutputSchema::Ifc2x3.available(),
+            ),
+        ] {
+            if !available {
+                continue;
+            }
+            let mut options = options();
+            options.schema = schema;
+            let output = write(model, &options).unwrap_or_else(|e| panic!("{name} {tag}: {e:?}"));
+            support::dump(&format!("{name}-{tag}.ifc"), &output.bytes);
+            assert!(output.findings.is_empty(), "{name} {tag}");
+        }
+    }
+}

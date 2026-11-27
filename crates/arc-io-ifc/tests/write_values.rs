@@ -997,3 +997,44 @@ fn a_set_on_another_predefined_type_or_entity_is_reported() {
         ]
     );
 }
+
+/// The bytes of the default (IFC4) path for the standard model stay as written.
+#[test]
+fn standard_output_bytes_are_pinned() {
+    let bytes = write(&standard_model().0, &WriteOptions::default())
+        .unwrap()
+        .bytes;
+    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    assert_eq!(hash, 1_128_104_274_161_974_051, "{} bytes", bytes.len());
+}
+
+/// Every model of this file in IFC4X3 and IFC2X3: written, self-checked and dumped for the oracle.
+#[test]
+fn models_write_in_every_schema() {
+    use arc_io_ifc::write::OutputSchema;
+    let models: Vec<(&str, WriteModel)> = vec![("standard", standard_model().0)];
+    for (name, model) in &models {
+        for (schema, tag, available) in [
+            (OutputSchema::Ifc4, "ifc4", true),
+            (OutputSchema::Ifc4x3, "ifc4x3", true),
+            (
+                OutputSchema::Ifc2x3,
+                "ifc2x3",
+                arc_io_ifc::write::OutputSchema::Ifc2x3.available(),
+            ),
+        ] {
+            if !available {
+                continue;
+            }
+            let options = WriteOptions {
+                schema,
+                ..WriteOptions::default()
+            };
+            let output = write(model, &options).unwrap_or_else(|e| panic!("{name} {tag}: {e:?}"));
+            support::dump(&format!("{name}-{tag}.ifc"), &output.bytes);
+            assert!(output.findings.is_empty(), "{name} {tag}");
+        }
+    }
+}

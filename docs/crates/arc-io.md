@@ -1350,6 +1350,12 @@ reports no mapped records, so the `mapped` count is zero.
 | `io.ifc.unit_assumed` | `approximated` |
 | `io.ifc.geometry_approximated` | `approximated` |
 | `io.ifc.not_written` | `dropped` |
+| `io.ifc.write_attribute_unrepresentable` | `dropped` |
+| `io.ifc.write_value_unrepresentable` | `approximated` |
+| `io.ifc.write_entity_unrepresentable` | `dropped` |
+| `io.ifc.write_default_supplied` | `approximated` |
+| `io.ifc.write_set_renamed` | `approximated` |
+| `io.ifc.write_self_check_skipped` | `failed` |
 
 ### Limits
 
@@ -1810,6 +1816,9 @@ IfcOpenShell's templates.
 | `io.ifc.write_value_invalid` | `invalid_input` | The writer was given a number that is not finite, a negative quantity, a door or window size that is not positive, placement axes or a true north that are too short or parallel, a NUL in a text, a name repeated within a property or quantity set, a set name repeated on one element, a property value its type refuses (a measure outside its rule, a label or identifier over 255 characters, an enumerated value outside its items, one enumeration name with two item lists), a grid axis curve that is degenerate or not joined, or an invalid georeferencing |
 | `io.ifc.write_reference_invalid` | `invalid_input` | The writer was given an element whose storey or host is not in the model or of a kind the relationship does not allow, an opening without a host, a chain of hosts that returns to its start, or a group member that is not an element or grid of the model |
 | `io.ifc.write_id_duplicate` | `invalid_input` | Two objects of the written file would have the same `GlobalId` |
+| `io.ifc.write_schema_unavailable` | `unsupported` | The output schema is IFC2X3 and the generated tables are not part of the build (IFC4 needs none; IFC4X3 tables are always present) |
+| `io.ifc.write_not_conformant` | `internal` | The self-check found the written file non-conformant (levels 1 to 3 against the tables of its schema); the arguments name the count and the first finding. A defect of the writer or of the schema mapping; nothing is returned |
+| `io.ifc.write_view_violated` | `invalid_input` | `ViewCheck::Enforce`: the file does not satisfy the rule set of the model view |
 | `io.ifc.edit_target_missing` | `not_found` | An edit names an instance, a record or a parameter that the file does not have |
 | `io.ifc.edit_reference_dangling` | `conflict` | An edit would leave a reference to an instance that is not in the file: a new value refers to one, or the instance to remove is still referred to |
 | `io.ifc.edit_value_invalid` | `invalid_input` | An edited value cannot be written: no records, a real that is not finite, a NUL in a text, a malformed type name, enumeration or binary, nesting deeper than 64, no instance name left, or an edited header without `FILE_DESCRIPTION`, `FILE_NAME` and `FILE_SCHEMA` first |
@@ -1821,8 +1830,8 @@ The `io.zip.*` codes of the archive reader are returned as the `arc-io-common` s
 `arc-io-ifc` writes the first part of CORE-IO-016: an IFC4 physical file (ISO 10303-21 clear text)
 from a neutral description of a building. `write(model, options)` takes a `WriteModel` and
 `WriteOptions` and returns `WriteOutput`: the bytes of the file and a loss report. It returns bytes and
-never writes a path. The model knows no product: a product maps its own objects to it. IFC4X3 output is
-not written yet.
+never writes a path. The model knows no product: a product maps its own objects to it. The output
+schema is `WriteOptions::schema` (`OutputSchema`): IFC4 by default, IFC4X3 ADD2 or IFC2X3 TC1.
 
 ### The write model
 
@@ -2074,6 +2083,62 @@ element, storeys, hosts or element types that are missing or of the wrong kind, 
 host, chains of hosts that return to their start, negative layer thicknesses and layer set usage
 offsets that are not finite.
 
+### Output schemas, self-check, IFC-ZIP and model views
+
+The writer builds every record in an IFC4 layout (attribute names in order, `write/layout.rs`; a test
+compares it with the IFC4 tables where they are generated). IFC4 output (the default) writes the
+values as built: its bytes do not depend on the tables and are pinned by tests. For `OutputSchema::Ifc4x3`
+and `OutputSchema::Ifc2x3` every record is rebuilt by attribute name through the tables of the
+output schema, so the order and the number of attributes, derived positions (`*`), required
+attributes and enumeration items come from the tables. IFC4X3 tables are part of every build; IFC2X3
+tables are generated locally, and without them an IFC2X3 write returns `io.ifc.write_schema_unavailable`.
+
+Differences handled by the mapping, and what is reported when the schema cannot carry the model:
+
+| Model content | IFC4X3 ADD2 | IFC2X3 TC1 |
+|---|---|---|
+| `IfcProperty.Description` | `Specification` | `Description` |
+| Door and window types | `IfcDoorType`, `IfcWindowType` | `IfcDoorStyle`, `IfcWindowStyle` (operation and construction; the required `ConstructionType`, `ParameterTakesPrecedence` and `Sizeable` get neutral values, `io.ifc.write_default_supplied`) |
+| `PredefinedType` of roofs, stairs, ramps, transport elements and spaces | same | `ShapeType`, `OperationType`, `InteriorOrExteriorSpace`; of walls, doors, windows, plates, members, curtain walls, openings, grids and stair and ramp flights: no attribute (`io.ifc.write_attribute_unrepresentable`) |
+| Enumeration item the schema lacks | `NOTDEFINED` (`io.ifc.write_value_unrepresentable`) | the same |
+| Roof types, pipe segments, georeferencing (`IfcMapConversion`) | written | not written (`io.ifc.write_entity_unrepresentable`) |
+| Measure types (`IfcNonNegativeLengthMeasure`, `IfcAreaDensityMeasure`) | written | the nearest wider type, or the property is not written (`io.ifc.write_entity_unrepresentable`) |
+| `Qto_` quantity sets | written under their name | written as `BaseQuantities` (`io.ifc.write_set_renamed`) |
+| Owner history | optional, not written | required: one `IfcOwnerHistory` from the options' author, organization and time stamp |
+| `IfcMaterialLayer` name, category, priority; `IfcMaterial` description, category; quantity `Formula` | written | not written (reported when set) |
+
+Self-check: after writing, a file whose schema has tables (IFC4X3 always) is read back and checked at
+conformance levels 1 to 3. `WriteOptions::self_check` is `SelfCheck::Fail` (default: a finding fails
+the write with `io.ifc.write_not_conformant`), `Report` (the findings are in `WriteOutput::findings`)
+or `Off`. A check that cannot run within the limits is reported as `io.ifc.write_self_check_skipped`.
+
+`WriteOptions::container` is `Container::Step` or `Container::Zip`: an IFC-ZIP archive with one
+deflated `.ifc` entry named after `file_name` (`model.ifc` otherwise), written by `ifc_zip`.
+
+`WriteOptions::view_check` is `ViewCheck::Off` (the `view_definition` text is written as given),
+`Report(view)` or `Enforce(view)` with a `ModelView`: `ReferenceView` allows tessellated face sets,
+mapped items, bounding boxes and annotation curves as representation items; `DesignTransferView` adds
+extrusions, revolutions, B-reps, clipping results and swept disks. Both allow the building products
+the writer produces; a product outside the list is a finding. The findings are `ViewFinding`s with the
+codes `io.ifc.view_representation_not_allowed`, `io.ifc.view_entity_not_allowed` and
+`io.ifc.view_schema_unsupported` (IFC2X3 has neither view). The header names `ReferenceView_V1.2` or
+`DesignTransferView_V1.0` only when the file passes; otherwise it holds `ViewDefinition []`.
+
+| Code | Finding |
+|---|---|
+| `io.ifc.view_representation_not_allowed` | A shape representation holds an item the view does not exchange |
+| `io.ifc.view_entity_not_allowed` | A placed product is not one the view exchanges |
+| `io.ifc.view_schema_unsupported` | The view is not defined for the output schema |
+
+### Spatial elements
+
+`Spatial` (project, site, building) and `Storey` carry `long_name`, `description`, `actors`,
+`property_sets` and `quantity_sets`; `Spatial` also has `phase` (project) and `address` (an `Address`,
+written as `IfcPostalAddress` for a site or building). An `Actor` (identifier, name, `Party`
+organization or person, optional role) is written as `IfcActor` with an `IfcActorRole` and one
+`IfcRelAssignsToActor` (role number `role::ACTOR`). A phase on a site or building and an address on
+the project are reported as `io.ifc.write_attribute_unrepresentable`.
+
 ### What is not written
 
 The loss report (direction `export`) counts the elements as mapped and reports `io.ifc.not_written`,
@@ -2096,8 +2161,8 @@ The loss report counts the element types as mapped too.
 
 The writer does not check that a profile is simple (a self-intersecting profile with area is written),
 that holes lie inside the outer loop, or that a B-rep is closed and planar. It writes no property sets of element types, representation maps, materials other than layer sets,
-space boundaries, axis representations, owner history, classification, zones, bounded, list, table,
-reference or complex property values, or other element kinds, and no IFC4X3 schema.
+space boundaries, axis representations, owner history (except IFC2X3), classification, zones, bounded, list, table,
+reference or complex property values, or other element kinds.
 
 ### Verification
 

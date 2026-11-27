@@ -1020,3 +1020,62 @@ fn roofs_and_roof_types_read_back() {
         "io.ifc.write_reference_invalid"
     );
 }
+
+/// The FNV-1a hash of the bytes the default (IFC4) path writes for the house models. Any change to
+/// these hashes means the output of existing callers changed (U12 keeps IFC4 bytes as they were).
+#[test]
+fn ifc4_output_bytes_are_pinned() {
+    let hash = |model: &WriteModel| {
+        let bytes = write(model, &options()).unwrap().bytes;
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    };
+    let got = [
+        hash(&house()),
+        hash(&house_with_spaces()),
+        hash(&house_with_types()),
+        hash(&house_with_roof()),
+    ];
+    assert_eq!(
+        got,
+        [
+            10_215_848_592_676_611_460,
+            15_356_604_462_979_120_629,
+            300_421_111_199_933_991,
+            12_817_192_702_147_000_733
+        ]
+    );
+}
+
+/// Every model of this file in IFC4X3 and IFC2X3: written, self-checked and dumped for the oracle.
+#[test]
+fn models_write_in_every_schema() {
+    use arc_io_ifc::write::OutputSchema;
+    let models: Vec<(&str, WriteModel)> = vec![
+        ("house", house()),
+        ("spaces", house_with_spaces()),
+        ("types", house_with_types()),
+        ("roof", house_with_roof()),
+    ];
+    for (name, model) in &models {
+        for (schema, tag, available) in [
+            (OutputSchema::Ifc4, "ifc4", true),
+            (OutputSchema::Ifc4x3, "ifc4x3", true),
+            (
+                OutputSchema::Ifc2x3,
+                "ifc2x3",
+                arc_io_ifc::write::OutputSchema::Ifc2x3.available(),
+            ),
+        ] {
+            if !available {
+                continue;
+            }
+            let mut options = options();
+            options.schema = schema;
+            let output = write(model, &options).unwrap_or_else(|e| panic!("{name} {tag}: {e:?}"));
+            support::dump(&format!("{name}-{tag}.ifc"), &output.bytes);
+            assert!(output.findings.is_empty(), "{name} {tag}");
+        }
+    }
+}

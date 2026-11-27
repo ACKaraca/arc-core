@@ -100,6 +100,31 @@ pub mod codes {
         message_id: "io-ifc-write-id-duplicate",
     };
 
+    /// The tables of the requested output schema are not part of this build: IFC2X3 and IFC4
+    /// tables are generated locally and absent from a build without them. IFC4 output does not need
+    /// them; IFC4X3 tables are always present.
+    pub const IFC_WRITE_SCHEMA_UNAVAILABLE: ErrorCode = ErrorCode {
+        code: "io.ifc.write_schema_unavailable",
+        category: Category::Unsupported,
+        message_id: "io-ifc-write-schema-unavailable",
+    };
+    /// The file the writer produced does not conform to the tables of its schema (conformance
+    /// levels 1 to 3), or does not satisfy the model view the caller required. A defect of the
+    /// writer or of the schema mapping, never written out; the arguments name the number of
+    /// findings and the first one.
+    pub const IFC_WRITE_NOT_CONFORMANT: ErrorCode = ErrorCode {
+        code: "io.ifc.write_not_conformant",
+        category: Category::Internal,
+        message_id: "io-ifc-write-not-conformant",
+    };
+    /// The model does not satisfy the exchange requirements of the model view the caller required
+    /// ([`ViewCheck::Enforce`](crate::write::ViewCheck::Enforce)).
+    pub const IFC_WRITE_VIEW_VIOLATED: ErrorCode = ErrorCode {
+        code: "io.ifc.write_view_violated",
+        category: Category::InvalidInput,
+        message_id: "io-ifc-write-view-violated",
+    };
+
     /// An edit names an instance that is not in the file, or an attribute position that its
     /// record does not have.
     pub const IFC_EDIT_TARGET_MISSING: ErrorCode = ErrorCode {
@@ -137,6 +162,9 @@ pub mod codes {
         IFC_WRITE_VALUE_INVALID,
         IFC_WRITE_REFERENCE_INVALID,
         IFC_WRITE_ID_DUPLICATE,
+        IFC_WRITE_SCHEMA_UNAVAILABLE,
+        IFC_WRITE_NOT_CONFORMANT,
+        IFC_WRITE_VIEW_VIOLATED,
         IFC_EDIT_TARGET_MISSING,
         IFC_EDIT_REFERENCE_DANGLING,
         IFC_EDIT_VALUE_INVALID,
@@ -319,6 +347,60 @@ pub mod reasons {
         message_id: "io-ifc-loss-not-written",
     };
 
+    /// The output schema has no such attribute: a value of the model that is set (not `$`, not
+    /// `NOTDEFINED`) is not written. The record kind is `ENTITY.Attribute` of the writer's IFC4
+    /// layout.
+    pub const ATTRIBUTE_NOT_REPRESENTABLE: Reason = Reason {
+        code: "io.ifc.write_attribute_unrepresentable",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-attribute-unrepresentable",
+    };
+    /// A value is not an item of the enumeration the output schema declares for the attribute, and
+    /// is written as `NOTDEFINED` (or `USERDEFINED`) instead. The record kind is `ENTITY.Attribute`.
+    pub const VALUE_NOT_REPRESENTABLE: Reason = Reason {
+        code: "io.ifc.write_value_unrepresentable",
+        outcome: Outcome::Approximated,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-value-unrepresentable",
+    };
+    /// The output schema does not declare an entity (or a measure type) the model needs, such as
+    /// `IfcRoofType`, `IfcPipeSegment` or `IfcMapConversion` in IFC2X3: the object, with what
+    /// belongs only to it, is not written. The record kind is the entity; the source is the
+    /// object's `GlobalId` where it has one.
+    pub const ENTITY_NOT_REPRESENTABLE: Reason = Reason {
+        code: "io.ifc.write_entity_unrepresentable",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-entity-unrepresentable",
+    };
+    /// The output schema requires an attribute the model has no value for (such as `Sizeable` of
+    /// an IFC2X3 `IfcDoorStyle`); a neutral value (`NOTDEFINED`, `FALSE`) is written. The record
+    /// kind is `ENTITY.Attribute`.
+    pub const DEFAULT_SUPPLIED: Reason = Reason {
+        code: "io.ifc.write_default_supplied",
+        outcome: Outcome::Approximated,
+        severity: Severity::Info,
+        message_id: "io-ifc-loss-default-supplied",
+    };
+    /// A quantity set named after a quantity set template (`Qto_...`) is written as the
+    /// `BaseQuantities` set of IFC2X3, which has no templates; its quantity names are the
+    /// caller's.
+    pub const SET_RENAMED: Reason = Reason {
+        code: "io.ifc.write_set_renamed",
+        outcome: Outcome::Approximated,
+        severity: Severity::Info,
+        message_id: "io-ifc-loss-set-renamed",
+    };
+    /// The self-check of the written file could not run within the limits; the file is written
+    /// without it.
+    pub const SELF_CHECK_SKIPPED: Reason = Reason {
+        code: "io.ifc.write_self_check_skipped",
+        outcome: Outcome::Failed,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-self-check-skipped",
+    };
+
     /// Every reason of this crate, for the registry check.
     pub const ALL: &[Reason] = &[
         ENTITY_PRESERVED,
@@ -342,6 +424,12 @@ pub mod reasons {
         UNIT_ASSUMED,
         GEOMETRY_APPROXIMATED,
         NOT_WRITTEN,
+        ATTRIBUTE_NOT_REPRESENTABLE,
+        VALUE_NOT_REPRESENTABLE,
+        ENTITY_NOT_REPRESENTABLE,
+        DEFAULT_SUPPLIED,
+        SET_RENAMED,
+        SELF_CHECK_SKIPPED,
     ];
 }
 
@@ -580,6 +668,7 @@ mod tests {
             .chain(reasons::ALL.iter().map(|r| r.message_id))
             .chain(rules::ALL.iter().map(|r| r.message_id))
             .chain(crate::psets::findings::ALL.iter().map(|f| f.message_id))
+            .chain(crate::write::VIEW_RULES.iter().map(|f| f.message_id))
             .collect();
         for catalog in [CATALOG, CATALOG_TR] {
             let defined = catalog_ids(catalog);
@@ -606,6 +695,10 @@ mod tests {
         }
         for finding in crate::psets::findings::ALL {
             let cell = format!("| `{}` |", finding.code);
+            assert!(SPECIFICATION.contains(&cell), "{cell} is not documented");
+        }
+        for rule in crate::write::VIEW_RULES {
+            let cell = format!("| `{}` |", rule.code);
             assert!(SPECIFICATION.contains(&cell), "{cell} is not documented");
         }
     }

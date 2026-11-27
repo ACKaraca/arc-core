@@ -6,7 +6,7 @@
 //! [`read`] takes byte buffers and never paths. It returns an [`IfcFile`] with every instance,
 //! indexed by name and by entity type, and a [`LossReport`] that counts the entity types the views
 //! do not read as preserved. [`IfcFile::typed_views`] builds the typed views. Geometry evaluation
-//! (CORE-IO-015) is [`IfcFile::geometry`]. [`write()`](fn@write) writes an IFC4 file from the neutral
+//! (CORE-IO-015) is [`IfcFile::geometry`]. [`write()`](fn@write) writes an IFC4, IFC4X3 or IFC2X3 file from the neutral
 //! description of a building in [`write`](mod@write) (CORE-IO-016, first part).
 //!
 //! Every count, string, nesting level and instance is checked against the caller's
