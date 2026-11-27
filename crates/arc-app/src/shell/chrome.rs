@@ -1131,6 +1131,13 @@ pub struct CommandBarView {
     pub groups: Vec<GroupView>,
 }
 
+/// Whether the flat toolbar strip is drawn: command tabs replace it in the main window, also while
+/// every tab is contextual and none is shown (the panel is then empty, not the toolbar).
+#[must_use]
+pub fn flat_toolbar_shown(tabs_configured: bool, main: bool) -> bool {
+    !(tabs_configured && main)
+}
+
 /// Reads the command tabs for the active tab: which are shown (probes), which is current (the
 /// per-window state kept in `ctx` under `state_id`) and the items of the current one. `None`
 /// when no tab is shown.
@@ -1615,6 +1622,14 @@ mod tests {
         };
         assert_eq!(toggled("Home"), Some(egui::accesskit::Toggled::False));
         assert_eq!(toggled("Draw"), Some(egui::accesskit::Toggled::True));
+    }
+
+    #[test]
+    fn the_flat_toolbar_does_not_replace_hidden_command_tabs() {
+        // Every tab is contextual and none is shown: no command bar, and still no toolbar.
+        assert!(!flat_toolbar_shown(true, true));
+        assert!(flat_toolbar_shown(false, true));
+        assert!(flat_toolbar_shown(true, false));
     }
 
     fn collapsed_after(events: Vec<Vec<egui::Event>>) -> bool {

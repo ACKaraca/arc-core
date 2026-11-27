@@ -1407,7 +1407,11 @@ impl Shell {
             }
             _ => None,
         };
-        let tools = chrome::tool_views(&self.toolbar, app, active, input.localize);
+        let tools = if chrome::flat_toolbar_shown(!self.command_tabs.is_empty(), main) {
+            chrome::tool_views(&self.toolbar, app, active, input.localize)
+        } else {
+            Vec::new()
+        };
         let quick = chrome::tool_views(&self.quick_access, app, active, input.localize);
         let commands = if main {
             let id = egui::Id::NULL.with(("arc-command-tabs", window));
