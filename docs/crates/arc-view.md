@@ -94,16 +94,15 @@ edits; benchmarks for hidden-line removal on large models.
 
 ## Plan views as implemented
 
-Implemented: CORE-VIEW-001 for the plan direction only, CORE-VIEW-003, CORE-VIEW-004,
-CORE-VIEW-005, CORE-VIEW-006, CORE-VIEW-008 without silhouette edges, CORE-VIEW-009 for the plan
-direction, single-threaded, CORE-VIEW-011 for straight segments, CORE-VIEW-012, CORE-VIEW-014
-for closed planar solids and triangle meshes, CORE-VIEW-015 to CORE-VIEW-017, CORE-VIEW-018 by
-object and by category (rule-based overrides are not implemented), CORE-VIEW-019 and
-CORE-VIEW-020. Not implemented: other view directions (CORE-VIEW-001), perspective drawings
-(CORE-VIEW-002), section boxes (CORE-VIEW-007), exact hidden-line removal through `arc-brep`
-(CORE-VIEW-010), incremental regeneration (CORE-VIEW-013: the view is rebuilt whole), annotation
-anchoring (CORE-VIEW-021) and snapping on derived geometry (CORE-VIEW-022). The crate has no
-third-party dependency yet.
+Implemented: CORE-VIEW-001 for orthographic frames (plan, elevation, section), CORE-VIEW-003,
+CORE-VIEW-004, CORE-VIEW-005, CORE-VIEW-006, CORE-VIEW-008 without silhouette edges, CORE-VIEW-009
+single-threaded, CORE-VIEW-011 for straight segments, CORE-VIEW-012, CORE-VIEW-014 for closed planar
+solids and triangle meshes, CORE-VIEW-015 to CORE-VIEW-017, CORE-VIEW-018 by object and by category
+(rule-based overrides are not implemented), CORE-VIEW-019 and CORE-VIEW-020. Not implemented:
+perspective drawings (CORE-VIEW-002), section boxes (CORE-VIEW-007), exact hidden-line removal
+through `arc-brep` (CORE-VIEW-010), incremental regeneration (CORE-VIEW-013: the view is rebuilt
+whole), annotation anchoring (CORE-VIEW-021) and snapping on derived geometry (CORE-VIEW-022). The
+crate has no third-party dependency yet.
 
 ### Definition and source
 
@@ -112,8 +111,11 @@ constructors (`PlanRange::new`, `ViewDef::plan`, `SourceObject::new` and `single
 `Part::new`, `Symbol::new`, `CutFill::solid` and `pattern`, `LineStyle::solid`,
 `ClassStyles::uniform`), `with_*` methods, or `Default` followed by setting public fields.
 
-- **`ViewDef`.** A `ViewDirection` (only `Plan`, looking down the world z axis: world x and y
-  are the sheet's x and y), a `PlanRange` (`cut`, `bottom` below it, an optional `top` above
+- **`ViewDef`.** A `ViewDirection` (`Plan`, looking down the world z axis: world x and y
+  are the sheet's x and y; or `Frame`, any orthographic frame made orthonormal by
+  `ViewDirection::frame` from an origin, a right axis and an up axis, view z toward the viewer:
+  a section has its cut plane through the origin, `cut` 0 and `bottom` minus the far clip
+  distance, and an elevation is a section whose plane lies in front of the model), a `PlanRange` (`cut`, `bottom` below it, an optional `top` above
   it), an optional crop `Region` in view coordinates (`crop_rectangle`, `crop_polygon`), a
   `DetailLevel`, a crease angle in [0, π] (default 30 degrees), a scale (model meters per sheet
   meter), `Overrides` and `ViewLimits`. `ViewDef::chord` is `SHEET_ERROR` (0.05 mm) times the

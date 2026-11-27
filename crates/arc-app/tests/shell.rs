@@ -1694,6 +1694,38 @@ fn a_plan_request_looks_straight_down_and_locks_rotation_until_a_camera_request(
 }
 
 #[test]
+fn a_facing_request_looks_along_its_direction_and_locks_rotation() {
+    let dir = TempDir::new("facing-camera");
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let mut app = app_with(&dir.0, false, Some(seen.clone()));
+    let mut shell = Shell::new(&app, config(), None);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    open_new_document(&mut shell, &mut app, &ctx);
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    let tab = app.active().unwrap();
+    let camera = |shell: &Shell| *shell.view(tab).unwrap().camera();
+    // A section looking north at a 12 m wide, 6 m tall drawing around (5, 2, 3).
+    seen.lock().unwrap().view = Some(shell::ViewRequest::Facing {
+        center: [5.0, 2.0, 3.0],
+        forward: [0.0, 2.0, 0.0],
+        up: [0.0, 0.0, 1.0],
+        size: [12.0, 6.0],
+    });
+    frame(&mut shell, &mut app, &ctx, Vec::new(), Vec::new(), false);
+    let facing = camera(&shell);
+    assert!((facing.forward() - arc_base::math::Vector3::y()).norm() < 1e-9);
+    assert!((facing.up() - arc_base::math::Vector3::z()).norm() < 1e-9);
+    assert!((facing.target() - arc_base::math::Point3::new(5.0, 2.0, 3.0)).norm() < 1e-9);
+    assert!(matches!(
+        facing.projection(),
+        arc_geom::view::Projection::Orthographic { .. }
+    ));
+    orbit(&mut shell, &mut app, &ctx, egui::pos2(320.0, 260.0));
+    assert_eq!(camera(&shell).forward(), facing.forward());
+}
+
+#[test]
 fn product_icons_are_checked_with_the_starter_set() {
     let svg = "<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><rect width='8' height='8'/></svg>";
     let icon = |name: &str, source: &str| (name.to_owned(), source.to_owned());

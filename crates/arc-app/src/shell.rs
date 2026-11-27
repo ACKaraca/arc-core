@@ -2580,14 +2580,15 @@ fn factory_error(id: &str) -> Error {
 fn viewport_config(camera: ViewFrame, colors: &Colors) -> ViewportConfig {
     let mut config = ViewportConfig::new(64, 64, camera);
     config.readback = false;
-    config.settings = render_settings(colors);
+    config.settings = render_settings(colors, arc_gpu::ShadingMode::default());
     config
 }
 
-/// The render settings of a viewport: a transparent background, so the widget's grid and axes
-/// show through under the drawing.
-fn render_settings(_colors: &Colors) -> arc_gpu::RenderSettings {
+/// The render settings of a viewport in the shading mode `mode`: a transparent background, so the
+/// widget's grid and axes show through under the drawing.
+fn render_settings(_colors: &Colors, mode: arc_gpu::ShadingMode) -> arc_gpu::RenderSettings {
     arc_gpu::RenderSettings {
+        mode,
         // The egui renderer samples the frame as premultiplied: transparent black adds nothing.
         background: arc_base::Color::from_srgb8([0, 0, 0, 0]),
         ..arc_gpu::RenderSettings::DEFAULT
@@ -2671,6 +2672,41 @@ fn same_orientation(camera: &ViewFrame, next: &ViewFrame) -> bool {
     (next.forward() - camera.forward()).norm() <= tol && (next.up() - camera.up()).norm() <= tol
 }
 
+/// The orthographic camera looking along `forward` with `up` on the screen, framed on the
+/// rectangle of `size` around `center`; a valid one locks the orientation.
+///
+/// # Errors
+///
+/// The errors of [`ViewFrame::new`] for a zero `forward` or an `up` parallel to it.
+fn facing(
+    center: Point3,
+    (forward, up): (Vector3, Vector3),
+    size: [f64; 2],
+    (aspect, camera): (f64, &ViewFrame),
+    locked: &mut bool,
+) -> Result<ViewFrame> {
+    let [w, h] = size;
+    // The rectangle fills the viewport in its tighter direction, with a narrow margin.
+    let height = (h.max(w / aspect) * 1.05).max(Tolerance::DEFAULT.linear);
+    let distance = height.max(PLAN_EYE);
+    // A zero `forward` puts the eye on the target, which the frame refuses.
+    let back = forward
+        .try_normalize(f64::EPSILON)
+        .unwrap_or_else(Vector3::zeros);
+    let frame = ViewFrame::new(
+        center - back * distance,
+        center,
+        up,
+        Projection::Orthographic { height },
+        camera.near().min(distance / 2.0),
+        camera.far().max(distance * 2.0),
+    );
+    if frame.is_ok() {
+        *locked = true;
+    }
+    frame
+}
+
 /// Applies a view request of the product to the camera: the framing itself is the zoom-extents pass.
 fn apply_view(
     request: ViewRequest,
@@ -2714,25 +2750,25 @@ fn apply_view(
         ViewRequest::Scale(factor) => {
             arc_gpu::navigation::zoom_at(camera, factor, &camera.target())
         }
-        ViewRequest::Plan { a, b, z } => {
-            let (w, h) = ((a[0] - b[0]).abs(), (a[1] - b[1]).abs());
-            // The rectangle fills the viewport in its tighter direction, with a narrow margin.
-            let height = (h.max(w / aspect) * 1.05).max(Tolerance::DEFAULT.linear);
-            let center = Point3::new((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, z);
-            let distance = height.max(PLAN_EYE);
-            let frame = ViewFrame::new(
-                center + Vector3::z() * distance,
-                center,
-                Vector3::y(),
-                Projection::Orthographic { height },
-                camera.near().min(distance / 2.0),
-                camera.far().max(distance * 2.0),
-            );
-            if frame.is_ok() {
-                *locked = true;
-            }
-            frame
-        }
+        ViewRequest::Plan { a, b, z } => facing(
+            Point3::new((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, z),
+            (-Vector3::z(), Vector3::y()),
+            [(a[0] - b[0]).abs(), (a[1] - b[1]).abs()],
+            (aspect, camera),
+            locked,
+        ),
+        ViewRequest::Facing {
+            center,
+            forward,
+            up,
+            size,
+        } => facing(
+            Point3::from(center),
+            (Vector3::from(forward), Vector3::from(up)),
+            [size[0].abs(), size[1].abs()],
+            (aspect, camera),
+            locked,
+        ),
         ViewRequest::Camera(frame) => {
             *locked = false;
             Ok(frame)
@@ -3025,6 +3061,13 @@ impl Panel for ViewportPanel {
         }
         if let Some(f) = &frame {
             display.update(&f.hidden, f.isolated.as_deref());
+            display.shading = f.shading.unwrap_or_default();
+            if let Some(Err(e)) = viewport
+                .as_ref()
+                .map(|vp| vp.set_section(f.section.clone()))
+            {
+                cx.actions.push(Action::Error(e));
+            }
             if let Some(text) = &f.banner {
                 over_viewport::paint_banner(ui, out.response.rect, text, cx.colors);
             }
@@ -3097,7 +3140,7 @@ impl Panel for ViewportPanel {
             *hover,
             highlight,
             overlay,
-            cx.colors,
+            render_settings(cx.colors, display.shading),
             cx.actions,
         );
         cx.actions.extend(out.errors.into_iter().map(Action::Error));
@@ -3170,7 +3213,7 @@ fn sync_viewport(
     hover: Option<ObjectId>,
     highlight: &[ObjectId],
     overlay: Option<arc_gpu::Overlay>,
-    colors: &Colors,
+    settings: arc_gpu::RenderSettings,
     actions: &mut Vec<Action>,
 ) {
     let Some(vp) = viewport else {
@@ -3181,7 +3224,7 @@ fn sync_viewport(
         vp.set_camera(*camera),
         vp.set_highlight(hover, highlight),
         vp.set_overlay(overlay),
-        vp.set_settings(render_settings(colors)),
+        vp.set_settings(settings),
     ];
     actions.extend(
         results
