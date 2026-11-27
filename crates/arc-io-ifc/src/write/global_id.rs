@@ -59,6 +59,8 @@ pub mod role {
     pub const MATERIAL: u32 = 11;
     /// The `IfcRelAssignsToGroup` of the owner group.
     pub const GROUP: u32 = 12;
+    /// The `IfcRelAssignsToActor` of the actor at the index of the owner's actors.
+    pub const ACTOR: u32 = 13;
     /// The first role reserved for the caller's own derived identifiers.
     pub const CALLER_FIRST: u32 = 0x1_0000;
 }

@@ -1,5 +1,5 @@
-//! IFC writing (CORE-IO-016, first part): an IFC4 physical file from a neutral description of a
-//! building.
+//! IFC writing (CORE-IO-016, first part): an IFC4, IFC4X3 or IFC2X3 physical file (or IFC-ZIP) from
+//! a neutral description of a building.
 //!
 //! [`WriteModel`] describes a project, a site, a building, its storeys and elements (walls, slabs,
 //! doors, windows, openings, spaces, roofs and coverings) with their placement, body geometry, voids and fills, property
@@ -15,7 +15,11 @@
 //! identifier of their object and a role.
 
 mod global_id;
+mod layout;
+mod mvd;
+mod party;
 pub(crate) mod step;
+mod target;
 mod values;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,6 +33,10 @@ use crate::loss::{Direction, LossHeader, LossLog, LossReport, Source};
 use crate::model::Parameter;
 
 pub use global_id::{derived_id, global_id, role};
+pub use mvd::{ModelView, VIEW_RULES, ViewCheck, ViewFinding, ViewRule};
+pub use party::{Actor, Address, Party};
+pub use target::OutputSchema;
+use target::Target;
 pub use values::{Measure, PropertyValue, QuantityValue};
 
 /// The length unit of the project. Every length of the model, and the area and volume of
@@ -61,23 +69,46 @@ pub enum AngleUnit {
     Degree,
 }
 
-/// A spatial element without attributes of its own: the project, the site or the building.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A spatial element: the project, the site or the building, with the attributes they share and
+/// those of one of them.
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Spatial {
     /// The identifier its `GlobalId` is made from.
     pub id: u128,
     /// The name.
     pub name: String,
+    /// The `LongName`; `None` omits it.
+    pub long_name: Option<String>,
+    /// The `Description`; `None` omits it.
+    pub description: Option<String>,
+    /// The `Phase` (project only); on a site or building it is reported, not written.
+    pub phase: Option<String>,
+    /// The `SiteAddress` (site) or `BuildingAddress` (building); on the project it is reported,
+    /// not written.
+    pub address: Option<Address>,
+    /// The actors assigned to the element with their roles (`IfcRelAssignsToActor`).
+    pub actors: Vec<Actor>,
+    /// The property sets of the element.
+    pub property_sets: Vec<PropertySet>,
+    /// The quantity sets of the element.
+    pub quantity_sets: Vec<QuantitySet>,
 }
 
 impl Spatial {
-    /// A project, site or building.
+    /// A project, site or building with only a name.
     #[must_use]
     pub fn new(id: u128, name: &str) -> Self {
         Self {
             id,
             name: name.to_owned(),
+            long_name: None,
+            description: None,
+            phase: None,
+            address: None,
+            actors: Vec::new(),
+            property_sets: Vec::new(),
+            quantity_sets: Vec::new(),
         }
     }
 }
@@ -92,6 +123,16 @@ pub struct Storey {
     pub name: String,
     /// The elevation of its placement above the building, in the length unit.
     pub elevation: f64,
+    /// The `LongName`; `None` omits it.
+    pub long_name: Option<String>,
+    /// The `Description`; `None` omits it.
+    pub description: Option<String>,
+    /// The actors assigned to the storey with their roles.
+    pub actors: Vec<Actor>,
+    /// The property sets of the storey.
+    pub property_sets: Vec<PropertySet>,
+    /// The quantity sets of the storey.
+    pub quantity_sets: Vec<QuantitySet>,
 }
 
 impl Storey {
@@ -102,6 +143,11 @@ impl Storey {
             id,
             name: name.to_owned(),
             elevation,
+            long_name: None,
+            description: None,
+            actors: Vec::new(),
+            property_sets: Vec::new(),
+            quantity_sets: Vec::new(),
         }
     }
 }
@@ -1001,8 +1047,43 @@ pub struct WriteOptions {
     pub organization: String,
     /// The `originating_system` of `FILE_NAME`.
     pub originating_system: String,
-    /// The model view definition named in `FILE_DESCRIPTION`.
+    /// The model view definition named in `FILE_DESCRIPTION` when `view_check` is
+    /// [`ViewCheck::Off`].
     pub view_definition: String,
+    /// The schema of the file: IFC4 by default (the bytes the writer always wrote), IFC4X3 ADD2 or
+    /// IFC2X3. Content the schema cannot carry is reported in the loss report.
+    pub schema: OutputSchema,
+    /// What happens when the written file does not conform to the schema tables (levels 1 to 3);
+    /// [`SelfCheck::Fail`] by default. Without tables for the schema (IFC4 and IFC2X3 in a build
+    /// without the generated tables) nothing is checked.
+    pub self_check: SelfCheck,
+    /// The model view the file is checked against and named after; [`ViewCheck::Off`] by default.
+    pub view_check: ViewCheck,
+    /// The container of the output bytes.
+    pub container: Container,
+}
+
+/// What the writer does with the result of checking its own output against the schema tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelfCheck {
+    /// A finding fails the write with `io.ifc.write_not_conformant`; nothing is returned.
+    #[default]
+    Fail,
+    /// The findings are returned in [`WriteOutput::findings`].
+    Report,
+    /// No check.
+    Off,
+}
+
+/// The container of the bytes [`write()`] returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Container {
+    /// The physical file (ISO 10303-21 clear text).
+    #[default]
+    Step,
+    /// An IFC-ZIP archive with one deflated `.ifc` entry named after `WriteOptions::file_name`
+    /// (`model.ifc` when that is not a `.ifc` name).
+    Zip,
 }
 
 impl Default for WriteOptions {
@@ -1017,17 +1098,26 @@ impl Default for WriteOptions {
             organization: String::new(),
             originating_system: String::new(),
             view_definition: "DesignTransferView_V1.0".to_owned(),
+            schema: OutputSchema::Ifc4,
+            self_check: SelfCheck::Fail,
+            view_check: ViewCheck::Off,
+            container: Container::Step,
         }
     }
 }
 
 /// The result of a write.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct WriteOutput {
-    /// The bytes of the physical file.
+    /// The bytes of the physical file, or of the IFC-ZIP archive holding it.
     pub bytes: Vec<u8>,
     /// The loss report of the write.
     pub report: LossReport,
+    /// The conformance findings of the written file under [`SelfCheck::Report`]; empty otherwise.
+    pub findings: Vec<crate::Finding>,
+    /// The findings of the model view check under [`ViewCheck::Report`]; empty otherwise.
+    pub view_findings: Vec<ViewFinding>,
 }
 
 /// Packs a physical file as an IFC-ZIP archive: one deflated entry named `entry_name`, which
@@ -1047,26 +1137,38 @@ pub fn ifc_zip(entry_name: &str, physical: &[u8]) -> Result<Vec<u8>> {
     write_archive(&[(entry_name, physical)], Method::Deflate)
 }
 
-/// Writes the model as an IFC4 physical file.
+/// Writes the model as a physical file (or an IFC-ZIP archive) in `options.schema`, IFC4 by
+/// default.
+///
+/// Every record is built through the writer's layout and, for IFC4X3 and IFC2X3, rebuilt through
+/// the tables of the output schema; what the schema cannot carry is reported in the loss report.
+/// With tables for the schema the written file is read back and checked at conformance levels 1 to 3
+/// (`options.self_check`), and against a model view (`options.view_check`).
 ///
 /// # Errors
 ///
 /// `io.ifc.write_value_invalid` for a number that is not finite, a negative quantity, a door or
 /// window size that is not positive, a placement whose axes or a true north that is zero, shorter
 /// than about 1.5E-8 or parallel, a NUL in a text, two properties or quantities of one set with
-/// the same name, or two sets of one element with the same name;
+/// the same name, two sets of one element with the same name, an address without any location
+/// field or an actor without a name;
 /// `io.ifc.write_reference_invalid` for a storey, host or element type that is not in the model or
 /// of the wrong kind, an element type of an opening or space, an opening without a host, or a chain
 /// of hosts that returns to its start; `io.ifc.write_value_invalid` also for a layer thickness that
 /// is negative or not finite and a layer set usage offset that is not finite;
-/// `io.ifc.write_id_duplicate` when two objects give the same `GlobalId`; `io.limit_exceeded` for
+/// `io.ifc.write_id_duplicate` when two objects give the same `GlobalId`;
+/// `io.ifc.write_schema_unavailable` for a schema whose tables are not part of the build;
+/// `io.ifc.write_not_conformant` when the self-check finds the output non-conformant (a defect);
+/// `io.ifc.write_view_violated` under [`ViewCheck::Enforce`]; `io.limit_exceeded` for
 /// `record_count` (instances), `string_bytes`, `array_length`, `nesting_depth` and `memory_bytes`
 /// (the size of the output); `base.cancelled` when the token was cancelled.
 pub fn write(model: &WriteModel, options: &WriteOptions) -> Result<WriteOutput> {
     options.cancel.check()?;
+    let target = Target::new(options.schema)?;
     let kinds = check_references(model)?;
     let mut writer = Writer {
         data: String::new(),
+        header_end: 0,
         next: 1,
         limits: &options.limits,
         tolerance: options.tolerance,
@@ -1078,8 +1180,20 @@ pub fn write(model: &WriteModel, options: &WriteOptions) -> Result<WriteOutput> 
         ids: BTreeSet::new(),
         loss: LossLog::default(),
         enumerations: BTreeMap::new(),
+        target,
+        owner_history: None,
+        skipped: BTreeSet::new(),
+        decomposed: model
+            .elements
+            .iter()
+            .filter(|e| is_part(e.kind))
+            .filter_map(|e| e.host)
+            .collect(),
     };
-    writer.header(options)?;
+    writer.header(options, &options.view_definition)?;
+    if options.schema == OutputSchema::Ifc2x3 {
+        writer.owner_history(options)?;
+    }
     let mut context = writer.context(model)?;
     for element in &model.elements {
         options.cancel.check()?;
@@ -1103,16 +1217,49 @@ pub fn write(model: &WriteModel, options: &WriteOptions) -> Result<WriteOutput> 
     writer.loss.add_mapped(len64(
         model.elements.len() + model.types.len() + model.grids.len() + model.groups.len(),
     ));
+    let (findings, view_findings) = writer.verify(options)?;
     let report = writer.loss.finish(LossHeader::new(
         "ifc",
-        "IFC4",
+        options.schema.identifier(),
         Direction::Export,
         Some(options.limits),
     ));
+    let mut bytes = writer.data.into_bytes();
+    if options.container == Container::Zip {
+        let entry = options
+            .file_name
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|n| n.to_ascii_lowercase().ends_with(".ifc") && n.len() > 4)
+            .unwrap_or("model.ifc");
+        bytes = ifc_zip(entry, &bytes)?;
+    }
     Ok(WriteOutput {
-        bytes: writer.data.into_bytes(),
+        bytes,
         report,
+        findings,
+        view_findings,
     })
+}
+
+/// The seconds since 1970-01-01T00:00:00 of an ISO 8601 `YYYY-MM-DDTHH:MM:SS` text (the time zone
+/// is ignored); 0 when the text has another form.
+fn unix_seconds(text: &str) -> i64 {
+    let number = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
+    let parse = || {
+        let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+        let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+        // Days from civil (proleptic Gregorian).
+        let y = if month <= 2 { year - 1 } else { year };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let mp = (month + 9) % 12;
+        let doy = (153 * mp + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468;
+        Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+    };
+    parse().filter(|s| *s >= 0).unwrap_or(0)
 }
 
 /// Whether an element of this kind with a host is a part of that decomposing container (a stair,
@@ -1351,6 +1498,8 @@ struct Context {
 
 struct Writer<'a> {
     data: String,
+    /// The length of the header at the start of `data`.
+    header_end: usize,
     next: u64,
     limits: &'a Limits,
     tolerance: Tolerance,
@@ -1361,6 +1510,13 @@ struct Writer<'a> {
     loss: LossLog,
     /// The `IfcPropertyEnumeration` written per name, with its items.
     enumerations: BTreeMap<String, (Vec<String>, u64)>,
+    target: Target,
+    /// The `IfcOwnerHistory` of IFC2X3, whose rooted entities require one.
+    owner_history: Option<u64>,
+    /// Elements and types the output schema cannot carry; nothing refers to them.
+    skipped: BTreeSet<u128>,
+    /// Elements with parts (a stair, ramp or curtain wall that others name as host).
+    decomposed: BTreeSet<u128>,
 }
 
 impl Writer<'_> {
@@ -1369,7 +1525,14 @@ impl Writer<'_> {
         if name > self.limits.record_count {
             return Err(limit("record_count", name));
         }
-        step::record(&mut self.data, name, type_name, parameters, self.limits)?;
+        if self.target.is_native() {
+            step::record(&mut self.data, name, type_name, parameters, self.limits)?;
+        } else {
+            let target = self.target;
+            let (entity, translated) =
+                target.translate(type_name, parameters, self.owner_history, &mut self.loss)?;
+            step::record(&mut self.data, name, &entity, &translated, self.limits)?;
+        }
         self.check_size()?;
         self.next += 1;
         Ok(name)
@@ -1393,9 +1556,10 @@ impl Writer<'_> {
         Ok(Parameter::Text(global_id(id)))
     }
 
-    fn header(&mut self, options: &WriteOptions) -> Result<()> {
-        self.data.push_str("ISO-10303-21;\nHEADER;\n");
-        let view = format!("ViewDefinition [{}]", options.view_definition);
+    fn header(&mut self, options: &WriteOptions, view: &str) -> Result<()> {
+        let mut text = String::new();
+        text.push_str("ISO-10303-21;\nHEADER;\n");
+        let view = format!("ViewDefinition [{view}]");
         let records = [
             (
                 "FILE_DESCRIPTION",
@@ -1413,13 +1577,176 @@ impl Writer<'_> {
                     label(""),
                 ],
             ),
-            ("FILE_SCHEMA", vec![Parameter::List(vec![label("IFC4")])]),
+            (
+                "FILE_SCHEMA",
+                vec![Parameter::List(vec![label(options.schema.identifier())])],
+            ),
         ];
         for (type_name, parameters) in &records {
-            step::header_record(&mut self.data, type_name, parameters, self.limits)?;
+            step::header_record(&mut text, type_name, parameters, self.limits)?;
         }
-        self.data.push_str("ENDSEC;\nDATA;\n");
+        text.push_str("ENDSEC;\nDATA;\n");
+        self.data.replace_range(..self.header_end, &text);
+        self.header_end = text.len();
         self.check_size()
+    }
+
+    /// Reads the written file back and checks it: conformance levels 1 to 3 against the tables of
+    /// the schema and the rule set of the model view. The header names the view only when the
+    /// file passes.
+    fn verify(
+        &mut self,
+        options: &WriteOptions,
+    ) -> Result<(Vec<crate::Finding>, Vec<ViewFinding>)> {
+        let schema = options.schema;
+        let tables = crate::schema::SchemaTables::of(&schema.schema()).is_some();
+        let conform = tables && options.self_check != SelfCheck::Off;
+        let view = match options.view_check {
+            ViewCheck::Off => None,
+            ViewCheck::Report(v) | ViewCheck::Enforce(v) => Some(v),
+        };
+        if !conform && view.is_none() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let mut read_options = crate::ReadOptions {
+            limits: options.limits,
+            cancel: options.cancel.clone(),
+            ..crate::ReadOptions::default()
+        };
+        let skipped = |e: &Error| e.code() == codes::LIMIT_EXCEEDED.code;
+        let file = match crate::read(self.data.as_bytes(), &mut read_options) {
+            Ok(output) => output.file,
+            Err(e) if skipped(&e) => {
+                self.loss
+                    .add(reasons::SELF_CHECK_SKIPPED, "conformance", None, 1);
+                return Ok((Vec::new(), Vec::new()));
+            }
+            Err(e) => return Err(e),
+        };
+        let mut findings = Vec::new();
+        if conform {
+            match file.conformance(&options.limits, &options.cancel) {
+                Ok(result) => {
+                    let failed = result.failed() > 0;
+                    findings = result.findings;
+                    if findings.is_empty() && failed {
+                        // Counts beyond the findings kept: still a failure.
+                        findings.push(crate::Finding {
+                            instance: 0,
+                            entity: String::new(),
+                            attribute: None,
+                            rule: crate::rules::VALUE_TYPE,
+                        });
+                    }
+                }
+                Err(e) if skipped(&e) => {
+                    self.loss
+                        .add(reasons::SELF_CHECK_SKIPPED, "conformance", None, 1);
+                }
+                Err(e) => return Err(e),
+            }
+            if options.self_check == SelfCheck::Fail
+                && let Some(first) = findings.first()
+            {
+                return Err(Error::new(codes::IFC_WRITE_NOT_CONFORMANT)
+                    .with_arg("count", i64::try_from(findings.len()).unwrap_or(i64::MAX))
+                    .with_arg("rule", first.rule.code)
+                    .with_arg(
+                        "instance",
+                        i64::try_from(first.instance).unwrap_or(i64::MAX),
+                    )
+                    .with_arg("entity", first.entity.clone()));
+            }
+            if options.self_check != SelfCheck::Report {
+                findings.clear();
+            }
+        }
+        let mut view_findings = Vec::new();
+        if let Some(view) = view {
+            view_findings = mvd::check(&file, view, schema);
+            if matches!(options.view_check, ViewCheck::Enforce(_)) && !view_findings.is_empty() {
+                return Err(Error::new(codes::IFC_WRITE_VIEW_VIOLATED).with_arg(
+                    "count",
+                    i64::try_from(view_findings.len()).unwrap_or(i64::MAX),
+                ));
+            }
+            let label = if view_findings.is_empty() {
+                view.label(schema).unwrap_or("")
+            } else {
+                ""
+            };
+            self.header(options, label)?;
+        }
+        Ok((findings, view_findings))
+    }
+
+    /// The `IfcOwnerHistory` IFC2X3 requires on every rooted entity: the author and organization
+    /// of the options (`unknown` when empty), this writer as the application, the time stamp of the
+    /// options as the creation date.
+    fn owner_history(&mut self, options: &WriteOptions) -> Result<()> {
+        let or_unknown = |t: &str| {
+            if t.is_empty() {
+                "unknown".to_owned()
+            } else {
+                t.to_owned()
+            }
+        };
+        let organization = self.add(
+            "IFCORGANIZATION",
+            &[
+                Parameter::Omitted,
+                label(&or_unknown(&options.organization)),
+                Parameter::Omitted,
+                Parameter::Omitted,
+                Parameter::Omitted,
+            ],
+        )?;
+        let person = self.add(
+            "IFCPERSON",
+            &[
+                Parameter::Omitted,
+                label(&or_unknown(&options.author)),
+                Parameter::Omitted,
+                Parameter::Omitted,
+                Parameter::Omitted,
+                Parameter::Omitted,
+                Parameter::Omitted,
+                Parameter::Omitted,
+            ],
+        )?;
+        let user = self.add(
+            "IFCPERSONANDORGANIZATION",
+            &[
+                reference(person),
+                reference(organization),
+                Parameter::Omitted,
+            ],
+        )?;
+        let application = self.add(
+            "IFCAPPLICATION",
+            &[
+                reference(organization),
+                label(env!("CARGO_PKG_VERSION")),
+                label("arc-io-ifc"),
+                label("arc-io-ifc"),
+            ],
+        )?;
+        let created = unix_seconds(&options.timestamp);
+        let history = self.add(
+            "IFCOWNERHISTORY",
+            &[
+                reference(user),
+                reference(application),
+                Parameter::Omitted,
+                enumeration("ADDED"),
+                Parameter::Omitted,
+                Parameter::Omitted,
+                Parameter::Omitted,
+                Parameter::Integer(created),
+            ],
+        )?;
+        self.owner_history = Some(history);
+        Ok(())
     }
 
     fn point3(&mut self, point: &Point3) -> Result<u64> {
@@ -1470,6 +1797,10 @@ impl Writer<'_> {
     }
 
     /// Units, the representation contexts, the project, the site, the building and the storeys.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one block per record of the structure"
+    )]
     fn context(&mut self, model: &WriteModel) -> Result<Context> {
         let units = self.units(model)?;
         let origin = self.point3(&Point3::origin())?;
@@ -1498,7 +1829,11 @@ impl Writer<'_> {
             ],
         )?;
         if let Some(georeference) = &model.georeference {
-            self.georeference(georeference, model_context)?;
+            if self.target.supports("IFCMAPCONVERSION") && self.target.supports("IFCPROJECTEDCRS") {
+                self.georeference(georeference, model_context)?;
+            } else {
+                Target::unrepresentable(&mut self.loss, "IFCMAPCONVERSION", None);
+            }
         }
         let body = self.subcontext("Body", model_context)?;
         let footprint = if model.grids.is_empty() {
@@ -1506,32 +1841,64 @@ impl Writer<'_> {
         } else {
             Some(self.subcontext("FootPrint", model_context)?)
         };
-        let project_id = self.global_id(model.project.id)?;
+        let optional = |t: &Option<String>| t.as_deref().map_or(Parameter::Omitted, label);
+        let project_spatial = &model.project;
+        if project_spatial.address.is_some() {
+            self.loss.attribute(
+                reasons::ATTRIBUTE_NOT_REPRESENTABLE,
+                "IFCPROJECT.Address",
+                1,
+            );
+        }
+        let project_id = self.global_id(project_spatial.id)?;
         let project = self.add(
             "IFCPROJECT",
             &[
                 project_id,
                 Parameter::Omitted,
-                label(&model.project.name),
+                label(&project_spatial.name),
+                optional(&project_spatial.description),
                 Parameter::Omitted,
-                Parameter::Omitted,
-                Parameter::Omitted,
-                Parameter::Omitted,
+                optional(&project_spatial.long_name),
+                optional(&project_spatial.phase),
                 references(&[model_context]),
                 reference(units),
             ],
         )?;
+        self.spatial_extras(project_spatial, project)?;
         let site_placement = self.local_placement(None, wcs)?;
-        let site_id = self.global_id(model.site.id)?;
-        let mut site_parameters = self.spatial_head(site_id, &model.site.name, site_placement);
-        site_parameters.extend(std::iter::repeat_n(Parameter::Omitted, 5));
+        let site_spatial = &model.site;
+        if site_spatial.phase.is_some() {
+            self.loss
+                .attribute(reasons::ATTRIBUTE_NOT_REPRESENTABLE, "IFCSITE.Phase", 1);
+        }
+        let site_address = match &site_spatial.address {
+            Some(address) => Some(self.address(address)?),
+            None => None,
+        };
+        let site_id = self.global_id(site_spatial.id)?;
+        let mut site_parameters = self.spatial_head(site_id, site_spatial, site_placement);
+        site_parameters.extend(std::iter::repeat_n(Parameter::Omitted, 4));
+        site_parameters.push(site_address.map_or(Parameter::Omitted, reference));
         let site = self.add("IFCSITE", &site_parameters)?;
+        self.spatial_extras(site_spatial, site)?;
         let building_placement = self.local_placement(Some(site_placement), wcs)?;
-        let building_id = self.global_id(model.building.id)?;
+        let building_spatial = &model.building;
+        if building_spatial.phase.is_some() {
+            self.loss
+                .attribute(reasons::ATTRIBUTE_NOT_REPRESENTABLE, "IFCBUILDING.Phase", 1);
+        }
+        let building_address = match &building_spatial.address {
+            Some(address) => Some(self.address(address)?),
+            None => None,
+        };
+        let building_id = self.global_id(building_spatial.id)?;
         let mut building_parameters =
-            self.spatial_head(building_id, &model.building.name, building_placement);
-        building_parameters.extend(std::iter::repeat_n(Parameter::Omitted, 3));
+            self.spatial_head(building_id, building_spatial, building_placement);
+        building_parameters.extend(std::iter::repeat_n(Parameter::Omitted, 2));
+        building_parameters.push(building_address.map_or(Parameter::Omitted, reference));
         let building = self.add("IFCBUILDING", &building_parameters)?;
+        self.spatial_extras(building_spatial, building)?;
         let mut storeys = BTreeMap::new();
         for storey in &model.storeys {
             let axes = self.axes(&Placement {
@@ -1540,9 +1907,17 @@ impl Writer<'_> {
             })?;
             let placement = self.local_placement(Some(building_placement), axes)?;
             let storey_id = self.global_id(storey.id)?;
-            let mut parameters = self.spatial_head(storey_id, &storey.name, placement);
+            let head = Spatial {
+                long_name: storey.long_name.clone(),
+                description: storey.description.clone(),
+                ..Spatial::new(storey.id, &storey.name)
+            };
+            let mut parameters = self.spatial_head(storey_id, &head, placement);
             parameters.push(Parameter::Real(storey.elevation));
             let instance = self.add("IFCBUILDINGSTOREY", &parameters)?;
+            self.actors(storey.id, &storey.actors, instance)?;
+            self.property_sets(storey.id, &storey.property_sets, instance)?;
+            self.quantity_sets(storey.id, &storey.quantity_sets, instance)?;
             storeys.insert(storey.id, (instance, placement));
         }
         Ok(Context {
@@ -1579,19 +1954,27 @@ impl Writer<'_> {
     }
 
     /// The first nine attributes of a spatial structure element: the rooted attributes, the
-    /// placement, no representation or long name, and `CompositionType` `ELEMENT`.
-    fn spatial_head(&self, id: Parameter, name: &str, placement: u64) -> Vec<Parameter> {
+    /// placement, no representation, the long name, and `CompositionType` `ELEMENT`.
+    fn spatial_head(&self, id: Parameter, spatial: &Spatial, placement: u64) -> Vec<Parameter> {
+        let optional = |t: &Option<String>| t.as_deref().map_or(Parameter::Omitted, label);
         vec![
             id,
             Parameter::Omitted,
-            label(name),
-            Parameter::Omitted,
+            label(&spatial.name),
+            optional(&spatial.description),
             Parameter::Omitted,
             reference(placement),
             Parameter::Omitted,
-            Parameter::Omitted,
+            optional(&spatial.long_name),
             enumeration("ELEMENT"),
         ]
+    }
+
+    /// The actors, property sets and quantity sets of the project, site or building.
+    fn spatial_extras(&mut self, spatial: &Spatial, instance: u64) -> Result<()> {
+        self.actors(spatial.id, &spatial.actors, instance)?;
+        self.property_sets(spatial.id, &spatial.property_sets, instance)?;
+        self.quantity_sets(spatial.id, &spatial.quantity_sets, instance)
     }
 
     fn units(&mut self, model: &WriteModel) -> Result<u64> {
@@ -1664,7 +2047,20 @@ impl Writer<'_> {
         self.add("IFCUNITASSIGNMENT", &[references(&units)])
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one block per record of the structure"
+    )]
     fn element(&mut self, element: &Element, context: &mut Context) -> Result<()> {
+        if !self.target.supports(element.kind.entity()) {
+            Target::unrepresentable(
+                &mut self.loss,
+                element.kind.entity(),
+                Some(&global_id(element.id)),
+            );
+            self.skipped.insert(element.id);
+            return Ok(());
+        }
         let id = self.global_id(element.id)?;
         let storey_placement = context
             .storeys
@@ -1673,7 +2069,22 @@ impl Writer<'_> {
             .ok_or_else(|| bad_reference(element.storey))?;
         let axes = self.axes(&element.placement)?;
         let placement = self.local_placement(Some(storey_placement), axes)?;
-        let representation = match &element.body {
+        // IFC2X3 refuses a representation on an element that decomposes into parts.
+        let own_body = if self.target.schema == OutputSchema::Ifc2x3
+            && self.decomposed.contains(&element.id)
+        {
+            if element.body.is_some() {
+                self.loss.attribute(
+                    reasons::ATTRIBUTE_NOT_REPRESENTABLE,
+                    &format!("{}.Representation", element.kind.entity()),
+                    1,
+                );
+            }
+            None
+        } else {
+            element.body.as_ref()
+        };
+        let representation = match own_body {
             Some(body) => self.body(body, element.id, context)?,
             None => None,
         }
@@ -1704,8 +2115,8 @@ impl Writer<'_> {
             ]);
             let instance = self.add(element.kind.entity(), &parameters)?;
             context.elements.insert(element.id, instance);
-            self.property_sets(element, instance)?;
-            return self.quantity_sets(element, instance);
+            self.property_sets(element.id, &element.property_sets, instance)?;
+            return self.quantity_sets(element.id, &element.quantity_sets, instance);
         }
         parameters.push(Parameter::Omitted);
         let operations = match element.kind {
@@ -1749,8 +2160,8 @@ impl Writer<'_> {
         }
         let instance = self.add(element.kind.entity(), &parameters)?;
         context.elements.insert(element.id, instance);
-        self.property_sets(element, instance)?;
-        self.quantity_sets(element, instance)
+        self.property_sets(element.id, &element.property_sets, instance)?;
+        self.quantity_sets(element.id, &element.quantity_sets, instance)
     }
 
     /// An `IfcGrid`: placed relative to the storey, its axes as `IfcGridAxis` lists and a
@@ -2028,6 +2439,9 @@ impl Writer<'_> {
         let mut seen = BTreeSet::new();
         let mut members = Vec::with_capacity(group.members.len());
         for &member in &group.members {
+            if self.skipped.contains(&member) {
+                continue;
+            }
             let written = context
                 .elements
                 .get(&member)
@@ -2063,6 +2477,11 @@ impl Writer<'_> {
         let entity = element_type
             .entity()
             .ok_or_else(|| bad_reference(element_type.id))?;
+        if !self.target.supports(entity) {
+            Target::unrepresentable(&mut self.loss, entity, Some(&global_id(element_type.id)));
+            self.skipped.insert(element_type.id);
+            return Ok(());
+        }
         let id = self.global_id(element_type.id)?;
         let (predefined, user_type) = choice(
             element_type.predefined_type.as_deref(),
@@ -2107,7 +2526,7 @@ impl Writer<'_> {
         let mut materials: BTreeMap<&str, u64> = BTreeMap::new();
         let mut sets: BTreeMap<u128, u64> = BTreeMap::new();
         for element_type in &model.types {
-            if element_type.layers.is_empty() {
+            if element_type.layers.is_empty() || self.skipped.contains(&element_type.id) {
                 continue;
             }
             if !matches!(
@@ -2126,6 +2545,11 @@ impl Writer<'_> {
             for layer in &element_type.layers {
                 if !layer.thickness.is_finite() || layer.thickness < 0.0 {
                     return Err(invalid("layer thickness"));
+                }
+                // IFC2X3 layers have a positive thickness: a membrane is not representable.
+                if layer.thickness == 0.0 && self.target.schema == OutputSchema::Ifc2x3 {
+                    Target::unrepresentable(&mut self.loss, "IFCMATERIALLAYER", None);
+                    continue;
                 }
                 let material = match materials.get(layer.material.as_str()) {
                     Some(&material) => material,
@@ -2157,6 +2581,9 @@ impl Writer<'_> {
                         Parameter::Omitted,
                     ],
                 )?);
+            }
+            if layers.is_empty() {
+                continue;
             }
             let set = self.add(
                 "IFCMATERIALLAYERSET",
@@ -2190,6 +2617,9 @@ impl Writer<'_> {
             let Some(usage) = element.layer_usage else {
                 continue;
             };
+            if self.skipped.contains(&element.id) {
+                continue;
+            }
             if !usage.offset.is_finite() {
                 return Err(invalid("layer set usage"));
             }
@@ -2426,13 +2856,13 @@ impl Writer<'_> {
         self.add("IFCFACETEDBREP", &[reference(shell)]).map(Some)
     }
 
-    fn property_sets(&mut self, element: &Element, instance: u64) -> Result<()> {
-        for (index, set) in (0u32..).zip(&element.property_sets) {
+    fn property_sets(&mut self, owner: u128, sets: &[PropertySet], instance: u64) -> Result<()> {
+        for (index, set) in (0u32..).zip(sets) {
             if set.properties.is_empty() {
                 self.loss.add(
                     reasons::NOT_WRITTEN,
                     "IFCPROPERTYSET",
-                    Some(Source::Text(&global_id(element.id))),
+                    Some(Source::Text(&global_id(owner))),
                     1,
                 );
                 continue;
@@ -2445,20 +2875,28 @@ impl Writer<'_> {
                 }
                 property.value.check()?;
                 let written = match property.value.nominal(self.angle_scale) {
-                    Some(value) => self.add(
-                        "IFCPROPERTYSINGLEVALUE",
-                        &[
-                            label(&property.name),
-                            Parameter::Omitted,
-                            value,
-                            Parameter::Omitted,
-                        ],
-                    )?,
+                    Some(value) => {
+                        let Some(value) = self.carried_value(value) else {
+                            continue;
+                        };
+                        self.add(
+                            "IFCPROPERTYSINGLEVALUE",
+                            &[
+                                label(&property.name),
+                                Parameter::Omitted,
+                                value,
+                                Parameter::Omitted,
+                            ],
+                        )?
+                    }
                     None => self.enumerated(property)?,
                 };
                 properties.push(written);
             }
-            let set_id = self.global_id(derived_id(element.id, role::PROPERTY_SET, index))?;
+            if properties.is_empty() {
+                continue;
+            }
+            let set_id = self.global_id(derived_id(owner, role::PROPERTY_SET, index))?;
             let definition = self.add(
                 "IFCPROPERTYSET",
                 &[
@@ -2469,9 +2907,38 @@ impl Writer<'_> {
                     references(&properties),
                 ],
             )?;
-            self.defines(element.id, role::PROPERTY_REL, index, instance, definition)?;
+            self.defines(owner, role::PROPERTY_REL, index, instance, definition)?;
         }
         Ok(())
+    }
+
+    /// A typed nominal value in a type the output schema declares: the value itself, in the
+    /// nearest wider type where the schema lacks its type, or `None` (reported) where there is
+    /// none.
+    fn carried_value(&mut self, value: Parameter) -> Option<Parameter> {
+        let Parameter::Typed {
+            type_name,
+            value: inner,
+        } = value
+        else {
+            return Some(value);
+        };
+        match self.target.value_type(&type_name) {
+            Some(carried) => {
+                let inner = match *inner {
+                    Parameter::Real(v) if self.target.is_integer(&carried) => {
+                        Parameter::Integer(target::rounded(v))
+                    }
+                    other => other,
+                };
+                Some(typed(&carried, inner))
+            }
+            None => {
+                self.loss
+                    .add(reasons::ENTITY_NOT_REPRESENTABLE, &type_name, None, 1);
+                None
+            }
+        }
     }
 
     /// An `IfcPropertyEnumeratedValue` and, once per enumeration name, its
@@ -2513,13 +2980,13 @@ impl Writer<'_> {
         )
     }
 
-    fn quantity_sets(&mut self, element: &Element, instance: u64) -> Result<()> {
-        for (index, set) in (0u32..).zip(&element.quantity_sets) {
+    fn quantity_sets(&mut self, owner: u128, sets: &[QuantitySet], instance: u64) -> Result<()> {
+        for (index, set) in (0u32..).zip(sets) {
             if set.quantities.is_empty() {
                 self.loss.add(
                     reasons::NOT_WRITTEN,
                     "IFCELEMENTQUANTITY",
-                    Some(Source::Text(&global_id(element.id))),
+                    Some(Source::Text(&global_id(owner))),
                     1,
                 );
                 continue;
@@ -2543,19 +3010,28 @@ impl Writer<'_> {
                     ],
                 )?);
             }
-            let set_id = self.global_id(derived_id(element.id, role::QUANTITY_SET, index))?;
+            let set_id = self.global_id(derived_id(owner, role::QUANTITY_SET, index))?;
+            // IFC2X3 has no quantity set templates: its convention is one `BaseQuantities` set.
+            let set_name =
+                if self.target.schema == OutputSchema::Ifc2x3 && set.name.starts_with("Qto_") {
+                    self.loss
+                        .add(reasons::SET_RENAMED, "IFCELEMENTQUANTITY", None, 1);
+                    "BaseQuantities"
+                } else {
+                    set.name.as_str()
+                };
             let definition = self.add(
                 "IFCELEMENTQUANTITY",
                 &[
                     set_id,
                     Parameter::Omitted,
-                    label(&set.name),
+                    label(set_name),
                     Parameter::Omitted,
                     Parameter::Omitted,
                     references(&quantities),
                 ],
             )?;
-            self.defines(element.id, role::QUANTITY_REL, index, instance, definition)?;
+            self.defines(owner, role::QUANTITY_REL, index, instance, definition)?;
         }
         Ok(())
     }
@@ -2678,6 +3154,9 @@ impl Writer<'_> {
         }
         for element in &model.elements {
             let Some(host) = element.host else { continue };
+            if self.skipped.contains(&element.id) || self.skipped.contains(&host) {
+                continue;
+            }
             let (Some(&own), Some(&other)) = (
                 context.elements.get(&element.id),
                 context.elements.get(&host),
