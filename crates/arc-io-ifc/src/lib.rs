@@ -51,7 +51,9 @@ pub use model::{IfcFile, Instance, Parameter, Record, Schema};
 pub use options::SystemClock;
 pub use options::{Clock, Progress, ReadOptions, ReadOutput};
 pub use read::read;
-pub use schema::{Conformance, Finding, InverseIndex, Referrer, RuleCount, Typed};
+pub use schema::{
+    Conformance, Finding, InverseIndex, Referrer, RuleCount, RuleScope, Typed, WhereCount,
+};
 pub use views::{
     Nominal, Number, Property, PropertySet, PropertyValue, Quantity, QuantityKind, QuantitySet,
     RootedEntity, SpatialNode, TypeAssignment, TypedViews, Value,

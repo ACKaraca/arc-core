@@ -354,7 +354,8 @@ pub mod rules {
     pub struct Rule {
         /// The stable code, `io.ifc.conformance_*`.
         pub code: &'static str,
-        /// The level: 1 instance structure, 2 inverse attributes and uniqueness.
+        /// The level: 1 instance structure, 2 inverse attributes and uniqueness, 3 domain and
+        /// global rules.
         pub level: u8,
         /// The Fluent message of a finding; its arguments are `instance`, `entity` and `attribute`.
         pub message_id: &'static str,
@@ -467,6 +468,27 @@ pub mod rules {
         level: 2,
         message_id: "io-ifc-conformance-unique-rule",
     };
+    /// A domain (`WHERE`) rule of the instance's entity or a supertype evaluates to `FALSE`; the
+    /// attribute of the finding is `Entity.Label`.
+    pub const WHERE_RULE: Rule = Rule {
+        code: "io.ifc.conformance_where_rule",
+        level: 3,
+        message_id: "io-ifc-conformance-where-rule",
+    };
+    /// A domain rule of the defined type of an attribute value of the instance (or of a type it is
+    /// based on) evaluates to `FALSE`; the attribute of the finding is `Type.Label`.
+    pub const TYPE_RULE: Rule = Rule {
+        code: "io.ifc.conformance_type_rule",
+        level: 3,
+        message_id: "io-ifc-conformance-type-rule",
+    };
+    /// A domain rule of a global rule evaluates to `FALSE` for the file; the finding has instance 0
+    /// and the attribute `Rule.Label`.
+    pub const GLOBAL_RULE: Rule = Rule {
+        code: "io.ifc.conformance_global_rule",
+        level: 3,
+        message_id: "io-ifc-conformance-global-rule",
+    };
 
     /// Every rule, in the order the checker reports them.
     pub const ALL: &[Rule] = &[
@@ -486,6 +508,9 @@ pub mod rules {
         VALUE_WIDTH,
         INVERSE_CARDINALITY,
         UNIQUE_RULE,
+        WHERE_RULE,
+        TYPE_RULE,
+        GLOBAL_RULE,
     ];
 }
 

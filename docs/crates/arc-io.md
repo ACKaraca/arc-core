@@ -1182,7 +1182,7 @@ Streaming (CORE-IO-017) and IDS (CORE-IO-018) are not implemented.
 - What is not read: the content of the header beyond `FILE_SCHEMA` is not interpreted. Reading does
   not check the parameter count or types of an entity against the schema; an entity keeps the values
   its file gives, whatever the schema says of them. The [conformance checker](#schema-aware-access-and-conformance)
-  checks them on request; no WHERE rule is evaluated.
+  checks them, and the `WHERE` and global rules, on request.
 - Memory estimate: the parser charges an estimate of the memory it allocates against `memory_bytes`:
   48 bytes per parameter, 64 bytes per record plus its type name, 120 bytes per instance (its span included), and the raw
   length of each string, binary literal, enumeration and type name. The constants are in
@@ -1546,7 +1546,7 @@ evaluation and the conformance checker use them; the writer does not yet.
   tables of the same schema (`Named::{Entity, Defined, Enumeration, Select}`).
 - An `Entity` has its name, supertype index, abstract flag, the subtypes of its `ONEOF` supertype
   expression, its declared explicit attributes in order (name, `TypeRef`, optional flag), its derived
-  attributes (type, expression text and, for a re-declaration such as `SELF\IfcNamedUnit.Dimensions`,
+  attributes (type, expression text and tree and, for a re-declaration such as `SELF\IfcNamedUnit.Dimensions`,
   the `AttributeRef` of the inherited attribute), its inverse attributes (source entity, source
   attribute, `SET` or `BAG` with bounds), its `UNIQUE` rules and its `WHERE` rules.
 - A `TypeRef` is a simple type (`INTEGER`, `REAL`, `NUMBER`, `BOOLEAN`, `LOGICAL`, `STRING` and
@@ -1555,8 +1555,19 @@ evaluation and the conformance checker use them; the writer does not yet.
   aggregates). A bound is a value, unbounded (`?`) or an expression kept as text.
 - Defined types carry the underlying type and `WHERE` rules, enumerations their items in order,
   selects their members. Functions and global rules carry their declaration text; global rules also
-  the entities they range over and their `WHERE` rules. `WHERE` rules, functions and global rules have
-  a `tree` field for the expression tree, which is always `None` until the rule interpreter exists.
+  the entities they range over and their `WHERE` rules.
+- Every `WHERE` rule and derived attribute has its expression as a static tree
+  (`schema::tree::Expr`), and every function and global rule its parameters, local variables with their
+  initializers, aggregate kinds and array lower bounds, and statements (`Algorithm`: assignment,
+  `IF`, `CASE`, `REPEAT` with increment, `WHILE` and `UNTIL`, `RETURN`, `ESCAPE`, `SKIP`, compound). The
+  generator resolves every name: parameters, locals and query and loop variables become slots, `SELF`
+  and the attributes of the entity in an entity rule become attribute accesses on `SELF`, the entities a
+  global rule ranges over become populations, `Type.ITEM` and bare items become enumeration items
+  (checked against the enumerations), `PI` and `CONST_E` their values, calls become built-in functions,
+  schema functions, entity constructors or defined type conversions by table index; group qualifiers
+  (`e\Entity`) are checked and dropped, as attributes are found by name. A name that resolves to
+  nothing, an encoded string literal or a procedure call fails the generation; none occurs in the three
+  schemas.
 - `positions(entity)` lists the attributes of a record of the entity in STEP order, inherited ones
   first, each marked `derived` where the entity or a supertype re-declares it, so the record holds `*`
   there. `supertypes` and `is_subtype_of` walk the supertype chain, bounded by the table size.
@@ -1645,10 +1656,61 @@ checked per instance.
 | `io.ifc.conformance_value_width` | 1 | A string (in characters) or binary (in bits) is not longer than its width, and exactly as long where the width is `FIXED` |
 | `io.ifc.conformance_inverse_cardinality` | 2 | The instances referring through the attribute of each inverse attribute of the entity and its supertypes are within its bounds; exactly one for an inverse that is not an aggregate |
 | `io.ifc.conformance_unique_rule` | 2 | No two instances share the values of the attributes of a `UNIQUE` rule; every instance of a group that shares them fails, and an instance without a value for one of the attributes is not compared |
+| `io.ifc.conformance_where_rule` | 3 | Every domain (`WHERE`) rule of the instance's entity and its supertypes holds; the attribute of a finding is `Entity.Label` |
+| `io.ifc.conformance_type_rule` | 3 | Every explicit attribute value (inside aggregates and typed select values too) satisfies the domain rules of its defined type and the defined types that type is based on; the attribute of a finding is `Type.Label` |
+| `io.ifc.conformance_global_rule` | 3 | Every domain rule of every global rule holds for the file; a finding has instance 0, no entity and the attribute `Rule.Label` |
 
-WHERE rules and global rules (level 3) are not evaluated. Messages are the `io-ifc-conformance-*`
+Level 3 evaluates every domain rule through a bounded interpreter of the trees:
+
+- Entity rules apply to every instance of the declaring entity and its subtypes (any part of a
+  complex instance), with `SELF` the instance. Type rules apply to every explicit attribute value that
+  is not derived, element by element inside aggregates and inside typed select values, whose declared
+  type is the defined type or a defined type based on it, with `SELF` the value. Global rules run once
+  per file: the locals and body, then each domain rule over the populations of the entities they range
+  over (in file order).
+- A rule is violated only when it evaluates to `FALSE` (ISO 10303-11). `TRUE` passes; `UNKNOWN`, which
+  `?` also gives, passes and is counted apart in `WhereCount::unknown`. A rule the interpreter stops on
+  is not evaluated, with the reason of its first stop in `WhereCount::reason`, and never passes; so is
+  every rule of an instance whose records do not hold as many parameters as the tables give, because
+  its attributes cannot be found at their positions.
+- Values: integers, reals, logicals (`FALSE < UNKNOWN < TRUE`), strings, binaries (as bits),
+  enumeration items, entity instances of the file or built by entity constructors and `||`, aggregates
+  with their kind and lower index, and values of defined types, which keep their type for `TYPEOF`.
+  Attributes are found by name over the supertypes of every part: a derived attribute (its expression
+  evaluated with `SELF` the instance) before an explicit one before an inverse one (from the inverse
+  index); an attribute the instance does not have, or one of `?`, is `?`.
+- Semantics: `AND` and `OR` decide on their left operand when it settles the result; comparisons and
+  arithmetic with `?` give `UNKNOWN` and `?`; `/` is real division; `IN`, set union, difference and
+  intersection use instance equality; `=` on entity instances compares their explicit attribute values;
+  an index outside an aggregate gives `?`; `QUERY` keeps the elements the condition is `TRUE` for (`?`
+  for a `?` aggregate); `LIKE` follows the wildcards of ISO 10303-11 (`@`, `^`, `!`, `?`, `&`, `#`, `$`,
+  `*`, `\`); an aggregate assigned to an aggregate variable takes the variable's kind and array lower
+  bound. `TYPEOF` gives the schema-qualified upper-case names (`IFC4.IFCWALL`, with the schema name as
+  the tables give it, such as `IFC4X3_ADD2`) of the entities of every part with their supertypes, or of a
+  defined type and the defined types it is based on followed by the simple or aggregation type name,
+  and an empty set for `?`. `USEDIN` reads the inverse index. Built-in functions: `ABS`, `ACOS`, `ASIN`,
+  `ATAN`, `BLENGTH`, `COS`, `EXISTS`, `EXP`, `HIINDEX`, `LENGTH`, `LOINDEX`, `LOG`, `LOG2`, `LOG10`,
+  `NVL`, `ODD`, `SIN`, `SIZEOF`, `SQRT`, `TAN`, `TYPEOF`, `USEDIN`, `VALUE`.
+- An evaluation stops (the rule is not evaluated) on an operand of another type, integer overflow,
+  division by zero, a numeric function outside its domain, an assignment into an instance of the file,
+  more than 1 000 000 steps (per rule on one instance and per global rule), calls of
+  functions and derived attributes nested deeper than `nesting_depth` or 32 (which bounds the
+  native stack), or an aggregate longer than
+  `array_length`. Cancellation is checked every 4096 steps and returns `base.cancelled`.
+- `Conformance::where_rules` holds one `WhereCount` per domain rule of the schema (scope, owner, label,
+  passed, unknown, failed, not evaluated, first reason): entity rules in entity order, then type rules,
+  then global rules. The `RuleCount` of `io.ifc.conformance_where_rule` and `io.ifc.conformance_type_rule`
+  counts instances (an instance passes when every applicable rule is `TRUE` or `UNKNOWN`), that of
+  `io.ifc.conformance_global_rule` counts the domain rules of the global rules. Level 3 findings follow
+  those of levels 1 and 2, in file order, within the same bound.
+
+All 365, 679 and 779 domain rules of IFC2X3, IFC4 and IFC4X3 evaluate: a test runs each on an entity
+value whose attributes are all `?`, a value of its type and an empty file without a stop, and none is
+left not evaluated on the published sample files the oracle is run on.
+
+Messages are the `io-ifc-conformance-*`
 identifiers with the arguments `instance`, `entity` and `attribute`. `cargo run -p arc-io-ifc --example
-conformance <file>` prints the findings as JSON for `tools/ifc-oracle/conformance_compare.py`.
+conformance <file>` prints the findings, the rule counts and the domain rule counts as JSON for `tools/ifc-oracle/conformance_compare.py`.
 
 ### Property and quantity set templates
 

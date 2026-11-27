@@ -60,3 +60,6 @@ io-ifc-pset-quantity-kind = { $set } kümesindeki { $property } miktarı bir { $
 io-ifc-pset-value-type = { $set } kümesindeki { $property } özelliğinin bir değeri { $found } türünde, ancak şablonu { $expected } bekliyor.
 io-ifc-pset-enumeration-item = { $set } kümesindeki { $property } özelliğinin { $found } değeri şablonun öğelerinden biri değil: { $expected }.
 io-ifc-pset-not-applicable = { $set } kümesi bir { $found } nesnesine atanmış, ancak şablonu yalnızca { $expected } için geçerli.
+io-ifc-conformance-where-rule = { $entity } türündeki #{ $instance } örneği: { $attribute } alan kuralı sağlanmıyor.
+io-ifc-conformance-type-rule = { $entity } türündeki #{ $instance } örneği: bir değer, türünün { $attribute } alan kuralını ihlal ediyor.
+io-ifc-conformance-global-rule = Dosya { $attribute } genel kuralını ihlal ediyor.

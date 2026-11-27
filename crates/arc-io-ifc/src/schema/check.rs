@@ -1,5 +1,6 @@
-//! The conformance checker (ADR-0018), levels 1 and 2: the structure of every instance against the
-//! tables of the file's schema, then inverse attribute cardinalities and `UNIQUE` rules.
+//! The conformance checker (ADR-0018): level 1, the structure of every instance against the
+//! tables of the file's schema; level 2, inverse attribute cardinalities and `UNIQUE` rules;
+//! level 3, the domain and global rules ([`super::level3`]).
 //!
 //! Every rule is counted per instance: passed, failed, or not evaluated. An instance is not
 //! evaluated for a rule when the rule could not be decided (the entity is unknown, the attribute
@@ -16,6 +17,7 @@ use crate::error::rules::{self, Rule};
 use crate::model::{IfcFile, Instance, Parameter, Record};
 
 use super::inverse::InverseIndex;
+use super::level3::{self, WhereCount};
 use super::{AggregateKind, Attribute, Bound, Inverse, Named, Position, SchemaTables, TypeRef};
 
 /// The most findings kept; the counts stay exact beyond it.
@@ -24,13 +26,13 @@ pub const MAX_FINDINGS: usize = 10_000;
 /// One failed rule on one instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
-    /// The instance name.
+    /// The instance name; 0 for a global rule.
     pub instance: u64,
     /// The entity of the instance as written, upper case; for a complex instance, its parts
-    /// joined by `+`.
+    /// joined by `+`; empty for a global rule.
     pub entity: String,
-    /// The attribute concerned: an explicit attribute, an inverse attribute, or the attributes of
-    /// a `UNIQUE` rule joined by `,`.
+    /// The attribute concerned: an explicit attribute, an inverse attribute, the attributes of
+    /// a `UNIQUE` rule joined by `,`, or for level 3 the rule as `Owner.Label`.
     pub attribute: Option<String>,
     /// The rule.
     pub rule: Rule,
@@ -58,8 +60,13 @@ pub struct Conformance {
     pub findings: Vec<Finding>,
     /// Whether findings were left out because of the bound.
     pub truncated: bool,
-    /// One count per rule, in the order of [`rules::ALL`].
+    /// One count per rule, in the order of [`rules::ALL`]. For the level 3 rules an instance
+    /// passes when every applicable rule is `TRUE` or `UNKNOWN`; a global rule counts once per
+    /// domain rule.
     pub rules: Vec<RuleCount>,
+    /// Level 3 per domain rule of the schema: entity rules in entity order, then defined type
+    /// rules, then global rules. Empty without tables.
+    pub where_rules: Vec<WhereCount>,
 }
 
 impl Conformance {
@@ -147,6 +154,7 @@ impl IfcFile {
                         not_evaluated: n,
                     })
                     .collect(),
+                where_rules: Vec::new(),
             });
         };
         let index = self.inverse_index(limits, cancel)?;
@@ -191,10 +199,27 @@ impl IfcFile {
                 }
             }
         }
+        let level3 = level3::check(self, tables, &index, limits, cancel)?;
+        for (rule, class) in level3.classes {
+            counts[slot(rule)] = class;
+        }
+        for (instance, entity, name, rule) in level3.findings {
+            if checker.findings.len() >= max_findings {
+                checker.truncated = true;
+                break;
+            }
+            checker.findings.push(Finding {
+                instance,
+                entity,
+                attribute: Some(name),
+                rule,
+            });
+        }
         Ok(Conformance {
             schema: Some(tables.name),
             findings: checker.findings,
             truncated: checker.truncated,
+            where_rules: level3.counts,
             rules: rules::ALL
                 .iter()
                 .zip(counts)

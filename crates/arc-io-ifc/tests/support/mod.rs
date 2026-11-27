@@ -22,7 +22,7 @@ pub fn dump(name: &str, bytes: &[u8]) {
     dump_nonconformant(name, bytes);
 }
 
-/// Checks levels 1 and 2 of the conformance checker on a file; nothing is checked without tables.
+/// Checks every level of the conformance checker on a file; nothing is checked without tables.
 pub fn assert_conformant(name: &str, bytes: &[u8]) {
     let file = arc_io_ifc::read(bytes, &mut arc_io_ifc::ReadOptions::default())
         .unwrap()

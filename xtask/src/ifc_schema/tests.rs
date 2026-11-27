@@ -110,6 +110,38 @@ fn emission_resolves_names_and_redeclarations() {
     assert!(code.contains("members: &[Named::Entity(0), Named::Defined(0)]"));
     assert!(code.contains("lower: Bound::Value(0), upper: Bound::Value(2)"));
     assert!(code.contains("label: Some(\"W1\"), source: \"Dim > 0\""));
+    assert!(code.contains(
+        "tree: Expr::Binary(BinaryOp::Gt, &Expr::Attribute(&Expr::SelfValue, \"Dim\"), &Expr::Integer(0))"
+    ));
+    assert!(code.contains("tree: Expr::Integer(3)"));
+
+    // Functions: parameters and locals become slots, entity names constructors, `T.ITEM`
+    // enumeration items; an unresolved name fails the generation.
+    let functions = parser::parse(
+        "SCHEMA T;\n\
+         TYPE K = ENUMERATION OF (A, B2); END_TYPE;\n\
+         ENTITY B; Dim : INTEGER; END_ENTITY;\n\
+         FUNCTION F (X : INTEGER) : LOGICAL; LOCAL s : SET OF K := []; r : ARRAY [0:1] OF B; END_LOCAL;\n\
+         s := s + K.B2; r[0] := B(X); RETURN (SIZEOF(QUERY(q <* s | q = B2)) = 1); END_FUNCTION;\n\
+         RULE R FOR (B); WHERE W1 : SIZEOF(B) < 2; END_RULE;\n\
+         END_SCHEMA;",
+    )
+    .unwrap();
+    let code = emit::emit(&functions, "T", "t.exp", "0").unwrap();
+    assert!(code.contains("Local { slot: 1, init: Some(Expr::Aggregate(&[])), kind: Some(AggregateKind::Set), lower: None }"), "{code}");
+    assert!(code.contains("lower: Some(Expr::Integer(0))"));
+    assert!(code.contains("Expr::EnumItem(\"B2\")"));
+    assert!(code.contains("Expr::Construct(0, &[Expr::Variable(0), ])"));
+    assert!(code.contains("Expr::Query { variable: 3,"));
+    assert!(code.contains("Expr::Population(0)"));
+    let unresolved =
+        parser::parse("SCHEMA T; ENTITY A; WHERE W1 : Missing > 0; END_ENTITY; END_SCHEMA;")
+            .unwrap();
+    assert!(
+        emit::emit(&unresolved, "T", "t", "0")
+            .unwrap_err()
+            .contains("unresolved name Missing")
+    );
 
     let unknown =
         parser::parse("SCHEMA T; ENTITY A; X : Missing; END_ENTITY; END_SCHEMA;").unwrap();

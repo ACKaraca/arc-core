@@ -24,7 +24,7 @@ read as an older name of the same variable.
 | `validate.py <files or directories>` | `ifcopenshell.validate` with the EXPRESS rules on; JSON summary per file (issue count, counts by kind) | 1 on any issue or unreadable file |
 | `geometry_compare.py <file> [--tol-rel] [--tol-abs]` | per product, volume, surface area and bounding box of IfcOpenShell's geometry iterator (openings not subtracted, world coordinates, metres) against `cargo run -p arc-io-ifc --example geometry_stats` (set `ARC_GEOMETRY_STATS` to a built binary to skip `cargo`) | 1 on a difference above the tolerance (default 0.1 % relative, 1e-6 absolute) or a product only one side has |
 | `schema_diff.py <tables.json> [schema ...]` | entities, supertypes, abstract flags and explicit attributes of a JSON dump of the `arc-io-ifc` schema tables against IfcOpenShell's schema introspection; skips (exit 0) when the file does not exist | 1 on a difference |
-| `conformance_compare.py [--json] <files or directories>` | levels 1 and 2 of `IfcFile::conformance` (`cargo run -p arc-io-ifc --example conformance`; set `ARC_CONFORMANCE` to a built binary to skip `cargo`) against `ifcopenshell.validate` without EXPRESS rules, per rule class and (instance, attribute): agree, Arc only, oracle only | 1 when a file cannot be checked by either side |
+| `conformance_compare.py [--json] [--rules] <files or directories>` | `IfcFile::conformance` (`cargo run -p arc-io-ifc --example conformance`; set `ARC_CONFORMANCE` to a built binary to skip `cargo`) against `ifcopenshell.validate`, per rule class and (instance, attribute): agree, Arc only, oracle only. Without `--rules`, levels 1 and 2 against the validator without EXPRESS rules; with it, also level 3 against the validator with EXPRESS rules: entity and type rules per (instance, `Owner.Label`), global rules per rule name, followed by a table per rule with the checks Arc evaluated and could not evaluate | 1 when a file cannot be checked by either side |
 | `pset_diff.py <templates.json> [schema ...]` | names, kinds, data types and quantity kinds of a JSON dump of the `arc-io-ifc` property and quantity set templates against IfcOpenShell's `PsetQto` templates; enumeration items, and data types the published definitions leave open, are listed as source differences without failing; skips (exit 0) when the file does not exist | 1 on a difference |
 | `run_all.sh [directory]` | runs the `arc-io-ifc` tests with `ARC_IFC_DUMP`, then `validate.py` and `geometry_compare.py` on every dumped file | 1 on any failure |
 
@@ -59,3 +59,17 @@ error, the cause is a documented behavior of the oracle's reader or validator (I
 
 For a `UNIQUE` rule the oracle names one instance of a repeated group and lists the others under
 "Violated by"; Arc reports every instance of the group, and the script compares against all of them.
+
+## Rule differences
+
+With `--rules`, the two sides agree on every finding of the published sample files, of the files the
+tests write and of samples with one injected rule violation, except where the oracle's rule runner
+behaves as follows (IfcOpenShell 0.9.0):
+
+| Arc | Oracle | Cause |
+|---|---|---|
+| `IfcGeometricRepresentationContext.North2D` holds on a subcontext | fails with "Attribute not set" | The runner reads the derived `TrueNorth` of a subcontext from its own computation, which derives a direction from the parent context's world coordinate system instead of evaluating `ParentContext.TrueNorth`; when that placement is degenerate (a two-dimensional axis, or axes in one direction) the read fails, and a failure to evaluate is reported as a violation |
+| a rule is `UNKNOWN` (passes) | fails with a Python error such as `unhashable type: 'indeterminate_type'` | Any error raised while the runner evaluates a rule is reported as a violation of the rule. For example `IfcUniquePropertyName` adds a property without a name (`?`) to a set; Arc gives `?` for the union and `UNKNOWN` for the rule, as ISO 10303-11 does for an operator with an indeterminate operand. The instance always has a level 1 finding for the missing value too |
+
+A rule Arc cannot evaluate is reported as not evaluated in the table per rule; on these files there
+is none except for instances whose structure level 1 already rejects.

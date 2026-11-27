@@ -60,3 +60,6 @@ io-ifc-pset-quantity-kind = The quantity { $property } of the set { $set } is an
 io-ifc-pset-value-type = A value of { $property } in the set { $set } is of type { $found }, but its template expects { $expected }.
 io-ifc-pset-enumeration-item = The value { $found } of { $property } in the set { $set } is not one of the template's items: { $expected }.
 io-ifc-pset-not-applicable = The set { $set } is assigned to an { $found }, but its template applies only to { $expected }.
+io-ifc-conformance-where-rule = Instance #{ $instance } of { $entity }: the domain rule { $attribute } does not hold.
+io-ifc-conformance-type-rule = Instance #{ $instance } of { $entity }: a value violates the domain rule { $attribute } of its type.
+io-ifc-conformance-global-rule = The file violates the global rule { $attribute }.

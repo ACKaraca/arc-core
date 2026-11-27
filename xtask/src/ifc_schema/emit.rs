@@ -11,10 +11,11 @@ use super::ast::{
     AggregateKind, AttrName, Bound, EntityDecl, Expr, Schema, Supertype, TypeBody, TypeSpec,
     WhereRule,
 };
+use super::trees::{Context, Scope};
 
 /// Where a name points.
 #[derive(Clone, Copy)]
-enum Target {
+pub enum Target {
     Entity(u16),
     Defined(u16),
     Enumeration(u16),
@@ -100,6 +101,11 @@ impl<'a> Resolved<'a> {
             rules,
             names,
         })
+    }
+
+    /// What `name` is declared as.
+    pub fn target(&self, name: &str) -> Option<Target> {
+        self.names.get(&upper(name)).copied()
     }
 
     fn entity(&self, name: &str) -> Result<u16, String> {
@@ -217,18 +223,21 @@ fn label(label: Option<&String>) -> String {
     label.map_or("None".to_owned(), |l| format!("Some({l:?})"))
 }
 
-fn where_rules(rules: &[WhereRule]) -> String {
+fn where_rules(scope: &mut Scope<'_, '_>, rules: &[WhereRule]) -> Result<String, String> {
     let mut out = String::from("&[");
     for r in rules {
+        let tree = scope
+            .expr(&r.expr)
+            .map_err(|m| format!("{}: {m}", r.label.as_deref().unwrap_or("WHERE")))?;
         let _ = write!(
             out,
-            "WhereRule {{ label: {}, source: {:?}, tree: None }}, ",
+            "WhereRule {{ label: {}, source: {:?}, tree: {tree} }}, ",
             label(r.label.as_ref()),
             r.source
         );
     }
     out.push(']');
-    out
+    Ok(out)
 }
 
 /// Writes the tables of `schema` as the static `static_name`.
@@ -257,11 +266,12 @@ pub fn emit(
     for t in &r.defined {
         if let TypeBody::Defined(spec) = &t.body {
             let ty = r.type_ref(spec).map_err(|m| format!("{}: {m}", t.name))?;
+            let rules = where_rules(&mut Scope::new(&r, Context::Type), &t.where_rules)
+                .map_err(|m| format!("{}: {m}", t.name))?;
             let _ = writeln!(
                 out,
-                "        DefinedType {{ name: {:?}, underlying: {ty}, where_rules: {} }},",
+                "        DefinedType {{ name: {:?}, underlying: {ty}, where_rules: {rules} }},",
                 t.name,
-                where_rules(&t.where_rules)
             );
         }
     }
@@ -305,9 +315,12 @@ pub fn emit(
     }
     out.push_str("    ],\n    functions: &[\n");
     for f in &r.functions {
+        let tree = Scope::new(&r, Context::Function)
+            .function(f)
+            .map_err(|m| format!("{}: {m}", f.name))?;
         let _ = writeln!(
             out,
-            "        Function {{ name: {:?}, source: {:?}, tree: None }},",
+            "        Function {{ name: {:?}, source: {:?}, tree: {tree} }},",
             f.name, f.source
         );
     }
@@ -318,12 +331,17 @@ pub fn emit(
             .iter()
             .map(|e| r.entity(e).map(|i| i.to_string()))
             .collect::<Result<Vec<_>, _>>()?;
+        let mut scope = Scope::new(&r, Context::Function);
+        let tree = scope
+            .rule(rule)
+            .map_err(|m| format!("{}: {m}", rule.name))?;
+        let rules = where_rules(&mut scope, &rule.where_rules)
+            .map_err(|m| format!("{}: {m}", rule.name))?;
         let _ = writeln!(
             out,
-            "        GlobalRule {{ name: {:?}, entities: &[{}], where_rules: {}, source: {:?}, tree: None }},",
+            "        GlobalRule {{ name: {:?}, entities: &[{}], where_rules: {rules}, source: {:?}, tree: {tree} }},",
             rule.name,
             entities.join(", "),
-            where_rules(&rule.where_rules),
             rule.source
         );
     }
@@ -352,6 +370,7 @@ fn no_extension(
 
 fn emit_entity(r: &Resolved<'_>, e: &EntityDecl, out: &mut String) -> Result<(), String> {
     let supertype = r.supertype(e)?;
+    let mut scope = Scope::new(r, Context::Entity(r.entity(&e.name)?));
     let one_of = match &e.supertype_of {
         None => Vec::new(),
         Some(Supertype::OneOf(items)) => items
@@ -399,9 +418,10 @@ fn emit_entity(r: &Resolved<'_>, e: &EntityDecl, out: &mut String) -> Result<(),
             }
             AttrName::Redeclared { .. } => return Err("RENAMED is not supported".into()),
         };
+        let tree = scope.expr(&d.expr).map_err(|m| format!("{name}: {m}"))?;
         let _ = writeln!(
             out,
-            "                Derived {{ name: {name:?}, redeclares: {redeclares}, ty: {}, source: {:?} }},",
+            "                Derived {{ name: {name:?}, redeclares: {redeclares}, ty: {}, source: {:?}, tree: {tree} }},",
             r.type_ref(&d.ty)?,
             d.source
         );
@@ -443,7 +463,7 @@ fn emit_entity(r: &Resolved<'_>, e: &EntityDecl, out: &mut String) -> Result<(),
     let _ = writeln!(
         out,
         "            ],\n            where_rules: {},\n        }},",
-        where_rules(&e.where_rules)
+        where_rules(&mut scope, &e.where_rules)?
     );
     Ok(())
 }
