@@ -1,6 +1,6 @@
 # 0018. IFC schema tables generated from the published EXPRESS schemas
 
-- Status: Proposed
+- Status: Accepted
 - Issue: [arc-core#112](https://github.com/ACKaraca/arc-core/issues/112)
 
 ## Context
@@ -34,9 +34,8 @@ the code build the reader in the crate. This decision settles that difference.
   expression trees. The tables are data; no Rust type is generated per entity.
 - The schema source files are not stored in any Arc repository. The generator reads them from a
   directory the maintainer supplies, verifies each against a pinned BLAKE3 digest and never
-  downloads. Every generated file carries the attribution the publication asks for and has a row in
-  `ATTRIBUTION.md`. This starts only after the maintainer records the license basis in the dependency
-  policy.
+  downloads. Every generated file carries the attribution the publication asks for. Which tables are
+  stored is set under Licensing.
 - A schema-aware layer over the generic model resolves attributes by name, tests supertypes and
   builds inverse indexes. The views, the geometry evaluator and the writer use it instead of
   positions written by hand.
@@ -50,6 +49,16 @@ the code build the reader in the crate. This decision settles that difference.
   content survives a round trip.
 - IfcOpenShell stays an out-of-process oracle outside the gate: schema and rule validation of every
   written file, comparison of the generated tables, and geometry comparison.
+
+## Licensing
+
+The IFC4X3 ADD2 tables are stored in the repository under CC BY-ND 4.0, the license of the published
+IFC 4.3 release (published as ISO 16739-1:2024), as the dependency policy for data and specification
+assets allows: they are generated lookup tables that change only the format, with the attribution,
+license notice and source kept and the schema text unmodified. The source, commit, path and hashes are
+in `THIRD_PARTY_NOTICES.md`. The IFC2X3 TC1 and IFC4 ADD2 TC1 release pages state non-commercial terms
+(CC BY-NC-ND 4.0), which the policy does not accept; their tables are generated locally, are ignored
+by git, and stay out of the repository until written consent is obtained.
 
 ## Consequences
 
@@ -74,5 +83,5 @@ the code build the reader in the crate. This decision settles that difference.
 
 ## Reopen when
 
-The maintainer does not accept the license basis for generated tables, or buildingSMART publishes the
+Written consent for IFC2X3 and IFC4 allows their tables to be stored, or buildingSMART publishes the
 schemas under a license on the allowlist (the source files could then be stored in the repository).

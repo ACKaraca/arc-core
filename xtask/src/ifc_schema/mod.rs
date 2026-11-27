@@ -4,7 +4,8 @@
 //! The schema files are read from `<dir>`, never downloaded, and each must match its pinned
 //! BLAKE3 digest. The output is one file per schema under
 //! `crates/arc-io-ifc/src/schema/generated/`; `--check` regenerates in memory and fails when a
-//! file differs.
+//! file differs. Only the IFC4X3 file is stored in the repository; `--check` accepts a missing
+//! file of another schema.
 
 pub mod ast;
 pub mod emit;
@@ -45,6 +46,10 @@ pub const SOURCES: [Source; 3] = [
         table: "IFC4X3",
     },
 ];
+
+/// The table of the one schema whose generated file is stored in the repository (CC BY-ND 4.0).
+/// The others are generated locally; `--check` skips them when they are absent.
+const STORED: &str = "IFC4X3";
 
 /// Largest schema file read.
 const MAX_FILE_BYTES: u64 = parser::MAX_SOURCE_BYTES as u64;
@@ -106,8 +111,10 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
         let code = generate(&dir, source)?;
         let path = out.join(format!("{}.rs", source.table.to_ascii_lowercase()));
         if check {
-            if fs::read_to_string(&path).ok().as_deref() != Some(code.as_str()) {
-                stale.push(path.display().to_string());
+            match fs::read_to_string(&path) {
+                Ok(on_disk) if on_disk == code => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && source.table != STORED => {}
+                _ => stale.push(path.display().to_string()),
             }
         } else {
             fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;

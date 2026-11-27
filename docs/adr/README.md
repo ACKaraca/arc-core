@@ -26,7 +26,7 @@ collaboration, extensibility, licensing, assistance, robustness, localization, e
 | [0015](0015-stroke-font-format.md) | Versioned text format for Arc stroke fonts | Accepted |
 | [0016](0016-hatch-pattern-format.md) | Versioned text format for Arc hatch patterns | Accepted |
 | [0017](0017-windows-security-ffi-crate.md) | Windows file owner check through an FFI crate | Accepted |
-| [0018](0018-ifc-schema-tables-from-express.md) | IFC schema tables generated from the published EXPRESS schemas | Proposed |
+| [0018](0018-ifc-schema-tables-from-express.md) | IFC schema tables generated from the published EXPRESS schemas | Accepted |
 
 ## Process
 
