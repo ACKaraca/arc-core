@@ -11,6 +11,8 @@
 
 use std::collections::BTreeMap;
 
+mod support;
+
 use arc_base::math::{Point2, Point3, Vector2, Vector3};
 use arc_base::{Cancel, Limits};
 use arc_io_ifc::write::{
@@ -264,6 +266,7 @@ fn output_is_deterministic_and_has_the_header() {
 #[test]
 fn house_reads_back_with_structure_relations_and_volumes() {
     let output = write(&house(), &options()).unwrap();
+    support::dump("house.ifc", &output.bytes);
     let file = read_back(&output.bytes);
     let views = file
         .typed_views(&Limits::CONSTRAINED, &Cancel::new())
@@ -415,6 +418,7 @@ fn millimetres_read_back_in_meters() {
         wall
     }];
     let output = write(&model, &options()).unwrap();
+    support::dump("wall-mm.ifc", &output.bytes);
     let text = std::str::from_utf8(&output.bytes).unwrap();
     assert!(text.contains("IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.)"));
     let (volumes, _) = volumes(&read_back(&output.bytes));
@@ -643,6 +647,7 @@ fn house_with_spaces() -> WriteModel {
 fn spaces_are_aggregated_by_their_storey_and_read_back() {
     let model = house_with_spaces();
     let output = write(&model, &options()).unwrap();
+    support::dump("house-spaces.ifc", &output.bytes);
     assert_eq!(output.bytes, write(&model, &options()).unwrap().bytes);
     let file = read_back(&output.bytes);
     let views = file
@@ -720,6 +725,7 @@ fn space_refusals_match_the_other_elements() {
         depth: 2.0,
     });
     let output = write(&model, &options()).unwrap();
+    support::dump("space-prism.ifc", &output.bytes);
     assert_eq!(output.report.items.len(), 1);
     assert_eq!(output.report.items[0].reason, "io.ifc.not_written");
 }
@@ -780,6 +786,7 @@ fn house_with_types() -> WriteModel {
 #[test]
 fn types_and_layer_sets_read_back() {
     let output = write(&house_with_types(), &options()).unwrap();
+    support::dump("house-types.ifc", &output.bytes);
     let file = read_back(&output.bytes);
     let views = file
         .typed_views(&Limits::CONSTRAINED, &Cancel::new())
@@ -877,6 +884,7 @@ fn type_references_and_layers_are_checked() {
     let mut model = house_with_types();
     model.elements[0].element_type = None;
     let output = write(&model, &options()).unwrap();
+    support::dump("house-types-no-layer-set.ifc", &output.bytes);
     assert!(
         output
             .report
@@ -915,6 +923,7 @@ fn ceilings_are_coverings_with_a_type_a_layer_set_and_voids() {
     opening.host = Some(COVERING);
     model.elements.push(opening);
     let output = write(&model, &options()).unwrap();
+    support::dump("house-ceilings.ifc", &output.bytes);
     let file = read_back(&output.bytes);
     let covering = file.instance(instance_of(&file, COVERING)).unwrap();
     assert_eq!(covering.records[0].type_name, "IFCCOVERING");
@@ -958,6 +967,7 @@ fn house_with_roof() -> WriteModel {
 #[test]
 fn roofs_and_roof_types_read_back() {
     let output = write(&house_with_roof(), &options()).unwrap();
+    support::dump("house-roof.ifc", &output.bytes);
     let file = read_back(&output.bytes);
     let roof = file.instance(instance_of(&file, ROOF)).unwrap();
     assert_eq!(roof.records[0].type_name, "IFCROOF");
@@ -984,44 +994,4 @@ fn roofs_and_roof_types_read_back() {
         write(&model, &options()).unwrap_err().code(),
         "io.ifc.write_reference_invalid"
     );
-}
-
-/// Writes the sample files for an external check when `ARC_IFC_WRITE_SAMPLES` names a directory.
-#[test]
-fn samples_for_external_validation() {
-    let Some(directory) = std::env::var_os("ARC_IFC_WRITE_SAMPLES") else {
-        return;
-    };
-    let directory = std::path::PathBuf::from(directory);
-    std::fs::write(
-        directory.join("house.ifc"),
-        write(&house(), &options()).unwrap().bytes,
-    )
-    .unwrap();
-    std::fs::write(
-        directory.join("house-types.ifc"),
-        write(&house_with_types(), &options()).unwrap().bytes,
-    )
-    .unwrap();
-    std::fs::write(
-        directory.join("house-roof.ifc"),
-        write(&house_with_roof(), &options()).unwrap().bytes,
-    )
-    .unwrap();
-    std::fs::write(
-        directory.join("house-spaces.ifc"),
-        write(&house_with_spaces(), &options()).unwrap().bytes,
-    )
-    .unwrap();
-    let mut model = house();
-    model.length_unit = LengthUnit::Millimetre;
-    model.angle_unit = AngleUnit::Radian;
-    model.true_north = None;
-    model.elements.truncate(1);
-    model.elements[0].body = Some(extrusion(10_000.0, 200.0, 3000.0));
-    std::fs::write(
-        directory.join("wall-mm.ifc"),
-        write(&model, &options()).unwrap().bytes,
-    )
-    .unwrap();
 }

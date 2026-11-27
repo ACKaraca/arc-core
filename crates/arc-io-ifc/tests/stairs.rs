@@ -9,6 +9,8 @@
     reason = "test code: fixtures and assertions"
 )]
 
+mod support;
+
 use arc_base::math::{Point3, Vector3};
 use arc_base::{Cancel, Limits};
 use arc_io_ifc::write::{
@@ -171,6 +173,7 @@ fn references(parameter: &Parameter) -> Vec<u64> {
 fn stairs_parts_and_railings_read_back() {
     let model = model();
     let output = write(&model, &options()).unwrap();
+    support::dump("stairs.ifc", &output.bytes);
     assert_eq!(output.bytes, write(&model, &options()).unwrap().bytes);
     assert!(!output.report.has_loss(), "{:?}", output.report);
     let file = read(&output.bytes, &mut ReadOptions::default())

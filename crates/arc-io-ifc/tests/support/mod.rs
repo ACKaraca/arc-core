@@ -11,6 +11,18 @@
 
 use arc_io_common::crc32::checksum;
 
+/// Writes a file a test produced to `$ARC_IFC_DUMP/<name>` for the oracle in `tools/ifc-oracle`
+/// (`ARC_IFC_OUT` is the older name of the variable). Does nothing when neither is set.
+pub fn dump(name: &str, bytes: &[u8]) {
+    let Some(dir) = std::env::var_os("ARC_IFC_DUMP").or_else(|| std::env::var_os("ARC_IFC_OUT"))
+    else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(name), bytes).unwrap();
+}
+
 /// The minimal project in the given schema identifier: a project, a site, a building, two
 /// storeys, a space, two walls with a type, a property set with one property of each kind, and an
 /// element quantity set with one quantity of each kind. IFC2X3 has no `Formula` attribute on the

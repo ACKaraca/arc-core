@@ -1736,4 +1736,7 @@ The same house with a layered wall type, a slab type with a membrane layer and d
 reads back with its type assignments, layer sets, layers and layer set usages, and the refusals of
 type references and layer values are checked.
 The out-of-process oracle of the [interchange architecture](../architecture/interchange.md) is not part
-of the gate.
+of the gate. `tools/ifc-oracle` (see its [README](../../tools/ifc-oracle/README.md)) validates every file
+the writer tests produce with IfcOpenShell and the EXPRESS rules and compares per-product volume, area
+and bounding box with `IfcFile::geometry`; `ARC_IFC_DUMP=<directory>` makes the tests write those files
+(`tools/ifc-oracle/run_all.sh` runs the whole check).
