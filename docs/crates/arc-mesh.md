@@ -345,3 +345,5 @@ The codes `arc-mesh` owns. A code is never reused for a different meaning; messa
 | `mesh.repair.invalid` | `invalid_input` | A repair option is out of range |
 | `mesh.simplify.invalid` | `invalid_input` | A simplification target or error bound is missing, not finite or negative |
 | `mesh.lod.invalid` | `invalid_input` | A level-of-detail parameter is out of range, or a chain is empty |
+| `mesh.boolean.not_closed` | `invalid_input` | An operand of a boolean operation is not a closed, consistently oriented mesh of positive volume |
+| `mesh.boolean.failed` | `failed_operation` | The arrangement of a boolean operation cannot be computed at the tolerance, or its result is not closed |

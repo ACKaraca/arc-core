@@ -24,3 +24,5 @@ mesh-query-empty = The mesh has no triangles to query.
 mesh-repair-invalid = A repair option is out of range.
 mesh-simplify-invalid = Give a target triangle count or an error bound that is a finite, non-negative number.
 mesh-lod-invalid = A level-of-detail setting is out of range, or the chain has no levels.
+mesh-boolean-not-closed = A boolean operation needs closed meshes with consistently oriented triangles and a positive volume.
+mesh-boolean-failed = The boolean operation could not produce a closed result at this tolerance.

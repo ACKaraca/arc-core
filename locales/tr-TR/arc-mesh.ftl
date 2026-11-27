@@ -24,3 +24,5 @@ mesh-query-empty = Sorgulanacak üçgeni olan bir ağ gerekir.
 mesh-repair-invalid = Bir onarım seçeneği aralığın dışında.
 mesh-simplify-invalid = Hedef üçgen sayısı veya sonlu, negatif olmayan bir hata sınırı verin.
 mesh-lod-invalid = Bir ayrıntı düzeyi ayarı aralığın dışında ya da zincirde hiç düzey yok.
+mesh-boolean-not-closed = Boolean işlem için üçgenleri tutarlı yönlü, pozitif hacimli kapalı ağlar gerekir.
+mesh-boolean-failed = Boolean işlem bu toleransta kapalı bir sonuç üretemedi.

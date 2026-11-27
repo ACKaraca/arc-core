@@ -87,7 +87,7 @@ pub use solid_clip::ClipSide;
 pub use solid_gen::{extrude, extrude_between, prism};
 pub use solid_opening::PrismTool;
 pub use trace::{IslandMode, trace_region};
-pub use triangulate::{TriangleMesh2, triangulate, triangulate_with};
+pub use triangulate::{TriangleMesh2, triangulate, triangulate_graph, triangulate_with};
 pub use view::{Projection, ViewFrame};
 
 use arc_base::math::Vector2;

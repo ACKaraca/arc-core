@@ -144,6 +144,18 @@ pub mod codes {
         category: Category::InvalidInput,
         message_id: "mesh-lod-invalid",
     };
+    /// An operand of a boolean operation is not a closed, consistently oriented mesh of positive volume.
+    pub const BOOLEAN_NOT_CLOSED: ErrorCode = ErrorCode {
+        code: "mesh.boolean.not_closed",
+        category: Category::InvalidInput,
+        message_id: "mesh-boolean-not-closed",
+    };
+    /// The arrangement of a boolean operation cannot be computed at the tolerance, or its result is not closed.
+    pub const BOOLEAN_FAILED: ErrorCode = ErrorCode {
+        code: "mesh.boolean.failed",
+        category: Category::FailedOperation,
+        message_id: "mesh-boolean-failed",
+    };
 
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
@@ -170,6 +182,8 @@ pub mod codes {
         REPAIR_INVALID,
         SIMPLIFY_INVALID,
         LOD_INVALID,
+        BOOLEAN_NOT_CLOSED,
+        BOOLEAN_FAILED,
     ];
 }
 
