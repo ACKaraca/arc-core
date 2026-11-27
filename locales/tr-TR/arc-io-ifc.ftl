@@ -78,3 +78,6 @@ io-ifc-view-schema-unsupported = Model görünümü çıktı şeması için tan�
 io-ifc-curve-invalid = IFC dosyasındaki bir eğri, aks veya doğrusal yerleşim değerlendirilemiyor: bir değer eksik, yanlış türde veya kullanılamaz.
 io-ifc-curve-unsupported = IFC dosyası, değerlendirilmeyen bir eğri türü veya parametre bileşimi kullanıyor.
 io-ifc-distance-out-of-range = Mesafe eğrinin dışında kalıyor.
+io-ids-invalid = IDS dosyası geçerli bir IDS 1.0 belgesi değil.
+io-ids-unsupported = IDS dosyası değerlendirilmeyen bir şey kullanıyor.
+io-ids-schema-unavailable = IFC dosyasının şemasının tabloları bu derlemede yok.

@@ -1123,7 +1123,7 @@ triangle meshes of the geometry evaluation (a lower-layer edge) and on `serde` f
 readers take byte buffers and never paths, and the crate builds for `wasm32-unknown-unknown`. The
 geometry evaluation (CORE-IO-015) is described in [Geometry evaluation as implemented](#geometry-evaluation-as-implemented).
 The first part of writing (CORE-IO-016) is described in [IFC writing as implemented](#ifc-writing-as-implemented).
-The alignment part of geometry evaluation is described in [Alignments and linear placement as implemented](#alignments-and-linear-placement-as-implemented).
+The alignment part of geometry evaluation is described in [Alignments and linear placement as implemented](#alignments-and-linear-placement-as-implemented). IDS (CORE-IO-018) is described in [IDS as implemented](#ids-as-implemented).
 
 ### Reading
 
@@ -1894,6 +1894,9 @@ IfcOpenShell's templates.
 | `io.ifc.curve_invalid` | `corrupt_data` | A curve, alignment layout or linear placement is not evaluable: an attribute is missing or of the wrong type, a parameter is not finite, a segment list is longer than the limits allow, or a reference does not lead to a curve |
 | `io.ifc.curve_unsupported` | `unsupported` | A curve type or parameter combination of an alignment is outside what the evaluator covers; the argument `kind` names it |
 | `io.ifc.distance_out_of_range` | `invalid_input` | A distance along a curve lies outside the curve by more than the tolerance |
+| `io.ids.invalid` | `corrupt_data` | An IDS file is not a valid IDS 1.0 document: not well-formed XML, an element or attribute outside the schema, a required element missing, a prohibited specification with requirements, or a pattern outside the pattern language; the argument `reason` names the first problem |
+| `io.ids.unsupported` | `unsupported` | An IDS file uses a restriction the IDS documentation excludes (`totalDigits`, `fractionDigits`); the argument `kind` names it |
+| `io.ids.schema_unavailable` | `unsupported` | The file to check is IFC2X3 or IFC4 and the generated tables are not part of the build (IFC4X3 tables are always present) |
 
 The `io.zip.*` codes of the archive reader are returned as the `arc-io-common` section defines them.
 
@@ -2020,6 +2023,107 @@ Differences that are not rounding:
 The tests are in `crates/arc-io-ifc/tests/alignment.rs`: closed forms for the line and the circle,
 numerical integration of the heading for every spiral, the gradient and cant of a layout, linear
 placements with offsets, axes and parents, units, and hostile input.
+
+## IDS as implemented
+
+`arc_io_ifc::ids` reads Information Delivery Specification 1.0 files and checks an `IfcFile` against
+them (CORE-IO-018, reading, and the checker the products use). It is written from the published schema
+and documentation of IDS 1.0.
+
+### Reading
+
+`ids::read(bytes, limits, cancel)` reads the document with the bounded XML reader of `arc-io-common`
+(no document type declaration, no entity expansion; the limits of the profile apply, and the number of
+elements is bounded by `record_count`) and accepts exactly the structure of the schema: `info` with a
+`title`, `specifications` with one or more `specification` (`name`, `ifcVersion` of `IFC2X3`, `IFC4`,
+`IFC4X3_ADD2`, `identifier`, `description`, `instructions`), an `applicability` with `minOccurs` and
+`maxOccurs`, and `requirements`. Anything else is `io.ids.invalid` with the argument `reason`; a
+prohibited specification with requirements is invalid.
+
+The six facets are read into `Facet`: entity (`name`, `predefinedType`), attribute, classification
+(`system`, `value`), property (`propertySet`, `baseName`, `dataType`, `value`), material and partOf
+(`relation`, nested `entity`). A requirement carries `cardinality` (`required`, `optional`,
+`prohibited`) and `instructions`; an entity requirement has no cardinality and an optional partOf is
+invalid. A value is a `simpleValue` or an `xs:restriction` with `enumeration`, `pattern`, the four
+bounds and `length`, `minLength` and `maxLength`; `xs:annotation` inside a restriction is ignored.
+`totalDigits` and `fractionDigits`, which the IDS documentation excludes, are `io.ids.unsupported`.
+
+Patterns are compiled by `ids::regex::Pattern`, an implementation of the pattern language of XML
+Schema: alternation, groups, `? * + {n} {n,} {n,m}`, `.`, classes with ranges, negation and
+subtraction, the escapes `\d \s \w \i \c` and their complements, `\p{..}` for the common categories
+and the single-character escapes. A pattern matches a whole string. Matching is by backtracking with
+a step budget of 2,000,000, so a hostile pattern such as `(a+)+b` stops with no match. Group
+extensions (`(?:`), back references and unknown escapes are refused when the document is read. A
+backslash before any other punctuation character is taken as that character.
+
+### Checking
+
+`Ids::check(file, limits, cancel)` returns a `Report` with a `SpecificationResult` per
+specification: its `Status`, the applicable instances, the failing instances with the requirement,
+the facet and the reason, and a reason for the specification as a whole. It needs the schema tables
+of the file's schema (`io.ids.schema_unavailable` when the IFC2X3 or IFC4 tables are not part of the
+build). The applicability facets select the instances, the requirements are evaluated on each, and
+the specification passes by its cardinality: required needs at least one applicable instance, optional
+none, prohibited no applicable instance. The `ifcVersion` list is metadata and does not change a
+result. The rules the checker applies, where the documentation leaves a choice:
+
+- **Entity.** The class name is compared in upper case and exactly, subclasses do not match. The
+  predefined type is the one of the type object, unless that is `NOTDEFINED`, else the one of the
+  instance; `USERDEFINED` is resolved through `ElementType`, `ObjectType`, `ProcessType` or
+  `ResourceType`, and the item `USERDEFINED` itself matches too. In IFC2X3 a name that the schema does
+  not declare but whose `...Type` class it does (`IfcAirTerminal`) is an instance of the supertype of
+  that type class that its type object has that class.
+- **Attribute.** Only explicit attributes are checked; a derived or inverse attribute never passes. An
+  attribute with no value, an empty string, an empty list or a logical unknown does not satisfy the
+  facet; a reference satisfies a facet without value and never one with a value. When a name
+  restriction matches several attributes, one is enough.
+- **Values.** A string is compared exactly, with case. A number is compared as a decimal text in the
+  formats of IDS (no `NaN`, no separators) with the tolerance of the IDS documentation, `1e-6`
+  relative plus `1e-6` absolute, bounds included; bounds of a restriction are compared exactly. A
+  boolean is `true` or `false` in lower case. Patterns and lengths apply to strings only.
+- **Property.** Property sets and quantity sets come from `IfcRelDefinesByProperties`, the type's
+  `HasPropertySets` (the occurrence's set of the same name replaces the type's), the material's
+  `IfcMaterialProperties` and `IfcExtendedMaterialProperties`, and the predefined property sets whose
+  attributes are the properties. Every matching set must hold a matching property and every
+  matching property must satisfy the facet. The data type is the defined type of the value (a
+  quantity has the measure of its kind; a table has two). Measure values are converted to the
+  default SI units from the project's unit assignment (prefix and conversion-based units for length,
+  area, volume, mass, time and plane angle) before the comparison. A list, enumeration or table
+  satisfies a single value when one item does and a range when all items do; a bounded value needs
+  both bounds inside the range.
+- **Classification.** The system is the name of the root `IfcClassification` and the value is the
+  identification of any reference on the way up to it, so `EF_25_10` matches a reference
+  `EF_25_10_25`. Classifications of the occurrence override those of the type per system, and
+  non-rooted resources are classified through `IfcExternalReferenceRelationship`.
+- **Material.** The value matches the name or category of the material, a layer, profile or
+  constituent, and the name of a layer set, profile set or constituent set; the materials are those
+  of the occurrence, else those of its type.
+- **PartOf.** The instance is part of an entity when that entity is reached through the relations
+  `IfcRelAggregates`, `IfcRelNests`, `IfcRelContainedInSpatialStructure`, `IfcRelAssignsToGroup`,
+  `IfcRelVoidsElement` and `IfcRelFillsElement`, transitively, or through the one named relation.
+
+### Verification
+
+`cargo run -p arc-io-ifc --example ids_testcases <directory>` runs the checker over a directory of IDS
+and IFC pairs in the layout of the buildingSMART IDS test cases (`pass-`, `fail-` and `invalid-`
+prefixes) and reports the agreement; an `invalid-` pair counts as agreeing when the reader rejects the
+IDS or the check fails. Over the 334 pairs of the published test cases (attribute 56, classification
+27, entity 33, ids 12, material 29, partOf 34, property 82, restriction 25, tolerance 36), with the
+IFC2X3, IFC4 and IFC4X3 tables, all 334 agree: 187 pairs expect pass, 120 fail and 27 invalid. Of
+the invalid ones 26 fail in the check and one, a prohibited specification with requirements, is
+rejected by the reader. The 12 example IDS files of the same repository are all read. The first run
+agreed on 300 of the 334 pairs; the differences were in the lowercase text of booleans, a name
+restriction that matches several attributes, optional classifications, classification through
+external references, the predefined type of a type, the IFC2X3 type mapping, the bounds of the
+tolerance interval, the property sets of a type and of a material, the data type of bounded, table
+and predefined values, and the escape `\/` in a pattern, which the pattern language does not list
+and the reader now takes as `/`. Each was resolved to the rule in the list above.
+
+The checker needs the schema tables of the file: without the local IFC2X3 and IFC4 tables only IFC4X3
+files can be checked and the others return `io.ids.schema_unavailable`. Tests written for this project,
+without the published files, are in
+`crates/arc-io-ifc/tests/ids.rs` (facets, units, inheritance, cardinalities, malformed and hostile
+documents) and in `ids/regex.rs` (the pattern language and the step budget).
 
 ## IFC writing as implemented
 

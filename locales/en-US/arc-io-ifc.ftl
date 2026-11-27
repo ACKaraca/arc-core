@@ -78,3 +78,6 @@ io-ifc-view-schema-unsupported = The model view is not defined for the output sc
 io-ifc-curve-invalid = A curve, alignment or linear placement of the IFC file cannot be evaluated: a value is missing, has the wrong type or is not usable.
 io-ifc-curve-unsupported = The IFC file uses a curve type or parameter combination that is not evaluated.
 io-ifc-distance-out-of-range = The distance lies outside the curve.
+io-ids-invalid = The IDS file is not a valid IDS 1.0 document.
+io-ids-unsupported = The IDS file uses something that is not evaluated.
+io-ids-schema-unavailable = The tables of the schema of the IFC file are not part of this build.

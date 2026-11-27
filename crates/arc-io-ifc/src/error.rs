@@ -171,6 +171,29 @@ pub mod codes {
         message_id: "io-ifc-distance-out-of-range",
     };
 
+    /// An IDS file is not a valid IDS document: not well-formed XML, an element or attribute
+    /// outside the schema, a missing required element, a restriction that cannot hold, or a pattern
+    /// that is not in the pattern language of XML Schema.
+    pub const IDS_INVALID: ErrorCode = ErrorCode {
+        code: "io.ids.invalid",
+        category: Category::CorruptData,
+        message_id: "io-ids-invalid",
+    };
+    /// An IDS file is valid but uses something the checker does not evaluate; the argument `kind`
+    /// names it.
+    pub const IDS_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "io.ids.unsupported",
+        category: Category::Unsupported,
+        message_id: "io-ids-unsupported",
+    };
+    /// The tables of the schema of the checked file are not part of this build: the IFC2X3 and IFC4
+    /// tables are generated locally; IFC4X3 tables are always present.
+    pub const IDS_SCHEMA_UNAVAILABLE: ErrorCode = ErrorCode {
+        code: "io.ids.schema_unavailable",
+        category: Category::Unsupported,
+        message_id: "io-ids-schema-unavailable",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         IFC_TRUNCATED,
@@ -193,6 +216,9 @@ pub mod codes {
         IFC_CURVE_INVALID,
         IFC_CURVE_UNSUPPORTED,
         IFC_DISTANCE_OUT_OF_RANGE,
+        IDS_INVALID,
+        IDS_UNSUPPORTED,
+        IDS_SCHEMA_UNAVAILABLE,
     ];
 }
 

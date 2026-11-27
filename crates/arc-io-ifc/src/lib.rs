@@ -33,6 +33,7 @@ pub mod alignment;
 mod edit;
 pub mod error;
 pub mod geometry;
+pub mod ids;
 pub mod loss;
 pub mod model;
 pub mod options;
