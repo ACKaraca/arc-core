@@ -185,6 +185,44 @@ pub enum ElementKind {
     /// contain them). By convention `Element::name` holds the room number and
     /// `Element::long_name` the room name.
     Space,
+    /// `IfcStair` (`PredefinedType` from `IfcStairTypeEnum`, for example `STRAIGHT_RUN_STAIR`,
+    /// `QUARTER_TURN_STAIR` for an L or `HALF_TURN_STAIR` for a U). A stair decomposes into its
+    /// parts: an element whose `host` is the stair (flights, landings and railings) is
+    /// aggregated by it (`IfcRelAggregates`) and not contained in the storey. A stair has no
+    /// element type.
+    Stair,
+    /// `IfcStairFlight` (`PredefinedType` from `IfcStairFlightTypeEnum`) with the counts and
+    /// dimensions of [`Element::flight`]. A flight whose `host` is a stair is a part of it; one
+    /// without a host is contained in its storey. A flight has no element type.
+    StairFlight,
+    /// `IfcRailing` (`PredefinedType` from `IfcRailingTypeEnum`: `HANDRAIL`, `GUARDRAIL`,
+    /// `BALUSTRADE`). A railing whose `host` is a stair is a part of it; one without a host is
+    /// contained in its storey. A railing has no element type. A landing is an `IfcSlab` with the
+    /// predefined type `LANDING`, a part of a stair in the same way.
+    Railing,
+    /// `IfcRamp` (`PredefinedType` from `IfcRampTypeEnum`, for example `STRAIGHT_RUN_RAMP`,
+    /// `QUARTER_TURN_RAMP` or `HALF_TURN_RAMP`). Like a stair, a ramp decomposes into its parts:
+    /// the ramp flights, landings (`IfcSlab` with the predefined type `LANDING`) and railings
+    /// that name it as their `host` are aggregated by it (`IfcRelAggregates`) and not contained
+    /// in the storey. A ramp has no element type.
+    Ramp,
+    /// `IfcRampFlight` (`PredefinedType` from `IfcRampFlightTypeEnum`: `STRAIGHT`, `SPIRAL`). A
+    /// flight whose `host` is a ramp is a part of it; one without a host is contained in its
+    /// storey. IFC4 gives a ramp flight no counts or dimensions: [`Element::flight`] is ignored
+    /// and quantities (`Qto_RampFlightBaseQuantities`) are the caller's quantity sets.
+    RampFlight,
+    /// `IfcCurtainWall` (`PredefinedType` `USERDEFINED` or `NOTDEFINED`). The plates and members
+    /// that name it as their `host` are aggregated by it (`IfcRelAggregates`) and not contained
+    /// in the storey.
+    CurtainWall,
+    /// `IfcPlate` (`PredefinedType` from `IfcPlateTypeEnum`: `CURTAIN_PANEL`, `SHEET`). A plate
+    /// whose `host` is a curtain wall is a part of it; one without a host is contained in its
+    /// storey.
+    Plate,
+    /// `IfcMember` (`PredefinedType` from `IfcMemberTypeEnum`, for example `MULLION`, `PLATE`;
+    /// IFC4 has no transom value: use `MEMBER` or a user-defined text). A member whose
+    /// `host` is a curtain wall is a part of it; one without a host is contained in its storey.
+    Member,
 }
 
 impl ElementKind {
@@ -198,6 +236,14 @@ impl ElementKind {
             Self::Space => "IFCSPACE",
             Self::Roof => "IFCROOF",
             Self::Covering => "IFCCOVERING",
+            Self::Stair => "IFCSTAIR",
+            Self::StairFlight => "IFCSTAIRFLIGHT",
+            Self::Railing => "IFCRAILING",
+            Self::Ramp => "IFCRAMP",
+            Self::RampFlight => "IFCRAMPFLIGHT",
+            Self::CurtainWall => "IFCCURTAINWALL",
+            Self::Plate => "IFCPLATE",
+            Self::Member => "IFCMEMBER",
         }
     }
 
@@ -230,6 +276,39 @@ impl ElementKind {
                 "MEMBRANE",
                 "SLEEVING",
                 "WRAPPING",
+            ],
+            Self::Stair => &[
+                "STRAIGHT_RUN_STAIR",
+                "TWO_STRAIGHT_RUN_STAIR",
+                "QUARTER_WINDING_STAIR",
+                "QUARTER_TURN_STAIR",
+                "HALF_WINDING_STAIR",
+                "HALF_TURN_STAIR",
+                "TWO_QUARTER_WINDING_STAIR",
+                "TWO_QUARTER_TURN_STAIR",
+                "THREE_QUARTER_WINDING_STAIR",
+                "THREE_QUARTER_TURN_STAIR",
+                "SPIRAL_STAIR",
+                "DOUBLE_RETURN_STAIR",
+                "CURVED_RUN_STAIR",
+                "TWO_CURVED_RUN_STAIR",
+            ],
+            Self::StairFlight => &["STRAIGHT", "WINDER", "SPIRAL", "CURVED", "FREEFORM"],
+            Self::Railing => &["HANDRAIL", "GUARDRAIL", "BALUSTRADE"],
+            Self::Ramp => &[
+                "STRAIGHT_RUN_RAMP",
+                "TWO_STRAIGHT_RUN_RAMP",
+                "QUARTER_TURN_RAMP",
+                "TWO_QUARTER_TURN_RAMP",
+                "HALF_TURN_RAMP",
+                "SPIRAL_RAMP",
+            ],
+            Self::RampFlight => &["STRAIGHT", "SPIRAL"],
+            Self::CurtainWall => &[],
+            Self::Plate => &["CURTAIN_PANEL", "SHEET"],
+            Self::Member => &[
+                "BRACE", "CHORD", "COLLAR", "MEMBER", "MULLION", "PLATE", "POST", "PURLIN",
+                "RAFTER", "STRINGER", "STRUT", "STUD",
             ],
             Self::Roof => &[
                 "FLAT_ROOF",
@@ -506,7 +585,43 @@ impl ElementType {
             ElementKind::Window => Some("IFCWINDOWTYPE"),
             ElementKind::Roof => Some("IFCROOFTYPE"),
             ElementKind::Covering => Some("IFCCOVERINGTYPE"),
-            ElementKind::Opening | ElementKind::Space => None,
+            ElementKind::Plate => Some("IFCPLATETYPE"),
+            ElementKind::Member => Some("IFCMEMBERTYPE"),
+            ElementKind::CurtainWall => Some("IFCCURTAINWALLTYPE"),
+            ElementKind::Opening
+            | ElementKind::Space
+            | ElementKind::Stair
+            | ElementKind::StairFlight
+            | ElementKind::Railing
+            | ElementKind::Ramp
+            | ElementKind::RampFlight => None,
+        }
+    }
+}
+
+/// The counts and dimensions of a stair flight (`IfcStairFlight`), in the length unit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct FlightDimensions {
+    /// `NumberOfRisers`.
+    pub risers: u32,
+    /// `NumberOfTreads`.
+    pub treads: u32,
+    /// `RiserHeight`, positive.
+    pub riser_height: f64,
+    /// `TreadLength`, positive.
+    pub tread_length: f64,
+}
+
+impl FlightDimensions {
+    /// The dimensions of a flight.
+    #[must_use]
+    pub fn new(risers: u32, treads: u32, riser_height: f64, tread_length: f64) -> Self {
+        Self {
+            risers,
+            treads,
+            riser_height,
+            tread_length,
         }
     }
 }
@@ -545,9 +660,14 @@ pub struct Element {
     pub overall_height: Option<f64>,
     /// Openings: the element the opening voids (`IfcRelVoidsElement`), a wall, slab, door or
     /// window; required. Doors and windows: the opening they fill (`IfcRelFillsElement`); a chain
-    /// of hosts must not return to its start. Must be `None`
-    /// for walls and slabs.
+    /// of hosts must not return to its start. Flights, landings (slabs) and railings: optionally
+    /// the stair they are a part of (`IfcRelAggregates`); a part is not contained in the storey.
+    /// Must be `None` for walls, spaces, roofs, coverings and stairs, and for a slab that is
+    /// not part of a stair.
     pub host: Option<u128>,
+    /// Stair flights: the `NumberOfRisers`, `NumberOfTreads`, `RiserHeight` and `TreadLength`;
+    /// `None` omits them. Ignored for the other kinds.
+    pub flight: Option<FlightDimensions>,
     /// The property sets.
     pub property_sets: Vec<PropertySet>,
     /// The quantity sets.
@@ -577,6 +697,7 @@ impl Element {
             overall_width: None,
             overall_height: None,
             host: None,
+            flight: None,
             property_sets: Vec::new(),
             quantity_sets: Vec::new(),
             element_type: None,
@@ -584,6 +705,105 @@ impl Element {
         }
     }
 }
+
+/// The curve of a grid axis, in the plane of the grid's placement and the length unit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AxisCurve {
+    /// A straight axis from `start` to `end`, written as an `IfcPolyline` of two points.
+    Line {
+        /// The first point.
+        start: Point2,
+        /// The last point; at least the linear tolerance away from `start`.
+        end: Point2,
+    },
+    /// A circular arc counterclockwise from `start_angle` to `end_angle`, written as an
+    /// `IfcTrimmedCurve` of an `IfcCircle` trimmed by parameter values (the angles, converted to
+    /// the plane angle unit of the project).
+    Arc {
+        /// The center.
+        center: Point2,
+        /// The radius, positive.
+        radius: f64,
+        /// The start angle from the x axis, in radians.
+        start_angle: f64,
+        /// The end angle in radians; greater than `start_angle` by at most a full turn.
+        end_angle: f64,
+    },
+}
+
+/// An axis of a grid (`IfcGridAxis`).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct GridAxis {
+    /// The `AxisTag`, the label of the axis; empty omits it.
+    pub tag: String,
+    /// The curve.
+    pub curve: AxisCurve,
+    /// `SameSense`: whether the direction of the axis agrees with the direction of the curve.
+    pub same_sense: bool,
+}
+
+impl GridAxis {
+    /// An axis labelled `tag` whose direction agrees with its curve.
+    #[must_use]
+    pub fn new(tag: &str, curve: AxisCurve) -> Self {
+        Self {
+            tag: tag.to_owned(),
+            curve,
+            same_sense: true,
+        }
+    }
+}
+
+/// A grid (`IfcGrid`), contained in its storey, with its axes in three directions. Its
+/// representation is a `FootPrint` `GeometricCurveSet` of the axis curves.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Grid {
+    /// The identifier its `GlobalId` is made from.
+    pub id: u128,
+    /// The name.
+    pub name: String,
+    /// The identifier of the storey the grid is placed relative to and contained in.
+    pub storey: u128,
+    /// The placement relative to the storey; the axis curves lie in its xy plane.
+    pub placement: Placement,
+    /// The `UAxes`; at least one.
+    pub axes_u: Vec<GridAxis>,
+    /// The `VAxes`; at least one.
+    pub axes_v: Vec<GridAxis>,
+    /// The optional `WAxes`; empty omits the attribute.
+    pub axes_w: Vec<GridAxis>,
+    /// The `PredefinedType`, handled like [`Element::predefined_type`] with the values of
+    /// `IfcGridTypeEnum` (`RECTANGULAR`, `RADIAL`, `TRIANGULAR`, `IRREGULAR`).
+    pub predefined_type: Option<String>,
+}
+
+impl Grid {
+    /// A grid at the storey's origin with the given U and V axes and no W axes.
+    #[must_use]
+    pub fn new(
+        id: u128,
+        name: &str,
+        storey: u128,
+        axes_u: Vec<GridAxis>,
+        axes_v: Vec<GridAxis>,
+    ) -> Self {
+        Self {
+            id,
+            name: name.to_owned(),
+            storey,
+            placement: Placement::default(),
+            axes_u,
+            axes_v,
+            axes_w: Vec::new(),
+            predefined_type: None,
+        }
+    }
+}
+
+/// The values of `IfcGridTypeEnum`.
+const GRID_TYPES: &[&str] = &["RECTANGULAR", "RADIAL", "TRIANGULAR", "IRREGULAR"];
 
 /// The neutral description of a building to write.
 #[derive(Debug, Clone, PartialEq)]
@@ -601,6 +821,8 @@ pub struct WriteModel {
     pub elements: Vec<Element>,
     /// The element types, written in this order after the elements.
     pub types: Vec<ElementType>,
+    /// The grids, written in this order after the elements.
+    pub grids: Vec<Grid>,
     /// The length unit.
     pub length_unit: LengthUnit,
     /// The plane angle unit.
@@ -621,6 +843,7 @@ impl WriteModel {
             storeys: Vec::new(),
             elements: Vec::new(),
             types: Vec::new(),
+            grids: Vec::new(),
             length_unit: LengthUnit::Metre,
             angle_unit: AngleUnit::Radian,
             true_north: None,
@@ -702,6 +925,10 @@ pub fn write(model: &WriteModel, options: &WriteOptions) -> Result<WriteOutput> 
         limits: &options.limits,
         tolerance: options.tolerance,
         meters: model.length_unit.meters(),
+        angle_scale: match model.angle_unit {
+            AngleUnit::Radian => 1.0,
+            AngleUnit::Degree => 180.0 / std::f64::consts::PI,
+        },
         ids: BTreeSet::new(),
         loss: LossLog::default(),
     };
@@ -715,12 +942,16 @@ pub fn write(model: &WriteModel, options: &WriteOptions) -> Result<WriteOutput> 
         options.cancel.check()?;
         writer.element_type(element_type, &mut context)?;
     }
+    for grid in &model.grids {
+        options.cancel.check()?;
+        writer.grid(grid, &mut context)?;
+    }
     writer.relationships(model, &context, &kinds)?;
     writer.materials(model, &context)?;
     writer.data.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
-    writer
-        .loss
-        .add_mapped(len64(model.elements.len() + model.types.len()));
+    writer.loss.add_mapped(len64(
+        model.elements.len() + model.types.len() + model.grids.len(),
+    ));
     let report = writer.loss.finish(LossHeader::new(
         "ifc",
         "IFC4",
@@ -731,6 +962,41 @@ pub fn write(model: &WriteModel, options: &WriteOptions) -> Result<WriteOutput> 
         bytes: writer.data.into_bytes(),
         report,
     })
+}
+
+/// Whether an element of this kind with a host is a part of that decomposing container (a stair,
+/// a ramp or a curtain wall).
+fn is_part(kind: ElementKind) -> bool {
+    matches!(
+        kind,
+        ElementKind::Slab
+            | ElementKind::StairFlight
+            | ElementKind::RampFlight
+            | ElementKind::Railing
+            | ElementKind::Plate
+            | ElementKind::Member
+    )
+}
+
+/// Whether an element of this kind decomposes into parts that name it as their host.
+fn is_container(kind: ElementKind) -> bool {
+    matches!(
+        kind,
+        ElementKind::Stair | ElementKind::Ramp | ElementKind::CurtainWall
+    )
+}
+
+/// Whether a part of kind `part` may be hosted by a container of kind `host`.
+fn part_fits(part: ElementKind, host: Option<ElementKind>) -> bool {
+    match part {
+        ElementKind::Slab | ElementKind::Railing => {
+            matches!(host, Some(ElementKind::Stair | ElementKind::Ramp))
+        }
+        ElementKind::StairFlight => host == Some(ElementKind::Stair),
+        ElementKind::RampFlight => host == Some(ElementKind::Ramp),
+        ElementKind::Plate | ElementKind::Member => host == Some(ElementKind::CurtainWall),
+        _ => false,
+    }
 }
 
 /// The shortest direction the writer accepts. A shorter one has components whose squares lose
@@ -811,11 +1077,8 @@ fn check_references(model: &WriteModel) -> Result<BTreeMap<u128, ElementKind>> {
         let allowed = match element.kind {
             ElementKind::Opening => host_kind.is_some_and(|k| k != ElementKind::Opening),
             ElementKind::Door | ElementKind::Window => host_kind == Some(ElementKind::Opening),
-            ElementKind::Wall
-            | ElementKind::Slab
-            | ElementKind::Space
-            | ElementKind::Roof
-            | ElementKind::Covering => false,
+            kind if is_part(kind) => part_fits(kind, host_kind),
+            _ => false,
         };
         if !allowed {
             return Err(bad_reference(host));
@@ -875,6 +1138,10 @@ fn enumeration(value: &str) -> Parameter {
     Parameter::Enumeration(value.to_owned())
 }
 
+fn boolean(value: bool) -> Parameter {
+    enumeration(if value { "T" } else { "F" })
+}
+
 fn label(value: &str) -> Parameter {
     Parameter::Text(value.to_owned())
 }
@@ -905,8 +1172,11 @@ struct Context {
     building: u64,
     wcs: u64,
     body: u64,
+    /// The `FootPrint` subcontext, written when the model has grids.
+    footprint: Option<u64>,
     storeys: BTreeMap<u128, (u64, u64)>,
     elements: BTreeMap<u128, u64>,
+    grids: BTreeMap<u128, u64>,
     types: BTreeMap<u128, u64>,
 }
 
@@ -916,6 +1186,8 @@ struct Writer<'a> {
     limits: &'a Limits,
     tolerance: Tolerance,
     meters: f64,
+    /// The factor from radians to the plane angle unit of the project.
+    angle_scale: f64,
     ids: BTreeSet<u128>,
     loss: LossLog,
 }
@@ -1054,21 +1326,12 @@ impl Writer<'_> {
                 north,
             ],
         )?;
-        let body = self.add(
-            "IFCGEOMETRICREPRESENTATIONSUBCONTEXT",
-            &[
-                label("Body"),
-                label("Model"),
-                Parameter::Derived,
-                Parameter::Derived,
-                Parameter::Derived,
-                Parameter::Derived,
-                reference(model_context),
-                Parameter::Omitted,
-                enumeration("MODEL_VIEW"),
-                Parameter::Omitted,
-            ],
-        )?;
+        let body = self.subcontext("Body", model_context)?;
+        let footprint = if model.grids.is_empty() {
+            None
+        } else {
+            Some(self.subcontext("FootPrint", model_context)?)
+        };
         let project_id = self.global_id(model.project.id)?;
         let project = self.add(
             "IFCPROJECT",
@@ -1114,10 +1377,31 @@ impl Writer<'_> {
             building,
             wcs,
             body,
+            footprint,
             storeys,
             elements: BTreeMap::new(),
+            grids: BTreeMap::new(),
             types: BTreeMap::new(),
         })
+    }
+
+    /// A `Model` subcontext of the model context for one representation identifier.
+    fn subcontext(&mut self, identifier: &str, model_context: u64) -> Result<u64> {
+        self.add(
+            "IFCGEOMETRICREPRESENTATIONSUBCONTEXT",
+            &[
+                label(identifier),
+                label("Model"),
+                Parameter::Derived,
+                Parameter::Derived,
+                Parameter::Derived,
+                Parameter::Derived,
+                reference(model_context),
+                Parameter::Omitted,
+                enumeration("MODEL_VIEW"),
+                Parameter::Omitted,
+            ],
+        )
     }
 
     /// The first nine attributes of a spatial structure element: the rooted attributes, the
@@ -1269,6 +1553,23 @@ impl Writer<'_> {
                 operation,
                 user_operation.unwrap_or(Parameter::Omitted),
             ]);
+        } else if element.kind == ElementKind::StairFlight {
+            match element.flight {
+                Some(flight) => {
+                    let sizes = [flight.riser_height, flight.tread_length];
+                    if !sizes.iter().all(|v| v.is_finite() && *v > 0.0) {
+                        return Err(invalid("flight dimensions"));
+                    }
+                    parameters.extend([
+                        Parameter::Integer(i64::from(flight.risers)),
+                        Parameter::Integer(i64::from(flight.treads)),
+                        Parameter::Real(flight.riser_height),
+                        Parameter::Real(flight.tread_length),
+                    ]);
+                }
+                None => parameters.extend(std::iter::repeat_n(Parameter::Omitted, 4)),
+            }
+            parameters.push(predefined);
         } else {
             parameters.push(predefined);
         }
@@ -1276,6 +1577,139 @@ impl Writer<'_> {
         context.elements.insert(element.id, instance);
         self.property_sets(element, instance)?;
         self.quantity_sets(element, instance)
+    }
+
+    /// An `IfcGrid`: placed relative to the storey, its axes as `IfcGridAxis` lists and a
+    /// `FootPrint` `GeometricCurveSet` of the axis curves as representation.
+    fn grid(&mut self, grid: &Grid, context: &mut Context) -> Result<()> {
+        let id = self.global_id(grid.id)?;
+        let storey_placement = context
+            .storeys
+            .get(&grid.storey)
+            .map(|&(_, placement)| placement)
+            .ok_or_else(|| bad_reference(grid.storey))?;
+        let footprint = context.footprint.ok_or_else(|| bad_reference(grid.id))?;
+        if grid.axes_u.is_empty() || grid.axes_v.is_empty() {
+            return Err(invalid("grid axes"));
+        }
+        let axes = self.axes(&grid.placement)?;
+        let placement = self.local_placement(Some(storey_placement), axes)?;
+        let mut curves = Vec::new();
+        let mut lists = Vec::with_capacity(3);
+        for list in [&grid.axes_u, &grid.axes_v, &grid.axes_w] {
+            let mut instances = Vec::with_capacity(list.len());
+            for axis in list {
+                let curve = self.axis_curve(&axis.curve)?;
+                curves.push(curve);
+                instances.push(self.add(
+                    "IFCGRIDAXIS",
+                    &[
+                        if axis.tag.is_empty() {
+                            Parameter::Omitted
+                        } else {
+                            label(&axis.tag)
+                        },
+                        reference(curve),
+                        boolean(axis.same_sense),
+                    ],
+                )?);
+            }
+            lists.push(if instances.is_empty() {
+                Parameter::Omitted
+            } else {
+                references(&instances)
+            });
+        }
+        let set = self.add("IFCGEOMETRICCURVESET", &[references(&curves)])?;
+        let representation = self.add(
+            "IFCSHAPEREPRESENTATION",
+            &[
+                reference(footprint),
+                label("FootPrint"),
+                label("GeometricCurveSet"),
+                references(&[set]),
+            ],
+        )?;
+        let shape = self.add(
+            "IFCPRODUCTDEFINITIONSHAPE",
+            &[
+                Parameter::Omitted,
+                Parameter::Omitted,
+                references(&[representation]),
+            ],
+        )?;
+        let (predefined, user_type) = choice(grid.predefined_type.as_deref(), GRID_TYPES);
+        let mut parameters = vec![
+            id,
+            Parameter::Omitted,
+            label(&grid.name),
+            Parameter::Omitted,
+            user_type.unwrap_or(Parameter::Omitted),
+            reference(placement),
+            reference(shape),
+        ];
+        parameters.extend(lists);
+        parameters.push(predefined);
+        let instance = self.add("IFCGRID", &parameters)?;
+        context.grids.insert(grid.id, instance);
+        Ok(())
+    }
+
+    /// The curve of a grid axis in two dimensions.
+    fn axis_curve(&mut self, curve: &AxisCurve) -> Result<u64> {
+        match *curve {
+            AxisCurve::Line { start, end } => {
+                let finite = [start.x, start.y, end.x, end.y]
+                    .iter()
+                    .all(|v| v.is_finite());
+                if !finite || (end - start).norm() * self.meters <= self.tolerance.linear {
+                    return Err(invalid("grid axis"));
+                }
+                let points = [self.point2(&start)?, self.point2(&end)?];
+                self.add("IFCPOLYLINE", &[references(&points)])
+            }
+            AxisCurve::Arc {
+                center,
+                radius,
+                start_angle,
+                end_angle,
+            } => {
+                let sweep = end_angle - start_angle;
+                let valid = [center.x, center.y, radius, start_angle, end_angle]
+                    .iter()
+                    .all(|v| v.is_finite())
+                    && radius * self.meters > self.tolerance.linear
+                    && sweep > self.tolerance.angular
+                    && sweep <= std::f64::consts::TAU;
+                if !valid {
+                    return Err(invalid("grid axis"));
+                }
+                let location = self.point2(&center)?;
+                let position = self.add(
+                    "IFCAXIS2PLACEMENT2D",
+                    &[reference(location), Parameter::Omitted],
+                )?;
+                let circle =
+                    self.add("IFCCIRCLE", &[reference(position), Parameter::Real(radius)])?;
+                let trim = |angle: f64| {
+                    Parameter::List(vec![typed(
+                        "IFCPARAMETERVALUE",
+                        Parameter::Real(angle * self.angle_scale),
+                    )])
+                };
+                let (first, last) = (trim(start_angle), trim(end_angle));
+                self.add(
+                    "IFCTRIMMEDCURVE",
+                    &[
+                        reference(circle),
+                        first,
+                        last,
+                        boolean(true),
+                        enumeration("PARAMETER"),
+                    ],
+                )
+            }
+        }
     }
 
     /// An element type: the rooted attributes, the `ElementType` text of a user-defined
@@ -1825,13 +2259,22 @@ impl Writer<'_> {
                 references(&storeys),
             )?;
         }
+        self.parts(model, context)?;
         for storey in &model.storeys {
             let contained: Vec<u64> = model
                 .elements
                 .iter()
                 .filter(|e| e.storey == storey.id)
                 .filter(|e| !matches!(e.kind, ElementKind::Opening | ElementKind::Space))
+                .filter(|e| !(e.host.is_some() && is_part(e.kind)))
                 .filter_map(|e| context.elements.get(&e.id).copied())
+                .chain(
+                    model
+                        .grids
+                        .iter()
+                        .filter(|g| g.storey == storey.id)
+                        .filter_map(|g| context.grids.get(&g.id).copied()),
+                )
                 .collect();
             let spaces: Vec<u64> = model
                 .elements
@@ -1868,6 +2311,7 @@ impl Writer<'_> {
                 return Err(bad_reference(host));
             };
             match kinds.get(&element.id) {
+                Some(kind) if is_part(*kind) => {}
                 Some(ElementKind::Opening) => self.relationship(
                     "IFCRELVOIDSELEMENT",
                     derived_id(element.id, role::VOIDS, 0),
@@ -1883,6 +2327,29 @@ impl Writer<'_> {
             }
         }
         self.type_relationships(model, context)
+    }
+
+    /// One `IfcRelAggregates` per stair, ramp or curtain wall with parts: the elements that name
+    /// it as their host, in model order.
+    fn parts(&mut self, model: &WriteModel, context: &Context) -> Result<()> {
+        for element in model.elements.iter().filter(|e| is_container(e.kind)) {
+            // The parts, in model order: aggregated by the container, not contained in a storey.
+            let parts: Vec<u64> = model
+                .elements
+                .iter()
+                .filter(|e| e.host == Some(element.id) && is_part(e.kind))
+                .filter_map(|e| context.elements.get(&e.id).copied())
+                .collect();
+            if let (false, Some(&stair)) = (parts.is_empty(), context.elements.get(&element.id)) {
+                self.relationship(
+                    "IFCRELAGGREGATES",
+                    derived_id(element.id, role::AGGREGATES, 0),
+                    reference(stair),
+                    references(&parts),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// One `IfcRelDefinesByType` per element type with occurrences.
