@@ -1956,8 +1956,8 @@ IfcOpenShell's templates.
 | `io.ifc.instance_duplicate` | `corrupt_data` | Two instances have the same name, in one or several data sections |
 | `io.ifc.archive_entry_missing` | `not_found` | The archive has no entry whose name ends in `.ifc` after the metadata entries are skipped |
 | `io.ifc.archive_entry_ambiguous` | `unsupported` | The archive has more than one entry whose name ends in `.ifc` after the metadata entries are skipped |
-| `io.ifc.write_value_invalid` | `invalid_input` | The writer was given a number that is not finite, a negative quantity, a door or window size that is not positive, placement axes or a true north that are too short or parallel, a NUL in a text, a name repeated within a property or quantity set, a set name repeated on one element, a property value its type refuses (a measure outside its rule, a label or identifier over 255 characters, an enumerated value outside its items, one enumeration name with two item lists), a grid axis curve that is degenerate or not joined, or an invalid georeferencing |
-| `io.ifc.write_reference_invalid` | `invalid_input` | The writer was given an element whose storey or host is not in the model or of a kind the relationship does not allow, an opening without a host, a chain of hosts that returns to its start, or a group member that is not an element or grid of the model |
+| `io.ifc.write_value_invalid` | `invalid_input` | The writer was given a number that is not finite, a negative quantity, a door or window size that is not positive, placement axes, a mapping transform or a true north that are too short or parallel, a mapping of an element that has a body or no type, a NUL in a text, a name repeated within a property or quantity set, a set name repeated on one element, a property value its type refuses (a measure outside its rule, a label or identifier over 255 characters, an enumerated value outside its items, one enumeration name with two item lists), a grid axis curve that is degenerate or not joined, or an invalid georeferencing |
+| `io.ifc.write_reference_invalid` | `invalid_input` | The writer was given an element whose storey or host is not in the model or of a kind the relationship does not allow (an opening or a space is never a host of a part), an opening without a host, a mapping of an element whose type has no representation, a chain of hosts that returns to its start, or a group member that is not an element or grid of the model |
 | `io.ifc.write_id_duplicate` | `invalid_input` | Two objects of the written file would have the same `GlobalId` |
 | `io.ifc.write_schema_unavailable` | `unsupported` | The output schema is IFC2X3 and the generated tables are not part of the build (IFC4 needs none; IFC4X3 tables are always present) |
 | `io.ifc.write_not_conformant` | `internal` | The self-check found the written file non-conformant (levels 1 to 3 against the tables of its schema); the arguments name the count and the first finding. A defect of the writer or of the schema mapping; nothing is returned |
@@ -1989,28 +1989,37 @@ The structs of the model are marked non-exhaustive and are built with their `new
 `MaterialLayer::new`, `LayerSetUsage::new`, `Grid::new`, `GridAxis::new`, `AxisSegment::new`,
 `Group::new`, `Georeference::new`); their fields are public and set after construction.
 
-An `Element` has an identifier, a kind (`ElementKind`: wall, slab, door, window, opening, space, roof, covering, stair, stair flight, railing, ramp, ramp flight, curtain wall, plate, member, transport element, pipe segment), a name, a long name (spaces), the
+An `Element` has an identifier, a kind (`ElementKind`: wall, slab, door, window, opening, space, roof, covering, stair, stair flight, railing, ramp, ramp flight, curtain wall, plate, member, transport element, pipe segment, furniture, sanitary terminal, light fixture, electric appliance, unitary equipment, column, beam, building element proxy), a name, a long name (spaces), the
 identifier of its storey, a `Placement` relative to the storey (origin, local z axis, local x axis), an
 optional `Body`, a predefined type, an operation type (doors) or partitioning type (windows), the overall
 width and height (doors and windows), a host, property sets, quantity sets, the identifier of its
-element type and a layer set usage (walls and slabs). A `Body` is an extrusion
+element type, a layer set usage (walls and slabs) and a mapping (a `Placement`: the transform of an occurrence of a type's shared geometry). A `Body` is an extrusion
 (a closed polyline profile with optional holes in the plane `z = 0`, a direction and a depth) or a faceted
 B-rep (vertices and polygon faces given as index loops, counterclockwise seen from outside). The host of
 an opening is the element it voids (a wall, slab, door or window) and is required, because an opening
 voids exactly one element; the host of a door or window is the opening it fills; walls and slabs have
 no host. A chain of hosts that returns to its start, such as an opening hosted by the door that fills
-it, is refused.
+it, is refused. Any element of the furniture, sanitary terminal, light fixture, electric appliance,
+unitary equipment, column, beam, building element proxy, transport element and pipe segment kinds may
+name as its host any element except an opening or a space; the host aggregates it (`IfcRelAggregates`).
+Walls, spaces, roofs, coverings, stairs, ramps and curtain walls keep their rules: no host, or the
+decomposition rules of the stair, ramp and curtain wall kinds.
 
 `WriteModel::types` holds the element types. An `ElementType` has an identifier, the kind of its
-occurrences (wall, slab, door or window; an opening or space kind is refused), a name, a predefined
-type, an operation type (doors) or partitioning type (windows) and, for walls and slabs, its
-`MaterialLayer`s in order: a material name, a thickness (zero for a membrane; negative or not finite
-is refused), an optional layer name and an optional category. An element names its type by
-identifier; a missing type or a type of another kind is refused. A `LayerSetUsage` says how the
-type's layers lie in the element: the axis of the element's placement they are stacked along
+occurrences (any kind with a type; an opening, space, stair, stair flight, railing, ramp or ramp flight
+is refused), a name, a predefined type, an operation type (doors) or partitioning type (windows) and,
+for walls and slabs, its `MaterialLayer`s in order: a material name, a thickness (zero for a membrane;
+negative or not finite is refused), an optional layer name and an optional category. An element names
+its type by identifier; a missing type or a type of another kind is refused. A `LayerSetUsage` says how
+the type's layers lie in the element: the axis of the element's placement they are stacked along
 (`LayerDirection::Axis2`, the local y axis across a wall, or `Axis3`, the local z axis through a
 slab), whether they follow toward the positive or the negative side, and the offset of the first
-layer from the reference line or plane (an offset that is not finite is refused).
+layer from the reference line or plane (an offset that is not finite is refused). The type's
+`property_sets` and `quantity_sets` are listed in its `HasPropertySets`; its `representation` is the
+shared geometry, written as an `IfcRepresentationMap`. An element with `mapping` set uses that map
+through an `IfcMappedItem` whose `MappingTarget` is the placement's transform (an
+`IfcCartesianTransformationOperator3D`: the x and z axes made orthogonal, the scale one); the element
+has no body of its own, and its type must have a representation.
 
 ### What is written
 
@@ -2073,6 +2082,12 @@ layer from the reference line or plane (an offset that is not finite is refused)
   one, and is contained in its storey otherwise. Bodies, placements (relative to the storey for
   every part), property sets and quantity sets (for example `Qto_StairFlightBaseQuantities` and
   `Qto_RailingBaseQuantities` with `Length`) are written as for the other elements.
+- Generic aggregation: an element of the kinds listed above (furniture to building element proxy, transport
+  element and pipe segment) with a `host` is a part of that host, whatever the host's kind (except an
+  opening or a space). The writer adds one `IfcRelAggregates` per host with parts
+  (`derived_id(host, AGGREGATES, 0)`, parts in model order), and a part is not in the storey's
+  `IfcRelContainedInSpatialStructure`. A chain of hosts that returns to its start, and a host that is not
+  in the model, are refused.
 - Ramps and curtain walls decompose like stairs. The writer's rule is general: a stair, a ramp
   or a curtain wall (a decomposing container) aggregates the elements that name it as their `host`
   (`IfcRelAggregates`, `derived_id(container, AGGREGATES, 0)`, parts in model order), and a part is not
@@ -2092,6 +2107,26 @@ layer from the reference line or plane (an offset that is not finite is refused)
     `STRUT`, `STUD`). Plates, members and curtain walls have element types (`IfcPlateType`,
     `IfcMemberType`, `IfcCurtainWallType`, written like the other types; their layers are reported,
     not written).
+- Furniture, sanitary terminals, light fixtures, electric appliances, unitary equipment, columns, beams
+  and building element proxies: `IfcFurniture` (`ElementKind::Furniture`, `IfcFurnitureTypeEnum`: `CHAIR`,
+  `TABLE`, `DESK`, `BED`, `FILECABINET`, `SHELF`, `SOFA`), `IfcSanitaryTerminal` (`SanitaryTerminal`,
+  `IfcSanitaryTerminalTypeEnum`: `BATH`, `BIDET`, `CISTERN`, `SHOWER`, `SINK`, `SANITARYFOUNTAIN`,
+  `TOILETPAN`, `URINAL`, `WASHHANDBASIN`, `WCSEAT`), `IfcLightFixture` (`LightFixture`:
+  `POINTSOURCE`, `DIRECTIONSOURCE`, `SECURITYLIGHTING`), `IfcElectricAppliance` (`ElectricAppliance`:
+  `DISHWASHER`, `ELECTRICCOOKER`, `FREESTANDINGELECTRICHEATER`, `FREESTANDINGFAN`,
+  `FREESTANDINGWATERHEATER`, `FREESTANDINGWATERCOOLER`, `FREEZER`, `FRIDGE_FREEZER`, `HANDDRYER`,
+  `KITCHENMACHINE`, `MICROWAVE`, `PHOTOCOPIER`, `REFRIGERATOR`, `TUMBLEDRYER`, `VENDINGMACHINE`,
+  `WASHINGMACHINE`), `IfcUnitaryEquipment` (`UnitaryEquipment`: `AIRHANDLER`, `AIRCONDITIONINGUNIT`,
+  `DEHUMIDIFIER`, `SPLITSYSTEM`, `ROOFTOPUNIT`), `IfcColumn` (`Column`: `COLUMN`, `PILASTER`), `IfcBeam`
+  (`Beam`: `BEAM`, `JOIST`, `HOLLOWCORE`, `LINTEL`, `SPANDREL`, `T_BEAM`) and `IfcBuildingElementProxy`
+  (`BuildingElementProxy`: `COMPLEX`, `ELEMENT`, `PARTIAL`, `PROVISIONFORVOID`, `PROVISIONFORSPACE`).
+  Each takes the `PredefinedType` of its IFC4 enumeration (another text is `USERDEFINED`, none is
+  `NOTDEFINED`) and is contained in its storey unless it has a host (see generic aggregation below). Each
+  has an element type (`IfcFurnitureType`, `IfcSanitaryTerminalType`, `IfcLightFixtureType`,
+  `IfcElectricApplianceType`, `IfcUnitaryEquipmentType`, `IfcColumnType`, `IfcBeamType`,
+  `IfcBuildingElementProxyType`). The writer never writes a proxy in place of a kind that the output
+  schema or the model lacks: such an element is reported as not written. `IfcFurnitureType` requires
+  `AssemblyPlace` in IFC4; the writer writes `NOTDEFINED`, as the model has no value for it.
 - Transport elements and pipe segments: `IfcTransportElement` (`ElementKind::TransportElement`,
   `IfcTransportElementTypeEnum`: `ELEVATOR`, `ESCALATOR`, `MOVINGWALKWAY`, `CRANEWAY`, `LIFTINGGEAR`)
   and `IfcPipeSegment` (`ElementKind::PipeSegment`, `IfcPipeSegmentTypeEnum`: `CULVERT`,
@@ -2122,12 +2157,17 @@ layer from the reference line or plane (an offset that is not finite is refused)
   only when the model has grids) holding one `IfcGeometricCurveSet` of the axis curves, which are
   shared with the axes. `PredefinedType` takes `IfcGridTypeEnum` (`RECTANGULAR`, `RADIAL`,
   `TRIANGULAR`, `IRREGULAR`; another text is `USERDEFINED`).
-- Element types: `IfcWallType`, `IfcSlabType`, `IfcRoofType`, `IfcCoveringType`, `IfcPlateType`, `IfcMemberType`, `IfcCurtainWallType`, `IfcDoorType` and `IfcWindowType`, after the
+- Element types: `IfcWallType`, `IfcSlabType`, `IfcRoofType`, `IfcCoveringType`, `IfcPlateType`, `IfcMemberType`, `IfcCurtainWallType`, `IfcDoorType`, `IfcWindowType` and the types of the kinds listed above, after the
   elements, in model order, with the rules of the predefined type below (the text of a user-defined
   predefined type is the `ElementType` attribute) and, for doors and windows, the operation or
-  partitioning type; `ParameterTakesPrecedence` is omitted. Each type with at least one occurrence
-  gets one `IfcRelDefinesByType` (`derived_id(type, TYPED, 0)`) listing its occurrences in model
-  order; a type without occurrences is written alone.
+  partitioning type; `ParameterTakesPrecedence` is omitted. Each type's property and quantity sets are
+  written before it and listed in `HasPropertySets` (an empty set is reported and not listed); no
+  `IfcRelDefinesByProperties` relates them. A type with a representation gets one `IfcRepresentationMap`
+  (`MappingOrigin` the identity, `MappedRepresentation` the body's `IfcShapeRepresentation`) in its
+  `RepresentationMaps`, written before the elements; an occurrence with `mapping` gets an `IfcMappedItem`
+  in a `MappedRepresentation` shape. Each type with at least one occurrence gets one `IfcRelDefinesByType`
+  (`derived_id(type, TYPED, 0)`) listing its occurrences in model order; a type without occurrences is
+  written alone.
 - Materials: each wall, slab or roof type with layers gets an `IfcMaterialLayerSet` named after the type,
   of one `IfcMaterialLayer` per layer (the `IfcMaterial`, the thickness, `IsVentilated` unknown, the
   layer name and category; one `IfcMaterial` per distinct material name in the file), associated
@@ -2303,7 +2343,7 @@ with the element's `GlobalId` as the source and the entity that was not written 
 The loss report counts the element types as mapped too.
 
 The writer does not check that a profile is simple (a self-intersecting profile with area is written),
-that holes lie inside the outer loop, or that a B-rep is closed and planar. It writes no property sets of element types, representation maps, materials other than layer sets,
+that holes lie inside the outer loop, or that a B-rep is closed and planar. It writes no materials other than layer sets,
 space boundaries, axis representations, owner history (except IFC2X3), classification, zones, bounded, list, table,
 reference or complex property values, or other element kinds.
 
@@ -2316,7 +2356,10 @@ property and quantity sets and the body volumes (6.0 m³ for a 10 × 0.2 × 3 m 
 are compared with the model; `geometry` subtracts the prism openings of the walls by default, so a wall loses the volume of its door or window.
 The same house with a layered wall type, a slab type with a membrane layer and door and window types
 reads back with its type assignments, layer sets, layers and layer set usages, and the refusals of
-type references and layer values are checked.
+type references and layer values are checked. `tests/write_kinds.rs` reads back the kinds of the
+ArchBuilder families with their types and predefined values, the type property and quantity sets, the
+mapped items with their transforms (volumes and bounds) and the generic aggregation through hosts, and
+checks the refusals of invalid mappings and hosts.
 The out-of-process oracle of the [interchange architecture](../architecture/interchange.md) is not part
 of the gate. `tools/ifc-oracle` (see its [README](../../tools/ifc-oracle/README.md)) validates every file
 the writer tests produce with IfcOpenShell and the EXPRESS rules and compares per-product volume, area
