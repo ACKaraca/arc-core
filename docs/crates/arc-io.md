@@ -1497,15 +1497,15 @@ not written yet.
 ### The write model
 
 `WriteModel` (module `write`) holds a project, a site and a building (`Spatial`: identifier and name),
-the storeys (`Storey`: identifier, name, elevation), the elements, the length unit (`LengthUnit`:
+the storeys (`Storey`: identifier, name, elevation), the elements, the grids (`Grid`), the length unit (`LengthUnit`:
 meters or millimeters), the plane angle unit (`AngleUnit`: radians or degrees) and an optional true
 north direction. Every length, area and volume of the model is in the length unit, squared or cubed.
 The structs of the model are marked non-exhaustive and are built with their `new` constructors
 (`WriteModel::new`, `Spatial::new`, `Storey::new`, `Element::new`, `Placement::new`,
 `PropertySet::new`, `Property::new`, `QuantitySet::new`, `Quantity::new`, `ElementType::new`,
-`MaterialLayer::new`, `LayerSetUsage::new`); their fields are public and set after construction.
+`MaterialLayer::new`, `LayerSetUsage::new`, `Grid::new`, `GridAxis::new`); their fields are public and set after construction.
 
-An `Element` has an identifier, a kind (`ElementKind`: wall, slab, door, window, opening, space, roof, covering, stair, stair flight, railing), a name, a long name (spaces), the
+An `Element` has an identifier, a kind (`ElementKind`: wall, slab, door, window, opening, space, roof, covering, stair, stair flight, railing, ramp, ramp flight, curtain wall, plate, member), a name, a long name (spaces), the
 identifier of its storey, a `Placement` relative to the storey (origin, local z axis, local x axis), an
 optional `Body`, a predefined type, an operation type (doors) or partitioning type (windows), the overall
 width and height (doors and windows), a host, property sets, quantity sets, the identifier of its
@@ -1589,7 +1589,43 @@ layer from the reference line or plane (an offset that is not finite is refused)
   one, and is contained in its storey otherwise. Bodies, placements (relative to the storey for
   every part), property sets and quantity sets (for example `Qto_StairFlightBaseQuantities` and
   `Qto_RailingBaseQuantities` with `Length`) are written as for the other elements.
-- Element types: `IfcWallType`, `IfcSlabType`, `IfcRoofType`, `IfcCoveringType`, `IfcDoorType` and `IfcWindowType`, after the
+- Ramps and curtain walls decompose like stairs. The writer's rule is general: a stair, a ramp
+  or a curtain wall (a decomposing container) aggregates the elements that name it as their `host`
+  (`IfcRelAggregates`, `derived_id(container, AGGREGATES, 0)`, parts in model order), and a part is not
+  in the storey's `IfcRelContainedInSpatialStructure`; a part without a host is contained. Allowed
+  hosts: a landing (`IfcSlab`) and a railing, a stair or a ramp; `StairFlight`, a stair;
+  `RampFlight`, a ramp; `Plate` and `Member`, a curtain wall; another host is
+  `io.ifc.write_reference_invalid`.
+  - `IfcRamp` (`ElementKind::Ramp`): `PredefinedType` of `IfcRampTypeEnum` (`STRAIGHT_RUN_RAMP`,
+    `TWO_STRAIGHT_RUN_RAMP`, `QUARTER_TURN_RAMP`, `TWO_QUARTER_TURN_RAMP`, `HALF_TURN_RAMP`,
+    `SPIRAL_RAMP`; another text is `USERDEFINED`, none `NOTDEFINED`). `IfcRampFlight`
+    (`ElementKind::RampFlight`): `IfcRampFlightTypeEnum` (`STRAIGHT`, `SPIRAL`); IFC4 gives it no
+    riser or tread attributes, so `Element::flight` is ignored and quantities
+    (`Qto_RampFlightBaseQuantities`) are the caller's quantity sets. Neither has an element type.
+  - `IfcCurtainWall` (`ElementKind::CurtainWall`, `USERDEFINED` or `NOTDEFINED`), `IfcPlate`
+    (`ElementKind::Plate`: `CURTAIN_PANEL`, `SHEET`) and `IfcMember` (`ElementKind::Member`:
+    `BRACE`, `CHORD`, `COLLAR`, `MEMBER`, `MULLION`, `PLATE`, `POST`, `PURLIN`, `RAFTER`, `STRINGER`,
+    `STRUT`, `STUD`). Plates, members and curtain walls have element types (`IfcPlateType`,
+    `IfcMemberType`, `IfcCurtainWallType`, written like the other types; their layers are reported,
+    not written).
+- Grids: `Grid { id, name, storey, placement, axes_u, axes_v, axes_w, predefined_type }` is written as an
+  `IfcGrid` placed relative to its storey and contained in it (`IfcRelContainedInSpatialStructure`, after
+  the storey's elements), after the elements. `UAxes` and `VAxes` need at least one axis, `WAxes` is
+  omitted when empty; each `GridAxis { tag, curve, same_sense }` is an `IfcGridAxis` (`AxisTag` omitted
+  when empty, `SameSense` from the field). The curve (`AxisCurve`, two dimensions, in the plane of the
+  grid's placement) is `Line { start, end }`, an `IfcPolyline` of two points (at least the linear
+  tolerance apart), or `Arc { center, radius, start_angle, end_angle }`, an `IfcTrimmedCurve` of an
+  `IfcCircle` at an `IfcAxis2Placement2D`, trimmed by `IfcParameterValue`s (the angles are in radians in
+  the model and written in the plane angle unit of the project), counterclockwise with
+  `SenseAgreement` true (radius above the linear tolerance, sweep above the angular tolerance and at
+  most a full turn); a clockwise or reversed axis is an arc with `same_sense` false. A value that is
+  not finite or outside these bounds is `io.ifc.write_value_invalid`, a storey that is not in the
+  model `io.ifc.write_reference_invalid`. The representation is an `IfcShapeRepresentation`
+  `FootPrint` / `GeometricCurveSet` in an `IfcGeometricRepresentationSubContext` `FootPrint` (added
+  only when the model has grids) holding one `IfcGeometricCurveSet` of the axis curves, which are
+  shared with the axes. `PredefinedType` takes `IfcGridTypeEnum` (`RECTANGULAR`, `RADIAL`,
+  `TRIANGULAR`, `IRREGULAR`; another text is `USERDEFINED`).
+- Element types: `IfcWallType`, `IfcSlabType`, `IfcRoofType`, `IfcCoveringType`, `IfcPlateType`, `IfcMemberType`, `IfcCurtainWallType`, `IfcDoorType` and `IfcWindowType`, after the
   elements, in model order, with the rules of the predefined type below (the text of a user-defined
   predefined type is the `ElementType` attribute) and, for doors and windows, the operation or
   partitioning type; `ParameterTakesPrecedence` is omitted. Each type with at least one occurrence
