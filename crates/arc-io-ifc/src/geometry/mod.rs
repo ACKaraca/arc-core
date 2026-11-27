@@ -29,6 +29,7 @@ mod units;
 /// the loop length. A longer loop is not evaluated.
 pub(crate) const MAX_LOOP_VERTICES: usize = 4096;
 
+use crate::schema::access::known;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -349,10 +350,16 @@ impl<'f> Evaluator<'f> {
         if let Some(pair) = self.texts.get(&name) {
             return Ok(pair.clone());
         }
-        let identifier = attr::text(rep.parameters.get(1), "IFCSHAPEREPRESENTATION");
+        let identifier = attr::text(
+            self.file.attr(rep, known::REPRESENTATION_IDENTIFIER),
+            "IFCSHAPEREPRESENTATION",
+        );
         let identifier = self.settle(identifier, name)?.flatten();
         let identifier = shared_text(&mut self.budget, identifier)?;
-        let rtype = attr::text(rep.parameters.get(2), "IFCSHAPEREPRESENTATION");
+        let rtype = attr::text(
+            self.file.attr(rep, known::REPRESENTATION_TYPE),
+            "IFCSHAPEREPRESENTATION",
+        );
         let rtype = self.settle(rtype, name)?.flatten();
         let rtype = shared_text(&mut self.budget, rtype)?;
         let pair = (identifier, rtype);
@@ -374,7 +381,7 @@ impl<'f> Evaluator<'f> {
         };
         let step = attr::distinct_references(
             &mut self.budget,
-            record.parameters.get(2),
+            file.attr(record, known::PRODUCT_REPRESENTATIONS),
             "IFCPRODUCTDEFINITIONSHAPE",
             usize::MAX,
         );
@@ -407,7 +414,7 @@ impl<'f> Evaluator<'f> {
             let (identifier, rtype) = self.representation_texts(representation, rep)?;
             let step = attr::distinct_references(
                 &mut self.budget,
-                rep.parameters.get(3),
+                file.attr(rep, known::REPRESENTATION_ITEMS),
                 "IFCSHAPEREPRESENTATION",
                 usize::MAX,
             );
@@ -462,13 +469,15 @@ fn products(file: &IfcFile) -> Vec<(u64, Option<u64>, u64)> {
     let mut out = Vec::new();
     for instance in file.instances() {
         for record in &instance.records {
-            let Some(Parameter::Reference(shape)) = record.parameters.get(6) else {
+            let Some(Parameter::Reference(shape)) =
+                file.attr(record, known::PRODUCT_REPRESENTATION)
+            else {
                 continue;
             };
             if attr::typed(file, *shape, "IFCPRODUCTDEFINITIONSHAPE").is_none() {
                 continue;
             }
-            let placement = match record.parameters.get(5) {
+            let placement = match file.attr(record, known::PRODUCT_PLACEMENT) {
                 Some(Parameter::Reference(name)) => Some(*name),
                 _ => None,
             };

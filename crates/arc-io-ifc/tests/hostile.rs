@@ -82,6 +82,7 @@ fn assert_clean(bytes: &[u8]) {
                 .file
                 .typed_views(&Limits::CONSTRAINED, &Cancel::new());
             let mut file = output.file;
+            let _ = file.conformance(&Limits::CONSTRAINED, &Cancel::new());
             if !bytes.starts_with(b"PK") {
                 assert_eq!(file.write_step(&Limits::LARGE_MODELS).unwrap(), bytes);
             }

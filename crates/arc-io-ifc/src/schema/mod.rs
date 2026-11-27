@@ -15,6 +15,14 @@ use std::cmp::Ordering;
 
 use crate::model::Schema;
 
+pub(crate) mod access;
+mod check;
+mod inverse;
+
+pub use access::Typed;
+pub use check::{Conformance, Finding, RuleCount};
+pub use inverse::{InverseIndex, Referrer};
+
 #[cfg(arc_ifc_schema_tables)]
 mod generated {
     use super::{

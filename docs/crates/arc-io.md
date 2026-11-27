@@ -1179,9 +1179,10 @@ Streaming (CORE-IO-017) and IDS (CORE-IO-018) are not implemented.
   that a byte that starts no well-formed UTF-8 sequence is read as ISO 8859-1 and counted
   (`io.ifc.text_latin1`). A raw tab, carriage return or line feed is kept and counted
   (`io.ifc.text_control_kept`). Any other raw control byte below 0x20 is refused.
-- What is not read: the content of the header beyond `FILE_SCHEMA` is not interpreted; the parameter
-  count and the parameter types of an entity are not checked against the schema, and no WHERE rule is
-  evaluated. An entity keeps the values its file gives, whatever the schema says of them.
+- What is not read: the content of the header beyond `FILE_SCHEMA` is not interpreted. Reading does
+  not check the parameter count or types of an entity against the schema; an entity keeps the values
+  its file gives, whatever the schema says of them. The [conformance checker](#schema-aware-access-and-conformance)
+  checks them on request; no WHERE rule is evaluated.
 - Memory estimate: the parser charges an estimate of the memory it allocates against `memory_bytes`:
   48 bytes per parameter, 64 bytes per record plus its type name, 120 bytes per instance (its span included), and the raw
   length of each string, binary literal, enumeration and type name. The constants are in
@@ -1303,11 +1304,14 @@ assignments, the property sets, the quantity sets and a loss report of the views
   `Name` 0, `Description` 1, `Unit` 2, its value at 3 and `Formula` 4. `Formula` exists in IFC4 and
   IFC4X3 only, so IFC2X3 gives no formula. A count is an integer, the others are reals; a measure wrapper
   such as `IFCAREAMEASURE(12.5)` is read through. Another quantity type is `io.ifc.not_mapped`.
-- Schemas: the reader reads attributes by position and does not consult the schema. The positions of the
-  rooted attributes, the relationships, the property values and the quantity values agree in IFC2X3, IFC4
-  and IFC4X3. The two exceptions are the layouts named above (`Formula` and `SetPointValue`), which are
-  absent in IFC2X3. The minimal project is tested in each schema identifier, with an IFC2X3 layout of its
-  quantities and bounded value; the schema of a file is available as `IfcFile::schema`.
+- Schemas: the views read every attribute by name through the
+  [schema tables](#schema-aware-access-and-conformance) of the file's schema; the positions given above
+  are those of the tables. An attribute the schema does not declare is absent: `Formula` and
+  `SetPointValue` in IFC2X3. The description of a property is `Description` in IFC2X3 and IFC4 and
+  `Specification` in IFC4X3. Without the tables, or for a schema or entity they do not declare, the
+  positions above are used; a test checks each of them against the tables of all three schemas. The
+  minimal project is tested in each schema identifier, with an IFC2X3 layout of its quantities and
+  bounded value; the schema of a file is available as `IfcFile::schema`.
 - A relationship member of the wrong kind drops that member only; the other members of the list are kept.
 - Entity types the views do not read stay generic instances and are not part of the views.
 
@@ -1532,8 +1536,8 @@ argument `limit` naming `memory_bytes`, `record_count` or `array_length`.
 ### Schema tables
 
 `arc_io_ifc::schema` holds tables of the IFC schemas IFC2X3 TC1, IFC4 ADD2 TC1 and IFC4X3 ADD2
-([ADR-0018](../adr/0018-ifc-schema-tables-from-express.md), proposed). The reader, the views and the
-writer do not use them yet.
+([ADR-0018](../adr/0018-ifc-schema-tables-from-express.md), proposed). The typed views, the geometry
+evaluation and the conformance checker use them; the writer does not yet.
 
 - `SchemaTables::of(&Schema)` returns the tables of a schema. Each table (`entities`,
   `defined_types`, `enumerations`, `selects`, `functions`, `rules`) is sorted by the upper-case name;
@@ -1588,6 +1592,63 @@ selects, abstract entities and derived re-declarations; all equal) and that the 
 current, and `tests/schema_tables.rs` requires the tables. Without it these tests skip.
 `ARC_IFC_SCHEMA_DUMP=<file>` makes `tests/schema_tables.rs` write the tables as JSON for
 `tools/ifc-oracle/schema_diff.py`.
+
+### Schema-aware access and conformance
+
+Access by name, over the tables of the file's schema (`IfcFile::tables`):
+
+- `SchemaTables::attribute_position(entity, name)` gives the record position of an explicit attribute
+  over the supertype chain and the attribute; names ignore ASCII case. `underlying` follows defined
+  types to their underlying type; `select_contains` and `select_accepts_entity` resolve select members
+  through nested selects; `decode(type, parameter)` reads a parameter by a declared type as a `Typed`
+  value (integer, real, boolean, logical, string, binary, entity reference, enumeration item, select
+  member with its typed parameter, aggregate, `$`, `*`), or `None` when the value is not of that type.
+- `IfcFile::attribute(record, name)` and `typed_attribute(record, name)` read an attribute of a simple
+  instance at the position the tables give; `instance_attribute(instance, name)` also reads a part of a
+  complex instance, whose record holds only the attributes its entity declares. All return `None` without
+  tables or for an entity or attribute the schema does not declare.
+- The typed views and the geometry evaluation read each attribute they use by name in the same way.
+  Without tables, or for an entity the schema does not declare, they use the attribute's position in
+  IFC2X3, IFC4 and IFC4X3; a test checks every such position against the tables of the three schemas.
+- `IfcFile::inverse_index(limits, cancel)` builds, on demand, the referrers of every instance (referring
+  instance, record and parameter position; references inside lists and typed parameters included). Each
+  entry counts against `record_count` and is charged 32 bytes against the share of `memory_bytes` left
+  after the parser. `InverseIndex::inverse(file, instance, name)` resolves an inverse attribute: the
+  instances of its entity, or a subtype, referring through its attribute, each once for a `SET`.
+
+`IfcFile::conformance(limits, cancel)` checks every instance against the tables and returns a
+`Conformance`: the schema checked against, the findings (instance, entity, attribute, `rules::Rule`) in
+file order, at most 10 000 and at most `record_count`, with `truncated` set when more failed, and one
+`RuleCount` per rule with the instances that passed, failed and were not evaluated. A rule is counted per
+instance it applies to; an instance is not evaluated for a rule the checker could not decide (the entity
+is unknown, the parameter count is wrong so the positions are unknown, a bound is an expression, a
+referenced instance has an unknown entity), and nothing undecided is counted as passed. Without tables
+every rule is not evaluated for every instance. A finding is reported once per instance, attribute and
+rule. The inverse index and the keys of the `UNIQUE` rules count against the limits; cancellation is
+checked per instance.
+
+| Code | Level | Rule |
+|---|---|---|
+| `io.ifc.conformance_entity_unknown` | 1 | The entity is declared in the schema |
+| `io.ifc.conformance_entity_abstract` | 1 | The entity of a simple instance is not abstract |
+| `io.ifc.conformance_complex_invalid` | 1 | The parts of a complex instance include the supertype of each part, at most one subtype of each `ONEOF`, and no abstract part without a subtype among the parts |
+| `io.ifc.conformance_attribute_count` | 1 | The parameter count equals the explicit attributes over the supertype chain (for a part of a complex instance, those its entity declares) |
+| `io.ifc.conformance_value_missing` | 1 | `$` only for an optional attribute, and inside an aggregate only for `ARRAY OF OPTIONAL` |
+| `io.ifc.conformance_derived_misplaced` | 1 | `*` exactly where the entity or a supertype re-declares the attribute as derived |
+| `io.ifc.conformance_value_type` | 1 | The value has the kind of the underlying type: integer; real or number (an integer is accepted, as EXPRESS makes integers reals); `.T.`/`.F.` for a boolean and also `.U.` for a logical; string; binary; reference; enumeration; list for an aggregate; a typed parameter only for a select |
+| `io.ifc.conformance_enumeration_item` | 1 | An enumeration value is an item of its enumeration |
+| `io.ifc.conformance_select_member` | 1 | A select value is a reference to an instance of a member entity (or a subtype) or a typed parameter naming a member type, through nested selects |
+| `io.ifc.conformance_reference_type` | 1 | A reference names an instance of the declared entity or a subtype |
+| `io.ifc.conformance_reference_dangling` | 1 | A reference names an instance of the file |
+| `io.ifc.conformance_aggregate_size` | 1 | An aggregate, nested ones included, has as many elements as its bounds allow (an array one per index) |
+| `io.ifc.conformance_aggregate_unique` | 1 | A `SET` or `UNIQUE` aggregate holds no element twice |
+| `io.ifc.conformance_value_width` | 1 | A string (in characters) or binary (in bits) is not longer than its width, and exactly as long where the width is `FIXED` |
+| `io.ifc.conformance_inverse_cardinality` | 2 | The instances referring through the attribute of each inverse attribute of the entity and its supertypes are within its bounds; exactly one for an inverse that is not an aggregate |
+| `io.ifc.conformance_unique_rule` | 2 | No two instances share the values of the attributes of a `UNIQUE` rule; every instance of a group that shares them fails, and an instance without a value for one of the attributes is not compared |
+
+WHERE rules and global rules (level 3) are not evaluated. Messages are the `io-ifc-conformance-*`
+identifiers with the arguments `instance`, `entity` and `attribute`. `cargo run -p arc-io-ifc --example
+conformance <file>` prints the findings as JSON for `tools/ifc-oracle/conformance_compare.py`.
 
 ### Error codes
 

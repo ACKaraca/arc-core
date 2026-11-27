@@ -7,6 +7,7 @@
 //! one-based integers). Each segment that is a line continues the polyline; a repeated join point is
 //! dropped. An `IfcArcIndex` is not evaluated, so the curve is skipped and reported.
 
+use crate::schema::access::known;
 use arc_base::math::Point3;
 
 use crate::error::reasons;
@@ -51,7 +52,7 @@ impl Evaluator<'_> {
                 let kind = "IFCPOLYLINE";
                 let names = attr::ordered_references(
                     &mut self.budget,
-                    record.parameters.first(),
+                    self.file.attr(record, known::POLYLINE_POINTS),
                     kind,
                     max,
                 )?;
@@ -79,10 +80,10 @@ impl Evaluator<'_> {
 
     fn indexed_polycurve(&mut self, record: &Record) -> Step<Vec<Point3>> {
         let kind = "IFCINDEXEDPOLYCURVE";
-        let list = attr::reference(record.parameters.first(), kind)?;
+        let list = attr::reference(self.file.attr(record, known::POLYCURVE_POINTS), kind)?;
         let coordinates = self.point_list(list)?;
         let count = coordinates.len();
-        let order = match record.parameters.get(1) {
+        let order = match self.file.attr(record, known::POLYCURVE_SEGMENTS) {
             None | Some(Parameter::Omitted | Parameter::Derived) => (0..count).collect(),
             Some(Parameter::List(segments)) => self.segment_order(segments, count)?,
             Some(_) => return Err(attr::wrong(kind)),
@@ -144,7 +145,7 @@ impl Evaluator<'_> {
         {
             return Err(skip(reasons::GEOMETRY_NOT_EVALUATED, &record.type_name));
         }
-        let rows = attr::list(record.parameters.first(), kind)?;
+        let rows = attr::list(file.attr(record, known::POINT_LIST_COORDINATES), kind)?;
         self.budget.array(rows.len())?;
         self.budget.charge(
             u64::try_from(rows.len())

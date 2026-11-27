@@ -42,7 +42,7 @@ mod text;
 pub mod views;
 pub mod write;
 
-pub use error::{codes, reasons};
+pub use error::{codes, reasons, rules};
 pub use geometry::{Geometry, GeometryItem, Shape, Units};
 pub use loss::{LossItem, LossReport, Outcome, Severity};
 pub use model::{IfcFile, Instance, Parameter, Record, Schema};
@@ -50,6 +50,7 @@ pub use model::{IfcFile, Instance, Parameter, Record, Schema};
 pub use options::SystemClock;
 pub use options::{Clock, Progress, ReadOptions, ReadOutput};
 pub use read::read;
+pub use schema::{Conformance, Finding, InverseIndex, Referrer, RuleCount, Typed};
 pub use views::{
     Nominal, Number, Property, PropertySet, PropertyValue, Quantity, QuantityKind, QuantitySet,
     RootedEntity, SpatialNode, TypeAssignment, TypedViews, Value,

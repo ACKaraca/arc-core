@@ -21,6 +21,7 @@
 //!
 //! Every length is multiplied by the length scale of the file when it is read.
 
+use crate::schema::access::known;
 use std::collections::BTreeSet;
 
 use arc_base::math::{Matrix4, Point3, Transform3, Vector3};
@@ -114,7 +115,7 @@ impl Evaluator<'_> {
         let kind = "IFCCARTESIANPOINT";
         let record = expect(self.file, name, kind)?;
         attr::point3(
-            attr::list(record.parameters.first(), kind)?,
+            attr::list(self.file.attr(record, known::POINT_COORDINATES), kind)?,
             self.scale,
             kind,
         )
@@ -124,7 +125,11 @@ impl Evaluator<'_> {
     pub(crate) fn direction(&self, name: u64) -> Step<Vector3> {
         let kind = "IFCDIRECTION";
         let record = expect(self.file, name, kind)?;
-        attr::coordinates3(attr::list(record.parameters.first(), kind)?, 1.0, kind)
+        attr::coordinates3(
+            attr::list(self.file.attr(record, known::DIRECTION_RATIOS), kind)?,
+            1.0,
+            kind,
+        )
     }
 
     /// A unit direction of a reference, or the default when the reference is absent.
@@ -147,13 +152,15 @@ impl Evaluator<'_> {
         };
         let kind = "IFCAXIS2PLACEMENT3D";
         let record = expect(self.file, name, kind)?;
-        let origin = match attr::opt_reference(record.parameters.first(), kind)? {
-            Some(point) => self.point(point)?,
-            None => Point3::origin(),
-        };
-        let reference = attr::opt_reference(record.parameters.get(2), kind)?;
+        let origin =
+            match attr::opt_reference(self.file.attr(record, known::PLACEMENT_LOCATION), kind)? {
+                Some(point) => self.point(point)?,
+                None => Point3::origin(),
+            };
+        let reference =
+            attr::opt_reference(self.file.attr(record, known::AXIS3_REF_DIRECTION), kind)?;
         let z = self.unit_direction(
-            attr::opt_reference(record.parameters.get(1), kind)?,
+            attr::opt_reference(self.file.attr(record, known::AXIS3_AXIS), kind)?,
             Vector3::z(),
             kind,
         )?;
@@ -173,15 +180,20 @@ impl Evaluator<'_> {
         };
         let kind = "IFCAXIS2PLACEMENT2D";
         let record = expect(self.file, name, kind)?;
-        let origin = match attr::opt_reference(record.parameters.first(), kind)? {
-            Some(point) => self.point(point)?,
-            None => Point3::origin(),
-        };
-        let x = match attr::opt_reference(record.parameters.get(1), kind)? {
+        let origin =
+            match attr::opt_reference(self.file.attr(record, known::PLACEMENT_LOCATION), kind)? {
+                Some(point) => self.point(point)?,
+                None => Point3::origin(),
+            };
+        let x = match attr::opt_reference(self.file.attr(record, known::AXIS2_REF_DIRECTION), kind)?
+        {
             Some(direction) => {
                 let record = expect(self.file, direction, "IFCDIRECTION")?;
-                let planar =
-                    attr::coordinates2(attr::list(record.parameters.first(), kind)?, 1.0, kind)?;
+                let planar = attr::coordinates2(
+                    attr::list(self.file.attr(record, known::DIRECTION_RATIOS), kind)?,
+                    1.0,
+                    kind,
+                )?;
                 unit(Vector3::new(planar.x, planar.y, 0.0), kind)?
             }
             None => Vector3::x(),
@@ -235,8 +247,11 @@ impl Evaluator<'_> {
                 )));
             }
             let record = expect(file, node, kind)?;
-            let relative = self.axis_any(attr::opt_reference(record.parameters.get(1), kind)?)?;
-            current = attr::opt_reference(record.parameters.first(), kind)?;
+            let relative = self.axis_any(attr::opt_reference(
+                file.attr(record, known::LOCAL_RELATIVE),
+                kind,
+            )?)?;
+            current = attr::opt_reference(file.attr(record, known::LOCAL_REL_TO), kind)?;
             self.charge_placement()?;
             chain.push((node, relative));
         }
@@ -270,12 +285,15 @@ impl Evaluator<'_> {
             "IFCCARTESIANTRANSFORMATIONOPERATOR3DNONUNIFORM" => true,
             _ => return Err(skip(reasons::GEOMETRY_NOT_EVALUATED, kind)),
         };
-        let parameter = |i: usize| record.parameters.get(i);
+        let parameter = |a| file.attr(record, a);
         let tolerance = self.tol.angular;
-        let axis3 =
-            self.unit_direction(attr::opt_reference(parameter(4), kind)?, Vector3::z(), kind)?;
+        let axis3 = self.unit_direction(
+            attr::opt_reference(parameter(known::OPERATOR_AXIS3), kind)?,
+            Vector3::z(),
+            kind,
+        )?;
         let mut approximated = false;
-        let axis1 = match attr::opt_reference(parameter(0), kind)? {
+        let axis1 = match attr::opt_reference(parameter(known::OPERATOR_AXIS1), kind)? {
             Some(name) => unit(self.direction(name)?, kind)?,
             None => Vector3::x(),
         };
@@ -286,7 +304,7 @@ impl Evaluator<'_> {
                 perpendicular(axis3, tolerance, kind)?
             }
         };
-        let axis2 = match attr::opt_reference(parameter(1), kind)? {
+        let axis2 = match attr::opt_reference(parameter(known::OPERATOR_AXIS2), kind)? {
             Some(name) => {
                 let given = unit(self.direction(name)?, kind)?;
                 let v = given - axis3 * given.dot(&axis3) - axis1 * given.dot(&axis1);
@@ -300,15 +318,15 @@ impl Evaluator<'_> {
             }
             None => axis3.cross(&axis1),
         };
-        let origin = match attr::opt_reference(parameter(2), kind)? {
+        let origin = match attr::opt_reference(parameter(known::OPERATOR_ORIGIN), kind)? {
             Some(point) => self.point(point)?,
             None => Point3::origin(),
         };
-        let scale = attr::opt_real(parameter(3), 1.0, kind)?.unwrap_or(1.0);
+        let scale = attr::opt_real(parameter(known::OPERATOR_SCALE), 1.0, kind)?.unwrap_or(1.0);
         let (scale2, scale3) = if non_uniform {
             (
-                attr::opt_real(parameter(5), 1.0, kind)?.unwrap_or(scale),
-                attr::opt_real(parameter(6), 1.0, kind)?.unwrap_or(scale),
+                attr::opt_real(parameter(known::OPERATOR_SCALE2), 1.0, kind)?.unwrap_or(scale),
+                attr::opt_real(parameter(known::OPERATOR_SCALE3), 1.0, kind)?.unwrap_or(scale),
             )
         } else {
             (scale, scale)

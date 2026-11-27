@@ -23,6 +23,7 @@
 //! An item with any face that cannot be evaluated is skipped as a whole, so no shell is emitted with
 //! a face missing.
 
+use crate::schema::access::known;
 use std::collections::BTreeMap;
 
 use arc_base::Limits;
@@ -133,26 +134,39 @@ fn corners(points: &[Point3], pn: Option<&[i64]>, values: &[i64], kind: &str) ->
         .collect()
 }
 
+/// The member list of a face or shell based surface model.
+fn surface_model_members(kind: &str) -> crate::schema::access::Attr {
+    if kind == "IFCSHELLBASEDSURFACEMODEL" {
+        known::SHELL_MODEL_BOUNDARY
+    } else {
+        known::FACE_MODEL_FACES
+    }
+}
+
 impl Evaluator<'_> {
     /// The pieces of a face-based item: one mesh of all its faces.
     pub(crate) fn faces(&mut self, name: u64, record: &Record) -> Step<Vec<Piece>> {
         let kind = record.type_name.as_str();
         let mut welder = Welder::new();
         let mut deviation = 0.0_f64;
-        let first = record.parameters.first();
+        let file = self.file;
         match kind {
             "IFCTRIANGULATEDFACESET" => self.triangulated(record, &mut welder)?,
             "IFCPOLYGONALFACESET" => self.polygonal(record, &mut welder, &mut deviation)?,
             "IFCFACETEDBREP" => {
-                let shell = attr::reference(first, kind)?;
+                let shell = attr::reference(file.attr(record, known::BREP_OUTER), kind)?;
                 for face in self.shell_faces(shell)? {
                     self.budget.step()?;
                     self.add_face(face, &mut welder, &mut deviation)?;
                 }
             }
             "IFCFACEBASEDSURFACEMODEL" | "IFCSHELLBASEDSURFACEMODEL" => {
-                let (members, _) =
-                    attr::distinct_references(&mut self.budget, first, kind, usize::MAX)?;
+                let (members, _) = attr::distinct_references(
+                    &mut self.budget,
+                    file.attr(record, surface_model_members(kind)),
+                    kind,
+                    usize::MAX,
+                )?;
                 for member in members {
                     for face in self.shell_faces(member)? {
                         self.budget.step()?;
@@ -188,10 +202,14 @@ impl Evaluator<'_> {
 
     fn triangulated(&mut self, record: &Record, welder: &mut Welder) -> Step<()> {
         let kind = "IFCTRIANGULATEDFACESET";
-        let coordinates = attr::reference(record.parameters.first(), kind)?;
+        let coordinates =
+            attr::reference(self.file.attr(record, known::FACE_SET_COORDINATES), kind)?;
         let points = self.point_list(coordinates)?;
-        let pn = self.pn_index(record.parameters.get(4))?;
-        let rows = attr::list(record.parameters.get(3), kind)?;
+        let pn = self.pn_index(self.file.attr(record, known::TRIANGULATED_PN_INDEX))?;
+        let rows = attr::list(
+            self.file.attr(record, known::TRIANGULATED_COORD_INDEX),
+            kind,
+        )?;
         self.budget.array(rows.len())?;
         for row in rows {
             self.budget.step()?;
@@ -211,12 +229,13 @@ impl Evaluator<'_> {
     fn polygonal(&mut self, record: &Record, welder: &mut Welder, deviation: &mut f64) -> Step<()> {
         let kind = "IFCPOLYGONALFACESET";
         let file = self.file;
-        let coordinates = attr::reference(record.parameters.first(), kind)?;
+        let coordinates =
+            attr::reference(self.file.attr(record, known::FACE_SET_COORDINATES), kind)?;
         let points = self.point_list(coordinates)?;
-        let pn = self.pn_index(record.parameters.get(3))?;
+        let pn = self.pn_index(file.attr(record, known::POLYGONAL_PN_INDEX))?;
         let (faces, _) = attr::distinct_references(
             &mut self.budget,
-            record.parameters.get(2),
+            file.attr(record, known::POLYGONAL_FACES),
             kind,
             usize::MAX,
         )?;
@@ -227,13 +246,17 @@ impl Evaluator<'_> {
             let mut loops = vec![corners(
                 &points,
                 pn.as_deref(),
-                &attr::integers(face_record.parameters.first(), kind)?,
+                &attr::integers(
+                    file.attr(face_record, known::INDEXED_FACE_COORD_INDEX),
+                    kind,
+                )?,
                 kind,
             )?];
             match face_record.type_name.as_str() {
                 "IFCINDEXEDPOLYGONALFACE" => {}
                 "IFCINDEXEDPOLYGONALFACEWITHVOIDS" => {
-                    for row in attr::list(face_record.parameters.get(1), kind)? {
+                    for row in attr::list(file.attr(face_record, known::INDEXED_FACE_INNER), kind)?
+                    {
                         let values = attr::integers(Some(row), kind)?;
                         loops.push(corners(&points, pn.as_deref(), &values, kind)?);
                     }
@@ -275,7 +298,7 @@ impl Evaluator<'_> {
             "IFCCLOSEDSHELL" | "IFCOPENSHELL" | "IFCCONNECTEDFACESET" => {
                 let (faces, _) = attr::distinct_references(
                     &mut self.budget,
-                    record.parameters.first(),
+                    file.attr(record, known::SHELL_FACES),
                     &record.type_name,
                     usize::MAX,
                 )?;
@@ -297,7 +320,7 @@ impl Evaluator<'_> {
         // Bounds keep their repeats: a repeated bound is a repeated loop, and the region is refused.
         let bounds = attr::ordered_references(
             &mut self.budget,
-            record.parameters.first(),
+            file.attr(record, known::FACE_BOUNDS),
             kind,
             usize::MAX,
         )?;
@@ -311,10 +334,14 @@ impl Evaluator<'_> {
                 "IFCFACEBOUND" => false,
                 other => return Err(skip(reasons::GEOMETRY_NOT_EVALUATED, other)),
             };
-            let loop_name =
-                attr::reference(bound_record.parameters.first(), &bound_record.type_name)?;
+            let loop_name = attr::reference(
+                file.attr(bound_record, known::FACE_BOUND),
+                &bound_record.type_name,
+            )?;
             let mut points = self.polygon_loop(loop_name)?;
-            if attr::enumeration(bound_record.parameters.get(1)) == Some("F") {
+            if attr::enumeration(file.attr(bound_record, known::FACE_BOUND_ORIENTATION))
+                == Some("F")
+            {
                 points.reverse();
             }
             loops.push((outer, points));
@@ -350,7 +377,7 @@ impl Evaluator<'_> {
         }
         let mut refs = attr::ordered_references(
             &mut self.budget,
-            record.parameters.first(),
+            file.attr(record, known::POLY_LOOP_POLYGON),
             kind,
             MAX_LOOP_VERTICES,
         )?;
