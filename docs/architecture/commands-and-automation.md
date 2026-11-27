@@ -147,7 +147,7 @@ remembers the choice in settings.
 |---|---|---|
 | Session | `arc.initialize`, `arc.shutdown`, `arc.ping`, `arc.capabilities` | |
 | Documents | `document.list`, `document.new`, `document.open`, `document.save`, `document.saveAs`, `document.close`, `document.info` | Paths are checked against read and write roots |
-| Commands | `command.list`, `command.describe`, `command.validate`, `command.run`, `command.cancel` | `command.run` accepts `document`, `command`, `params`, optional `expectedRevision` and `preview: true` (runs and rolls back, returning the result and the change summary) |
+| Commands | `command.list`, `command.describe`, `command.validate`, `command.run`, `command.prompt`, `command.cancel` | `command.prompt` answers the prompt of the session's command line with typed text (or starts the command it names); `command.run` accepts `document`, `command`, `params`, optional `expectedRevision` and `preview: true` (runs and rolls back, returning the result and the change summary) |
 | Queries | `query.objects`, `query.object`, `query.references`, `query.diagnostics`, `query.history`, `query.compare`, `query.derived` | Filters by type, owner, partition, indexed property predicates and ids; projection of fields; cursor pagination; every result names the revision it was read from |
 | History | `history.undo`, `history.redo` | Steps the document's undo or redo stack; needs the `edit` permission; answers the command and label of the step it reversed |
 | Events | `event.subscribe`, `event.unsubscribe`; notification `event.notify` | Document events, command progress, selection changes |

@@ -95,6 +95,7 @@ pub const METHODS: &[&str] = &[
     "command.cancel",
     "command.describe",
     "command.list",
+    "command.prompt",
     "command.run",
     "command.validate",
     "event.subscribe",
@@ -278,6 +279,8 @@ enum Work {
     Run(Invocation, bool),
     /// A `history.undo` or `history.redo`, cancellable while it waits.
     Step(Direction, Cancel),
+    /// A `command.prompt`: the text, the seed and the cancellation token.
+    Prompt(String, u64, Cancel),
 }
 
 /// One queued `command.run`, `history.undo` or `history.redo`.
@@ -416,6 +419,14 @@ struct RunParams {
     expected_revision: Option<u64>,
     #[serde(default)]
     preview: bool,
+    #[serde(default)]
+    seed: u64,
+}
+
+#[derive(Deserialize)]
+struct PromptParams {
+    document: String,
+    text: String,
     #[serde(default)]
     seed: u64,
 }
@@ -654,6 +665,8 @@ impl<'a> Server<'a> {
         hub: &Hub,
         revoked: &AtomicBool,
     ) {
+        // The command line of each document, which the session's prompts live in.
+        let mut lines = BTreeMap::new();
         for job in queue {
             let Job {
                 id,
@@ -680,6 +693,15 @@ impl<'a> Server<'a> {
                     Work::Step(direction, cancel) => {
                         self.step_job(&target, &session, direction, &cancel, pending, &key)
                     }
+                    Work::Prompt(text, seed, cancel) => self.prompt_job(
+                        Some(hub),
+                        &mut lines,
+                        &target,
+                        &session,
+                        &text,
+                        seed,
+                        &cancel,
+                    ),
                 }))
                 .unwrap_or_else(|payload| {
                     self.log.log(
@@ -1091,6 +1113,10 @@ impl<'a> Reader<'_, 'a> {
                 Ok(p) => return self.run_command(id, session, p),
                 Err(failure) => Err(failure),
             },
+            "command.prompt" => match decode::<PromptParams>(method, params) {
+                Ok(p) => return self.prompt_command(id, session, p),
+                Err(failure) => Err(failure),
+            },
             "history.undo" | "history.redo" => {
                 let direction = if method == "history.undo" {
                     Direction::Undo
@@ -1221,6 +1247,30 @@ impl<'a> Reader<'_, 'a> {
             state,
             session,
             work,
+        })
+    }
+
+    /// Queues `command.prompt` behind the requests of the session, so it answers the prompt
+    /// their effects left. It is cancellable while it waits, and a command it completes is
+    /// cancellable like a run.
+    fn prompt_command(&mut self, id: &Value, session: Session, p: PromptParams) -> Reply {
+        let (document, state) = match self.server.document_state(&p.document) {
+            Ok(found) => found,
+            Err(failure) => return Reply::Now(Err(failure)),
+        };
+        let key = text(id);
+        let cancel = Cancel::new();
+        if let Err(failure) = self.reserve(&key, &cancel) {
+            return Reply::Now(Err(failure));
+        }
+        self.enqueue(Job {
+            id: id.clone(),
+            key,
+            doc_id: p.document,
+            document,
+            state,
+            session,
+            work: Work::Prompt(p.text, p.seed, cancel),
         })
     }
 

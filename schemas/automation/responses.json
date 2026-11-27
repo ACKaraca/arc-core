@@ -483,6 +483,95 @@
       ],
       "additionalProperties": false
     },
+    "command.prompt": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "idle",
+            "prompt",
+            "rejected",
+            "ran",
+            "cancelled"
+          ]
+        },
+        "prompt": {
+          "$ref": "#/$defs/prompt"
+        },
+        "error": {
+          "$ref": "#/$defs/errorData"
+        },
+        "command": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "value": true,
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/diagnostic"
+          }
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "summary": {
+          "$ref": "#/$defs/changeSummary"
+        },
+        "baseRevision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    "prompt": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "arguments": {
+          "type": "object"
+        },
+        "accepts": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "point",
+              "distance",
+              "angle",
+              "pick",
+              "selection",
+              "text",
+              "number",
+              "expression",
+              "keyword"
+            ]
+          }
+        },
+        "hasDefault": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key",
+        "messageId",
+        "arguments",
+        "accepts",
+        "hasDefault"
+      ],
+      "additionalProperties": false
+    },
     "command.describe": {
       "$ref": "#/$defs/commandEntry"
     },
@@ -1252,5 +1341,6 @@
       ],
       "additionalProperties": false
     }
-  }
+  },
+  "$comment": "Revised for `command.prompt` (additive, protocol version stays 1.0): clients that do not send it see no change."
 }
