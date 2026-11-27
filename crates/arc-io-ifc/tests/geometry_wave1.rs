@@ -854,24 +854,36 @@ fn a_box_opening_extruded_along_the_height_cuts_through_the_thickness() {
 
 #[test]
 fn openings_that_cannot_be_subtracted_are_reported() {
-    // An opening whose body is a faceted brep is not an extrusion.
-    let brep = format!(
-        "#10=IFCEXTRUDEDAREASOLID(#11,#6,#2,3.);\n#11=IFCRECTANGLEPROFILEDEF(.AREA.,$,#8,4.,0.2);\n\
-#50=IFCFACETEDBREP(#300);\n{}\
-#60=IFCPRODUCTDEFINITIONSHAPE($,$,(#61));\n#61=IFCSHAPEREPRESENTATION($,'Body','Brep',(#50));\n\
+    // An opening whose body is a faceted brep is subtracted by the mesh boolean: the cube
+    // [0,1]^3 overlaps the wall (y in [-0.1, 0.1]) in a 1 x 0.1 x 1 box.
+    let opening = |body: &str, kind: &str| {
+        format!(
+            "#10=IFCEXTRUDEDAREASOLID(#11,#6,#2,3.);\n#11=IFCRECTANGLEPROFILEDEF(.AREA.,$,#8,4.,0.2);\n\
+{body}\
+#60=IFCPRODUCTDEFINITIONSHAPE($,$,(#61));\n#61=IFCSHAPEREPRESENTATION($,'Body','{kind}',(#50));\n\
 #62=IFCOPENINGELEMENT('open000000000000000000A',$,'Opening',$,$,$,#60,$,.OPENING.);\n\
-#63=IFCRELVOIDSELEMENT('rel0000000000000000000A',$,$,$,#902,#62);\n",
-        cube_shell(300, 0.0, 1.0, false)
+#63=IFCRELVOIDSELEMENT('rel0000000000000000000A',$,$,$,#902,#62);\n"
+        )
+    };
+    let brep = opening(
+        &format!("#50=IFCFACETEDBREP(#300);\n{}", cube_shell(300, 0.0, 1.0, false)),
+        "Brep",
     );
     let geometry = evaluate(&fixture(&brep));
-    let (v, _) = measure_of(&geometry, 902);
-    close(v, 2.4, 1e-9, "the wall stays solid");
+    close(measure_of(&geometry, 902).0, 2.4 - 0.1, 1e-9, "the brep opening is cut");
     assert_eq!(
-        loss_count(
-            &geometry,
-            reasons::OPENING_NOT_SUBTRACTED.code,
-            "IFCRELVOIDSELEMENT"
-        ),
+        loss_count(&geometry, reasons::OPENING_NOT_SUBTRACTED.code, "IFCRELVOIDSELEMENT"),
+        0
+    );
+    // An opening whose body is a polyline is not a solid: the wall stays solid and it is reported.
+    let line = opening(
+        "#50=IFCPOLYLINE((#51,#52));\n#51=IFCCARTESIANPOINT((0.,0.,0.));\n#52=IFCCARTESIANPOINT((1.,0.,0.));\n",
+        "Curve3D",
+    );
+    let geometry = evaluate(&fixture(&line));
+    close(measure_of(&geometry, 902).0, 2.4, 1e-9, "the wall stays solid");
+    assert_eq!(
+        loss_count(&geometry, reasons::OPENING_NOT_SUBTRACTED.code, "IFCRELVOIDSELEMENT"),
         1
     );
     // Without the subtraction every opening is reported.

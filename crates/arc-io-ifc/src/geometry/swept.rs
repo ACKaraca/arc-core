@@ -41,6 +41,10 @@ const MIN_MITER_COSINE: f64 = 0.1;
 
 impl Evaluator<'_> {
     /// The pieces of a revolved area solid.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the profiles, the turn and the rings of one solid"
+    )]
     pub(crate) fn revolution(&mut self, name: u64, record: &Record) -> Step<Vec<Piece>> {
         let kind = "IFCREVOLVEDAREASOLID";
         let file = self.file;
@@ -66,15 +70,50 @@ impl Evaluator<'_> {
         let full = angle.abs() >= TAU - 1e-9;
         let angle = if full { TAU.copysign(angle) } else { angle };
         let parts = self.profile(profile)?;
+        let end_points: Option<Vec<Vec<P2>>> = if record.type_name == "IFCREVOLVEDAREASOLIDTAPERED"
+        {
+            let end = attr::reference(named(file, record, "EndSweptArea", 4), kind)?;
+            let end_parts = self.profile(end)?;
+            let same = parts.len() == end_parts.len()
+                && parts.iter().zip(&end_parts).all(|(a, b)| {
+                    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.len() == y.len())
+                });
+            if !same {
+                return Err(skip(reasons::GEOMETRY_NOT_EVALUATED, kind));
+            }
+            Some(
+                end_parts
+                    .into_iter()
+                    .map(|loops| loops.into_iter().flatten().collect())
+                    .collect(),
+            )
+        } else {
+            None
+        };
         let mut acc = MeshAcc::default();
-        for part in self.prepared_parts(parts, kind)? {
+        for (number, part) in self.prepared_parts(parts, kind)?.into_iter().enumerate() {
             let local: Vec<Vector3> = part
                 .points
                 .iter()
                 .map(|p| Vector3::new(p[0], p[1], 0.0) - origin.coords)
                 .collect();
+            let local_end: Option<Vec<Vector3>> =
+                end_points.as_ref().and_then(|e| e.get(number)).map(|e| {
+                    e.iter()
+                        .map(|p| Vector3::new(p[0], p[1], 0.0) - origin.coords)
+                        .collect()
+                });
             let radial: Vec<f64> = local.iter().map(|q| (q - k * k.dot(q)).norm()).collect();
-            let widest = radial.iter().copied().fold(0.0_f64, f64::max);
+            let widest = radial
+                .iter()
+                .copied()
+                .chain(
+                    local_end
+                        .iter()
+                        .flatten()
+                        .map(|q| (q - k * k.dot(q)).norm()),
+                )
+                .fold(0.0_f64, f64::max);
             if widest <= self.tol.linear {
                 return Err(skip(reasons::GEOMETRY_DEGENERATE, kind));
             }
@@ -89,12 +128,27 @@ impl Evaluator<'_> {
             }
             let rings = if full { steps } else { steps + 1 };
             self.budget.array(rings.saturating_mul(part.points.len()))?;
-            let fixed: Vec<bool> = radial.iter().map(|&r| r <= self.tol.linear).collect();
+            let fixed: Vec<bool> = radial
+                .iter()
+                .enumerate()
+                .map(|(i, &r)| {
+                    r <= self.tol.linear
+                        && local_end
+                            .as_ref()
+                            .and_then(|e| e.get(i))
+                            .is_none_or(|q| (q - k * k.dot(q)).norm() <= self.tol.linear)
+                })
+                .collect();
             let mut positions = Vec::with_capacity(rings * part.points.len());
             for j in 0..rings {
                 let phi = angle * (j as f64) / (steps as f64);
                 let (s, c) = phi.sin_cos();
-                for q in &local {
+                let blend = (j as f64) / (steps as f64);
+                for (index, q) in local.iter().enumerate() {
+                    let q = &match local_end.as_ref().and_then(|e| e.get(index)) {
+                        Some(end) => q * (1.0 - blend) + end * blend,
+                        None => *q,
+                    };
                     let turned = q * c + k.cross(q) * s + k * (k.dot(q) * (1.0 - c));
                     positions.push(position.transform_point(&Point3::from(turned + origin.coords)));
                 }
@@ -114,7 +168,6 @@ impl Evaluator<'_> {
         if radius <= 0.0 || inner.is_some_and(|r| r <= 0.0 || r >= radius) {
             return Err(skip(reasons::GEOMETRY_DEGENERATE, kind));
         }
-        self.reject_parameters(record, kind)?;
         if kind == "IFCSWEPTDISKSOLIDPOLYGONAL" {
             let fillet = attr::opt_real(named(file, record, "FilletRadius", 5), self.scale, kind)?;
             if fillet.is_some_and(|r| r > 0.0) {
@@ -126,7 +179,7 @@ impl Evaluator<'_> {
                 );
             }
         }
-        let path = self.directrix(directrix)?;
+        let path = self.sweep_path(directrix, record, kind)?;
         let loops = self.circle_loops(name, kind, &Transform3::identity(), radius, inner)?;
         let part = self.prepare_part(loops, kind)?;
         let (u0, v0) = perpendicular_frame(&path)?;
@@ -145,8 +198,7 @@ impl Evaluator<'_> {
             kind,
         )?)?;
         let directrix = attr::reference(named(file, record, "Directrix", 2), kind)?;
-        self.reject_parameters(record, kind)?;
-        let path = self.directrix(directrix)?;
+        let path = self.sweep_path(directrix, record, kind)?;
         let start = *path
             .first()
             .ok_or_else(|| skip(reasons::GEOMETRY_DEGENERATE, kind))?;
@@ -175,20 +227,79 @@ impl Evaluator<'_> {
         self.finish_mesh(acc)
     }
 
-    /// A swept solid that is limited by parameters is not evaluated.
-    fn reject_parameters(&self, record: &Record, kind: &str) -> Step<()> {
+    /// The directrix of a sweep limited by `StartParam` and `EndParam` (attributes 3 and 4), as the
+    /// polyline between them; the whole directrix when neither is given. The parameters are those of
+    /// the curve: the index of a polyline point, an angle in the plane angle unit of the file on a
+    /// circle, an ellipse or a trimmed one of them, the basis parameter on a trimmed line, and the knot
+    /// parameter of a B-spline. Another curve with parameters is not evaluated.
+    fn sweep_path(&mut self, directrix: u64, record: &Record, kind: &str) -> Step<Vec<Point3>> {
         let file = self.file;
-        let given = |name: &str, position: usize| {
-            !matches!(
-                named(file, record, name, position),
-                None | Some(crate::model::Parameter::Omitted | crate::model::Parameter::Derived)
-            )
+        let given = |name: &str, position: usize| -> Step<Option<f64>> {
+            attr::opt_real(named(file, record, name, position), 1.0, kind)
         };
-        let (start, end) = (3, 4);
-        if given("StartParam", start) || given("EndParam", end) {
-            return Err(skip(reasons::GEOMETRY_NOT_EVALUATED, kind));
+        let (start, end) = (given("StartParam", 3)?, given("EndParam", 4)?);
+        if start.is_none() && end.is_none() {
+            return self.directrix(directrix);
         }
-        Ok(())
+        let Some(curve) = file.instance(directrix).and_then(|i| i.records.first()) else {
+            return Err(skip(reasons::TARGET_MISSING, "IFCCURVE"));
+        };
+        let mut points = match curve.type_name.as_str() {
+            "IFCCIRCLE" | "IFCELLIPSE" => {
+                let conic = self.conic(curve)?;
+                let (s, e) = (start.unwrap_or(0.0), end.unwrap_or(TAU / self.angle));
+                let mut out = Vec::new();
+                self.sample_conic(
+                    directrix,
+                    &conic,
+                    s * self.angle,
+                    (e - s) * self.angle,
+                    usize::MAX,
+                    &mut out,
+                )?;
+                out
+            }
+            "IFCTRIMMEDCURVE" => {
+                let (points, (t1, t2), angular) =
+                    self.trimmed_ranged(directrix, curve, usize::MAX)?;
+                let factor = if angular { self.angle } else { 1.0 };
+                let (s, e) = (
+                    start.map_or(t1, |s| s * factor),
+                    end.map_or(t2, |e| e * factor),
+                );
+                let samples: Vec<(f64, Point3)> = points
+                    .iter()
+                    .enumerate()
+                    .map(|(k, p)| {
+                        let f = (k as f64) / ((points.len() - 1).max(1) as f64);
+                        (t1 + (t2 - t1) * f, *p)
+                    })
+                    .collect();
+                cut(&samples, s, e)
+            }
+            "IFCPOLYLINE" => {
+                let points = self.curve_points(directrix, MAX_LOOP_VERTICES)?;
+                let samples: Vec<(f64, Point3)> = points
+                    .iter()
+                    .enumerate()
+                    .map(|(k, p)| (k as f64, *p))
+                    .collect();
+                let last = (points.len() as f64) - 1.0;
+                cut(&samples, start.unwrap_or(0.0), end.unwrap_or(last))
+            }
+            "IFCBSPLINECURVEWITHKNOTS" | "IFCRATIONALBSPLINECURVEWITHKNOTS" => {
+                let spline = self.bspline_curve(curve)?;
+                let samples = spline.samples(self.tol.tessellation_chord);
+                let (a, b) = spline.domain();
+                cut(&samples, start.unwrap_or(a), end.unwrap_or(b))
+            }
+            other => return Err(skip(reasons::GEOMETRY_NOT_EVALUATED, other)),
+        };
+        points.dedup_by(|a, b| (*a - *b).norm() <= self.tol.linear);
+        if points.len() < 2 {
+            return Err(skip(reasons::GEOMETRY_DEGENERATE, kind));
+        }
+        Ok(points)
     }
 
     /// The points of a directrix without consecutive repeats, at least two.
@@ -255,6 +366,43 @@ impl Evaluator<'_> {
         }
         self.ring_part(acc, part, positions, segments + 1, false, &[])
     }
+}
+
+/// The points of `samples` (parameter, point; parameters ascending or descending) between the
+/// parameters `start` and `end`, with the ends interpolated; in the order from `start` to `end`.
+fn cut(samples: &[(f64, Point3)], start: f64, end: f64) -> Vec<Point3> {
+    let ascending = samples
+        .first()
+        .zip(samples.last())
+        .is_some_and(|(a, b)| a.0 <= b.0);
+    let mut sorted: Vec<(f64, Point3)> = samples.to_vec();
+    if !ascending {
+        sorted.reverse();
+    }
+    let (lo, hi) = (start.min(end), start.max(end));
+    let at = |t: f64| -> Option<Point3> {
+        let t = t.clamp(sorted.first()?.0, sorted.last()?.0);
+        sorted.windows(2).find_map(|w| {
+            (t >= w[0].0 && t <= w[1].0).then(|| {
+                let span = w[1].0 - w[0].0;
+                let f = if span > 0.0 { (t - w[0].0) / span } else { 0.0 };
+                w[0].1 + (w[1].1 - w[0].1) * f
+            })
+        })
+    };
+    let mut out = Vec::new();
+    out.extend(at(lo));
+    out.extend(
+        sorted
+            .iter()
+            .filter(|(t, _)| *t > lo && *t < hi)
+            .map(|(_, p)| *p),
+    );
+    out.extend(at(hi));
+    if start > end {
+        out.reverse();
+    }
+    out
 }
 
 /// A frame `(u, v)` perpendicular to the first segment of `path`, right-handed with its direction.

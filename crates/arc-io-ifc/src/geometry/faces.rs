@@ -48,7 +48,7 @@ const INDEX_BYTES: u64 = 48;
 pub(crate) struct Welder {
     index: BTreeMap<[u64; 3], u32>,
     positions: Vec<Point3>,
-    triangles: Vec<[u32; 3]>,
+    pub(crate) triangles: Vec<[u32; 3]>,
 }
 
 /// The key of a point: its bits, with the sign of zero normalized.
@@ -61,7 +61,7 @@ fn key(p: &Point3) -> [u64; 3] {
 }
 
 impl Welder {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             index: BTreeMap::new(),
             positions: Vec::new(),
@@ -93,7 +93,7 @@ impl Welder {
         Ok(())
     }
 
-    fn finish(self, limits: &Limits) -> Step<arc_mesh::TriMesh> {
+    pub(crate) fn finish(self, limits: &Limits) -> Step<arc_mesh::TriMesh> {
         TriMeshBuilder::new(self.positions, self.triangles)
             .build(limits)
             .map_err(Flow::Hard)
@@ -285,7 +285,7 @@ impl Evaluator<'_> {
     }
 
     /// Triangulates a planar face given by its loops and adds the triangles to the welder.
-    fn emit_planar(
+    pub(crate) fn emit_planar(
         &mut self,
         loops: &[Vec<Point3>],
         welder: &mut Welder,
@@ -302,7 +302,7 @@ impl Evaluator<'_> {
     }
 
     /// The faces of a shell, connected face set or open shell, in order.
-    fn shell_faces(&mut self, name: u64) -> Step<Vec<u64>> {
+    pub(crate) fn shell_faces(&mut self, name: u64) -> Step<Vec<u64>> {
         let file = self.file;
         let Some(instance) = file.instance(name) else {
             return Err(skip(reasons::TARGET_MISSING, "IFCCLOSEDSHELL"));
@@ -325,7 +325,12 @@ impl Evaluator<'_> {
     }
 
     /// Adds one `IfcFace`: its outer bound and holes, each loop with its orientation applied.
-    fn add_face(&mut self, face: u64, welder: &mut Welder, deviation: &mut f64) -> Step<()> {
+    pub(crate) fn add_face(
+        &mut self,
+        face: u64,
+        welder: &mut Welder,
+        deviation: &mut f64,
+    ) -> Step<()> {
         let kind = "IFCFACE";
         let file = self.file;
         let record =
@@ -383,7 +388,7 @@ impl Evaluator<'_> {
     /// The points of an `IfcPolyLoop`, with three or more and at most [`MAX_LOOP_VERTICES`]. Repeats
     /// are kept, since a face loop may reuse a point (a keyhole); only a closing repeat, whose last
     /// point is its first, is dropped.
-    fn polygon_loop(&mut self, name: u64) -> Step<Vec<Point3>> {
+    pub(crate) fn polygon_loop(&mut self, name: u64) -> Step<Vec<Point3>> {
         let kind = "IFCPOLYLOOP";
         let file = self.file;
         let record =
@@ -420,7 +425,10 @@ impl Evaluator<'_> {
     /// counterclockwise seen from the Newell normal of the outer loop, and the deviation is the
     /// largest distance of a point from the plane through the outer loop's first point. `None` for a
     /// loop with zero area or a region that is not valid.
-    fn planar(&mut self, loops: &[Vec<Point3>]) -> Step<Option<(Vec<[Point3; 3]>, f64)>> {
+    pub(crate) fn planar(
+        &mut self,
+        loops: &[Vec<Point3>],
+    ) -> Step<Option<(Vec<[Point3; 3]>, f64)>> {
         // The total of the loops (holes included, each bridged twice) is capped before anything is
         // copied or triangulated.
         let lengths: Vec<usize> = loops.iter().map(Vec::len).collect();

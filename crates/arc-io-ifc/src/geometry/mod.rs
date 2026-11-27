@@ -14,17 +14,22 @@
 //! mapped items) shares one depth counter capped at [`MAX_NESTING`]. Cancellation is checked per
 //! product and every 1024 steps of a long loop.
 
+mod advanced;
 mod attr;
 mod boolean;
+mod bspline;
 mod budget;
+mod csg;
 mod curves;
 mod faces;
 mod mapped;
+mod offset;
 mod opening;
 mod place;
 mod polygon;
 mod profile;
 mod solid;
+mod surface;
 mod swept;
 mod units;
 
@@ -88,27 +93,32 @@ impl GeometryItem {
     ///
     /// The limits of [`arc_mesh::TriMeshBuilder::build`] apply to the new mesh.
     pub fn world_mesh(&self, limits: &Limits) -> Result<Option<TriMesh>> {
-        let Shape::Mesh(mesh) = self.shape.as_ref() else {
-            return Ok(None);
-        };
-        let reflected = self
-            .transform
-            .matrix()
-            .fixed_view::<3, 3>(0, 0)
-            .determinant()
-            < 0.0;
-        let positions = mesh
-            .positions()
-            .iter()
-            .map(|p| self.transform.transform_point(p))
-            .collect();
-        let triangles = mesh
-            .triangles()
-            .iter()
-            .map(|t| if reflected { [t[0], t[2], t[1]] } else { *t })
-            .collect();
-        TriMesh::new(positions, triangles, limits).map(Some)
+        shape_mesh(&self.shape, &self.transform, limits)
     }
+}
+
+/// The mesh of `shape` moved by `transform`, with the winding of a reflection reversed so that the
+/// triangles face outward; `None` for polylines.
+pub(crate) fn shape_mesh(
+    shape: &Shape,
+    transform: &Transform3,
+    limits: &Limits,
+) -> Result<Option<TriMesh>> {
+    let Shape::Mesh(mesh) = shape else {
+        return Ok(None);
+    };
+    let reflected = transform.matrix().fixed_view::<3, 3>(0, 0).determinant() < 0.0;
+    let positions = mesh
+        .positions()
+        .iter()
+        .map(|p| transform.transform_point(p))
+        .collect();
+    let triangles = mesh
+        .triangles()
+        .iter()
+        .map(|t| if reflected { [t[0], t[2], t[1]] } else { *t })
+        .collect();
+    TriMesh::new(positions, triangles, limits).map(Some)
 }
 
 /// What a geometry evaluation does besides evaluating the representation items.
@@ -310,18 +320,34 @@ impl<'f> Evaluator<'f> {
             "IFCMAPPEDITEM" => self.mapped(name, record, depth),
             "IFCEXTRUDEDAREASOLID" | "IFCEXTRUDEDAREASOLIDTAPERED" => self.extrusion(record),
             "IFCBOOLEANRESULT" | "IFCBOOLEANCLIPPINGRESULT" => self.boolean(name, record, depth),
-            "IFCREVOLVEDAREASOLID" => self.revolution(name, record),
+            "IFCREVOLVEDAREASOLID" | "IFCREVOLVEDAREASOLIDTAPERED" => self.revolution(name, record),
+            "IFCBLOCK"
+            | "IFCRECTANGULARPYRAMID"
+            | "IFCRIGHTCIRCULARCONE"
+            | "IFCRIGHTCIRCULARCYLINDER"
+            | "IFCSPHERE" => self.csg_primitive(name, record),
+            "IFCCSGSOLID" => self.csg_solid(name, record, depth),
             "IFCSWEPTDISKSOLID" | "IFCSWEPTDISKSOLIDPOLYGONAL" => self.swept_disk(name, record),
             "IFCSURFACECURVESWEPTAREASOLID" | "IFCFIXEDREFERENCESWEPTAREASOLID" => {
                 self.directrix_sweep(record)
             }
+            "IFCADVANCEDBREP" | "IFCADVANCEDBREPWITHVOIDS" => self.advanced_brep(name, record),
             "IFCTRIANGULATEDFACESET"
             | "IFCPOLYGONALFACESET"
             | "IFCFACETEDBREP"
             | "IFCFACETEDBREPWITHVOIDS"
             | "IFCFACEBASEDSURFACEMODEL"
             | "IFCSHELLBASEDSURFACEMODEL" => self.faces(name, record),
+            "IFCGEOMETRICSET" | "IFCGEOMETRICCURVESET" => self.geometric_set(name, record),
+            "IFCBSPLINESURFACEWITHKNOTS" | "IFCRATIONALBSPLINESURFACEWITHKNOTS" => {
+                self.bspline_surface_item(name, record)
+            }
             "IFCPOLYLINE"
+            | "IFCBSPLINECURVEWITHKNOTS"
+            | "IFCRATIONALBSPLINECURVEWITHKNOTS"
+            | "IFCOFFSETCURVE2D"
+            | "IFCOFFSETCURVE3D"
+            | "IFCOFFSETCURVEBYDISTANCES"
             | "IFCINDEXEDPOLYCURVE"
             | "IFCCIRCLE"
             | "IFCELLIPSE"

@@ -13,10 +13,14 @@
 //! of an opening is the inscribed polygon of the chord tolerance, so a round opening is never larger
 //! than the circle.
 //!
-//! An opening that the prism subtraction does not support (it refuses it, or its body is not an
-//! extrusion), and an element whose body is not an extrusion, are reported once per opening as
-//! `io.ifc.opening_not_subtracted`; the element is then emitted without that opening. An opening whose
-//! prism does not meet the solid at all is skipped without a report.
+//! Whatever the prism subtraction does not do (an opening whose body is not an extrusion or is refused,
+//! or an element body of any other kind of solid) is done by the mesh boolean of `arc-mesh`: the body
+//! meshes of the opening and the mesh of the element, both in world coordinates, with the opening
+//! subtracted; the item is then in world coordinates (identity transform). An opening that neither
+//! path can subtract (its body is not evaluated or is not a closed solid, or the result cannot be
+//! closed at the tolerance) is reported once as `io.ifc.opening_not_subtracted`; the element is then
+//! emitted without that opening. An opening that does not meet the solid at all is skipped without a
+//! report.
 
 use std::sync::Arc;
 
@@ -36,6 +40,9 @@ use crate::schema::access::known;
 
 use super::attr::{self, named, skip};
 use super::{Evaluator, GeometryItem, Shape, Step};
+
+/// The most triangles of an element and an opening body in a mesh boolean.
+const MAX_BOOLEAN_TRIANGLES: usize = 100_000;
 
 /// One opening body in the coordinates of the solid it cuts.
 struct Tool {
@@ -325,7 +332,8 @@ impl Evaluator<'_> {
         out
     }
 
-    /// Subtracts the openings of `element` from the items `items[from..]` of the element.
+    /// Subtracts the openings of `element` from the items `items[from..]` of the element: the exact
+    /// prism subtraction first, and the mesh boolean for every (item, opening) pair it cannot do.
     #[allow(
         clippy::too_many_lines,
         reason = "tools, items and the report of one element"
@@ -351,15 +359,12 @@ impl Evaluator<'_> {
             .map(|(k, _)| k)
             .collect();
         let solid_inverse = world.inverse();
-        // Each opening is reported once, when it is not subtracted from some item.
-        let mut failed: Vec<bool> = vec![false; openings.len()];
-        // A solid body that is not an extrusion keeps its openings; curves and the like do not.
-        let other_solids = items
-            .iter()
-            .enumerate()
-            .any(|(k, i)| !candidates.contains(&k) && matches!(i.shape.as_ref(), Shape::Mesh(_)));
-        if candidates.is_empty() || other_solids {
-            failed.iter_mut().for_each(|f| *f = true);
+        // The (item, opening) pairs the prism subtraction did not do.
+        let mut todo: Vec<(usize, usize)> = Vec::new();
+        for (k, item) in items.iter().enumerate() {
+            if matches!(item.shape.as_ref(), Shape::Mesh(_)) && !candidates.contains(&k) {
+                todo.extend((0..openings.len()).map(|o| (k, o)));
+            }
         }
         let mut tool_sets: Vec<Option<Vec<Tool>>> = Vec::with_capacity(openings.len());
         for (k, &(_, placement, shape)) in openings.iter().enumerate() {
@@ -376,7 +381,7 @@ impl Evaluator<'_> {
                 Ok(t) => tool_sets.push(Some(t)),
                 Err(super::Flow::Hard(error)) => return Err(error),
                 Err(super::Flow::Skip(_)) => {
-                    failed[k] = true;
+                    todo.extend(candidates.iter().map(|&c| (c, k)));
                     tool_sets.push(None);
                 }
             }
@@ -394,7 +399,13 @@ impl Evaluator<'_> {
                 Ok(s) => s,
                 Err(super::Flow::Hard(error)) => return Err(error),
                 Err(super::Flow::Skip(_)) => {
-                    failed.iter_mut().for_each(|f| *f = true);
+                    todo.extend(
+                        tool_sets
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, t)| t.is_some())
+                            .map(|(k, _)| (index, k)),
+                    );
                     continue;
                 }
             };
@@ -420,7 +431,7 @@ impl Evaluator<'_> {
                             changed = true;
                             number = number.saturating_add(1);
                         }
-                        Some(Err(())) => failed[k] = true,
+                        Some(Err(())) => todo.push((index, k)),
                         None => {}
                     }
                 }
@@ -431,6 +442,28 @@ impl Evaluator<'_> {
                     item.shape = Arc::new(Shape::Mesh(mesh));
                 }
             }
+        }
+        todo.sort_unstable();
+        todo.dedup();
+        let mut failed: Vec<bool> = vec![false; openings.len()];
+        let mut bodies: Vec<Option<Option<Vec<TriMesh>>>> = vec![None; openings.len()];
+        for (index, k) in todo {
+            self.budget.step()?;
+            let Some(&opening) = openings.get(k) else {
+                continue;
+            };
+            if bodies[k].is_none() {
+                bodies[k] = Some(self.opening_bodies(opening)?);
+            }
+            let tools = bodies[k].as_ref().and_then(Option::as_ref);
+            let Some(item) = items.get_mut(index) else {
+                continue;
+            };
+            let done = match tools {
+                Some(tools) => self.boolean_opening(item, tools)?,
+                None => false,
+            };
+            failed[k] |= !done;
         }
         for (k, bad) in failed.into_iter().enumerate() {
             if bad && let Some(&(opening, _, _)) = openings.get(k) {
@@ -444,6 +477,85 @@ impl Evaluator<'_> {
         }
         let _ = element;
         Ok(())
+    }
+
+    /// The body meshes of an opening in world coordinates; `None` when it has none that is evaluated.
+    fn opening_bodies(
+        &mut self,
+        (opening, placement, shape): (u64, Option<u64>, u64),
+    ) -> arc_base::Result<Option<Vec<TriMesh>>> {
+        let Some(world) = self.product_transform(opening, placement)? else {
+            return Ok(None);
+        };
+        let mut found: Vec<GeometryItem> = Vec::new();
+        self.product_items(opening, shape, world, &mut found)?;
+        let mut out = Vec::new();
+        for item in found {
+            if item
+                .representation_identifier
+                .as_deref()
+                .is_some_and(|i| i != "Body")
+            {
+                continue;
+            }
+            if let Some(mesh) = item.world_mesh(&self.limits)? {
+                out.push(mesh);
+            }
+        }
+        Ok((!out.is_empty()).then_some(out))
+    }
+
+    /// Subtracts the opening bodies from the mesh of `item` by the mesh boolean, leaving the item in
+    /// world coordinates. `Ok(false)` when the boolean is refused; the item is then unchanged.
+    fn boolean_opening(
+        &mut self,
+        item: &mut GeometryItem,
+        tools: &[TriMesh],
+    ) -> arc_base::Result<bool> {
+        let Some(mut current) = item.world_mesh(&self.limits)? else {
+            return Ok(false);
+        };
+        let mut changed = false;
+        for tool in tools {
+            self.budget.step()?;
+            let size = current
+                .triangle_count()
+                .saturating_add(tool.triangle_count());
+            if size > MAX_BOOLEAN_TRIANGLES {
+                return Ok(false);
+            }
+            self.budget.array(size.saturating_mul(4))?;
+            self.budget.charge(
+                u64::try_from(size)
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(8 * (super::VERTEX_BYTES + super::TRIANGLE_BYTES)),
+            )?;
+            let (lo, hi) = (current.bounding_box(), tool.bounding_box());
+            let slack = self.tol.linear;
+            let apart = (0..3)
+                .any(|a| hi.min()[a] > lo.max()[a] + slack || hi.max()[a] < lo.min()[a] - slack);
+            if apart {
+                continue;
+            }
+            match arc_mesh::boolean::boolean(
+                &current,
+                tool,
+                arc_mesh::boolean::BooleanOp::Difference,
+                &self.tol,
+                &self.limits,
+            ) {
+                Ok(next) => {
+                    current = next;
+                    changed = true;
+                }
+                Err(_) => return Ok(false),
+            }
+        }
+        if changed {
+            item.shape = Arc::new(Shape::Mesh(current));
+            item.transform = Transform3::identity();
+        }
+        Ok(true)
     }
 
     /// Subtracts one prism; `None` when the prism does not meet the solid, `Some(Err)` when the
