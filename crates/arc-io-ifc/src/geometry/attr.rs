@@ -252,3 +252,31 @@ pub(crate) fn coordinates2(list: &[Parameter], scale: f64, kind: &str) -> Step<V
 pub(crate) fn point3(list: &[Parameter], scale: f64, kind: &str) -> Step<Point3> {
     coordinates3(list, scale, kind).map(|v| Point3::new(v.x, v.y, v.z))
 }
+
+/// The attribute `name` of a record by the schema tables, so that the differences between the
+/// schemas are read as declared; at `position` (its place in IFC4) when the build has no tables.
+pub(crate) fn named<'a>(
+    file: &IfcFile,
+    record: &'a Record,
+    name: &str,
+    position: usize,
+) -> Option<&'a Parameter> {
+    if file.tables().is_some() {
+        file.attribute(record, name)
+    } else {
+        record.parameters.get(position)
+    }
+}
+
+/// An optional boolean (`.T.` or `.F.`); `None` for `$`, `*` and any other value.
+pub(crate) fn boolean(parameter: Option<&Parameter>) -> Option<bool> {
+    match parameter {
+        Some(Parameter::Enumeration(name)) => match name.as_str() {
+            "T" => Some(true),
+            "F" => Some(false),
+            _ => None,
+        },
+        Some(Parameter::Typed { value, .. }) => boolean(Some(value)),
+        _ => None,
+    }
+}

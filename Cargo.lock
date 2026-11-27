@@ -291,6 +291,7 @@ name = "arc-io-ifc"
 version = "0.1.0"
 dependencies = [
  "arc-base",
+ "arc-geom",
  "arc-io-common",
  "arc-mesh",
  "proptest",

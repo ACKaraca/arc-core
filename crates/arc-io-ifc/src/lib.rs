@@ -44,7 +44,7 @@ pub mod views;
 pub mod write;
 
 pub use error::{codes, reasons, rules};
-pub use geometry::{Geometry, GeometryItem, Shape, Units};
+pub use geometry::{Geometry, GeometryItem, GeometryOptions, Shape, Units};
 pub use loss::{LossItem, LossReport, Outcome, Severity};
 pub use model::{IfcFile, Instance, Parameter, Record, Schema};
 #[cfg(not(target_arch = "wasm32"))]

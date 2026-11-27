@@ -15,14 +15,17 @@
 //! product and every 1024 steps of a long loop.
 
 mod attr;
+mod boolean;
 mod budget;
 mod curves;
 mod faces;
 mod mapped;
+mod opening;
 mod place;
 mod polygon;
 mod profile;
 mod solid;
+mod swept;
 mod units;
 
 /// The most points of one loop or polyline that are evaluated; the triangulation is quadratic in
@@ -108,6 +111,24 @@ impl GeometryItem {
     }
 }
 
+/// What a geometry evaluation does besides evaluating the representation items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GeometryOptions {
+    /// Subtract the bodies of the openings of an element (`IfcRelVoidsElement`) from the element's
+    /// extruded body, as the module `opening` describes. When false, or for an opening that cannot be
+    /// subtracted, the opening is reported as `io.ifc.opening_not_subtracted` and the element is
+    /// emitted solid.
+    pub subtract_openings: bool,
+}
+
+impl Default for GeometryOptions {
+    fn default() -> Self {
+        Self {
+            subtract_openings: true,
+        }
+    }
+}
+
 /// The result of a geometry evaluation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Geometry {
@@ -187,6 +208,8 @@ pub(crate) struct Evaluator<'f> {
     pub(crate) log: LossLog,
     /// Meters per length unit of the file, applied to every length read.
     pub(crate) scale: f64,
+    /// Radians per plane angle unit of the file, applied to every angle read.
+    pub(crate) angle: f64,
     /// The deepest recursion allowed: the nesting limit of the profile, at most [`MAX_NESTING`].
     pub(crate) depth_limit: u32,
     placements: BTreeMap<u64, Transform3>,
@@ -208,6 +231,7 @@ impl<'f> Evaluator<'f> {
             budget: Budget::new(limits, file.parsed_bytes(), cancel),
             log: LossLog::default(),
             scale: 1.0,
+            angle: 1.0,
             depth_limit: limits.nesting_depth.min(MAX_NESTING),
             placements: BTreeMap::new(),
             items: BTreeMap::new(),
@@ -284,13 +308,25 @@ impl<'f> Evaluator<'f> {
         let kind = record.type_name.as_str();
         match kind {
             "IFCMAPPEDITEM" => self.mapped(name, record, depth),
-            "IFCEXTRUDEDAREASOLID" => self.extrusion(record),
+            "IFCEXTRUDEDAREASOLID" | "IFCEXTRUDEDAREASOLIDTAPERED" => self.extrusion(record),
+            "IFCBOOLEANRESULT" | "IFCBOOLEANCLIPPINGRESULT" => self.boolean(name, record, depth),
+            "IFCREVOLVEDAREASOLID" => self.revolution(name, record),
+            "IFCSWEPTDISKSOLID" | "IFCSWEPTDISKSOLIDPOLYGONAL" => self.swept_disk(name, record),
+            "IFCSURFACECURVESWEPTAREASOLID" | "IFCFIXEDREFERENCESWEPTAREASOLID" => {
+                self.directrix_sweep(record)
+            }
             "IFCTRIANGULATEDFACESET"
             | "IFCPOLYGONALFACESET"
             | "IFCFACETEDBREP"
+            | "IFCFACETEDBREPWITHVOIDS"
             | "IFCFACEBASEDSURFACEMODEL"
             | "IFCSHELLBASEDSURFACEMODEL" => self.faces(name, record),
-            "IFCPOLYLINE" | "IFCINDEXEDPOLYCURVE" => self.curve(record),
+            "IFCPOLYLINE"
+            | "IFCINDEXEDPOLYCURVE"
+            | "IFCCIRCLE"
+            | "IFCELLIPSE"
+            | "IFCTRIMMEDCURVE"
+            | "IFCCOMPOSITECURVE" => self.curve(name, record),
             _ => Err(attr::skip(reasons::GEOMETRY_NOT_EVALUATED, kind)),
         }
     }
@@ -503,18 +539,54 @@ fn count_openings(evaluator: &mut Evaluator<'_>) {
 }
 
 /// The whole evaluation.
-fn run(file: &IfcFile, limits: &Limits, tol: &Tolerance, cancel: &Cancel) -> Result<Geometry> {
+fn run(
+    file: &IfcFile,
+    limits: &Limits,
+    tol: &Tolerance,
+    cancel: &Cancel,
+    options: &GeometryOptions,
+) -> Result<Geometry> {
     cancel.check()?;
     let mut evaluator = Evaluator::new(file, limits, tol, cancel);
     let units = evaluator.read_units()?;
-    count_openings(&mut evaluator);
+    if !options.subtract_openings {
+        count_openings(&mut evaluator);
+    }
+    let all = products(file);
+    let voids = if options.subtract_openings {
+        opening::voids(file)
+    } else {
+        BTreeMap::new()
+    };
+    let index: BTreeMap<u64, (Option<u64>, u64)> =
+        all.iter().map(|&(n, p, s)| (n, (p, s))).collect();
     let mut items = Vec::new();
-    for (product, placement, shape) in products(file) {
+    for (product, placement, shape) in all {
         evaluator.budget.check()?;
         let Some(world) = evaluator.product_transform(product, placement)? else {
             continue;
         };
+        let start = items.len();
         evaluator.product_items(product, shape, world, &mut items)?;
+        if let Some(openings) = voids.get(&product) {
+            let mut found: Vec<(u64, Option<u64>, u64)> = Vec::with_capacity(openings.len());
+            for opening in openings {
+                match index.get(opening) {
+                    Some(&(p, s)) => found.push((*opening, p, s)),
+                    // An opening without a body cannot be subtracted.
+                    None => evaluator.log.add(
+                        reasons::OPENING_NOT_SUBTRACTED,
+                        "IFCRELVOIDSELEMENT",
+                        Some(Source::Decimal(*opening)),
+                        1,
+                    ),
+                }
+            }
+            let openings = found;
+            if let Some(slice) = items.get_mut(start..) {
+                evaluator.subtract_openings(product, world, &openings, slice)?;
+            }
+        }
     }
     let report = evaluator.log.finish(LossHeader::new(
         "ifc",
@@ -556,6 +628,22 @@ impl IfcFile {
         cancel: &Cancel,
         tolerance: &Tolerance,
     ) -> Result<Geometry> {
-        run(self, limits, tolerance, cancel)
+        run(self, limits, tolerance, cancel, &GeometryOptions::default())
+    }
+
+    /// Evaluates the geometry of the products of the file as
+    /// [`Self::geometry_with_tolerance`] does, with the given options.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::geometry_with_tolerance`].
+    pub fn geometry_with_options(
+        &self,
+        limits: &Limits,
+        cancel: &Cancel,
+        tolerance: &Tolerance,
+        options: &GeometryOptions,
+    ) -> Result<Geometry> {
+        run(self, limits, tolerance, cancel, options)
     }
 }

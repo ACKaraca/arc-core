@@ -153,11 +153,27 @@ impl Evaluator<'_> {
         match kind {
             "IFCTRIANGULATEDFACESET" => self.triangulated(record, &mut welder)?,
             "IFCPOLYGONALFACESET" => self.polygonal(record, &mut welder, &mut deviation)?,
-            "IFCFACETEDBREP" => {
+            "IFCFACETEDBREP" | "IFCFACETEDBREPWITHVOIDS" => {
                 let shell = attr::reference(file.attr(record, known::BREP_OUTER), kind)?;
                 for face in self.shell_faces(shell)? {
                     self.budget.step()?;
                     self.add_face(face, &mut welder, &mut deviation)?;
+                }
+                if kind == "IFCFACETEDBREPWITHVOIDS" {
+                    // The shells of the voids are wound outward from the material, so their faces
+                    // are added as they are.
+                    let (voids, _) = attr::distinct_references(
+                        &mut self.budget,
+                        attr::named(file, record, "Voids", 1),
+                        kind,
+                        usize::MAX,
+                    )?;
+                    for void in voids {
+                        for face in self.shell_faces(void)? {
+                            self.budget.step()?;
+                            self.add_face(face, &mut welder, &mut deviation)?;
+                        }
+                    }
                 }
             }
             "IFCFACEBASEDSURFACEMODEL" | "IFCSHELLBASEDSURFACEMODEL" => {

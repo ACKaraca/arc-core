@@ -113,6 +113,7 @@ impl Evaluator<'_> {
         }
         let meters_per_length_unit = length.unwrap_or(1.0);
         self.scale = meters_per_length_unit;
+        self.angle = angle.unwrap_or(1.0);
         Ok(Units {
             meters_per_length_unit,
             radians_per_angle_unit: angle.unwrap_or(1.0),

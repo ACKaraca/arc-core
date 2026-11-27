@@ -444,7 +444,7 @@ fn polyline_axis_representation_is_returned_as_meters() {
 }
 
 #[test]
-fn boolean_result_emits_nothing_and_is_reported_once_per_kind() {
+fn unsupported_boolean_keeps_the_first_operand_and_is_reported_once() {
     let body = "\
 #60=IFCEXTRUDEDAREASOLID(#61,$,#62,1000.);
 #61=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1000.,1000.);
@@ -459,17 +459,14 @@ fn boolean_result_emits_nothing_and_is_reported_once_per_kind() {
 #51=IFCBUILDINGELEMENTPROXY('bool0000000000000000000B',$,'Bool2',$,$,$,#42,$,$);
 ";
     let geometry = evaluate(&project(body));
-    assert_eq!(
-        geometry.items.len(),
-        1,
-        "only the box of the second product"
-    );
-    assert_eq!(geometry.items[0].product, 51);
+    // The half space has no plane, so the boolean is not applied: the box is kept, once for the
+    // first product and twice (the box and the boolean) for the second.
+    assert_eq!(geometry.items.len(), 3);
     // The boolean is one representation item, evaluated and reported once, whichever products use it.
     assert_eq!(
         loss_count(
             &geometry,
-            reasons::GEOMETRY_NOT_EVALUATED.code,
+            reasons::GEOMETRY_APPROXIMATED.code,
             "IFCBOOLEANCLIPPINGRESULT"
         ),
         1
