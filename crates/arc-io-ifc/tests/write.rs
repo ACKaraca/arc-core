@@ -102,8 +102,8 @@ fn house() -> WriteModel {
         "Pset_WallCommon",
         vec![
             Property::new("IsExternal", PropertyValue::Boolean(true)),
-            Property::new("Reference", PropertyValue::Label("W-01 \\ ç".into())),
-            Property::new("Width", PropertyValue::Length(0.2)),
+            Property::new("Reference", PropertyValue::Identifier("W-01 \\ ç".into())),
+            Property::new("FireRating", PropertyValue::Label("REI 60".into())),
         ],
     ));
     first.quantity_sets.push(QuantitySet::new(
@@ -254,7 +254,7 @@ fn output_is_deterministic_and_has_the_header() {
     assert!(text.contains("FILE_SCHEMA(('IFC4'));\nENDSEC;\nDATA;\n#1="));
     assert!(text.ends_with("ENDSEC;\nEND-ISO-10303-21;\n"));
     assert!(text.contains("'Wall ''south'' \\X2\\011F\\X0\\'"));
-    assert!(text.contains("IFCLABEL('W-01 \\\\ \\X2\\00E7\\X0\\')"));
+    assert!(text.contains("IFCIDENTIFIER('W-01 \\\\ \\X2\\00E7\\X0\\')"));
     assert!(text.contains("IFCBOOLEAN(.T.)"));
     assert!(text.contains(".DOOR.,.SINGLE_SWING_LEFT.,$);"));
     assert!(text.contains(".WINDOW.,.USERDEFINED.,'tilt and turn');"));
@@ -367,7 +367,7 @@ fn house_reads_back_with_structure_relations_and_volumes() {
         .iter()
         .map(|p| p.name.clone().unwrap())
         .collect();
-    assert_eq!(names, ["IsExternal", "Reference", "Width"]);
+    assert_eq!(names, ["IsExternal", "Reference", "FireRating"]);
     assert!(matches!(
         &set.properties[1].value,
         arc_io_ifc::PropertyValue::Single { nominal: Some(n), .. }
@@ -634,7 +634,7 @@ fn house_with_spaces() -> WriteModel {
         "Pset_SpaceCommon",
         vec![Property::new(
             "Reference",
-            PropertyValue::Label("101".into()),
+            PropertyValue::Identifier("101".into()),
         )],
     ));
     room.quantity_sets.push(QuantitySet::new(

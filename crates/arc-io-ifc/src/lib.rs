@@ -35,6 +35,7 @@ pub mod geometry;
 pub mod loss;
 pub mod model;
 pub mod options;
+pub mod psets;
 mod read;
 pub mod schema;
 mod step;
