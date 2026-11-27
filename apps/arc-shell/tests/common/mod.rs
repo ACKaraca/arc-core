@@ -282,7 +282,8 @@ impl Harness {
             raw: egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
-                    egui::vec2(1200.0, 900.0),
+                    // Tall enough at 150 % for the command tabs and a bottom panel's rows.
+                    egui::vec2(1200.0, 1080.0),
                 )),
                 events,
                 dropped_files,
