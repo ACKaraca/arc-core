@@ -1116,7 +1116,12 @@ pub fn flat_tab(
         x.widget_info(|| WidgetInfo::labeled(Role::Button, true, format!("{close} {name}")));
     }
     tab.widget_info(|| WidgetInfo::selected(Role::Button, true, active, label));
-    let hot = tab.hovered() || x.hovered() || ui.rect_contains_pointer(rect);
+    // A focused tab or close control shows like a hovered one, so keyboard focus is visible.
+    let hot = tab.hovered()
+        || x.hovered()
+        || tab.has_focus()
+        || x.has_focus()
+        || ui.rect_contains_pointer(rect);
     let visuals = ui.visuals();
     let accent = visuals.hyperlink_color;
     let weak = visuals.weak_text_color();
@@ -1130,6 +1135,11 @@ pub fn flat_tab(
     } else if hot {
         ui.painter()
             .rect_filled(rect, 0.0, visuals.widgets.hovered.bg_fill);
+    }
+    let focus = visuals.widgets.active.bg_stroke;
+    for focused in [&tab, &x].into_iter().filter(|r| r.has_focus()) {
+        ui.painter()
+            .rect_stroke(focused.rect, 0.0, focus, egui::StrokeKind::Inside);
     }
     let color = if active { strong } else { weak };
     ui.painter().galley(
@@ -1161,6 +1171,30 @@ pub fn flat_tab(
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn a_focused_close_control_of_an_inactive_tab_is_drawn() {
+        let ctx = egui::Context::default();
+        let x_id = std::cell::Cell::new(None);
+        let frame = || {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let (_, x) = flat_tab(ui, "Layers", "Layers", false, "Close", true);
+                x_id.set(Some(x.id));
+            });
+            out.textures_delta.clear();
+            out.shapes
+                .iter()
+                .filter(|s| matches!(s.shape, egui::Shape::LineSegment { .. }))
+                .count()
+        };
+        // Neither active nor hovered: the close control is hidden.
+        assert_eq!(frame(), 0);
+        if let Some(id) = x_id.get() {
+            ctx.memory_mut(|m| m.request_focus(id));
+        }
+        frame();
+        assert!(frame() >= 2, "the focused close control is not drawn");
+    }
 
     fn tabs(names: &[&str]) -> Dock {
         Dock::Tabs {

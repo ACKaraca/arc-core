@@ -970,8 +970,8 @@ needs no window:
   Ctrl+Shift+Z whenever no text field has the focus, so a product needs no binding for them.
 - Command tabs (`ShellConfig::command_tabs`) replace the flat toolbar strip when given. A row of
   tab labels (real, keyboard-reachable tabs, each padded 12 points either side, highlighted on
-  hover) sits under the menu bar: the current tab has an
-  accent underline, a double click on it folds the panel away or back (kept per window), and
+  hover, outlined while focused, the current one reported as selected to assistive technology)
+  sits under the menu bar: the current tab has an accent underline, a double click on it folds the panel away or back (kept per window), and
   picking another tab while folded expands it. Below the row a fixed-height panel lays the
   current tab's groups out left to right in a horizontal scroll area, without wrapping: each
   group draws its items, its label centered underneath in the muted text color, and a thin

@@ -1218,13 +1218,21 @@ pub fn show_commands(ui: &mut Ui, bar: &CommandBarView, look: &Look<'_>) -> Opti
             let size = egui::vec2(galley.size().x + 2.0 * TAB_PAD, TAB_H);
             let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
             response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::Role::Tab, true, head.label.as_str())
+                egui::WidgetInfo::selected(egui::Role::Tab, true, current, head.label.as_str())
             });
             if response.hovered() {
                 ui.painter().rect_filled(
                     rect,
                     egui::CornerRadius::same(ROUNDING),
                     colors.control_hover,
+                );
+            }
+            if response.has_focus() {
+                ui.painter().rect_stroke(
+                    rect,
+                    egui::CornerRadius::same(ROUNDING),
+                    egui::Stroke::new(1.5, colors.focus),
+                    egui::StrokeKind::Inside,
                 );
             }
             let at = egui::pos2(
@@ -1562,6 +1570,43 @@ mod tests {
         // A chosen tab that is no longer shown falls back to the first one.
         assert_eq!(state.current(&[1]), Some(1));
         assert_eq!(state.current(&[]), None);
+    }
+
+    #[test]
+    fn command_tabs_tell_assistive_technology_which_is_current() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let colors = arc_ui::ThemeId::Dark.theme().colors;
+        let look = Look {
+            icons: None,
+            colors: &colors,
+        };
+        let head = |index: usize, label: &str| TabHead {
+            index,
+            label: label.into(),
+            contextual: false,
+        };
+        let bar = CommandBarView {
+            state_id: egui::Id::NULL.with("tabs"),
+            heads: vec![head(0, "Home"), head(1, "Draw")],
+            current: 1,
+            collapsed: true,
+            groups: Vec::new(),
+        };
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show_commands(ui, &bar, &look);
+        });
+        out.textures_delta.clear();
+        let update = out.platform_output.accesskit_update.unwrap();
+        let toggled = |label: &str| {
+            update
+                .nodes
+                .iter()
+                .find(|(_, n)| n.role() == egui::accesskit::Role::Tab && n.label() == Some(label))
+                .and_then(|(_, n)| n.toggled())
+        };
+        assert_eq!(toggled("Home"), Some(egui::accesskit::Toggled::False));
+        assert_eq!(toggled("Draw"), Some(egui::accesskit::Toggled::True));
     }
 
     #[test]
