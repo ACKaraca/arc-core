@@ -252,8 +252,23 @@ pub enum ViewRequest {
         z: f64,
     },
     /// Use this camera (one the controller read from [`InteractionContext::camera`] earlier) and
-    /// release the orientation lock of [`ViewRequest::Plan`].
+    /// release the orientation lock of [`ViewRequest::Plan`] and [`ViewRequest::Facing`].
     Camera(ViewFrame),
+    /// Look along `forward` with `up` on the screen with an orthographic camera framed on the
+    /// rectangle of `size` (width along the screen's x, height along its y) centered at `center`,
+    /// and lock the orientation as [`ViewRequest::Plan`] does. A product shows a rotated plan, a
+    /// section or an elevation drawing this way. Directions need not be unit vectors; `up` is
+    /// made perpendicular to `forward`.
+    Facing {
+        /// The middle of the rectangle.
+        center: [f64; 3],
+        /// The direction the camera looks in.
+        forward: [f64; 3],
+        /// The direction that is up on the screen.
+        up: [f64; 3],
+        /// The width and height of the rectangle.
+        size: [f64; 2],
+    },
 }
 
 /// The dynamic input panel a controller asks for: its prompt message and fields.
@@ -316,6 +331,12 @@ pub struct InteractionOutput {
     /// other objects are hidden. `None` (the default) shows every object that is not in
     /// [`Self::hidden`].
     pub isolated: Option<Vec<ObjectId>>,
+    /// How the viewport draws faces and edges (a view's visual style). `None` (the default) is
+    /// [`arc_gpu::ShadingMode::Shaded`].
+    pub shading: Option<arc_gpu::ShadingMode>,
+    /// The section planes and box that clip the viewport's meshes (a 3D view's section box).
+    /// `None` (the default) clips nothing.
+    pub section: Option<arc_gpu::display::Section>,
 }
 
 /// The most commands one call of a controller can ask the shell for.

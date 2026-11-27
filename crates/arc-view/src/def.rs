@@ -1,6 +1,6 @@
 //! View definitions (CORE-VIEW-001, CORE-VIEW-003, CORE-VIEW-004, CORE-VIEW-006).
 
-use arc_base::math::{Point2, Point3};
+use arc_base::math::{Point2, Point3, Vector3};
 use arc_base::{Error, Result, Tolerance};
 use arc_geom::{Curve2, Region, RegionPart, Segment2};
 
@@ -10,24 +10,60 @@ use crate::source::Overrides;
 /// The largest error a drawing may show on the sheet, in meters: 0.05 mm.
 pub const SHEET_ERROR: f64 = 5e-5;
 
-/// The direction a view looks in. Only the plan direction exists yet; the rest of the crate
-/// works in view space (x right, y up on the sheet, z toward the viewer), so further
-/// directions only add their mapping here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// The direction a view looks in. The rest of the crate works in view space (x right, y up on
+/// the sheet, z toward the viewer); a direction is the mapping between world and view space.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub enum ViewDirection {
     /// Looking down the negative world z axis: world x and y are the sheet's x and y, and the
     /// world z is the height toward the viewer.
     #[default]
     Plan,
+    /// Any orthographic frame (an elevation, a section, an axonometric view): view x runs along
+    /// `right`, view y along `up` and view z along `right × up`, toward the viewer, all measured
+    /// from `origin`. Build it with [`ViewDirection::frame`], which makes the axes orthonormal.
+    Frame {
+        /// The world point at the view-space origin.
+        origin: Point3,
+        /// The unit world direction of view x.
+        right: Vector3,
+        /// The unit world direction of view y, perpendicular to `right`.
+        up: Vector3,
+    },
 }
 
 impl ViewDirection {
+    /// The orthographic frame at `origin` whose view x runs along `right` and whose view y runs
+    /// along the part of `up` perpendicular to it; a vertical section or elevation has
+    /// a horizontal `right` and `up` = +z.
+    ///
+    /// # Errors
+    ///
+    /// `view.definition.invalid` (`parameter` `direction`) for a point or axis that is not finite,
+    /// an axis of no length or axes that are parallel.
+    pub fn frame(origin: Point3, right: Vector3, up: Vector3) -> Result<Self> {
+        let invalid = || Error::new(codes::DEFINITION_INVALID).with_arg("parameter", "direction");
+        let finite = |v: &[f64]| v.iter().all(|c| c.is_finite());
+        if !finite(origin.coords.as_slice()) || !finite(right.as_slice()) || !finite(up.as_slice())
+        {
+            return Err(invalid());
+        }
+        let right = right.try_normalize(f64::EPSILON).ok_or_else(invalid)?;
+        let up = (up - right * up.dot(&right))
+            .try_normalize(1e-9)
+            .ok_or_else(invalid)?;
+        Ok(Self::Frame { origin, right, up })
+    }
+
     /// The view-space position of a world point.
     #[must_use]
     pub fn to_view(self, point: Point3) -> Point3 {
         match self {
             Self::Plan => point,
+            Self::Frame { origin, right, up } => {
+                let d = point - origin;
+                Point3::new(d.dot(&right), d.dot(&up), d.dot(&right.cross(&up)))
+            }
         }
     }
 
@@ -36,6 +72,24 @@ impl ViewDirection {
     pub fn to_world(self, point: Point3) -> Point3 {
         match self {
             Self::Plan => point,
+            Self::Frame { origin, right, up } => {
+                origin + right * point.x + up * point.y + right.cross(&up) * point.z
+            }
+        }
+    }
+
+    /// Whether the mapping is a rotation and translation: always for the plan direction; for a
+    /// frame, finite unit axes that are perpendicular.
+    fn is_rigid(self) -> bool {
+        match self {
+            Self::Plan => true,
+            Self::Frame { origin, right, up } => {
+                let unit = |v: Vector3| (v.norm() - 1.0).abs() < 1e-9;
+                origin.coords.iter().all(|c| c.is_finite())
+                    && unit(right)
+                    && unit(up)
+                    && right.dot(&up).abs() < 1e-9
+            }
         }
     }
 }
@@ -170,9 +224,9 @@ impl ViewDef {
     ///
     /// # Errors
     ///
-    /// `view.definition.invalid` with the argument `parameter` for a tolerance with a linear
-    /// value, chord or angle that is not finite and positive or an angular value that is not
-    /// finite and not negative, ranges that are not finite or not ordered `bottom < cut < top`, a
+    /// `view.definition.invalid` with the argument `parameter` for a direction frame whose axes
+    /// are not perpendicular unit vectors, a tolerance with a linear value, chord or angle that is
+    /// not finite and positive or an angular value that is not finite and not negative, ranges that are not finite or not ordered `bottom < cut < top`, a
     /// crease angle outside [0, π], a scale that is not finite and positive, or a coordinate
     /// bound that is not finite and positive.
     pub fn validate(&self, tolerance: &Tolerance) -> Result<()> {
@@ -196,6 +250,9 @@ impl ViewDef {
             && !(top.is_finite() && top > cut)
         {
             return invalid("range");
+        }
+        if !self.direction.is_rigid() {
+            return invalid("direction");
         }
         if !(0.0..=std::f64::consts::PI).contains(&self.crease_angle) {
             return invalid("crease_angle");
