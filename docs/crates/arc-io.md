@@ -1123,7 +1123,7 @@ triangle meshes of the geometry evaluation (a lower-layer edge) and on `serde` f
 readers take byte buffers and never paths, and the crate builds for `wasm32-unknown-unknown`. The
 geometry evaluation (CORE-IO-015) is described in [Geometry evaluation as implemented](#geometry-evaluation-as-implemented).
 The first part of writing (CORE-IO-016) is described in [IFC writing as implemented](#ifc-writing-as-implemented).
-The alignment part of geometry evaluation is described in [Alignments and linear placement as implemented](#alignments-and-linear-placement-as-implemented). IDS (CORE-IO-018) is described in [IDS as implemented](#ids-as-implemented).
+The alignment part of geometry evaluation is described in [Alignments and linear placement as implemented](#alignments-and-linear-placement-as-implemented). Streaming (CORE-IO-017) is described in [Streaming read as implemented](#streaming-read-as-implemented). IDS (CORE-IO-018) is described in [IDS as implemented](#ids-as-implemented).
 
 ### Reading
 
@@ -1204,7 +1204,7 @@ its `;`, and the offset of the `ENDSEC` that closes the last data section. `IfcF
 copy of the physical file (for an IFC-ZIP archive, the inflated entry) and the spans as offsets into
 it, part of the 120 bytes per instance of the parser's estimate; no instance holds a copy of its text.
 `span(name)` returns the span of an unchanged instance and `source_text(name)` its bytes. Because
-spans are offsets, a later streaming reader (CORE-IO-017) can keep them into a seekable source instead
+spans are offsets, the streaming reader (CORE-IO-017) keeps them into a seekable source instead
 of a buffer.
 
 `write_step(limits)` writes the file back. Every byte that no edit touched is copied from the source:
@@ -2023,6 +2023,54 @@ Differences that are not rounding:
 The tests are in `crates/arc-io-ifc/tests/alignment.rs`: closed forms for the line and the circle,
 numerical integration of the heading for every spiral, the gradient and cant of a layout, linear
 placements with offsets, axes and parents, units, and hostile input.
+
+## Streaming read as implemented
+
+`arc_io_ifc::stream` reads a physical file from a `Read` source with memory bounded by a window and
+an index, not by the file (CORE-IO-017). It handles the STEP physical file; an IFC-ZIP archive is read
+whole and then by `read`.
+
+- `scan(source, limits, stream_limits, cancel, visit)` reads the source once, in chunks of 64 KiB, and
+  calls `visit(&Instance, span)` for each instance as soon as it is parsed; nothing is kept but the set
+  of names that detects duplicates. It returns a `StreamSummary` with the schema, the header records
+  with their spans, the number of instances, the bytes read and the largest window.
+- `StreamIndex::build(source, ..)` keeps, per instance, its name, the span of its source text and its
+  place in the list of its entity types: a conservative estimate of 96 bytes whatever the instance
+  holds, charged against `memory_bytes`. `span(name)` is the span `IfcFile::span` reports, from the
+  `#` to the `;`, and `instances_of(type)` the names in file order.
+- `StreamFile::open(source, ..)` couples an index with a `Read + Seek` source; `instance(name)` seeks
+  to the span and parses that one statement with the parser of `read`, so the instance is the one
+  `read` returns, and `instances_of(type)` parses the instances of a type in order.
+
+A statement is found by its terminating `;` outside strings and comments, so a source may be
+delivered in pieces of any size (the tests use 1 to 1,048,576 bytes). The window holds the statement
+being read: a statement longer than `StreamLimits::statement_bytes` (64 MiB by default) is
+`io.limit_exceeded`. The limits of `read` apply (`input_bytes`, `record_count`, `array_length`,
+`string_bytes`, `nesting_depth`). A malformed file returns the same `io.ifc.*` code as `read` in the
+cases tested, with the offset relative to the statement and the detail `statement_offset` with its
+place in the file; after `END-ISO-10303-21;` nothing is read. The loss report and the typed views
+need an `IfcFile` and are not produced by the stream.
+
+### Verification
+
+`cargo run --release -p arc-io-ifc --example stream_stats -- compare <file>...` compares the stream
+with `read` on every file: the header, the schema, every instance, every span and the lists by type.
+On all 2,256 files found on the development machine (the published IFC2X3, IFC4 and IFC4.3 samples, the
+IDS test cases, the files the writer and the mutation tests produce) the results were equal, and no
+file failed on one side only. The largest file, 51.7 MB and 714,501 instances, took:
+
+| | Peak resident set | Time |
+|---|---|---|
+| `read` (in memory) | 534 MiB | 2.3 s |
+| `StreamFile`: index, then every instance parsed on demand | 52 MiB | 2.9 s |
+
+(release build; the stream's peak is dominated by the index; its window was 67 KiB). The tests are in
+`crates/arc-io-ifc/tests/stream.rs`: equality with `read` on a file that has comments between and
+inside statements, strings holding `;`, `''` and `/*`, a complex instance, two data sections, an
+anchor section and trailing bytes, at several chunk sizes; a 250,000-instance file whose window stays
+below 400 KB and whose index is a third of the memory of the in-memory parse; and the failures
+(truncation at several places, a duplicate name, a syntax error, a statement without end, the limits,
+cancellation).
 
 ## IDS as implemented
 

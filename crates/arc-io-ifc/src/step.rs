@@ -123,6 +123,50 @@ pub(crate) fn parse(data: &[u8], limits: &Limits, control: &mut Control<'_>) -> 
     })
 }
 
+/// Parses one instance statement, `#n=TYPE(...);`, held alone in `statement`, for the streaming
+/// reader. Errors carry offsets relative to the statement.
+pub(crate) fn parse_instance_statement(
+    statement: &[u8],
+    limits: &Limits,
+    control: &mut Control<'_>,
+) -> Result<Instance> {
+    let mut parser = Parser::alone(statement, limits, control);
+    parser.skip_space()?;
+    if parser.peek() != Some(b'#') {
+        return Err(parser.fail(codes::IFC_SYNTAX));
+    }
+    let instance = parser.instance()?;
+    parser.alone_done()?;
+    Ok(instance)
+}
+
+/// Parses one header record statement, `FILE_NAME(...);`, held alone in `statement`.
+pub(crate) fn parse_header_statement(
+    statement: &[u8],
+    limits: &Limits,
+    control: &mut Control<'_>,
+) -> Result<Record> {
+    let mut parser = Parser::alone(statement, limits, control);
+    let record = parser.record()?;
+    parser.expect(b';')?;
+    parser.alone_done()?;
+    Ok(record)
+}
+
+/// The keyword that starts a statement: letters, digits, `_` and `-`, in upper case, and the byte
+/// offset where it ends. `None` when the statement does not start with one.
+pub(crate) fn leading_keyword(statement: &[u8]) -> Option<(String, usize)> {
+    let end = statement
+        .iter()
+        .position(|b| !(b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-'))
+        .unwrap_or(statement.len());
+    if end == 0 || !statement.first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let word = std::str::from_utf8(statement.get(..end)?).ok()?;
+    Some((word.to_ascii_uppercase(), end))
+}
+
 fn to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
@@ -140,6 +184,32 @@ struct Parser<'a, 'c, 'p> {
     notes: Notes,
     /// The offset of the `ENDSEC` of the last data section read so far.
     data_end: usize,
+}
+
+impl<'a, 'c, 'p> Parser<'a, 'c, 'p> {
+    /// A parser over one statement, with fresh counters.
+    fn alone(data: &'a [u8], limits: &Limits, control: &'c mut Control<'p>) -> Self {
+        Self {
+            data,
+            pos: 0,
+            limits: *limits,
+            depth_limit: limits.nesting_depth.min(MAX_NESTING),
+            control,
+            used: 0,
+            names: BTreeSet::new(),
+            notes: Notes::default(),
+            data_end: 0,
+        }
+    }
+
+    /// Checks that nothing but space follows a statement parsed alone.
+    fn alone_done(&mut self) -> Result<()> {
+        self.skip_space()?;
+        if self.peek().is_some() {
+            return Err(self.fail(codes::IFC_SYNTAX));
+        }
+        Ok(())
+    }
 }
 
 impl<'a> Parser<'a, '_, '_> {

@@ -41,6 +41,7 @@ pub mod psets;
 mod read;
 pub mod schema;
 mod step;
+pub mod stream;
 mod text;
 pub mod views;
 pub mod write;
