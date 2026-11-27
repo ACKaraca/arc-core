@@ -1382,7 +1382,8 @@ the wall-clock limit is not enforced unless the caller supplies a clock. The vie
 
 `IfcFile::geometry(limits, cancel)` evaluates the geometry of the products of the file;
 `IfcFile::geometry_with_tolerance` takes the `arc_base::Tolerance` to use, and `geometry` uses
-`Tolerance::DEFAULT`. The output is a `Geometry`: the items, the units and a loss report of the
+`Tolerance::DEFAULT`. `IfcFile::geometry_with_options` adds `GeometryOptions` (`subtract_openings`,
+true by default). The output is a `Geometry`: the items, the units and a loss report of the
 evaluation. The representation items that are not listed below are not evaluated and are reported.
 
 - Products: an instance whose sixth attribute `Representation` (position 6) refers to an
@@ -1431,14 +1432,18 @@ evaluation. The representation items that are not listed below are not evaluated
 | Item | Output | Notes |
 |---|---|---|
 | `IfcExtrudedAreaSolid` (`SweptArea` 0, `Position` 1, `ExtrudedDirection` 2, `Depth` 3) | mesh | Caps and sides. The direction is normalized and may be skew to the profile plane. A depth that is not positive, and a direction parallel to the profile plane, skip the item. |
-| `IfcRectangleProfileDef` (`Position` 2, `XDim` 3, `YDim` 4) | loop | Centered on its position; both dimensions positive. |
-| `IfcCircleProfileDef` (`Position` 2, `Radius` 3) | loop | A regular polygon; see Bounds for the segment count. |
-| `IfcArbitraryClosedProfileDef` (`OuterCurve` 2) | loop | |
+| Parameterized profiles: rectangle, rounded rectangle, rectangle hollow, circle, circle hollow, ellipse, I, L, T, U, C, Z, asymmetric I, trapezium | loops | Attributes are read by name through the schema tables, so each schema's layout reads as declared. See Profiles below. |
+| `IfcArbitraryClosedProfileDef` (`OuterCurve` 2) | loop | The curve is any curve of the curve rows. |
 | `IfcArbitraryProfileDefWithVoids` (`OuterCurve` 2, `InnerCurves` 3) | loops | Holes are bridged to the outer loop. |
-| `IfcPolyline` (`Points` 0) and `IfcIndexedPolyCurve` (`Points` 0, `Segments` 1) inside a profile | loop | Line segments only; the points must lie in the plane. |
+| `IfcCompositeProfileDef`, `IfcDerivedProfileDef`, `IfcMirroredProfileDef`, `IfcCenterLineProfileDef` | loops | See Profiles below. |
+| `IfcPolyline`, `IfcIndexedPolyCurve` (line and arc segments), `IfcCircle`, `IfcEllipse`, `IfcTrimmedCurve` (on a line, circle or ellipse), `IfcCompositeCurve` | loop, or polyline as a representation item | In 2D or 3D. See Curves below. |
+| `IfcExtrudedAreaSolidTapered` (`EndSweptArea` 4) | mesh | The end profile must have the loops of the start profile with equal point counts. |
+| `IfcRevolvedAreaSolid` (`SweptArea` 0, `Position` 1, `Axis` 2, `Angle` 3) | mesh | See Swept solids below. |
+| `IfcSweptDiskSolid`, `IfcSweptDiskSolidPolygonal`, `IfcSurfaceCurveSweptAreaSolid`, `IfcFixedReferenceSweptAreaSolid` | mesh | See Swept solids below. |
+| `IfcBooleanResult`, `IfcBooleanClippingResult` | mesh | A half space as the second operand. See Booleans below. |
 | `IfcTriangulatedFaceSet` (`Coordinates` 0, `CoordIndex` 3, `PnIndex` 4) | mesh | `Coordinates` is an `IfcCartesianPointList3D`. |
 | `IfcPolygonalFaceSet` (`Coordinates` 0, `Faces` 2, `PnIndex` 3) with `IfcIndexedPolygonalFace` (`CoordIndex` 0) and `IfcIndexedPolygonalFaceWithVoids` (`InnerCoordIndices` 1) | mesh | Each face is triangulated in its plane. |
-| `IfcFacetedBrep` (`Outer` 0) | mesh | The outer `IfcClosedShell` (`CfsFaces` 0). |
+| `IfcFacetedBrep` (`Outer` 0), `IfcFacetedBrepWithVoids` (`Voids` 1) | mesh | The outer `IfcClosedShell` (`CfsFaces` 0). The faces of the void shells are added as they are, wound outward from the material. |
 | `IfcFaceBasedSurfaceModel` (`FbsmFaces` 0) and `IfcShellBasedSurfaceModel` (`SbsmBoundary` 0) | mesh | The shells and connected face sets are `IfcClosedShell`, `IfcOpenShell` or `IfcConnectedFaceSet`. |
 | `IfcFace` (`Bounds` 0), `IfcFaceOuterBound` and `IfcFaceBound` (`Bound` 0, `Orientation` 1), `IfcPolyLoop` (`Polygon` 0) | part of a mesh | The outer bound is the first `IfcFaceOuterBound`, or else the first bound. `Orientation` `.F.` reverses the loop. Any other loop type is not evaluated. |
 | `IfcMappedItem` (`MappingSource` 0, `MappingTarget` 1) | the pieces of the mapped representation | `IfcRepresentationMap` (`MappingOrigin` 0, `MappedRepresentation` 1). `MappingTarget` is an `IfcCartesianTransformationOperator3D` or its `...3DnonUniform` form (`Scale` 3, `Scale2` 5, `Scale3` 6, which default to `Scale`). The map's items are composed with `MappingTarget * MappingOrigin`. |
@@ -1453,17 +1458,61 @@ evaluation. The representation items that are not listed below are not evaluated
   `io.ifc.geometry_approximated` with the record kind `IFCMAPPEDITEM`. A `Scale`, `Scale2` or `Scale3`
   that is not positive skips the item as `io.ifc.geometry_degenerate`; a mirror is expressed through
   the axes, not through a negative scale.
+- Profiles: the shapes have their origin at the center of their bounding box, `Depth` along y. I has equal
+  flanges; T has its flange at the top; U and C open toward +x with the web at -x; Z has its top flange
+  toward -x and its bottom flange toward +x and measures `FlangeWidth` from the center line of the web to the
+  tip; L has its vertical leg at -x and its horizontal leg at the bottom; the trapezium has its bottom edge
+  centered and its top edge starting `TopXOffset` from the bottom edge's left end. Each fillet and edge
+  radius the shape declares rounds the corner as a tangent arc (a radius larger than half of an adjacent
+  edge is reduced and reported as `io.ifc.geometry_approximated`); a flange, leg or web slope is not
+  applied and a slope that is not zero is reported the same way. A composite profile is the parts of its
+  profiles side by side (overlapping profiles give overlapping solids). A derived profile applies its 2D
+  operator (`Axis1`, `Axis2`, `LocalOrigin`, `Scale`, `Scale2`) to the parent; a mirrored profile negates x.
+  A center line profile is the strip of `Thickness` around a polyline, mitered at the corners.
+- Curves: arcs of an `IfcIndexedPolyCurve` (`IfcArcIndex`: start, a point on the arc, end) are the circle
+  through the three points, in 2D or 3D. A trimmed curve takes each trim as a parameter value (a length in
+  units of the vector on a line, an angle in the plane angle unit on a circle or ellipse) or a cartesian
+  point; `MasterRepresentation` `.CARTESIAN.` takes the point and any other value the parameter when both
+  are given. `SenseAgreement` `.T.` runs with increasing parameter from `Trim1` to `Trim2`, `.F.` against it.
+  A composite curve joins its parent curves, reversing those with `SameSense` `.F.`. Arcs and conics are
+  discretized with the chord tolerance: the segment count of an arc of sweep `s` is
+  `ceil(s / (2 acos(1 - c / r)))` (at least one segment per 120 degrees, at most 512 per turn; an ellipse uses
+  its larger semi-axis as `r`).
+- Swept solids: a revolved solid turns the profile about `Axis` (an `IfcAxis1Placement` in the coordinates
+  of `Position`) in steps that keep the chord deviation of the outermost point within the chord tolerance;
+  a magnitude of a full turn or more has no end caps and a profile point on the axis is one vertex. A
+  swept disk (hollow with `InnerRadius`) and the two directrix sweeps are swept along the directrix
+  polyline with each interior vertex mitered (the section lies in the bisecting plane), so the volume is the
+  section area times the directrix length. A turn of more than about 154 degrees at a vertex, and a
+  `StartParam` or `EndParam`, are not evaluated. The profile of a directrix sweep is placed with its plane
+  perpendicular to the first segment; the reference surface and the fixed reference direction are not read.
+- Booleans: the operator is `.DIFFERENCE.` or `.INTERSECTION.`, the first operand is any item and the
+  second is an `IfcHalfSpaceSolid` or `IfcPolygonalBoundedHalfSpace` on an `IfcPlane`. The half space is the
+  side opposite the plane normal when `AgreementFlag` is `.T.` and the side of the normal when `.F.`. The
+  triangles are cut exactly by the plane (vertices within the linear tolerance are on it) and the section is
+  closed by a cap triangulated in the plane, holes included; a result that keeps nothing emits nothing. A
+  polygonal boundary is applied as the whole half space when it is convex and every point of the removed
+  part lies inside it. Anything else (a union, a second operand that is a solid, a base surface that is not a
+  plane, a boundary that clips the solid, a cut of a mesh that is not closed) leaves the first operand
+  unchanged and is reported as `io.ifc.geometry_approximated` with the record kind of the boolean.
+- Openings: with `subtract_openings` (the default) the bodies of the opening elements of an element
+  (`IfcRelVoidsElement`) are subtracted from the element when each of its body items is an untapered
+  `IfcExtrudedAreaSolid` of one profile part, by `arc_geom::Polyhedron::subtract_prism`. An opening body is
+  an `IfcExtrudedAreaSolid` whose direction is perpendicular to its profile; a rectangular body that the
+  prism subtraction refuses along its extrusion axis is tried along its two other axes, which handles a
+  window body extruded along the height that passes through the thickness of the wall. A prism that starts
+  or ends on a face of the solid, and spans the solid, is extended past it by a millimeter. A round edge is
+  the inscribed polygon of the chord tolerance. An opening that is not subtracted (the subtraction is
+  refused, the body is not an extrusion, or the element has a solid body that is not an extrusion) is
+  reported as `io.ifc.opening_not_subtracted` with the record kind `IFCRELVOIDSELEMENT` and the opening
+  as source; an opening whose prism does not meet the solid is skipped without a report. Without the option
+  the report holds one `io.ifc.opening_not_subtracted` item whose count is the number of relationships
+  and the elements are emitted solid.
 - Not evaluated: every other representation item, profile, curve, loop, shell or placement kind. Each
   is reported as `io.ifc.geometry_not_evaluated` with the record kind of the entity, one item per kind
-  with its count, and nothing is emitted for it. This covers `IfcBooleanResult`,
-  `IfcBooleanClippingResult` (no operand is emitted in its place), `IfcSweptDiskSolid`,
-  `IfcRevolvedAreaSolid`, `IfcAdvancedBrep`, `IfcExtrudedAreaSolidTapered`, the CSG primitives, the other
-  profile types, `IfcArcIndex` (the indexed poly-curve holding it is skipped), the other curve types and
-  `IfcEdgeLoop`. An item is emitted as a whole or not at all: a shell with any face that cannot be
-  evaluated is not emitted.
-- Openings: `IfcRelVoidsElement` relationships are not subtracted. The report holds one
-  `io.ifc.opening_not_subtracted` item per file whose count is the number of such relationships, and
-  the elements are emitted solid.
+  with its count, and nothing is emitted for it. This covers the coverage table's "not evaluated" rows.
+  An item is emitted as a whole or not at all: a shell with any face that cannot be evaluated is not
+  emitted.
 - Skips: an attribute of the wrong type skips its item and is reported as `io.ifc.value_unexpected`. An
   index outside its list, or a value that is not an index, is `io.ifc.index_invalid`. A degenerate item
   (zero or negative depth, a loop with zero area, a zero direction, a scale that is not positive, a
@@ -1504,6 +1553,26 @@ evaluation. The representation items that are not listed below are not evaluated
   projection onto the mean plane of its outer loop, with the original vertices, and reported as
   `io.ifc.geometry_approximated`.
 
+#### Coverage of the representation items
+
+Kinds of IFC4 and IFC4X3 by support: *supported* (evaluated as defined), *approximated* (evaluated with a
+stated approximation) and *not evaluated* (reported as `io.ifc.geometry_not_evaluated`).
+
+| Support | Kinds |
+|---|---|
+| supported | `IfcExtrudedAreaSolid`, `IfcTriangulatedFaceSet`, `IfcPolygonalFaceSet`, `IfcFacetedBrep`, `IfcFacetedBrepWithVoids`, `IfcFaceBasedSurfaceModel`, `IfcShellBasedSurfaceModel`, `IfcMappedItem` (uniform and non-uniform operators), `IfcPolyline`, `IfcIndexedPolyCurve` (lines and arcs), `IfcCompositeCurve`, `IfcTrimmedCurve` on `IfcLine`, `IfcCircle`, `IfcEllipse`; profiles rectangle, rounded rectangle, rectangle hollow, arbitrary closed, with voids, composite, derived, mirrored, center line; the half space booleans with a plane |
+| approximated | circles, ellipses, arcs and round profile corners (chord tolerance); `IfcExtrudedAreaSolidTapered`, `IfcRevolvedAreaSolid` (chord tolerance, faces of the taper may be skew), `IfcSweptDiskSolid`, `IfcSweptDiskSolidPolygonal`, `IfcSurfaceCurveSweptAreaSolid`, `IfcFixedReferenceSweptAreaSolid` (mitered polyline sweep); the I, L, T, U, C, Z, asymmetric I and trapezium profiles (radii as arcs, slopes not applied); `IfcPolygonalBoundedHalfSpace` (whole half space when the boundary does not clip); a boolean with any other second operand (first operand kept); openings (prisms through planar extrusions only) |
+| not evaluated | `IfcAdvancedBrep` and its subtypes, `IfcBooleanResult` with a solid second operand (general booleans), `IfcCsgSolid` and the CSG primitives, `IfcSectionedSpine`, `IfcSurfaceOfLinearExtrusion` and the other surfaces, `IfcBSplineCurve` and its subtypes, `IfcOffsetCurve2D`, `IfcOffsetCurve3D`, `IfcClothoid` and the other alignment curves, `IfcCompositeCurveOnSurface`, trimmed curves on a polyline, `IfcGeometricSet` and `IfcGeometricCurveSet`, `IfcAnnotationFillArea`, `IfcTextLiteral`, `IfcSectionedSolidHorizontal`, `IfcDirectrixCurveSweptAreaSolid` and the sweeps with `StartParam` or `EndParam`, `IfcTriangulatedIrregularNetwork`, `IfcCartesianPointList` as an item, the other profile kinds (`IfcArbitraryOpenProfileDef`, `IfcDerivedProfileDef` with a non-2D operator, `IfcCShapeProfileDef` slopes) |
+
+The agreement with an independent geometry engine is measured per product with
+`tools/ifc-oracle/geometry_compare.py` (volume, area and bounding box, tolerance 0.1 % relative or 1e-6 absolute).
+At an equal chord tolerance every product agrees except where the engine differs: its tapered extrusion repeats
+its end caps (volume and area too large); its derived profile applies the local origin of the operator twice and
+scales in another way; it produces no geometry for `IfcFacetedBrepWithVoids` or `IfcCenterLineProfileDef`; with its
+subtraction on it does not iterate the opening elements; and a polygonal bounded half space whose boundary clips
+the solid is not evaluated here (the first operand is kept and reported). The tubes of a swept disk differ by
+their polygon (0.1 to 0.2 % at a 0.1 mm chord) and every curved profile by its discretization.
+
 #### Bounds
 
 Every allocation is charged to one budget of the call before it is made, against `memory_bytes` minus
@@ -1516,7 +1585,7 @@ mesh, a polyline or a point list longer than `array_length` is refused, and a fa
 declared list length before its points are read. Exceeding a limit returns `io.limit_exceeded` with the
 argument `limit` naming `memory_bytes`, `record_count` or `array_length`.
 
-- A circle has `n = ceil(pi / acos(1 - c / r))` segments for the chord tolerance `c` (`tessellation_chord`)
+- A circle has `n = ceil(pi / acos(1 - c / r))` segments (arcs and ellipses as in Curves above) for the chord tolerance `c` (`tessellation_chord`)
   and radius `r`, at least 3 and at most 512 (`MAX_CIRCLE_SEGMENTS`). A circle that needs more is
   tessellated with 512 segments and reported as `io.ifc.geometry_approximated`.
 - A loop of more than 4096 points (`MAX_LOOP_VERTICES`) is not evaluated and is reported as
@@ -2105,7 +2174,7 @@ The tests read every written file back with `read`, `typed_views` and `geometry`
 (three extrusions and one B-rep), a slab with a hole, and a door and a window filling openings in two
 walls, on two storeys. The spatial structure, the containment, the `GlobalId`s, the voids and fills, the
 property and quantity sets and the body volumes (6.0 m³ for a 10 × 0.2 × 3 m wall, 15.8 m³ for the slab)
-are compared with the model; `geometry` does not subtract openings, so each body keeps its own volume.
+are compared with the model; `geometry` subtracts the prism openings of the walls by default, so a wall loses the volume of its door or window.
 The same house with a layered wall type, a slab type with a membrane layer and door and window types
 reads back with its type assignments, layer sets, layers and layer set usages, and the refusals of
 type references and layer values are checked.

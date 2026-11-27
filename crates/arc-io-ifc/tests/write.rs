@@ -398,15 +398,16 @@ fn house_reads_back_with_structure_relations_and_volumes() {
     );
 }
 
-/// The reader does not subtract openings, so each body keeps its own volume.
+/// The geometry subtracts the prism openings of the walls by default, so a wall loses the volume of
+/// its door or window.
 #[test]
 fn house_body_volumes_read_back() {
     let file = read_back(&write(&house(), &options()).unwrap().bytes);
     let (volumes, report) = volumes(&file);
     let expected = [
-        (WALLS[0], 6.0),
+        (WALLS[0], 6.0 - 0.378),
         (WALLS[1], 4.8),
-        (WALLS[2], 6.0),
+        (WALLS[2], 6.0 - 0.288),
         (WALLS[3], 4.8),
         (SLAB, 15.8),
         (DOOR_OPENING, 0.378),
@@ -419,7 +420,39 @@ fn house_body_volumes_read_back() {
         let got = volumes[&global_id(id)];
         assert!((got - value).abs() < 1e-9, "{id:x}: {got} != {value}");
     }
-    let unsubtracted = report
+    assert!(
+        report
+            .items
+            .iter()
+            .all(|i| i.reason != reasons::OPENING_NOT_SUBTRACTED.code)
+    );
+    assert_eq!(report.summary.dropped, 0);
+}
+
+/// Without the subtraction each body keeps its own volume and the openings are counted.
+#[test]
+fn house_openings_are_counted_when_not_subtracted() {
+    let file = read_back(&write(&house(), &options()).unwrap().bytes);
+    let options = arc_io_ifc::GeometryOptions {
+        subtract_openings: false,
+    };
+    let geometry = file
+        .geometry_with_options(
+            &Limits::CONSTRAINED,
+            &Cancel::new(),
+            &arc_base::Tolerance::DEFAULT,
+            &options,
+        )
+        .unwrap();
+    let wall = geometry
+        .items
+        .iter()
+        .find(|i| gid_of(&file, i.product) == global_id(WALLS[0]))
+        .unwrap();
+    let mesh = wall.world_mesh(&Limits::CONSTRAINED).unwrap().unwrap();
+    assert!((volume(&mesh, &Limits::CONSTRAINED).unwrap() - 6.0).abs() < 1e-9);
+    let unsubtracted = geometry
+        .report
         .items
         .iter()
         .find(|i| i.reason == reasons::OPENING_NOT_SUBTRACTED.code)
@@ -428,7 +461,6 @@ fn house_body_volumes_read_back() {
         unsubtracted.arguments.get("count"),
         Some(&arc_io_ifc::loss::Argument::Int(2))
     );
-    assert_eq!(report.summary.dropped, 0);
 }
 
 #[test]
