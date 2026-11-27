@@ -799,7 +799,8 @@ impl Shell {
     /// Prepares the first frame: loads the user settings file into the user scope (a malformed
     /// file is set aside and reported as a notification), remembers the files for writing,
     /// applies the appearance settings and lists the recoverable sessions in the recovery
-    /// prompt. Nothing is recovered or discarded until the user chooses it. Without `files`
+    /// prompt. Sessions without records are discarded without asking; nothing else is recovered
+    /// or discarded until the user chooses it. Without `files`
     /// settings and recent files stay in memory.
     pub fn start(&mut self, app: &mut Application, files: Option<UserFiles>) {
         if let Some(files) = &files {
@@ -817,7 +818,7 @@ impl Shell {
         }
         self.files = files;
         self.appearance = prefs::appearance(app.settings(), self.base_appearance);
-        match app.recoverable() {
+        match app.recovery_offers() {
             Ok(orphans) => {
                 self.recovery = orphans
                     .into_iter()
