@@ -75,3 +75,6 @@ io-ifc-conformance-global-rule = The file violates the global rule { $attribute 
 io-ifc-view-representation-not-allowed = Instance #{ $instance }: a representation item of { $entity } is not exchanged by the model view.
 io-ifc-view-entity-not-allowed = Instance #{ $instance }: the product { $entity } is not exchanged by the model view.
 io-ifc-view-schema-unsupported = The model view is not defined for the output schema.
+io-ifc-curve-invalid = A curve, alignment or linear placement of the IFC file cannot be evaluated: a value is missing, has the wrong type or is not usable.
+io-ifc-curve-unsupported = The IFC file uses a curve type or parameter combination that is not evaluated.
+io-ifc-distance-out-of-range = The distance lies outside the curve.

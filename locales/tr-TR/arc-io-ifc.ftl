@@ -75,3 +75,6 @@ io-ifc-conformance-global-rule = Dosya { $attribute } genel kuralını ihlal edi
 io-ifc-view-representation-not-allowed = #{ $instance } örneği: { $entity } temsil öğesi model görünümünde değiştirilmiyor.
 io-ifc-view-entity-not-allowed = #{ $instance } örneği: { $entity } ürünü model görünümünde değiştirilmiyor.
 io-ifc-view-schema-unsupported = Model görünümü çıktı şeması için tanımlı değil.
+io-ifc-curve-invalid = IFC dosyasındaki bir eğri, aks veya doğrusal yerleşim değerlendirilemiyor: bir değer eksik, yanlış türde veya kullanılamaz.
+io-ifc-curve-unsupported = IFC dosyası, değerlendirilmeyen bir eğri türü veya parametre bileşimi kullanıyor.
+io-ifc-distance-out-of-range = Mesafe eğrinin dışında kalıyor.

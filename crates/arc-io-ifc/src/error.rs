@@ -149,6 +149,28 @@ pub mod codes {
         message_id: "io-ifc-edit-value-invalid",
     };
 
+    /// A curve, alignment layout or linear placement is not evaluable: an attribute is missing or of
+    /// the wrong type, a segment has no length or a parameter is not finite, a list is longer than
+    /// the limits allow, or a reference does not lead to a curve.
+    pub const IFC_CURVE_INVALID: ErrorCode = ErrorCode {
+        code: "io.ifc.curve_invalid",
+        category: Category::CorruptData,
+        message_id: "io-ifc-curve-invalid",
+    };
+    /// A curve type or a parameter combination of an alignment is outside what the evaluator
+    /// covers; the argument `kind` names the entity or segment type.
+    pub const IFC_CURVE_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "io.ifc.curve_unsupported",
+        category: Category::Unsupported,
+        message_id: "io-ifc-curve-unsupported",
+    };
+    /// A distance along a curve lies outside the curve by more than the tolerance.
+    pub const IFC_DISTANCE_OUT_OF_RANGE: ErrorCode = ErrorCode {
+        code: "io.ifc.distance_out_of_range",
+        category: Category::InvalidInput,
+        message_id: "io-ifc-distance-out-of-range",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         IFC_TRUNCATED,
@@ -168,6 +190,9 @@ pub mod codes {
         IFC_EDIT_TARGET_MISSING,
         IFC_EDIT_REFERENCE_DANGLING,
         IFC_EDIT_VALUE_INVALID,
+        IFC_CURVE_INVALID,
+        IFC_CURVE_UNSUPPORTED,
+        IFC_DISTANCE_OUT_OF_RANGE,
     ];
 }
 

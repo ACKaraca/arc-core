@@ -8,7 +8,7 @@
 //! negative or not finite. When no usable length unit exists, meters are assumed and reported as
 //! `io.ifc.unit_assumed`.
 
-use arc_base::Result;
+use arc_base::{Cancel, Limits, Result, Tolerance};
 
 use crate::error::reasons;
 use crate::model::{IfcFile, Parameter, Record};
@@ -186,5 +186,17 @@ impl Evaluator<'_> {
         let factor = value * si_factor(self.file, component)?;
         // A factor that is zero, negative or not finite makes the unit unusable: meters are assumed.
         (factor.is_finite() && factor > 0.0).then_some(factor)
+    }
+}
+
+impl Units {
+    /// Reads the length and plane angle units of the file (see the module documentation).
+    ///
+    /// # Errors
+    ///
+    /// `base.cancelled` when the token was cancelled.
+    pub fn of(file: &IfcFile, limits: &Limits, cancel: &Cancel) -> Result<Self> {
+        cancel.check()?;
+        Evaluator::new(file, limits, &Tolerance::DEFAULT, cancel).read_units()
     }
 }

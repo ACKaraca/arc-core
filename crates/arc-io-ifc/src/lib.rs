@@ -29,6 +29,7 @@
 //! # Ok::<(), arc_base::Error>(())
 //! ```
 
+pub mod alignment;
 mod edit;
 pub mod error;
 pub mod geometry;

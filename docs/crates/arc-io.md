@@ -1123,7 +1123,7 @@ triangle meshes of the geometry evaluation (a lower-layer edge) and on `serde` f
 readers take byte buffers and never paths, and the crate builds for `wasm32-unknown-unknown`. The
 geometry evaluation (CORE-IO-015) is described in [Geometry evaluation as implemented](#geometry-evaluation-as-implemented).
 The first part of writing (CORE-IO-016) is described in [IFC writing as implemented](#ifc-writing-as-implemented).
-Streaming (CORE-IO-017) and IDS (CORE-IO-018) are not implemented.
+The alignment part of geometry evaluation is described in [Alignments and linear placement as implemented](#alignments-and-linear-placement-as-implemented).
 
 ### Reading
 
@@ -1891,8 +1891,135 @@ IfcOpenShell's templates.
 | `io.ifc.edit_target_missing` | `not_found` | An edit names an instance, a record or a parameter that the file does not have |
 | `io.ifc.edit_reference_dangling` | `conflict` | An edit would leave a reference to an instance that is not in the file: a new value refers to one, or the instance to remove is still referred to |
 | `io.ifc.edit_value_invalid` | `invalid_input` | An edited value cannot be written: no records, a real that is not finite, a NUL in a text, a malformed type name, enumeration or binary, nesting deeper than 64, no instance name left, or an edited header without `FILE_DESCRIPTION`, `FILE_NAME` and `FILE_SCHEMA` first |
+| `io.ifc.curve_invalid` | `corrupt_data` | A curve, alignment layout or linear placement is not evaluable: an attribute is missing or of the wrong type, a parameter is not finite, a segment list is longer than the limits allow, or a reference does not lead to a curve |
+| `io.ifc.curve_unsupported` | `unsupported` | A curve type or parameter combination of an alignment is outside what the evaluator covers; the argument `kind` names it |
+| `io.ifc.distance_out_of_range` | `invalid_input` | A distance along a curve lies outside the curve by more than the tolerance |
 
 The `io.zip.*` codes of the archive reader are returned as the `arc-io-common` section defines them.
+
+## Alignments and linear placement as implemented
+
+`arc_io_ifc::alignment` evaluates the curves of IFC4X3 alignments and resolves placements that are
+measured along them (the alignment part of CORE-IO-015). It reads the instances through the schema
+tables, so it needs an IFC4X3 file, and it converts every length to meters with the units of the
+project.
+
+### Two descriptions, evaluated separately
+
+An `IfcAlignment` is described twice, and the module reads both so that one checks the other.
+
+- The **representation** is an `IfcCompositeCurve` (plan), `IfcGradientCurve` (plan and heights) or
+  `IfcSegmentedReferenceCurve` (plan, heights and cant) of `IfcCurveSegment`s. The parent curves
+  are `IfcLine`, `IfcCircle`, `IfcClothoid`, `IfcPolynomialCurve`, `IfcSecondOrderPolynomialSpiral`,
+  `IfcThirdOrderPolynomialSpiral`, `IfcSeventhOrderPolynomialSpiral`, `IfcCosineSpiral` and
+  `IfcSineSpiral`. A cant segment may also have a line or a polynomial curve as parent.
+- The **layout** is `IfcAlignmentHorizontal`, `IfcAlignmentVertical` and `IfcAlignmentCant` with the
+  design parameters of their `IfcAlignmentSegment`s, found through `IfcRelNests` (a child alignment
+  that reuses its parent's horizontal layout is followed through `IfcRelAggregates`). The horizontal
+  segment types are `LINE`, `CIRCULARARC`, `CLOTHOID`, `CUBIC`, `HELMERTCURVE`, `BLOSSCURVE`,
+  `COSINECURVE`, `SINECURVE` and `VIENNESEBEND`; the vertical types are `CONSTANTGRADIENT`,
+  `CIRCULARARC` and `PARABOLICARC`; the cant types are all transitions of the schema. A vertical
+  `CLOTHOID` is not evaluated from the layout, because its start curvature is not among the
+  attributes of the segment; its representation is. The Viennese bend takes the cant layout into
+  account as the schema describes it, with the bank angle in the correction term taken as `D / b`
+  (the small angle form the schema gives with `sin psi ~ psi`).
+
+`IfcFile::alignments(limits, cancel)` returns an `AlignmentCurves` per alignment with both curves
+(`representation` and `layout`, each present when it can be evaluated) and a loss report for the
+rest: an unsupported curve is `io.ifc.geometry_not_evaluated`, a malformed one
+`io.ifc.geometry_degenerate`. `IfcFile::curve(name, ..)` builds the curve of one composite, gradient
+or segmented reference curve and `IfcFile::alignment_layout_curve(alignment, ..)` the curve of one
+layout; both return `io.ifc.curve_invalid` or `io.ifc.curve_unsupported` as errors.
+
+### Evaluation
+
+`Curve::evaluate(distance, tolerance)` returns a `Pose`: the position, the unit tangent and the
+frame (X along the tangent, Y to the left, Z up, tilted toward the left by the cant angle), in meters.
+A distance outside `[0, length]` by no more than `tolerance` meters is clamped to the end; any other
+is `io.ifc.distance_out_of_range`. `Curve::segment_kinds(distance)` names the plan, gradient and
+cant segment in effect, by the entity type of the parent curve or the layout segment type.
+
+- **Segments.** A curve segment is its parent curve trimmed from `SegmentStart` by `SegmentLength`
+  (a negative length runs the parent backward), placed so that the start point and the start tangent
+  take the `Placement`. The `Position` of a parent curve therefore does not matter. The start and
+  length are lengths along the parent; for an `IfcPolynomialCurve` that is the arc length. The
+  distance along a composite curve is the sum of the segment lengths.
+- **Spirals.** A spiral is evaluated from its heading: the polynomial spirals from the curvature
+  `sum A_k^-(k+1) s^k` (with the sign of `A_k` for odd `k`) as the schema defines them, the clothoid
+  from `kappa = s / (A |A|)`, the cosine spiral from `kappa = 1/A0 + cos(pi s / L) / A1` and the sine
+  spiral from its heading angle (the schema gives the curvature of the sine spiral with a different
+  scale than its heading angle; the heading angle is used). `L` is the length of the segment. The
+  position is the integral of `(cos theta, sin theta)`, by 8-point Gauss-Legendre panels whose count
+  follows the turn of the heading, split at the kink of a Helmert transition.
+- **Gradient curves.** The distance is the distance along the base curve, as the schema defines the
+  parameterization. The vertical segments are in the plane (distance along, height); the piece in
+  effect is the last one whose placement starts at or before the distance, and the height is found
+  by solving for the distance along on that piece. Past the end of the last piece the height
+  continues along its end tangent.
+- **Cant.** A cant layout gives, per piece, the raise of the centerline `(left + right) / 2` and the
+  cross slope `(right - left) / b` over the rail head distance `b`; the shape of the change is the
+  one of the segment type. The tilt is `asin` of the cross slope. In a segmented reference curve the
+  parent curve of a cant segment gives the shape of the change: a spiral by its curvature function
+  (clothoid linear, polynomial spirals and cosine and sine as their curvature), a line or a
+  polynomial curve by its height. The deviating elevation changes from the start location of the
+  segment to the location of the next, and the tilt of the `Axis` from the start axis to the next
+  axis, with that fraction. The elevation adds to the height, and its slope tilts the tangent.
+- **Linear placement.** `IfcFile::linear_resolver(limits, cancel, tolerance)` returns a
+  `LinearResolver`, the hook for the typed views and the geometry: `curve(name)` reads and caches a
+  curve (an alignment gives its axis representation, or its layout when it has none), `point(name)`
+  resolves an `IfcPointByDistanceExpression` (lateral to the left, vertical up in the frame, and
+  longitudinal offsets), and `placement(name)` an `IfcLinearPlacement` to a world transform,
+  including its `PlacementRelTo` chain, with `Axis` and `RefDirection` taken in the frame of the
+  curve. `placement_with_fallback(name)` uses the `CartesianPosition` when the curve cannot be
+  evaluated. Geometry evaluation ([above](#geometry-evaluation-as-implemented)) does not call the
+  resolver yet: an element with a linear placement is not placed along its curve there.
+
+Every list is bounded by `array_length`, placement chains by the nesting limit, and a repeated
+placement is `io.ifc.curve_invalid`. The cancellation token is checked per alignment, per segment and
+per placement.
+
+### Verification
+
+`tools/ifc-oracle/alignment_compare.py <file>...` compares the frame at sampled distances with
+IfcOpenShell's function item evaluator on the same curve item (for a layout, on the item of the axis
+representation), and the world transform of every `IfcLinearPlacement` with
+`ifcopenshell.util.placement.get_local_placement`. The samples come from `cargo run -p arc-io-ifc
+--example alignment_samples <file>`. The files were the four alignment samples of the published
+IFC4.3 sample set (reference curves, sectioned solids, a signal placed linearly) and 9 files written
+for the check with the alignment API of the same library (every horizontal, vertical and cant
+segment type, spirals of every order). The largest position deviations per segment type, in meters,
+over 18,446 sampled frames (12,832 of them on curves with heights and 6,416 with cant), were:
+
+| Segment type | Representation | Layout |
+|---|---|---|
+| line, circle | 1e-9, 5e-9 | 1e-9, 5e-9 |
+| clothoid | 1e-6 | 1e-6 |
+| second, third and seventh order polynomial spiral (Helmert, Bloss, Viennese bend) | 3e-7, 4e-7, 1e-6 | 6e-4 (Helmert), 4e-7, 1e-6 |
+| cosine spiral, sine spiral | 5e-7, 5e-7 | 4e-7, 5e-7 |
+| polynomial curve, `CUBIC` | 2e-7 | 2e-7 |
+| vertical line, parabola, circle | 1e-6, 4e-15, 1e-6 | 1e-6, 4e-15, 1e-6 |
+| cant, every shape | 1e-6 | 1e-6 |
+| linear placement, 28 placements, frames to 7e-16 | 2e-7 | |
+
+The oracle integrates spirals with an error of the order of 5e-7 m, which is the remainder of the
+plan rows. The layout and the representation of a file also agree with each other to 1e-13 m except
+for the Helmert transition of the file the oracle wrote: its second half starts from a heading that
+is 2e-5 rad off the exact middle heading of the transition, which the layout does not have.
+Differences that are not rounding:
+
+- The tangent and frame differ by up to 2e-3 rad where a cant is present. The oracle keeps the
+  tangent of the base curve; the description of `IfcSegmentedReferenceCurve` makes the slope of the
+  deviating elevation part of the direction, which this module follows.
+- The cosine cant of the reference-curve sample differs by up to 7.9 m at its end: the oracle does
+  not reproduce the deviating elevation that the published description of that sample gives
+  (0.08 at the start, 0.04 in the middle, 0 at the end), which this module does, to 1e-14 m against
+  its own layout of the same alignment.
+- The vertical circular arc of a layout is fixed by the horizontal length and the two gradients; the
+  radius attribute is redundant and differs from the one the oracle writes by 1e-4 relative.
+
+The tests are in `crates/arc-io-ifc/tests/alignment.rs`: closed forms for the line and the circle,
+numerical integration of the heading for every spiral, the gradient and cant of a layout, linear
+placements with offsets, axes and parents, units, and hostile input.
 
 ## IFC writing as implemented
 
