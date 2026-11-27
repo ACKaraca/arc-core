@@ -280,6 +280,33 @@ pub enum ElementKind {
     /// `FLEXIBLESEGMENT`, `RIGIDSEGMENT`, `GUTTER`, `SPOOL`), contained in its storey; its type is
     /// an `IfcPipeSegmentType`.
     PipeSegment,
+    /// `IfcFurniture` (`PredefinedType` from `IfcFurnitureTypeEnum`: `CHAIR`, `TABLE`, `DESK`,
+    /// `BED`, `FILECABINET`, `SHELF`, `SOFA`); its type is an `IfcFurnitureType`.
+    Furniture,
+    /// `IfcSanitaryTerminal` (`PredefinedType` from `IfcSanitaryTerminalTypeEnum`, for example
+    /// `SINK`, `TOILETPAN`, `SHOWER`); its type is an `IfcSanitaryTerminalType`.
+    SanitaryTerminal,
+    /// `IfcLightFixture` (`PredefinedType` from `IfcLightFixtureTypeEnum`: `POINTSOURCE`,
+    /// `DIRECTIONSOURCE`, `SECURITYLIGHTING`); its type is an `IfcLightFixtureType`.
+    LightFixture,
+    /// `IfcElectricAppliance` (`PredefinedType` from `IfcElectricApplianceTypeEnum`, for example
+    /// `MICROWAVE`, `FRIDGE_FREEZER`); its type is an `IfcElectricApplianceType`.
+    ElectricAppliance,
+    /// `IfcUnitaryEquipment` (`PredefinedType` from `IfcUnitaryEquipmentTypeEnum`: `AIRHANDLER`,
+    /// `AIRCONDITIONINGUNIT`, `DEHUMIDIFIER`, `SPLITSYSTEM`, `ROOFTOPUNIT`); its type is an
+    /// `IfcUnitaryEquipmentType`.
+    UnitaryEquipment,
+    /// `IfcColumn` (`PredefinedType` from `IfcColumnTypeEnum`: `COLUMN`, `PILASTER`); its type is
+    /// an `IfcColumnType`.
+    Column,
+    /// `IfcBeam` (`PredefinedType` from `IfcBeamTypeEnum`, for example `BEAM`, `JOIST`, `LINTEL`,
+    /// `T_BEAM`); its type is an `IfcBeamType`.
+    Beam,
+    /// `IfcBuildingElementProxy` (`PredefinedType` from `IfcBuildingElementProxyTypeEnum`:
+    /// `COMPLEX`, `ELEMENT`, `PARTIAL`, `PROVISIONFORVOID`, `PROVISIONFORSPACE`). The writer never
+    /// substitutes it for a kind the output schema or the model does not carry: a caller asks for
+    /// it by name. Its type is an `IfcBuildingElementProxyType`.
+    BuildingElementProxy,
 }
 
 impl ElementKind {
@@ -303,10 +330,22 @@ impl ElementKind {
             Self::Member => "IFCMEMBER",
             Self::TransportElement => "IFCTRANSPORTELEMENT",
             Self::PipeSegment => "IFCPIPESEGMENT",
+            Self::Furniture => "IFCFURNITURE",
+            Self::SanitaryTerminal => "IFCSANITARYTERMINAL",
+            Self::LightFixture => "IFCLIGHTFIXTURE",
+            Self::ElectricAppliance => "IFCELECTRICAPPLIANCE",
+            Self::UnitaryEquipment => "IFCUNITARYEQUIPMENT",
+            Self::Column => "IFCCOLUMN",
+            Self::Beam => "IFCBEAM",
+            Self::BuildingElementProxy => "IFCBUILDINGELEMENTPROXY",
         }
     }
 
     /// The values of `PredefinedType` besides `USERDEFINED` and `NOTDEFINED`.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one list of the IFC4 enumeration per kind"
+    )]
     fn predefined(self) -> &'static [&'static str] {
         match self {
             Self::Wall => &[
@@ -382,6 +421,69 @@ impl ElementKind {
                 "RIGIDSEGMENT",
                 "GUTTER",
                 "SPOOL",
+            ],
+            Self::Furniture => &[
+                "CHAIR",
+                "TABLE",
+                "DESK",
+                "BED",
+                "FILECABINET",
+                "SHELF",
+                "SOFA",
+            ],
+            Self::SanitaryTerminal => &[
+                "BATH",
+                "BIDET",
+                "CISTERN",
+                "SHOWER",
+                "SINK",
+                "SANITARYFOUNTAIN",
+                "TOILETPAN",
+                "URINAL",
+                "WASHHANDBASIN",
+                "WCSEAT",
+            ],
+            Self::LightFixture => &["POINTSOURCE", "DIRECTIONSOURCE", "SECURITYLIGHTING"],
+            Self::ElectricAppliance => &[
+                "DISHWASHER",
+                "ELECTRICCOOKER",
+                "FREESTANDINGELECTRICHEATER",
+                "FREESTANDINGFAN",
+                "FREESTANDINGWATERHEATER",
+                "FREESTANDINGWATERCOOLER",
+                "FREEZER",
+                "FRIDGE_FREEZER",
+                "HANDDRYER",
+                "KITCHENMACHINE",
+                "MICROWAVE",
+                "PHOTOCOPIER",
+                "REFRIGERATOR",
+                "TUMBLEDRYER",
+                "VENDINGMACHINE",
+                "WASHINGMACHINE",
+            ],
+            Self::UnitaryEquipment => &[
+                "AIRHANDLER",
+                "AIRCONDITIONINGUNIT",
+                "DEHUMIDIFIER",
+                "SPLITSYSTEM",
+                "ROOFTOPUNIT",
+            ],
+            Self::Column => &["COLUMN", "PILASTER"],
+            Self::Beam => &[
+                "BEAM",
+                "JOIST",
+                "HOLLOWCORE",
+                "LINTEL",
+                "SPANDREL",
+                "T_BEAM",
+            ],
+            Self::BuildingElementProxy => &[
+                "COMPLEX",
+                "ELEMENT",
+                "PARTIAL",
+                "PROVISIONFORVOID",
+                "PROVISIONFORSPACE",
             ],
             Self::Roof => &[
                 "FLAT_ROOF",
@@ -586,15 +688,16 @@ impl LayerSetUsage {
     }
 }
 
-/// An element type (`IfcWallType`, `IfcSlabType`, `IfcDoorType`, `IfcWindowType`, `IfcRoofType` or
-/// `IfcCoveringType`), assigned to
-/// the elements whose [`Element::element_type`] names it (`IfcRelDefinesByType`).
+/// An element type (`IfcWallType`, `IfcDoorType`, `IfcFurnitureType` and the other types of
+/// [`ElementKind`]), assigned to the elements whose [`Element::element_type`] names it
+/// (`IfcRelDefinesByType`).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ElementType {
     /// The identifier its `GlobalId` is made from.
     pub id: u128,
-    /// The kind of its occurrences: a wall, slab, door, window or roof.
+    /// The kind of its occurrences, which selects the type's entity; an opening, a space and the
+    /// stair and ramp kinds have no type.
     pub kind: ElementKind,
     /// The name.
     pub name: String,
@@ -608,6 +711,14 @@ pub struct ElementType {
     /// empty writes no material. Doors and windows: must be empty; layers are reported, not
     /// written.
     pub layers: Vec<MaterialLayer>,
+    /// The property sets of the type, written in its `HasPropertySets`; an empty set is reported.
+    pub property_sets: Vec<PropertySet>,
+    /// The quantity sets of the type, written in its `HasPropertySets` after the property sets.
+    pub quantity_sets: Vec<QuantitySet>,
+    /// The shared geometry: written as an `IfcRepresentationMap` in the type's `RepresentationMaps`
+    /// (the body is in the coordinates of the map's origin, the identity). An occurrence uses it
+    /// through [`Element::mapping`]; `None` writes no map.
+    pub representation: Option<Body>,
 }
 
 impl ElementType {
@@ -621,6 +732,9 @@ impl ElementType {
             predefined_type: None,
             operation_type: None,
             layers: Vec::new(),
+            property_sets: Vec::new(),
+            quantity_sets: Vec::new(),
+            representation: None,
         }
     }
 
@@ -637,6 +751,14 @@ impl ElementType {
             ElementKind::CurtainWall => Some("IFCCURTAINWALLTYPE"),
             ElementKind::TransportElement => Some("IFCTRANSPORTELEMENTTYPE"),
             ElementKind::PipeSegment => Some("IFCPIPESEGMENTTYPE"),
+            ElementKind::Furniture => Some("IFCFURNITURETYPE"),
+            ElementKind::SanitaryTerminal => Some("IFCSANITARYTERMINALTYPE"),
+            ElementKind::LightFixture => Some("IFCLIGHTFIXTURETYPE"),
+            ElementKind::ElectricAppliance => Some("IFCELECTRICAPPLIANCETYPE"),
+            ElementKind::UnitaryEquipment => Some("IFCUNITARYEQUIPMENTTYPE"),
+            ElementKind::Column => Some("IFCCOLUMNTYPE"),
+            ElementKind::Beam => Some("IFCBEAMTYPE"),
+            ElementKind::BuildingElementProxy => Some("IFCBUILDINGELEMENTPROXYTYPE"),
             ElementKind::Opening
             | ElementKind::Space
             | ElementKind::Stair
@@ -708,11 +830,14 @@ pub struct Element {
     /// Doors and windows: `OverallHeight`, positive, in the length unit.
     pub overall_height: Option<f64>,
     /// Openings: the element the opening voids (`IfcRelVoidsElement`), a wall, slab, door or
-    /// window; required. Doors and windows: the opening they fill (`IfcRelFillsElement`); a chain
-    /// of hosts must not return to its start. Flights, landings (slabs) and railings: optionally
-    /// the stair they are a part of (`IfcRelAggregates`); a part is not contained in the storey.
-    /// Must be `None` for walls, spaces, roofs, coverings and stairs, and for a slab that is
-    /// not part of a stair.
+    /// window; required. Doors and windows: the opening they fill (`IfcRelFillsElement`).
+    /// Flights, landings (slabs) and railings: the stair they are a part of; plates and members:
+    /// the curtain wall. Any element of the kinds furniture, sanitary terminal, light fixture,
+    /// electric appliance, unitary equipment, column, beam, building element proxy, transport
+    /// element and pipe segment may name as its host any element except an opening or a space;
+    /// the host aggregates it (`IfcRelAggregates`). A part is not contained in the storey. Must be
+    /// `None` for walls, spaces, roofs, coverings, stairs, ramps and curtain walls, and for a slab
+    /// that is not part of a stair or ramp. A chain of hosts must not return to its start.
     pub host: Option<u128>,
     /// Stair flights: the `NumberOfRisers`, `NumberOfTreads`, `RiserHeight` and `TreadLength`;
     /// `None` omits them. Ignored for the other kinds.
@@ -721,12 +846,18 @@ pub struct Element {
     pub property_sets: Vec<PropertySet>,
     /// The quantity sets.
     pub quantity_sets: Vec<QuantitySet>,
-    /// Walls, slabs, doors and windows: the identifier of the [`ElementType`] of the model the
-    /// element is an occurrence of; it must be a type of the same kind. `None` assigns no type.
+    /// The identifier of the [`ElementType`] of the model the element is an occurrence of; it
+    /// must be a type of the same kind. `None` assigns no type.
     pub element_type: Option<u128>,
     /// Walls and slabs: how the layers of the element's type lie in it. Written when the type
     /// has layers; otherwise it is reported, not written.
     pub layer_usage: Option<LayerSetUsage>,
+    /// The occurrence of the type's shared geometry: the element uses the `IfcRepresentationMap` of
+    /// its [`Element::element_type`] (which must have an [`ElementType::representation`]) through
+    /// an `IfcMappedItem`, placed by this transform (origin and axes) in the element's placement.
+    /// Must be `None` when [`Element::body`] is set; `None` gives the element no representation of
+    /// its own.
+    pub mapping: Option<Placement>,
 }
 
 impl Element {
@@ -751,6 +882,7 @@ impl Element {
             quantity_sets: Vec::new(),
             element_type: None,
             layer_usage: None,
+            mapping: None,
         }
     }
 }
@@ -1195,6 +1327,11 @@ pub fn write(model: &WriteModel, options: &WriteOptions) -> Result<WriteOutput> 
         writer.owner_history(options)?;
     }
     let mut context = writer.context(model)?;
+    // Representation maps come before the elements that are mapped to them.
+    for element_type in &model.types {
+        options.cancel.check()?;
+        writer.representation_map(element_type, &mut context)?;
+    }
     for element in &model.elements {
         options.cancel.check()?;
         writer.element(element, &mut context)?;
@@ -1262,8 +1399,9 @@ fn unix_seconds(text: &str) -> i64 {
     parse().filter(|s| *s >= 0).unwrap_or(0)
 }
 
-/// Whether an element of this kind with a host is a part of that decomposing container (a stair,
-/// a ramp or a curtain wall).
+/// Whether an element of this kind with a host is a part of it: a flight, landing or railing of a
+/// stair or ramp, a plate or member of a curtain wall, or an element of a generic kind (see
+/// [`is_generic_part`]). A part is aggregated by its host and not contained in the storey.
 fn is_part(kind: ElementKind) -> bool {
     matches!(
         kind,
@@ -1273,18 +1411,29 @@ fn is_part(kind: ElementKind) -> bool {
             | ElementKind::Railing
             | ElementKind::Plate
             | ElementKind::Member
-    )
+    ) || is_generic_part(kind)
 }
 
-/// Whether an element of this kind decomposes into parts that name it as their host.
-fn is_container(kind: ElementKind) -> bool {
+/// The kinds that any element may name as its host, whatever the kind of the host (except an
+/// opening or a space): the kinds that have no decomposition rule of their own.
+fn is_generic_part(kind: ElementKind) -> bool {
     matches!(
         kind,
-        ElementKind::Stair | ElementKind::Ramp | ElementKind::CurtainWall
+        ElementKind::Furniture
+            | ElementKind::SanitaryTerminal
+            | ElementKind::LightFixture
+            | ElementKind::ElectricAppliance
+            | ElementKind::UnitaryEquipment
+            | ElementKind::Column
+            | ElementKind::Beam
+            | ElementKind::BuildingElementProxy
+            | ElementKind::TransportElement
+            | ElementKind::PipeSegment
     )
 }
 
-/// Whether a part of kind `part` may be hosted by a container of kind `host`.
+/// Whether a part of kind `part` may be hosted by an element of kind `host` (`None` when the
+/// host is not an element of the model).
 fn part_fits(part: ElementKind, host: Option<ElementKind>) -> bool {
     match part {
         ElementKind::Slab | ElementKind::Railing => {
@@ -1293,6 +1442,9 @@ fn part_fits(part: ElementKind, host: Option<ElementKind>) -> bool {
         ElementKind::StairFlight => host == Some(ElementKind::Stair),
         ElementKind::RampFlight => host == Some(ElementKind::Ramp),
         ElementKind::Plate | ElementKind::Member => host == Some(ElementKind::CurtainWall),
+        kind if is_generic_part(kind) => {
+            host.is_some_and(|h| !matches!(h, ElementKind::Opening | ElementKind::Space))
+        }
         _ => false,
     }
 }
@@ -1352,6 +1504,7 @@ fn check_references(model: &WriteModel) -> Result<BTreeMap<u128, ElementKind>> {
         }
     }
     let mut type_kinds = BTreeMap::new();
+    let mut represented = BTreeSet::new();
     for element_type in &model.types {
         if element_type.entity().is_none() {
             return Err(bad_reference(element_type.id));
@@ -1364,6 +1517,12 @@ fn check_references(model: &WriteModel) -> Result<BTreeMap<u128, ElementKind>> {
             return Err(Error::new(codes::IFC_WRITE_ID_DUPLICATE)
                 .with_arg("global_id", global_id(element_type.id)));
         }
+        if element_type.representation.is_some() {
+            represented.insert(element_type.id);
+        }
+        if !unique_set_names(&element_type.property_sets, &element_type.quantity_sets) {
+            return Err(invalid("property set name"));
+        }
     }
     for element in &model.elements {
         if !storeys.contains(&element.storey) {
@@ -1374,13 +1533,19 @@ fn check_references(model: &WriteModel) -> Result<BTreeMap<u128, ElementKind>> {
         {
             return Err(bad_reference(id));
         }
-        let mut set_names = BTreeSet::new();
-        let names = element.property_sets.iter().map(|p| &p.name);
-        if !names
-            .chain(element.quantity_sets.iter().map(|q| &q.name))
-            .all(|name| set_names.insert(name))
-        {
+        if !unique_set_names(&element.property_sets, &element.quantity_sets) {
             return Err(invalid("property set name"));
+        }
+        if element.mapping.is_some() {
+            if element.body.is_some() {
+                return Err(invalid("mapping with a body"));
+            }
+            let Some(id) = element.element_type else {
+                return Err(invalid("mapping without an element type"));
+            };
+            if !represented.contains(&id) {
+                return Err(bad_reference(id));
+            }
         }
         let Some(host) = element.host else {
             if element.kind == ElementKind::Opening {
@@ -1402,6 +1567,16 @@ fn check_references(model: &WriteModel) -> Result<BTreeMap<u128, ElementKind>> {
     }
     check_host_cycles(model)?;
     Ok(kinds)
+}
+
+/// Whether the property and quantity sets of one owner have distinct names.
+fn unique_set_names(properties: &[PropertySet], quantities: &[QuantitySet]) -> bool {
+    let mut names = BTreeSet::new();
+    properties
+        .iter()
+        .map(|p| p.name.as_str())
+        .chain(quantities.iter().map(|q| q.name.as_str()))
+        .all(|name| names.insert(name))
 }
 
 /// Refuses a chain of hosts that returns to an element on it, such as an opening hosted by the
@@ -1494,6 +1669,8 @@ struct Context {
     elements: BTreeMap<u128, u64>,
     grids: BTreeMap<u128, u64>,
     types: BTreeMap<u128, u64>,
+    /// The `IfcRepresentationMap` of each type with a representation, by the type's identifier.
+    maps: BTreeMap<u128, u64>,
 }
 
 struct Writer<'a> {
@@ -1916,8 +2093,8 @@ impl Writer<'_> {
             parameters.push(Parameter::Real(storey.elevation));
             let instance = self.add("IFCBUILDINGSTOREY", &parameters)?;
             self.actors(storey.id, &storey.actors, instance)?;
-            self.property_sets(storey.id, &storey.property_sets, instance)?;
-            self.quantity_sets(storey.id, &storey.quantity_sets, instance)?;
+            self.property_sets(storey.id, &storey.property_sets, Some(instance))?;
+            self.quantity_sets(storey.id, &storey.quantity_sets, Some(instance))?;
             storeys.insert(storey.id, (instance, placement));
         }
         Ok(Context {
@@ -1931,6 +2108,7 @@ impl Writer<'_> {
             elements: BTreeMap::new(),
             grids: BTreeMap::new(),
             types: BTreeMap::new(),
+            maps: BTreeMap::new(),
         })
     }
 
@@ -1973,8 +2151,9 @@ impl Writer<'_> {
     /// The actors, property sets and quantity sets of the project, site or building.
     fn spatial_extras(&mut self, spatial: &Spatial, instance: u64) -> Result<()> {
         self.actors(spatial.id, &spatial.actors, instance)?;
-        self.property_sets(spatial.id, &spatial.property_sets, instance)?;
-        self.quantity_sets(spatial.id, &spatial.quantity_sets, instance)
+        self.property_sets(spatial.id, &spatial.property_sets, Some(instance))?;
+        self.quantity_sets(spatial.id, &spatial.quantity_sets, Some(instance))
+            .map(drop)
     }
 
     fn units(&mut self, model: &WriteModel) -> Result<u64> {
@@ -2070,23 +2249,19 @@ impl Writer<'_> {
         let axes = self.axes(&element.placement)?;
         let placement = self.local_placement(Some(storey_placement), axes)?;
         // IFC2X3 refuses a representation on an element that decomposes into parts.
-        let own_body = if self.target.schema == OutputSchema::Ifc2x3
-            && self.decomposed.contains(&element.id)
-        {
-            if element.body.is_some() {
-                self.loss.attribute(
-                    reasons::ATTRIBUTE_NOT_REPRESENTABLE,
-                    &format!("{}.Representation", element.kind.entity()),
-                    1,
-                );
-            }
-            None
-        } else {
-            element.body.as_ref()
-        };
-        let representation = match own_body {
-            Some(body) => self.body(body, element.id, context)?,
-            None => None,
+        let decomposes =
+            self.target.schema == OutputSchema::Ifc2x3 && self.decomposed.contains(&element.id);
+        if decomposes && (element.body.is_some() || element.mapping.is_some()) {
+            self.loss.attribute(
+                reasons::ATTRIBUTE_NOT_REPRESENTABLE,
+                &format!("{}.Representation", element.kind.entity()),
+                1,
+            );
+        }
+        let representation = match element.body.as_ref() {
+            Some(body) if !decomposes => self.body(body, element.id, context)?,
+            None if !decomposes => self.mapped(element, context)?,
+            _ => None,
         }
         .map_or(Parameter::Omitted, reference);
         let (predefined, user_type) = choice(
@@ -2115,8 +2290,10 @@ impl Writer<'_> {
             ]);
             let instance = self.add(element.kind.entity(), &parameters)?;
             context.elements.insert(element.id, instance);
-            self.property_sets(element.id, &element.property_sets, instance)?;
-            return self.quantity_sets(element.id, &element.quantity_sets, instance);
+            self.property_sets(element.id, &element.property_sets, Some(instance))?;
+            return self
+                .quantity_sets(element.id, &element.quantity_sets, Some(instance))
+                .map(drop);
         }
         parameters.push(Parameter::Omitted);
         let operations = match element.kind {
@@ -2160,8 +2337,9 @@ impl Writer<'_> {
         }
         let instance = self.add(element.kind.entity(), &parameters)?;
         context.elements.insert(element.id, instance);
-        self.property_sets(element.id, &element.property_sets, instance)?;
-        self.quantity_sets(element.id, &element.quantity_sets, instance)
+        self.property_sets(element.id, &element.property_sets, Some(instance))?;
+        self.quantity_sets(element.id, &element.quantity_sets, Some(instance))
+            .map(drop)
     }
 
     /// An `IfcGrid`: placed relative to the storey, its axes as `IfcGridAxis` lists and a
@@ -2483,6 +2661,14 @@ impl Writer<'_> {
             return Ok(());
         }
         let id = self.global_id(element_type.id)?;
+        // The sets are written before the type, which lists them in `HasPropertySets`.
+        let mut definitions =
+            self.property_sets(element_type.id, &element_type.property_sets, None)?;
+        definitions.extend(self.quantity_sets(
+            element_type.id,
+            &element_type.quantity_sets,
+            None,
+        )?);
         let (predefined, user_type) = choice(
             element_type.predefined_type.as_deref(),
             element_type.kind.predefined(),
@@ -2493,12 +2679,23 @@ impl Writer<'_> {
             label(&element_type.name),
             Parameter::Omitted,
             Parameter::Omitted,
-            Parameter::Omitted,
-            Parameter::Omitted,
+            if definitions.is_empty() {
+                Parameter::Omitted
+            } else {
+                references(&definitions)
+            },
+            context
+                .maps
+                .get(&element_type.id)
+                .map_or(Parameter::Omitted, |&map| references(&[map])),
             Parameter::Omitted,
             user_type.unwrap_or(Parameter::Omitted),
-            predefined,
         ];
+        if element_type.kind == ElementKind::Furniture {
+            // `AssemblyPlace` is required by IFC4; the model has no value for it.
+            parameters.push(enumeration("NOTDEFINED"));
+        }
+        parameters.push(predefined);
         let operations = match element_type.kind {
             ElementKind::Door => Some(DOOR_OPERATIONS),
             ElementKind::Window => Some(WINDOW_PARTITIONINGS),
@@ -2664,7 +2861,29 @@ impl Writer<'_> {
 
     /// The product definition shape of a body, or `None` with a loss item when the body is
     /// degenerate. A number that is not finite is an error.
+    /// The `IfcProductDefinitionShape` of a body; `None` when the body is not written (reported).
     fn body(&mut self, body: &Body, owner: u128, context: &Context) -> Result<Option<u64>> {
+        let Some(representation) = self.body_shape(body, owner, context)? else {
+            return Ok(None);
+        };
+        self.product_shape(representation).map(Some)
+    }
+
+    /// The `IfcProductDefinitionShape` of one `IfcShapeRepresentation`.
+    fn product_shape(&mut self, representation: u64) -> Result<u64> {
+        self.add(
+            "IFCPRODUCTDEFINITIONSHAPE",
+            &[
+                Parameter::Omitted,
+                Parameter::Omitted,
+                references(&[representation]),
+            ],
+        )
+    }
+
+    /// The `IfcShapeRepresentation` of a body in the body context; `None` when the body is not
+    /// written (reported against `owner`).
+    fn body_shape(&mut self, body: &Body, owner: u128, context: &Context) -> Result<Option<u64>> {
         let (item, kind) = match body {
             Body::Extrusion {
                 outer,
@@ -2706,7 +2925,7 @@ impl Writer<'_> {
             );
             return Ok(None);
         };
-        let representation = self.add(
+        self.add(
             "IFCSHAPEREPRESENTATION",
             &[
                 reference(context.body),
@@ -2714,16 +2933,102 @@ impl Writer<'_> {
                 label(kind.0),
                 references(&[item]),
             ],
-        )?;
-        self.add(
-            "IFCPRODUCTDEFINITIONSHAPE",
-            &[
-                Parameter::Omitted,
-                Parameter::Omitted,
-                references(&[representation]),
-            ],
         )
         .map(Some)
+    }
+
+    /// The `IfcRepresentationMap` of a type with a representation, with the identity as its origin,
+    /// written before the elements: an occurrence names it in its `IfcMappedItem`. A type the
+    /// output schema lacks, or a body that is not written, has no map.
+    fn representation_map(
+        &mut self,
+        element_type: &ElementType,
+        context: &mut Context,
+    ) -> Result<()> {
+        let (Some(body), Some(entity)) = (&element_type.representation, element_type.entity())
+        else {
+            return Ok(());
+        };
+        if !self.target.supports(entity) {
+            return Ok(());
+        }
+        let Some(representation) = self.body_shape(body, element_type.id, context)? else {
+            return Ok(());
+        };
+        let origin = self.axes(&Placement::default())?;
+        let map = self.add(
+            "IFCREPRESENTATIONMAP",
+            &[reference(origin), reference(representation)],
+        )?;
+        context.maps.insert(element_type.id, map);
+        Ok(())
+    }
+
+    /// The representation of an occurrence of a type with shared geometry: an `IfcMappedItem` of the
+    /// type's map, its `MappingTarget` the element's [`Element::mapping`], in a
+    /// `MappedRepresentation`. `None` when the map is absent (reported).
+    fn mapped(&mut self, element: &Element, context: &Context) -> Result<Option<u64>> {
+        let Some(mapping) = element.mapping else {
+            return Ok(None);
+        };
+        let Some(&map) = element.element_type.and_then(|t| context.maps.get(&t)) else {
+            self.loss.add(
+                reasons::NOT_WRITTEN,
+                "IFCMAPPEDITEM",
+                Some(Source::Text(&global_id(element.id))),
+                1,
+            );
+            return Ok(None);
+        };
+        let target = self.transform(&mapping)?;
+        let item = self.add("IFCMAPPEDITEM", &[reference(map), reference(target)])?;
+        let representation = self.add(
+            "IFCSHAPEREPRESENTATION",
+            &[
+                reference(context.body),
+                label("Body"),
+                label("MappedRepresentation"),
+                references(&[item]),
+            ],
+        )?;
+        self.product_shape(representation).map(Some)
+    }
+
+    /// An `IfcCartesianTransformationOperator3D` of a placement: the origin, and the z axis and the
+    /// x axis made orthogonal to it (the y axis completes them); the scale is one.
+    fn transform(&mut self, placement: &Placement) -> Result<u64> {
+        let Placement {
+            origin,
+            axis,
+            ref_direction,
+        } = placement;
+        let finite = origin.iter().chain(axis.iter()).chain(ref_direction.iter());
+        if !finite.copied().all(f64::is_finite) {
+            return Err(invalid("mapping"));
+        }
+        let Some(z) = unit(axis) else {
+            return Err(invalid("mapping"));
+        };
+        let Some(x) = unit(&(ref_direction - z * ref_direction.dot(&z))) else {
+            return Err(invalid("mapping"));
+        };
+        let y = z.cross(&x);
+        let location = self.point3(origin)?;
+        let (x, y, z) = (
+            self.direction(&x)?,
+            self.direction(&y)?,
+            self.direction(&z)?,
+        );
+        self.add(
+            "IFCCARTESIANTRANSFORMATIONOPERATOR3D",
+            &[
+                reference(x),
+                reference(y),
+                reference(location),
+                Parameter::Omitted,
+                reference(z),
+            ],
+        )
     }
 
     fn extrusion(
@@ -2856,7 +3161,16 @@ impl Writer<'_> {
         self.add("IFCFACETEDBREP", &[reference(shell)]).map(Some)
     }
 
-    fn property_sets(&mut self, owner: u128, sets: &[PropertySet], instance: u64) -> Result<()> {
+    /// The property sets of `owner`, returned as their definitions. Relates each to `instance` when
+    /// there is one (the element or spatial structure of an occurrence); a type lists them in its
+    /// `HasPropertySets` instead.
+    fn property_sets(
+        &mut self,
+        owner: u128,
+        sets: &[PropertySet],
+        instance: Option<u64>,
+    ) -> Result<Vec<u64>> {
+        let mut definitions = Vec::new();
         for (index, set) in (0u32..).zip(sets) {
             if set.properties.is_empty() {
                 self.loss.add(
@@ -2907,9 +3221,12 @@ impl Writer<'_> {
                     references(&properties),
                 ],
             )?;
-            self.defines(owner, role::PROPERTY_REL, index, instance, definition)?;
+            if let Some(instance) = instance {
+                self.defines(owner, role::PROPERTY_REL, index, instance, definition)?;
+            }
+            definitions.push(definition);
         }
-        Ok(())
+        Ok(definitions)
     }
 
     /// A typed nominal value in a type the output schema declares: the value itself, in the
@@ -2980,7 +3297,14 @@ impl Writer<'_> {
         )
     }
 
-    fn quantity_sets(&mut self, owner: u128, sets: &[QuantitySet], instance: u64) -> Result<()> {
+    /// The quantity sets of `owner`, as [`Self::property_sets`] does for property sets.
+    fn quantity_sets(
+        &mut self,
+        owner: u128,
+        sets: &[QuantitySet],
+        instance: Option<u64>,
+    ) -> Result<Vec<u64>> {
+        let mut definitions = Vec::new();
         for (index, set) in (0u32..).zip(sets) {
             if set.quantities.is_empty() {
                 self.loss.add(
@@ -3031,9 +3355,12 @@ impl Writer<'_> {
                     references(&quantities),
                 ],
             )?;
-            self.defines(owner, role::QUANTITY_REL, index, instance, definition)?;
+            if let Some(instance) = instance {
+                self.defines(owner, role::QUANTITY_REL, index, instance, definition)?;
+            }
+            definitions.push(definition);
         }
-        Ok(())
+        Ok(definitions)
     }
 
     fn defines(
@@ -3182,24 +3509,24 @@ impl Writer<'_> {
         self.type_relationships(model, context)
     }
 
-    /// One `IfcRelAggregates` per stair, ramp or curtain wall with parts: the elements that name
-    /// it as their host, in model order.
+    /// One `IfcRelAggregates` per element with parts: the parts are the elements that name it as
+    /// their host, in model order. A host may be any element (see [`Element::host`]).
     fn parts(&mut self, model: &WriteModel, context: &Context) -> Result<()> {
-        // The parts of each host, in model order: aggregated by the container, not contained in a
-        // storey.
         let mut by_host: BTreeMap<u128, Vec<u64>> = BTreeMap::new();
         for e in model.elements.iter().filter(|e| is_part(e.kind)) {
             if let (Some(host), Some(&part)) = (e.host, context.elements.get(&e.id)) {
                 by_host.entry(host).or_default().push(part);
             }
         }
-        for element in model.elements.iter().filter(|e| is_container(e.kind)) {
-            let parts = by_host.get(&element.id).map_or(&[][..], Vec::as_slice);
-            if let (false, Some(&stair)) = (parts.is_empty(), context.elements.get(&element.id)) {
+        for element in &model.elements {
+            let Some(parts) = by_host.get(&element.id) else {
+                continue;
+            };
+            if let Some(&host) = context.elements.get(&element.id) {
                 self.relationship(
                     "IFCRELAGGREGATES",
                     derived_id(element.id, role::AGGREGATES, 0),
-                    reference(stair),
+                    reference(host),
                     references(parts),
                 )?;
             }
