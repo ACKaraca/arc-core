@@ -11,6 +11,7 @@
 //!
 //! Other profile types are not evaluated.
 
+use crate::schema::access::known;
 use std::f64::consts::TAU;
 
 use arc_base::math::{Point3, Transform3};
@@ -81,16 +82,16 @@ impl Evaluator<'_> {
             "IFCRECTANGLEPROFILEDEF" => self.rectangle(record),
             "IFCCIRCLEPROFILEDEF" => self.circle(name, record),
             "IFCARBITRARYCLOSEDPROFILEDEF" => {
-                let outer = self.profile_loop(record, 2)?;
+                let outer = self.profile_loop(record)?;
                 Ok(vec![outer])
             }
             "IFCARBITRARYPROFILEDEFWITHVOIDS" => {
-                let mut loops = vec![self.profile_loop(record, 2)?];
+                let mut loops = vec![self.profile_loop(record)?];
                 let kind = "IFCARBITRARYPROFILEDEFWITHVOIDS";
                 // A repeated inner curve is the same hole: it is read once.
                 let (inner, _) = attr::distinct_references(
                     &mut self.budget,
-                    record.parameters.get(3),
+                    self.file.attr(record, known::PROFILE_INNER_CURVES),
                     kind,
                     usize::MAX,
                 )?;
@@ -113,9 +114,12 @@ impl Evaluator<'_> {
 
     fn rectangle(&self, record: &Record) -> Step<Vec<Vec<P2>>> {
         let kind = "IFCRECTANGLEPROFILEDEF";
-        let placement = self.axis2(attr::opt_reference(record.parameters.get(2), kind)?)?;
-        let x = positive(record.parameters.get(3), self.scale, kind)? / 2.0;
-        let y = positive(record.parameters.get(4), self.scale, kind)? / 2.0;
+        let placement = self.axis2(attr::opt_reference(
+            self.file.attr(record, known::PROFILE_POSITION),
+            kind,
+        )?)?;
+        let x = positive(self.file.attr(record, known::RECTANGLE_X), self.scale, kind)? / 2.0;
+        let y = positive(self.file.attr(record, known::RECTANGLE_Y), self.scale, kind)? / 2.0;
         let corners = [[-x, -y], [x, -y], [x, y], [-x, y]];
         let loop_ = corners
             .iter()
@@ -126,8 +130,15 @@ impl Evaluator<'_> {
 
     fn circle(&mut self, name: u64, record: &Record) -> Step<Vec<Vec<P2>>> {
         let kind = "IFCCIRCLEPROFILEDEF";
-        let placement = self.axis2(attr::opt_reference(record.parameters.get(2), kind)?)?;
-        let radius = positive(record.parameters.get(3), self.scale, kind)?;
+        let placement = self.axis2(attr::opt_reference(
+            self.file.attr(record, known::PROFILE_POSITION),
+            kind,
+        )?)?;
+        let radius = positive(
+            self.file.attr(record, known::CIRCLE_RADIUS),
+            self.scale,
+            kind,
+        )?;
         let (count, limited) = circle_segments(radius, self.tol.tessellation_chord);
         if limited {
             self.log.add(
@@ -154,9 +165,12 @@ impl Evaluator<'_> {
         Ok(vec![loop_])
     }
 
-    /// The outer curve of an arbitrary profile, at parameter `position` of the record.
-    fn profile_loop(&mut self, record: &Record, position: usize) -> Step<Vec<P2>> {
-        let curve = attr::reference(record.parameters.get(position), &record.type_name)?;
+    /// The outer curve of an arbitrary profile.
+    fn profile_loop(&mut self, record: &Record) -> Step<Vec<P2>> {
+        let curve = attr::reference(
+            self.file.attr(record, known::PROFILE_OUTER_CURVE),
+            &record.type_name,
+        )?;
         self.profile_curve(curve)
     }
 

@@ -318,13 +318,157 @@ pub mod reasons {
     ];
 }
 
+/// The rules of the conformance checker ([`crate::IfcFile::conformance`]): each has a stable code,
+/// the level it belongs to and the message of a finding. A finding names the instance, its entity
+/// and, where one is concerned, the attribute.
+pub mod rules {
+    /// A conformance rule.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Rule {
+        /// The stable code, `io.ifc.conformance_*`.
+        pub code: &'static str,
+        /// The level: 1 instance structure, 2 inverse attributes and uniqueness.
+        pub level: u8,
+        /// The Fluent message of a finding; its arguments are `instance`, `entity` and `attribute`.
+        pub message_id: &'static str,
+    }
+
+    /// The entity of an instance is not declared in the file's schema.
+    pub const ENTITY_UNKNOWN: Rule = Rule {
+        code: "io.ifc.conformance_entity_unknown",
+        level: 1,
+        message_id: "io-ifc-conformance-entity-unknown",
+    };
+    /// The entity of a simple instance is abstract.
+    pub const ENTITY_ABSTRACT: Rule = Rule {
+        code: "io.ifc.conformance_entity_abstract",
+        level: 1,
+        message_id: "io-ifc-conformance-entity-abstract",
+    };
+    /// The parts of a complex instance do not form a valid combination: a part's supertype is
+    /// missing, two parts are alternatives of one `ONEOF`, or a part without a subtype among the
+    /// parts is abstract.
+    pub const COMPLEX_INVALID: Rule = Rule {
+        code: "io.ifc.conformance_complex_invalid",
+        level: 1,
+        message_id: "io-ifc-conformance-complex-invalid",
+    };
+    /// The number of parameters differs from the number of explicit attributes of the entity and
+    /// its supertypes (for a part of a complex instance, of the part's entity).
+    pub const ATTRIBUTE_COUNT: Rule = Rule {
+        code: "io.ifc.conformance_attribute_count",
+        level: 1,
+        message_id: "io-ifc-conformance-attribute-count",
+    };
+    /// `$` stands for an attribute that is not optional, or for an element of an aggregate that is
+    /// not `ARRAY OF OPTIONAL`.
+    pub const VALUE_MISSING: Rule = Rule {
+        code: "io.ifc.conformance_value_missing",
+        level: 1,
+        message_id: "io-ifc-conformance-value-missing",
+    };
+    /// `*` stands for an attribute that is not re-declared as derived, or a derived attribute holds
+    /// something else than `*`.
+    pub const DERIVED_MISPLACED: Rule = Rule {
+        code: "io.ifc.conformance_derived_misplaced",
+        level: 1,
+        message_id: "io-ifc-conformance-derived-misplaced",
+    };
+    /// A value is not of the kind its type declares (integer, real, number, boolean, logical,
+    /// string, binary, reference, enumeration, aggregate), or a typed parameter stands where no
+    /// select is declared.
+    pub const VALUE_TYPE: Rule = Rule {
+        code: "io.ifc.conformance_value_type",
+        level: 1,
+        message_id: "io-ifc-conformance-value-type",
+    };
+    /// An enumeration value is not an item of its enumeration.
+    pub const ENUMERATION_ITEM: Rule = Rule {
+        code: "io.ifc.conformance_enumeration_item",
+        level: 1,
+        message_id: "io-ifc-conformance-enumeration-item",
+    };
+    /// A value of a select is not one of its members: a typed parameter of another type, a value
+    /// without its type, or a reference to an instance of an entity the select does not list.
+    pub const SELECT_MEMBER: Rule = Rule {
+        code: "io.ifc.conformance_select_member",
+        level: 1,
+        message_id: "io-ifc-conformance-select-member",
+    };
+    /// A reference names an instance of an entity that is neither the declared entity nor one of
+    /// its subtypes.
+    pub const REFERENCE_TYPE: Rule = Rule {
+        code: "io.ifc.conformance_reference_type",
+        level: 1,
+        message_id: "io-ifc-conformance-reference-type",
+    };
+    /// A reference names an instance that is not in the file.
+    pub const REFERENCE_DANGLING: Rule = Rule {
+        code: "io.ifc.conformance_reference_dangling",
+        level: 1,
+        message_id: "io-ifc-conformance-reference-dangling",
+    };
+    /// An aggregate has fewer or more elements than its bounds allow.
+    pub const AGGREGATE_SIZE: Rule = Rule {
+        code: "io.ifc.conformance_aggregate_size",
+        level: 1,
+        message_id: "io-ifc-conformance-aggregate-size",
+    };
+    /// A `SET` or an aggregate declared `UNIQUE` holds an element twice.
+    pub const AGGREGATE_UNIQUE: Rule = Rule {
+        code: "io.ifc.conformance_aggregate_unique",
+        level: 1,
+        message_id: "io-ifc-conformance-aggregate-unique",
+    };
+    /// A string or binary value is longer than its declared width, or of another length where the
+    /// width is fixed.
+    pub const VALUE_WIDTH: Rule = Rule {
+        code: "io.ifc.conformance_value_width",
+        level: 1,
+        message_id: "io-ifc-conformance-value-width",
+    };
+    /// The number of instances that refer to an instance through the attribute of an inverse
+    /// attribute is outside the inverse attribute's bounds.
+    pub const INVERSE_CARDINALITY: Rule = Rule {
+        code: "io.ifc.conformance_inverse_cardinality",
+        level: 2,
+        message_id: "io-ifc-conformance-inverse-cardinality",
+    };
+    /// Two instances share the values of the attributes of a `UNIQUE` rule.
+    pub const UNIQUE_RULE: Rule = Rule {
+        code: "io.ifc.conformance_unique_rule",
+        level: 2,
+        message_id: "io-ifc-conformance-unique-rule",
+    };
+
+    /// Every rule, in the order the checker reports them.
+    pub const ALL: &[Rule] = &[
+        ENTITY_UNKNOWN,
+        ENTITY_ABSTRACT,
+        COMPLEX_INVALID,
+        ATTRIBUTE_COUNT,
+        VALUE_MISSING,
+        DERIVED_MISPLACED,
+        VALUE_TYPE,
+        ENUMERATION_ITEM,
+        SELECT_MEMBER,
+        REFERENCE_TYPE,
+        REFERENCE_DANGLING,
+        AGGREGATE_SIZE,
+        AGGREGATE_UNIQUE,
+        VALUE_WIDTH,
+        INVERSE_CARDINALITY,
+        UNIQUE_RULE,
+    ];
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
     use arc_base::error::registry_problems;
 
-    use super::{codes, reasons};
+    use super::{codes, reasons, rules};
 
     const CATALOG: &str = include_str!("../../../locales/en-US/arc-io-ifc.ftl");
     const CATALOG_TR: &str = include_str!("../../../locales/tr-TR/arc-io-ifc.ftl");
@@ -362,6 +506,15 @@ mod tests {
                 reason.message_id
             );
         }
+        for rule in rules::ALL {
+            assert!(
+                rule.code.starts_with("io.ifc.conformance_"),
+                "{}",
+                rule.code
+            );
+            assert!(seen.insert(rule.code), "{} twice", rule.code);
+            assert!(seen.insert(rule.message_id), "{} twice", rule.message_id);
+        }
         for entry in codes::ALL {
             assert!(!seen.contains(entry.code) && !seen.contains(entry.message_id));
         }
@@ -373,6 +526,7 @@ mod tests {
             .iter()
             .map(|c| c.message_id)
             .chain(reasons::ALL.iter().map(|r| r.message_id))
+            .chain(rules::ALL.iter().map(|r| r.message_id))
             .collect();
         for catalog in [CATALOG, CATALOG_TR] {
             let defined = catalog_ids(catalog);
@@ -391,6 +545,10 @@ mod tests {
         }
         for reason in reasons::ALL {
             let cell = format!("| `{}` | `{}` |", reason.code, reason.outcome.as_str());
+            assert!(SPECIFICATION.contains(&cell), "{cell} is not documented");
+        }
+        for rule in rules::ALL {
+            let cell = format!("| `{}` | {} |", rule.code, rule.level);
             assert!(SPECIFICATION.contains(&cell), "{cell} is not documented");
         }
     }

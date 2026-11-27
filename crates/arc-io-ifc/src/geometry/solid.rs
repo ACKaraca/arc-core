@@ -12,6 +12,7 @@
 //! side of the profile plane as its normal (`d . n > 0`), and the other orientation is used when it
 //! does not. A direction parallel to the profile plane is degenerate and skipped.
 
+use crate::schema::access::known;
 use arc_base::math::{Point3, Vector3};
 use arc_mesh::TriMeshBuilder;
 
@@ -28,12 +29,16 @@ impl Evaluator<'_> {
     /// The pieces of an extruded area solid.
     pub(crate) fn extrusion(&mut self, record: &Record) -> Step<Vec<Piece>> {
         let kind = "IFCEXTRUDEDAREASOLID";
-        let parameter = |i: usize| record.parameters.get(i);
-        let profile = attr::reference(parameter(0), kind)?;
-        let position = self.axis3(attr::opt_reference(parameter(1), kind)?)?;
-        let direction = attr::reference(parameter(2), kind)?;
+        let file = self.file;
+        let parameter = |a| file.attr(record, a);
+        let profile = attr::reference(parameter(known::EXTRUSION_AREA), kind)?;
+        let position = self.axis3(attr::opt_reference(
+            parameter(known::EXTRUSION_POSITION),
+            kind,
+        )?)?;
+        let direction = attr::reference(parameter(known::EXTRUSION_DIRECTION), kind)?;
         let direction = super::place::unit(self.direction(direction)?, kind)?;
-        let depth = attr::real(parameter(3), self.scale, kind)?;
+        let depth = attr::real(parameter(known::EXTRUSION_DEPTH), self.scale, kind)?;
         if depth <= 0.0 {
             return Err(skip(reasons::GEOMETRY_DEGENERATE, kind));
         }

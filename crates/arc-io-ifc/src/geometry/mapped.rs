@@ -11,6 +11,7 @@
 //! shared through `Arc`, and receives the composed transform. A map that reaches its own mapped
 //! item again is cut by the cycle check of [`Evaluator::item`]; nesting shares the depth limit.
 
+use crate::schema::access::known;
 use std::sync::Arc;
 
 use crate::error::reasons;
@@ -27,21 +28,24 @@ impl Evaluator<'_> {
     pub(crate) fn mapped(&mut self, name: u64, record: &Record, depth: u32) -> Step<Vec<Piece>> {
         let kind = "IFCMAPPEDITEM";
         let file = self.file;
-        let source = attr::reference(record.parameters.first(), kind)?;
-        let target = attr::reference(record.parameters.get(1), kind)?;
+        let source = attr::reference(file.attr(record, known::MAPPING_SOURCE), kind)?;
+        let target = attr::reference(file.attr(record, known::MAPPING_TARGET), kind)?;
         let map = expect(file, source, "IFCREPRESENTATIONMAP")?;
         let origin = self.axis_any(attr::opt_reference(
-            map.parameters.first(),
+            file.attr(map, known::MAPPING_ORIGIN),
             "IFCREPRESENTATIONMAP",
         )?)?;
-        let representation = attr::reference(map.parameters.get(1), "IFCREPRESENTATIONMAP")?;
+        let representation = attr::reference(
+            file.attr(map, known::MAPPED_REPRESENTATION),
+            "IFCREPRESENTATIONMAP",
+        )?;
         let rep = file
             .instance(representation)
             .and_then(|i| i.records.first())
             .ok_or_else(|| skip(reasons::TARGET_MISSING, "IFCREPRESENTATION"))?;
         let (items, _) = attr::distinct_references(
             &mut self.budget,
-            rep.parameters.get(3),
+            file.attr(rep, known::REPRESENTATION_ITEMS),
             "IFCREPRESENTATION",
             usize::MAX,
         )?;

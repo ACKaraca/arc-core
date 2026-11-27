@@ -80,6 +80,9 @@ fn assert_clean(bytes: &[u8]) {
             let _ = output
                 .file
                 .typed_views(&Limits::CONSTRAINED, &Cancel::new());
+            let _ = output
+                .file
+                .conformance(&Limits::CONSTRAINED, &Cancel::new());
         }
         Err(error) => {
             let code = error.code();
