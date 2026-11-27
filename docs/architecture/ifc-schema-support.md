@@ -13,14 +13,15 @@ the target and does not claim that any of it exists.
 |---|---|
 | Schemas read | IFC2X3, IFC4 and IFC4X3, recognized from `FILE_SCHEMA`; no schema knowledge: every entity name is accepted and no attribute count, type, enumeration value, derived position, inverse attribute or rule is checked |
 | Schemas written | IFC4 |
-| Encodings | STEP physical file (clear text) read and written; IFC-ZIP read |
-| Model | Generic instances, records and parameters, indexed by name and type; complex instances kept as several records; no byte spans, no serializer from a read file |
+| Encodings | STEP physical file (clear text) read and written; IFC-ZIP read and written |
+| Model | Generic instances, records and parameters, indexed by name and type; complex instances kept as several records; byte spans of the source, a serializer from a read file and an edit API (step 4) |
 | Typed views | Spatial structure, type assignment, property sets (four property kinds) and quantity sets (six kinds): 26 IFC4 entity types, with attribute positions written by hand |
 | Geometry evaluated | 9 representation item kinds (extrusion, triangulated and polygonal face sets, faceted B-rep, face and shell based surface models, polyline, indexed poly curve with line segments, mapped item), 4 profile kinds; openings not subtracted |
 | Writer | 16 element kinds, 9 element type kinds, grids, material layer sets and usages, property and quantity sets with a few value kinds; 74 IFC4 entity types and 7 of the 42 relationship types |
 
-Unknown content stays in the generic model and is counted in the loss report, but nothing read can be
-written back, so foreign content does not survive a round trip.
+Unknown content stays in the generic model and is counted in the loss report. A read file can be
+edited and written back with its unmodified content byte-identical (step 4), but no product carries
+foreign content into a document and back out yet.
 
 ## Schema size
 
@@ -114,7 +115,7 @@ ADR-0018 applies to these sources too.
 
 ## Round trip of foreign content
 
-- Each instance keeps the byte range of its source. `IfcFile::write_to` writes the header records
+- Each instance keeps the byte range of its source. `IfcFile::write_step` writes the header records
   and every unmodified instance byte-identical to the source, and changed or new instances in the
   canonical form of the writer.
 - An edit API adds, replaces and removes instances. Existing instance names are kept, new names are
@@ -131,7 +132,7 @@ ADR-0018 applies to these sources too.
 
 The writer gains a schema option, IFC4, IFC4X3 ADD2 or IFC2X3, with the entity and attribute
 differences taken from the tables; content a schema cannot carry is reported. Further additions:
-IFC-ZIP output (stored entries with the existing CRC-32); element types for stairs, stair flights,
+element types for stairs, stair flights,
 ramps, ramp flights and railings; axis, footprint and bounding box representations; a tessellated
 body option for reference exchanges; surface styles and colors; groups and zones; classification
 references; space boundaries; covering relationships; map conversion and projected coordinate
@@ -165,8 +166,8 @@ Every result states the chordal error it was tessellated with; tolerances come f
 ## Other encodings
 
 ifcXML and ifcJSON are not planned: the first has few producers and the second is not a ratified
-standard. Both are reconsidered when a consumer requires them. IFC-ZIP writing is part of the writer
-work.
+standard. Both are reconsidered when a consumer requires them. IFC-ZIP writing (one deflated entry)
+is implemented with step 4.
 
 ## Model views and IDS
 
@@ -214,7 +215,7 @@ Each step is one issue with its tests. Steps 1 to 3 do not depend on each other.
 | 9 | Property and quantity set templates, checker, writer value kinds | 1 |
 | 10 | Typed views for import: materials, openings and fills, element attributes, aggregation, types with their sets, classification, groups, styles, georeferencing | 5 |
 | 11 | Geometry wave 1 | 2, 5 |
-| 12 | Writer on the tables, schema option, IFC-ZIP output, view rule sets | 6 |
+| 12 | Writer on the tables, schema option, view rule sets | 6 |
 | 13 | Writer model additions | 9, 12 |
 | 14 | Geometry wave 2 | 11 and the boolean decision |
 | 15 | Geometry wave 3 | 11 |

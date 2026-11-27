@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use arc_base::{Error, Limits, Result};
 
 use crate::error::{codes, limit};
-use crate::model::Parameter;
+use crate::model::{Parameter, Record};
 
 /// Writes `#name=TYPE(parameters);` and a line feed.
 pub(crate) fn record(
@@ -33,10 +33,42 @@ pub(crate) fn header_record(
     parameters: &[Parameter],
     limits: &Limits,
 ) -> Result<()> {
-    out.push_str(type_name);
-    list(out, parameters, limits, 1)?;
+    body(out, type_name, parameters, limits)?;
     out.push_str(";\n");
     Ok(())
+}
+
+/// Writes `#name=TYPE(parameters);`, or `#name=(A(...)B(...));` for a complex instance, without a
+/// line feed.
+pub(crate) fn instance(
+    out: &mut String,
+    name: u64,
+    records: &[Record],
+    limits: &Limits,
+) -> Result<()> {
+    let _ = write!(out, "#{name}=");
+    if let [single] = records {
+        body(out, &single.type_name, &single.parameters, limits)?;
+    } else {
+        out.push('(');
+        for part in records {
+            body(out, &part.type_name, &part.parameters, limits)?;
+        }
+        out.push(')');
+    }
+    out.push(';');
+    Ok(())
+}
+
+/// Writes `TYPE(parameters)`.
+pub(crate) fn body(
+    out: &mut String,
+    type_name: &str,
+    parameters: &[Parameter],
+    limits: &Limits,
+) -> Result<()> {
+    out.push_str(type_name);
+    list(out, parameters, limits, 1)
 }
 
 fn list(out: &mut String, items: &[Parameter], limits: &Limits, depth: u32) -> Result<()> {

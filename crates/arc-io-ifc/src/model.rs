@@ -1,7 +1,9 @@
 //! The neutral model of an IFC file: the schema, the header records and the instances of the
 //! data section, indexed once by instance name and by entity type name.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
+use std::sync::Arc;
 
 /// The schema named by `FILE_SCHEMA`. A version suffix such as `_ADD2` or `_TC1` does not change
 /// the schema; any other name is kept as written.
@@ -91,47 +93,118 @@ pub struct Instance {
     pub records: Vec<Record>,
 }
 
+/// The physical file a model was read from, shared by the clones of the model. Its `Debug` form
+/// gives only the length.
+#[derive(Clone, PartialEq, Default)]
+pub(crate) struct SourceBytes(pub(crate) Arc<[u8]>);
+
+impl std::fmt::Debug for SourceBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SourceBytes({} bytes)", self.0.len())
+    }
+}
+
+/// Where the read content sits in the source, for writing it back (see [`IfcFile::write_step`]).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct Layout {
+    /// The physical file, one copy for the whole model.
+    pub(crate) source: SourceBytes,
+    /// The header records as read, with their spans.
+    pub(crate) header: Vec<(Record, Range<usize>)>,
+    /// The span of each instance read, by position in `IfcFile::instances`; `None` for an added
+    /// instance.
+    pub(crate) spans: Vec<Option<Range<usize>>>,
+    /// The spans of the instances read and then removed.
+    pub(crate) removed: Vec<Range<usize>>,
+    /// The instances read and then replaced or changed.
+    pub(crate) modified: BTreeSet<u64>,
+    /// The offset of the `ENDSEC` closing the last data section, where added instances go.
+    pub(crate) data_end: usize,
+    /// The name the next added instance receives: above every name the file ever held.
+    pub(crate) next_name: u64,
+}
+
 /// A parsed IFC file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IfcFile {
     /// The schema named by `FILE_SCHEMA`.
     pub schema: Schema,
     /// The header records, in file order (`FILE_DESCRIPTION`, `FILE_NAME`, `FILE_SCHEMA`, ...).
+    /// They may be edited in place; [`IfcFile::write_step`] writes a record that differs from the
+    /// one read in the canonical form and keeps the others as read.
     pub header: Vec<Record>,
-    instances: Vec<Instance>,
-    by_name: BTreeMap<u64, usize>,
-    by_type: BTreeMap<String, Vec<usize>>,
+    pub(crate) instances: Vec<Instance>,
+    pub(crate) by_name: BTreeMap<u64, usize>,
+    pub(crate) by_type: BTreeMap<String, Vec<usize>>,
     parsed_bytes: u64,
+    pub(crate) layout: Layout,
 }
 
 impl IfcFile {
     /// Builds the file and its indexes. `instances` must have distinct names; the parser checks
-    /// that before it calls this.
+    /// that before it calls this. `layout.spans` is parallel to `instances`.
     pub(crate) fn new(
         schema: Schema,
-        header: Vec<Record>,
         instances: Vec<Instance>,
         parsed_bytes: u64,
+        layout: Layout,
     ) -> Self {
-        let mut by_name = BTreeMap::new();
-        let mut by_type: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for (position, instance) in instances.iter().enumerate() {
-            by_name.insert(instance.name, position);
+        let header = layout
+            .header
+            .iter()
+            .map(|(record, _)| record.clone())
+            .collect();
+        let mut file = Self {
+            schema,
+            header,
+            instances,
+            by_name: BTreeMap::new(),
+            by_type: BTreeMap::new(),
+            parsed_bytes,
+            layout,
+        };
+        file.reindex();
+        file.layout.next_name = file
+            .by_name
+            .last_key_value()
+            .map_or(1, |(name, _)| name.saturating_add(1));
+        file
+    }
+
+    /// Rebuilds the indexes by name and by type from the instance list.
+    pub(crate) fn reindex(&mut self) {
+        self.by_name.clear();
+        self.by_type.clear();
+        for (position, instance) in self.instances.iter().enumerate() {
+            self.by_name.insert(instance.name, position);
             for record in &instance.records {
-                let positions = by_type.entry(record.type_name.clone()).or_default();
+                let positions = self.by_type.entry(record.type_name.clone()).or_default();
                 if positions.last() != Some(&position) {
                     positions.push(position);
                 }
             }
         }
-        Self {
-            schema,
-            header,
-            instances,
-            by_name,
-            by_type,
-            parsed_bytes,
+    }
+
+    /// The byte span of an instance in the physical file it was read from, from its `#` to its
+    /// `;`. `None` for an instance that was added, replaced or changed since, or is not in the file.
+    #[must_use]
+    pub fn span(&self, name: u64) -> Option<Range<u64>> {
+        if self.layout.modified.contains(&name) {
+            return None;
         }
+        let position = *self.by_name.get(&name)?;
+        let span = self.layout.spans.get(position)?.as_ref()?;
+        Some(to_u64(span.start)..to_u64(span.end))
+    }
+
+    /// The source text of an instance that is unchanged since it was read (see [`IfcFile::span`]).
+    #[must_use]
+    pub fn source_text(&self, name: u64) -> Option<&[u8]> {
+        let span = self.span(name)?;
+        let start = usize::try_from(span.start).ok()?;
+        let end = usize::try_from(span.end).ok()?;
+        self.layout.source.0.get(start..end)
     }
 
     /// The estimate of the memory the parser allocated for this file, the amount charged against
@@ -172,4 +245,8 @@ impl IfcFile {
             .iter()
             .filter_map(move |&position| self.instances.get(position))
     }
+}
+
+fn to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }

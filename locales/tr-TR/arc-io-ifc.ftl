@@ -32,4 +32,7 @@ io-ifc-loss-geometry-approximated = { $count } geometri öğesi yaklaşık alın
 io-ifc-write-value-invalid = Modeldeki bir değer IFC'ye yazılamıyor: sonlu olmayan bir sayı, negatif bir miktar, pozitif olmayan bir boyut, bozuk bir yerleşim ya da gerçek kuzey, bir NUL karakteri ya da bir kümede veya bir öğenin kümeleri arasında yinelenen bir ad.
 io-ifc-write-reference-invalid = Bir öğe, modelde olmayan ya da ilişkinin izin vermediği türde bir kata veya ana öğeye başvuruyor, bir boşluğun ana öğesi yok ya da ana öğe zinciri başladığı yere dönüyor.
 io-ifc-write-id-duplicate = IFC dosyasındaki iki nesne aynı GlobalId değerini alacaktı.
+io-ifc-edit-target-missing = Düzenleme, IFC dosyasında olmayan bir örneğe veya özniteliğe başvuruyor.
+io-ifc-edit-reference-dangling = Düzenleme, IFC dosyasında olmayan bir örneğe başvuru bırakacaktı.
+io-ifc-edit-value-invalid = Düzenlenen değer bir IFC dosyasına yazılamaz.
 io-ifc-loss-not-written = { $count } bozuk gövde ya da boş özellik veya miktar kümesi yazılmadı.

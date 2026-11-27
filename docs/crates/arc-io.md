@@ -762,7 +762,7 @@ because the layer table does not allow one format crate to depend on another.
 
 `arc-io-common` holds the bounded ZIP and XML readers that CORE-IO-007 names, so that every
 ZIP- and XML-based format reads them the same way. It depends on `arc-base`, on `miniz_oxide` for
-inflation and on `quick-xml` for XML parsing; it reads byte buffers only, has no product type and
+inflation and deflation and on `quick-xml` for XML parsing; it reads byte buffers only, has no product type and
 builds for `wasm32-unknown-unknown`. Format crates depend on it through same-layer edges that are
 added when each one starts using it (ADR-0001, amendment "Shared bounded ZIP and XML readers").
 The limits are `arc_base::Limits`, used directly: the crate defines no limits type of its own, so
@@ -838,6 +838,12 @@ the field names and profile values are those of [interchange.md](../architecture
 - The budget is the archive's: every call to `read_entry` charges the bytes it produced against
   `decompressed_bytes`, whether the entry then passes its CRC-32 check or not. Reading an entry again
   uses budget again, and an entry that fails its checks cannot be inflated without limit.
+- `write_archive(entries, method)` writes an archive of (name, data) entries in the given order, all
+  stored or all deflated with `miniz_oxide` at level 6. Names are checked like the reader's names and
+  for duplicates, and flagged as UTF-8; folder conflicts are not checked. The output is deterministic:
+  every entry carries the DOS time 1980-01-01 00:00 and no extra fields. ZIP64 is not written: an
+  entry, an offset or the directory of 4 GiB or more, or more than 65,534 entries, is
+  `io.limit_exceeded`.
 
 ### XML documents
 
@@ -1177,7 +1183,7 @@ Streaming (CORE-IO-017) and IDS (CORE-IO-018) are not implemented.
   count and the parameter types of an entity are not checked against the schema, and no WHERE rule is
   evaluated. An entity keeps the values its file gives, whatever the schema says of them.
 - Memory estimate: the parser charges an estimate of the memory it allocates against `memory_bytes`:
-  48 bytes per parameter, 64 bytes per record plus its type name, 96 bytes per instance, and the raw
+  48 bytes per parameter, 64 bytes per record plus its type name, 120 bytes per instance (its span included), and the raw
   length of each string, binary literal, enumeration and type name. The constants are in
   `crates/arc-io-ifc/src/step.rs`. The estimate is kept on the file as `IfcFile::parsed_bytes`.
 
@@ -1189,6 +1195,62 @@ an instance by name with a binary search over an index built once when the file 
 all instances per query. `Instance` holds its name and its records; `Record` holds its type name and its
 parameters; `Parameter` is the enumeration of the parameter kinds above. `parsed_bytes()` is the memory
 estimate of the parser.
+
+### Round trip and editing
+
+The parser records the byte span of every header record and every instance, from its first byte to
+its `;`, and the offset of the `ENDSEC` that closes the last data section. `IfcFile` keeps one shared
+copy of the physical file (for an IFC-ZIP archive, the inflated entry) and the spans as offsets into
+it, part of the 120 bytes per instance of the parser's estimate; no instance holds a copy of its text.
+`span(name)` returns the span of an unchanged instance and `source_text(name)` its bytes. Because
+spans are offsets, a later streaming reader (CORE-IO-017) can keep them into a seekable source instead
+of a buffer.
+
+`write_step(limits)` writes the file back. Every byte that no edit touched is copied from the source:
+the header, white space, line breaks, comments between statements, skipped sections and the bytes
+after `END-ISO-10303-21;`. A file read and written without edits is therefore identical to its source
+byte for byte. Comments are not semantic in ISO 10303-21; they are kept where they lie between
+statements and inside unchanged instances, and dropped inside an edited instance, which is written
+whole in the canonical form of [Encoding and determinism](#encoding-and-determinism) on its own
+span, a complex instance as `#n=(A(...)B(...));`. An edit thus changes only the lines of the edited
+instances. A removed instance drops its text, the spaces after it and one line break. Added
+instances are written one per line, in the order they were added, before the `ENDSEC` of the last
+data section, with the line break the file uses there (`\r\n` or `\n`).
+
+`header` is public and editable: `FILE_DESCRIPTION` (view definition and implementation level),
+`FILE_NAME` and `FILE_SCHEMA` are kept as read. A header record that differs from the one read is
+written in the canonical form in its place, records beyond those read follow the last one, and an
+edited header must start with `FILE_DESCRIPTION`, `FILE_NAME` and `FILE_SCHEMA`, otherwise
+`io.ifc.edit_value_invalid`. Editing `FILE_SCHEMA` does not change `schema`, which stays the one read.
+
+The edit API keeps instance names: no edit renumbers, and `add(records)` returns a name above every
+name the file has held, so a removed name is not reused. `replace(name, records)` keeps the name and
+the place in the file; `set_attribute(name, record, index, value)` sets one parameter (record 0 of a
+simple instance); `remove(name)` returns the removed instance. Every value is checked before it is
+stored, so that the file stays writable: reals finite, texts without NUL, enumerations of letters,
+digits and `_`, binaries of the reader's form, type names in upper case, nesting at most 64. No edit
+leaves a dangling reference: a value that refers to an instance not in the file (other than the edited
+instance itself) and the removal of an instance another instance still refers to are refused with
+`io.ifc.edit_reference_dangling`; a missing instance, record or parameter is
+`io.ifc.edit_target_missing`. References that were already dangling in the file read are kept as
+read, but a replacement that carries one is refused. A removal scans every instance for references
+and rebuilds the indexes, so it costs time in proportion to the file; the other edits update the
+indexes in place.
+
+`ifc_zip(entry_name, bytes)` packs a physical file as an IFC-ZIP archive of one deflated entry with
+`arc_io_common::zip::write_archive`; the entry name must end in `.ifc` and not name metadata, so that
+`read` finds it, or the call fails with `io.ifc.archive_entry_missing`.
+
+The tests write every edge case of the clear text encoding back byte for byte (the minimal project in
+each schema, CR LF line breaks, comments inside and between instances, a byte order mark, trailing
+padding and garbage, a skipped section and a second data section with a complex instance, a file on
+one line), check that one changed attribute changes one line, that every parameter kind is written
+canonically and reads back equal, the name policy, every refusal, header edits and IFC-ZIP output.
+Truncating each edge-case file at every byte and flipping random bytes of the project either fails
+with an `io.*` error or reads a file that writes back byte for byte; the hostile-input tests also
+rewrite the first instance canonically and read it back equal. With `ARC_IFC_ROUNDTRIP_DIR` set,
+`tests/roundtrip.rs` round-trips every `.ifc` file under that directory, such as the output of
+`ARC_IFC_DUMP` or a sample corpus outside the repository.
 
 ### Typed views
 
@@ -1543,6 +1605,9 @@ current, and `tests/schema_tables.rs` requires the tables. Without it these test
 | `io.ifc.write_value_invalid` | `invalid_input` | The writer was given a number that is not finite, a negative quantity, a door or window size that is not positive, placement axes or a true north that are too short or parallel, a NUL in a text, a name repeated within a property or quantity set, or a set name repeated on one element |
 | `io.ifc.write_reference_invalid` | `invalid_input` | The writer was given an element whose storey or host is not in the model or of a kind the relationship does not allow, an opening without a host, or a chain of hosts that returns to its start |
 | `io.ifc.write_id_duplicate` | `invalid_input` | Two objects of the written file would have the same `GlobalId` |
+| `io.ifc.edit_target_missing` | `not_found` | An edit names an instance, a record or a parameter that the file does not have |
+| `io.ifc.edit_reference_dangling` | `conflict` | An edit would leave a reference to an instance that is not in the file: a new value refers to one, or the instance to remove is still referred to |
+| `io.ifc.edit_value_invalid` | `invalid_input` | An edited value cannot be written: no records, a real that is not finite, a NUL in a text, a malformed type name, enumeration or binary, nesting deeper than 64, no instance name left, or an edited header without `FILE_DESCRIPTION`, `FILE_NAME` and `FILE_SCHEMA` first |
 
 The `io.zip.*` codes of the archive reader are returned as the `arc-io-common` section defines them.
 
