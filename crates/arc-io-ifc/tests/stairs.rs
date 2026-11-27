@@ -265,6 +265,17 @@ fn stairs_parts_and_railings_read_back() {
     assert!((volume(&mesh, &Limits::CONSTRAINED).unwrap() - expected).abs() < 1e-9);
 }
 
+/// The aggregation of parts is grouped by host in one pass; the bytes stay what the
+/// container-by-element scan wrote.
+#[test]
+fn stair_output_bytes_are_pinned() {
+    let bytes = write(&model(), &options()).unwrap().bytes;
+    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    assert_eq!(hash, 3_995_293_198_085_456_176, "{} bytes", bytes.len());
+}
+
 #[test]
 fn invalid_stair_parts_are_refused() {
     let code = |model: &WriteModel| write(model, &options()).unwrap_err().code();
