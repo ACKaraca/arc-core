@@ -126,6 +126,11 @@ The single gate command is **`cargo xtask ci`**. It runs, in order:
     directory the step reports that there is nothing to check. Whether a schema matches the
     implementation is checked by the tests of the crate that owns it.
 
+`cargo xtask ci` does not run `cargo xtask ifc-schema`: the IFC schema tables are generated from
+schema files outside the repository and are not stored yet
+([arc-io.md](crates/arc-io.md#schema-tables)). Their tests run when `ARC_IFC_SCHEMA_DIR` names the
+directory of those files and skip otherwise.
+
 The same command runs locally and in CI on Windows, macOS and Linux. Nightly jobs add: fuzzing,
 the corpus and golden-model runs, benchmarks, address-sanitizer runs of the FFI crates, image tests
 on real GPUs, and a release dry run.
