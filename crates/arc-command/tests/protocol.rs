@@ -633,6 +633,26 @@ fn conformance(c: &mut Client) {
         undone["result"]["revision"].as_u64().unwrap() + 1
     );
 
+    // Prompts: typed text starts a command, then answers its prompts.
+    let r = c.call(&request(
+        86,
+        "command.prompt",
+        json!({"document": "main", "text": "test.item.create"}),
+    ));
+    assert_eq!(r["result"]["state"], "prompt");
+    let r = c.call(&request(
+        87,
+        "command.prompt",
+        json!({"document": "main", "text": "conformance"}),
+    ));
+    assert_eq!(r["result"]["prompt"]["key"], "length");
+    let r = c.call(&request(
+        88,
+        "command.prompt",
+        json!({"document": "main", "text": "2 m"}),
+    ));
+    assert_eq!(r["result"]["state"], "ran");
+
     // Event subscriptions (the notifications themselves are tested in `events.rs`).
     let r = c.call(&request(
         90,
@@ -1088,6 +1108,53 @@ fn create_item(id: u64, document: &str, name: &str) -> Value {
         json!({"document": document, "command": "test.item.create",
                "params": {"name": name, "length": 1}}),
     )
+}
+
+#[test]
+fn command_prompt_answers_the_prompt_of_the_session_with_text() {
+    session(|c| {
+        c.call(&initialize(1, "1.0", "1.0", &["read", "edit"]));
+        let prompt = |c: &mut Client, id: u64, document: &str, text: &str| {
+            c.call(&request(
+                id,
+                "command.prompt",
+                json!({"document": document, "text": text}),
+            ))
+        };
+        // Nothing asked and nothing typed: nothing happens.
+        assert_eq!(
+            prompt(c, 2, "empty", "")["result"],
+            json!({"state": "idle"})
+        );
+        // The command named by the text asks for its first parameter.
+        let r = prompt(c, 3, "empty", "test.item.create");
+        assert_eq!(r["result"]["state"], "prompt");
+        assert_eq!(r["result"]["prompt"]["key"], "name");
+        assert_eq!(r["result"]["prompt"]["accepts"], json!(["text"]));
+        // Prompts are kept per document: another document starts its own.
+        let r = prompt(c, 4, "main", "nope.such");
+        assert_eq!(error_code(&r), -32001);
+        // An answer the prompt cannot read is rejected and the same prompt is asked again.
+        let r = prompt(c, 5, "empty", "a");
+        assert_eq!(r["result"]["prompt"]["key"], "length");
+        let r = prompt(c, 6, "empty", "long");
+        assert_eq!(r["result"]["state"], "rejected");
+        assert_eq!(r["result"]["error"]["code"], "solve.expr.unknown_name");
+        assert_eq!(r["result"]["prompt"]["key"], "length");
+        // The last answer completes the command, which runs like `command.run`.
+        let r = prompt(c, 7, "empty", "2 m");
+        assert_eq!(r["result"]["state"], "ran");
+        assert_eq!(r["result"]["command"], "test.item.create");
+        assert_eq!(r["result"]["revision"], 1);
+        let objects = c.call(&request(8, "query.objects", json!({"document": "empty"})));
+        assert_eq!(objects["result"]["objects"].as_array().unwrap().len(), 1);
+        // The command ended with the run: an empty line repeats it, as at the command line.
+        let r = prompt(c, 9, "empty", "");
+        assert_eq!(
+            (&r["result"]["state"], &r["result"]["revision"]),
+            (&json!("ran"), &json!(2))
+        );
+    });
 }
 
 #[test]

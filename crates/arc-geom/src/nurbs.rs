@@ -1189,6 +1189,17 @@ impl Nurbs2 {
     /// The length between parameters `t0 <= t1` (clamped), by adaptive Gauss–Legendre
     /// quadrature on each knot span, cut where the speed is stationary.
     pub(crate) fn length_between(&self, t0: f64, t1: f64, tolerance: &Tolerance) -> Result<f64> {
+        self.length_between_in(&self.bezier_segments(), t0, t1, tolerance)
+    }
+
+    /// [`Self::length_between`] with the Bézier segments given (`self.bezier_segments()`).
+    fn length_between_in(
+        &self,
+        segments: &[Bezier],
+        t0: f64,
+        t1: f64,
+        tolerance: &Tolerance,
+    ) -> Result<f64> {
         let (lo, hi) = self.parameter_range();
         let (a, b) = (t0.clamp(lo, hi), t1.clamp(lo, hi));
         let (a, b) = (a.min(b), a.max(b));
@@ -1220,8 +1231,7 @@ impl Nurbs2 {
         // A near-cusp or narrow peak of the speed between the nodes of a rule and of its halves
         // fools the error estimate, so the pieces are cut where the speed is stationary; the
         // speed is then nearly monotone on each piece.
-        for (lo, hi, segment) in self
-            .bezier_segments()
+        for (lo, hi, segment) in segments
             .iter()
             .map(|s| (s.lo.max(a), s.hi.min(b), s))
             .filter(|(lo, hi, _)| hi > lo)
@@ -1281,8 +1291,9 @@ impl Nurbs2 {
         }
         let (mut a, mut b) = (lo, hi);
         let mut t = lo + (hi - lo) * s / total;
+        let segments = self.bezier_segments();
         for _ in 0..MAX_ROOT_ITERATIONS {
-            let residual = self.length_between(lo, t, tolerance)? - s;
+            let residual = self.length_between_in(&segments, lo, t, tolerance)? - s;
             if residual.abs() <= 0.5 * tolerance.linear {
                 return Ok(t);
             }
@@ -2266,6 +2277,51 @@ pub(crate) mod tests {
     }
 
     /// The curve of issue 114: a degree-4 rational curve whose speed has a narrow peak.
+    /// The loop of `parameter_at_length` as it was, with the segments recomputed in each call.
+    fn parameter_at_length_recomputing(c: &Nurbs2, s: f64, total: f64) -> f64 {
+        let (lo, hi) = c.parameter_range();
+        let (mut a, mut b) = (lo, hi);
+        let mut t = lo + (hi - lo) * s / total;
+        for _ in 0..MAX_ROOT_ITERATIONS {
+            let residual = c.length_between(lo, t, &TOL).unwrap() - s;
+            if residual.abs() <= 0.5 * TOL.linear {
+                return t;
+            }
+            if residual > 0.0 {
+                b = t;
+            } else {
+                a = t;
+            }
+            let newton = t - residual / crate::length(&c.derivatives(t).1);
+            let mid = 0.5 * (a + b);
+            if mid <= a || mid >= b {
+                return t;
+            }
+            t = if newton > a && newton < b {
+                newton
+            } else {
+                mid
+            };
+        }
+        panic!("no convergence");
+    }
+
+    #[test]
+    fn parameter_at_length_is_unchanged_by_sharing_the_segments() {
+        for c in [quarter_circle(), narrow_peak_curve()] {
+            let (lo, hi) = c.parameter_range();
+            let total = c.length_between(lo, hi, &TOL).unwrap();
+            for f in [0.05, 0.3, 0.5, 0.77, 0.95] {
+                let s = f * total;
+                let got = c.parameter_at_length(s, total, &TOL).unwrap();
+                assert_eq!(
+                    got.to_bits(),
+                    parameter_at_length_recomputing(&c, s, total).to_bits()
+                );
+            }
+        }
+    }
+
     fn narrow_peak_curve() -> Nurbs2 {
         let k = [
             2.7472477515695424,

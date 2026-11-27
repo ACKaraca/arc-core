@@ -2332,20 +2332,22 @@ impl Writer<'_> {
     /// One `IfcRelAggregates` per stair, ramp or curtain wall with parts: the elements that name
     /// it as their host, in model order.
     fn parts(&mut self, model: &WriteModel, context: &Context) -> Result<()> {
+        // The parts of each host, in model order: aggregated by the container, not contained in a
+        // storey.
+        let mut by_host: BTreeMap<u128, Vec<u64>> = BTreeMap::new();
+        for e in model.elements.iter().filter(|e| is_part(e.kind)) {
+            if let (Some(host), Some(&part)) = (e.host, context.elements.get(&e.id)) {
+                by_host.entry(host).or_default().push(part);
+            }
+        }
         for element in model.elements.iter().filter(|e| is_container(e.kind)) {
-            // The parts, in model order: aggregated by the container, not contained in a storey.
-            let parts: Vec<u64> = model
-                .elements
-                .iter()
-                .filter(|e| e.host == Some(element.id) && is_part(e.kind))
-                .filter_map(|e| context.elements.get(&e.id).copied())
-                .collect();
+            let parts = by_host.get(&element.id).map_or(&[][..], Vec::as_slice);
             if let (false, Some(&stair)) = (parts.is_empty(), context.elements.get(&element.id)) {
                 self.relationship(
                     "IFCRELAGGREGATES",
                     derived_id(element.id, role::AGGREGATES, 0),
                     reference(stair),
-                    references(&parts),
+                    references(parts),
                 )?;
             }
         }

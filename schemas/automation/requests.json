@@ -89,6 +89,26 @@
       "required": [],
       "additionalProperties": true
     },
+    "command.prompt": {
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "document",
+        "text"
+      ],
+      "additionalProperties": true
+    },
     "command.describe": {
       "type": "object",
       "properties": {
@@ -445,5 +465,6 @@
       ],
       "additionalProperties": true
     }
-  }
+  },
+  "$comment": "Revised for `command.prompt` (additive, protocol version stays 1.0): clients that do not send it see no change."
 }
