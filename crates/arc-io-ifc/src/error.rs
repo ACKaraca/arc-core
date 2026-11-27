@@ -554,6 +554,7 @@ mod tests {
             .map(|c| c.message_id)
             .chain(reasons::ALL.iter().map(|r| r.message_id))
             .chain(rules::ALL.iter().map(|r| r.message_id))
+            .chain(crate::psets::findings::ALL.iter().map(|f| f.message_id))
             .collect();
         for catalog in [CATALOG, CATALOG_TR] {
             let defined = catalog_ids(catalog);
@@ -576,6 +577,10 @@ mod tests {
         }
         for rule in rules::ALL {
             let cell = format!("| `{}` | {} |", rule.code, rule.level);
+            assert!(SPECIFICATION.contains(&cell), "{cell} is not documented");
+        }
+        for finding in crate::psets::findings::ALL {
+            let cell = format!("| `{}` |", finding.code);
             assert!(SPECIFICATION.contains(&cell), "{cell} is not documented");
         }
     }

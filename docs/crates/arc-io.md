@@ -1650,6 +1650,84 @@ WHERE rules and global rules (level 3) are not evaluated. Messages are the `io-i
 identifiers with the arguments `instance`, `entity` and `attribute`. `cargo run -p arc-io-ifc --example
 conformance <file>` prints the findings as JSON for `tools/ifc-oracle/conformance_compare.py`.
 
+### Property and quantity set templates
+
+`arc_io_ifc::psets` holds the property and quantity set templates of IFC2X3 TC1 (317 property
+sets) and IFC4 ADD2 TC1 (420 property sets and 93 quantity sets), generated from the property set
+definitions (PSD XML) buildingSMART International publishes with each release. IFC4X3 ADD2
+publishes its sets only as documentation pages, so `PsetTemplates::of` returns `None` for it.
+
+- `PsetTemplates::of(&Schema)` returns the templates of a schema; `get(name)` finds a `SetTemplate`
+  by binary search ignoring ASCII case. A `SetTemplate` has its name, `SetKind` (`Properties` or
+  `Quantities`), the published template type (such as `PSET_TYPEDRIVENOVERRIDE`), the `Applicable`
+  entities with an optional predefined type (`IfcActuator/ELECTRICACTUATOR` in the definitions) and
+  its `PropertyTemplate`s in published order; `property(name)` finds one by its exact name.
+- A `PropertyKind` is `Single`, `Bounded` or `List` with the data type (the IFC defined type, such as
+  `IfcPositiveLengthMeasure`), `Enumerated` with the enumeration name and items, `Table` with the
+  defining and defined types, `Reference` with the referenced entity (`IfcTimeSeries`, `IfcPerson`,
+  `IfcMaterialDefinition`, ...), `Complex` with its usage name and nested templates, or
+  `Quantity(QuantityKind)` (`Length`, `Area`, `Volume`, `Count`, `Weight`, `Time`).
+  `PropertyKind::entity()` names the entity a value of the kind is written as. A data type is empty
+  where the published definition leaves it open (`<DataType />`, 16 IFC4 properties, among them
+  `LoadBearing` and `ThermalTransmittance` of `Pset_RampCommon` and `Pset_StairCommon`). Enumeration
+  items come from the enumeration list, or from the constants of the definition where the list is
+  empty. IFC2X3 time series properties (`TypeSimpleProperty`) are references to `IfcTimeSeries`;
+  the type of the series values is not kept, as in IFC4. An IFC2X3 class name with a schema module
+  prefix (`IFCKERNEL/IfcProduct`) keeps the entity only, and the free-text predefined type
+  conditions of IFC2X3 are not read.
+
+`IfcFile::check_property_sets(limits, cancel)` compares every `IfcPropertySet` and
+`IfcElementQuantity` whose name starts with `Pset_` or `Qto_` with the template of that name for the
+file's schema and returns a `PsetCheck`: the schema of the templates (`None` when there are none, so
+nothing was evaluated), the number of sets compared and the findings in file order. A
+`PsetFinding` has a stable code, the instance and name of the set, the property (with the names of
+enclosing complex properties joined by `.`), the object for an applicability finding, and the
+expected and found texts; `PsetFinding::error()` gives it as an `arc_base::Error` with the message
+arguments `set`, `property`, `expected` and `found` (messages in `locales/en-US` and
+`locales/tr-TR`).
+
+| Code | Finding |
+|---|---|
+| `io.ifc.pset_template_unknown` | The name starts with `Pset_` or `Qto_` but the schema has no template of that name |
+| `io.ifc.pset_set_kind` | A property set carries the name of a quantity set template, or the reverse |
+| `io.ifc.pset_property_unknown` | A property or quantity name is not in the template (names are case-sensitive) |
+| `io.ifc.pset_property_kind` | A property is written as another entity than its kind (a single value for a bounded value, a property for a quantity) |
+| `io.ifc.pset_quantity_kind` | A quantity is of another quantity class than its template's |
+| `io.ifc.pset_value_type` | A value of a single, bounded, list or table property is not wrapped in the template's data type, or the target of a reference is not of its entity |
+| `io.ifc.pset_enumeration_item` | An enumerated value is not an item of the template's enumeration (compared ignoring ASCII case) |
+| `io.ifc.pset_not_applicable` | The set is assigned to an object whose entity, or whose own predefined type, the template does not apply to |
+
+The objects of a set are the `RelatedObjects` of its `IfcRelDefinesByProperties` and the type objects
+that list it in `HasPropertySets`. A type object stands for its occurrence entity (`IfcWallType` for
+`IfcWall`, `IfcDoorStyle` for `IfcDoor`) on both sides. Subtypes, type objects, the entity of a
+reference and the `PredefinedType` of an object are resolved through the schema tables; without them,
+or for a name they do not hold, applicability and reference targets are not judged. A predefined type
+restriction is judged only against an object's own enumeration value; `USERDEFINED`, `NOTDEFINED` or
+none defers to the type and is not judged. Complex properties are followed to a depth of 16 and
+`nesting_depth`; the properties visited count against `record_count`.
+
+The templates are generated by `cargo xtask ifc-psets --psd-dir <dir> [--check]` into
+`crates/arc-io-ifc/src/schema/generated/psets_ifc2x3.rs` and `psets_ifc4.rs`, under the same license
+condition as the schema tables (ADR-0018): they are not stored in the repository, and the build
+script sets `cfg(arc_ifc_pset_tables)` only when both files exist. `<dir>` is a checkout of the
+`Standards-builds` repository of buildingSMART International; the task reads these folders, never
+downloads, and checks each against the BLAKE3 digest of its manifest (the sorted lines
+`<path>\t<BLAKE3 of the file>`):
+
+| Folder | Files | Manifest BLAKE3 |
+|---|---|---|
+| `IFC/RELEASE/IFC2x3/TC1/HTML/psd` (recursive) | 317 | `cc826797d4e35afd4e07117d6941bd04a6bc39b0620ee8ee4cd472c610d3f268` |
+| `IFC/RELEASE/IFC4/ADD2_TC1/HTML/psd` | 420 | `48bd17998c7e91314d70b5df959e98439790587ba187642ee84f0d4fcac21c23` |
+| `IFC/RELEASE/IFC4/ADD2_TC1/HTML/qto` | 93 | `9e3f018e4404287a90055f4fe823ab7ec1b545fe38e8271ebb980d5845419d16` |
+
+The generator (`xtask/src/ifc_pset.rs`) reads the files with a small XML reader of its own (elements,
+attributes, text and the predefined and character references; the declaration, comments and
+processing instructions are skipped, a document type declaration is refused, nesting is limited to 64
+levels and a file to 4 MiB). With `ARC_IFC_PSD_DIR` set, `tests/psets.rs` requires the templates
+and checks the counts above; `ARC_IFC_PSET_DUMP=<file>` writes them as JSON for
+`tools/ifc-oracle/pset_diff.py`, which compares names, kinds, data types and quantity kinds with
+IfcOpenShell's templates.
+
 ### Error codes
 
 | Code | Category | Meaning |
@@ -1663,8 +1741,8 @@ conformance <file>` prints the findings as JSON for `tools/ifc-oracle/conformanc
 | `io.ifc.instance_duplicate` | `corrupt_data` | Two instances have the same name, in one or several data sections |
 | `io.ifc.archive_entry_missing` | `not_found` | The archive has no entry whose name ends in `.ifc` after the metadata entries are skipped |
 | `io.ifc.archive_entry_ambiguous` | `unsupported` | The archive has more than one entry whose name ends in `.ifc` after the metadata entries are skipped |
-| `io.ifc.write_value_invalid` | `invalid_input` | The writer was given a number that is not finite, a negative quantity, a door or window size that is not positive, placement axes or a true north that are too short or parallel, a NUL in a text, a name repeated within a property or quantity set, or a set name repeated on one element |
-| `io.ifc.write_reference_invalid` | `invalid_input` | The writer was given an element whose storey or host is not in the model or of a kind the relationship does not allow, an opening without a host, or a chain of hosts that returns to its start |
+| `io.ifc.write_value_invalid` | `invalid_input` | The writer was given a number that is not finite, a negative quantity, a door or window size that is not positive, placement axes or a true north that are too short or parallel, a NUL in a text, a name repeated within a property or quantity set, a set name repeated on one element, a property value its type refuses (a measure outside its rule, a label or identifier over 255 characters, an enumerated value outside its items, one enumeration name with two item lists), a grid axis curve that is degenerate or not joined, or an invalid georeferencing |
+| `io.ifc.write_reference_invalid` | `invalid_input` | The writer was given an element whose storey or host is not in the model or of a kind the relationship does not allow, an opening without a host, a chain of hosts that returns to its start, or a group member that is not an element or grid of the model |
 | `io.ifc.write_id_duplicate` | `invalid_input` | Two objects of the written file would have the same `GlobalId` |
 | `io.ifc.edit_target_missing` | `not_found` | An edit names an instance, a record or a parameter that the file does not have |
 | `io.ifc.edit_reference_dangling` | `conflict` | An edit would leave a reference to an instance that is not in the file: a new value refers to one, or the instance to remove is still referred to |
@@ -1683,15 +1761,17 @@ not written yet.
 ### The write model
 
 `WriteModel` (module `write`) holds a project, a site and a building (`Spatial`: identifier and name),
-the storeys (`Storey`: identifier, name, elevation), the elements, the grids (`Grid`), the length unit (`LengthUnit`:
+the storeys (`Storey`: identifier, name, elevation), the elements, the grids (`Grid`), the groups
+(`Group`), an optional georeferencing (`Georeference`), the length unit (`LengthUnit`:
 meters or millimeters), the plane angle unit (`AngleUnit`: radians or degrees) and an optional true
 north direction. Every length, area and volume of the model is in the length unit, squared or cubed.
 The structs of the model are marked non-exhaustive and are built with their `new` constructors
 (`WriteModel::new`, `Spatial::new`, `Storey::new`, `Element::new`, `Placement::new`,
 `PropertySet::new`, `Property::new`, `QuantitySet::new`, `Quantity::new`, `ElementType::new`,
-`MaterialLayer::new`, `LayerSetUsage::new`, `Grid::new`, `GridAxis::new`); their fields are public and set after construction.
+`MaterialLayer::new`, `LayerSetUsage::new`, `Grid::new`, `GridAxis::new`, `AxisSegment::new`,
+`Group::new`, `Georeference::new`); their fields are public and set after construction.
 
-An `Element` has an identifier, a kind (`ElementKind`: wall, slab, door, window, opening, space, roof, covering, stair, stair flight, railing, ramp, ramp flight, curtain wall, plate, member), a name, a long name (spaces), the
+An `Element` has an identifier, a kind (`ElementKind`: wall, slab, door, window, opening, space, roof, covering, stair, stair flight, railing, ramp, ramp flight, curtain wall, plate, member, transport element, pipe segment), a name, a long name (spaces), the
 identifier of its storey, a `Placement` relative to the storey (origin, local z axis, local x axis), an
 optional `Body`, a predefined type, an operation type (doors) or partitioning type (windows), the overall
 width and height (doors and windows), a host, property sets, quantity sets, the identifier of its
@@ -1794,17 +1874,30 @@ layer from the reference line or plane (an offset that is not finite is refused)
     `STRUT`, `STUD`). Plates, members and curtain walls have element types (`IfcPlateType`,
     `IfcMemberType`, `IfcCurtainWallType`, written like the other types; their layers are reported,
     not written).
+- Transport elements and pipe segments: `IfcTransportElement` (`ElementKind::TransportElement`,
+  `IfcTransportElementTypeEnum`: `ELEVATOR`, `ESCALATOR`, `MOVINGWALKWAY`, `CRANEWAY`, `LIFTINGGEAR`)
+  and `IfcPipeSegment` (`ElementKind::PipeSegment`, `IfcPipeSegmentTypeEnum`: `CULVERT`,
+  `FLEXIBLESEGMENT`, `RIGIDSEGMENT`, `GUTTER`, `SPOOL`) are contained in their storey and have no
+  host; their types are `IfcTransportElementType` and `IfcPipeSegmentType` (layers reported, not
+  written).
 - Grids: `Grid { id, name, storey, placement, axes_u, axes_v, axes_w, predefined_type }` is written as an
   `IfcGrid` placed relative to its storey and contained in it (`IfcRelContainedInSpatialStructure`, after
   the storey's elements), after the elements. `UAxes` and `VAxes` need at least one axis, `WAxes` is
   omitted when empty; each `GridAxis { tag, curve, same_sense }` is an `IfcGridAxis` (`AxisTag` omitted
   when empty, `SameSense` from the field). The curve (`AxisCurve`, two dimensions, in the plane of the
   grid's placement) is `Line { start, end }`, an `IfcPolyline` of two points (at least the linear
-  tolerance apart), or `Arc { center, radius, start_angle, end_angle }`, an `IfcTrimmedCurve` of an
+  tolerance apart), `Polyline(points)`, an `IfcPolyline` of two or more points (consecutive points at
+  least the linear tolerance apart), `Composite(segments)`, or `Arc { center, radius, start_angle, end_angle }`, an `IfcTrimmedCurve` of an
   `IfcCircle` at an `IfcAxis2Placement2D`, trimmed by `IfcParameterValue`s (the angles are in radians in
   the model and written in the plane angle unit of the project), counterclockwise with
   `SenseAgreement` true (radius above the linear tolerance, sweep above the angular tolerance and at
-  most a full turn); a clockwise or reversed axis is an arc with `same_sense` false. A value that is
+  most a full turn); a clockwise or reversed axis is an arc with `same_sense` false. A composite is an
+  `IfcCompositeCurve` (`SelfIntersect` unknown) of `IfcCompositeCurveSegment`s, one per `AxisSegment
+  { curve, same_sense }` whose curve is a line, polyline or arc (a nested composite is refused);
+  each segment must start within the linear tolerance of where the previous one ends, taking
+  `same_sense` false as running the curve backward. Every segment is `CONTINUOUS` except the last,
+  which is `DISCONTINUOUS` unless it ends at the start of the first (a closed curve), as the
+  continuity rule of `IfcCompositeCurve` requires. A value that is
   not finite or outside these bounds is `io.ifc.write_value_invalid`, a storey that is not in the
   model `io.ifc.write_reference_invalid`. The representation is an `IfcShapeRepresentation`
   `FootPrint` / `GeometricCurveSet` in an `IfcGeometricRepresentationSubContext` `FootPrint` (added
@@ -1835,10 +1928,39 @@ layer from the reference line or plane (an offset that is not finite is refused)
   curves are closed `IfcPolyline`s (the last point is the first point's instance). A last profile point
   equal to the first is dropped before writing. A B-rep is `Brep`: an `IfcFacetedBrep` of one
   `IfcClosedShell` whose faces are `IfcFace`s with one `IfcFaceOuterBound` of an `IfcPolyLoop`.
-- Property sets: an `IfcPropertySet` of `IfcPropertySingleValue`s, with the values `IfcLabel`,
-  `IfcLengthMeasure`, `IfcAreaMeasure`, `IfcVolumeMeasure` or `IfcBoolean` and no unit (the project
-  units apply). Quantity sets: an `IfcElementQuantity` of `IfcQuantityLength`, `IfcQuantityArea` and
-  `IfcQuantityVolume`. Each set is assigned to its element by its own `IfcRelDefinesByProperties`.
+- Property sets: an `IfcPropertySet` of `IfcPropertySingleValue`s and `IfcPropertyEnumeratedValue`s
+  with no unit (the project units apply). A `PropertyValue` is `Label`, `Identifier` (both at most
+  255 characters), `Text`, `Integer`, `Real`, `Boolean`, `Logical` (unknown is `None`), `Length`,
+  `Area`, `Volume`, `Measure(Measure, value)` or `Enumerated { enumeration, items, values }`. A
+  `Measure` names the defined type: length, positive length, non-negative length, area, volume, plane
+  angle, positive plane angle, ratio, positive ratio, normalised ratio, count, thermal transmittance,
+  thermodynamic temperature, power, pressure, volumetric flow rate, mass, mass density, area
+  density, time, illuminance, linear velocity, heat flux density, planar force and monetary measure.
+  Its rule is checked (`Measure::accepts`): positive measures are above zero, the non-negative length
+  is zero or more, the normalised ratio lies from 0 to 1, and every value is finite. Plane angles are
+  given in radians and written in the plane angle unit of the project. An enumerated value writes its
+  chosen items as `IfcLabel`s and refers to an `IfcPropertyEnumeration` of its name and items, written
+  once per name (the name is unique in a file); the items must be distinct and the chosen ones among
+  them, and one name with two item lists is refused. The constructors `PropertyValue::measure`,
+  `real`, `label`, `identifier` and `enumerated` refuse what the writer refuses
+  (`PropertyValue::check`), so a caller learns of an invalid value where it builds it. Quantity sets:
+  an `IfcElementQuantity` of `IfcQuantityLength`, `IfcQuantityArea`, `IfcQuantityVolume`,
+  `IfcQuantityCount`, `IfcQuantityWeight` (kilograms) and `IfcQuantityTime` (seconds); a value must
+  be finite and not negative. Each set is assigned to its element by its own
+  `IfcRelDefinesByProperties`. The sets the writer tests produce under template names match their
+  templates (`IfcFile::check_property_sets`).
+- Groups: each `Group { id, name, description, object_type, members }` is an `IfcGroup` after the
+  grids, and its members (elements and grids of the model, each written once in model order) are
+  assigned to it by one `IfcRelAssignsToGroup` (`derived_id(group, GROUP, 0)`); an empty group is
+  written alone, and a member that is not an element or grid of the model is
+  `io.ifc.write_reference_invalid`.
+- Georeferencing: with `WriteModel::georeference`, an `IfcMapConversion` from the model context to an
+  `IfcProjectedCRS` (`Name`, `Description`, `GeodeticDatum`, `VerticalDatum`, `MapProjection`,
+  `MapZone`, the map unit an `IfcSIUnit` metre) with `Eastings`, `Northings`, `OrthogonalHeight` in
+  meters, `XAxisAbscissa` and `XAxisOrdinate` from the normalized `x_axis` and the positive `Scale`;
+  the optional values are omitted when `None`. A value that is not finite, an empty reference system
+  name, a text over 255 characters, a zero x axis or a scale that is not positive is
+  `io.ifc.write_value_invalid`.
 
 ### Encoding and determinism
 
@@ -1865,8 +1987,8 @@ writer adds take a version 8 UUID from `derived_id(owner, role, index)`: the ide
 a role number of the module `role` and the index of the set (0 for a relationship), so they are stable
 too and never equal a version 7 identifier. The roles are `AGGREGATES` 1, `CONTAINS` 2, `VOIDS` 3,
 `FILLS` 4, `PROPERTY_SET` 5, `PROPERTY_REL` 6, `QUANTITY_SET` 7, `QUANTITY_REL` 8, `TYPED` 10
-(the type relationship of an element type) and `MATERIAL` 11 (the material association of a type or
-an element). Element types take their `GlobalId` from the caller's identifier. `INSERT_OPENING` 9
+(the type relationship of an element type), `MATERIAL` 11 (the material association of a type or
+an element) and `GROUP` 12 (the assignment to a group). Element types take their `GlobalId` from the caller's identifier. `INSERT_OPENING` 9
 is for the caller: a product whose door or window has no opening object of its own derives the
 opening's identifier from the insert's with this role and index 0. The roles from `CALLER_FIRST`
 (`0x10000`) up are never used by the writer. Two objects with the same `GlobalId` are refused with
@@ -1908,8 +2030,8 @@ The loss report counts the element types as mapped too.
 
 The writer does not check that a profile is simple (a self-intersecting profile with area is written),
 that holes lie inside the outer loop, or that a B-rep is closed and planar. It writes no property sets of element types, representation maps, materials other than layer sets,
-space boundaries, axis representations, owner history, classification or other element kinds, and
-no IFC4X3 schema.
+space boundaries, axis representations, owner history, classification, zones, bounded, list, table,
+reference or complex property values, or other element kinds, and no IFC4X3 schema.
 
 ### Verification
 

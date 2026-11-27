@@ -57,6 +57,8 @@ pub mod role {
     /// The `IfcRelAssociatesMaterial` of the owner: an element type with its layer set, or an
     /// element with its layer set usage.
     pub const MATERIAL: u32 = 11;
+    /// The `IfcRelAssignsToGroup` of the owner group.
+    pub const GROUP: u32 = 12;
     /// The first role reserved for the caller's own derived identifiers.
     pub const CALLER_FIRST: u32 = 0x1_0000;
 }

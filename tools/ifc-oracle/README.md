@@ -25,6 +25,7 @@ read as an older name of the same variable.
 | `geometry_compare.py <file> [--tol-rel] [--tol-abs]` | per product, volume, surface area and bounding box of IfcOpenShell's geometry iterator (openings not subtracted, world coordinates, metres) against `cargo run -p arc-io-ifc --example geometry_stats` (set `ARC_GEOMETRY_STATS` to a built binary to skip `cargo`) | 1 on a difference above the tolerance (default 0.1 % relative, 1e-6 absolute) or a product only one side has |
 | `schema_diff.py <tables.json> [schema ...]` | entities, supertypes, abstract flags and explicit attributes of a JSON dump of the `arc-io-ifc` schema tables against IfcOpenShell's schema introspection; skips (exit 0) when the file does not exist | 1 on a difference |
 | `conformance_compare.py [--json] <files or directories>` | levels 1 and 2 of `IfcFile::conformance` (`cargo run -p arc-io-ifc --example conformance`; set `ARC_CONFORMANCE` to a built binary to skip `cargo`) against `ifcopenshell.validate` without EXPRESS rules, per rule class and (instance, attribute): agree, Arc only, oracle only | 1 when a file cannot be checked by either side |
+| `pset_diff.py <templates.json> [schema ...]` | names, kinds, data types and quantity kinds of a JSON dump of the `arc-io-ifc` property and quantity set templates against IfcOpenShell's `PsetQto` templates; enumeration items, and data types the published definitions leave open, are listed as source differences without failing; skips (exit 0) when the file does not exist | 1 on a difference |
 | `run_all.sh [directory]` | runs the `arc-io-ifc` tests with `ARC_IFC_DUMP`, then `validate.py` and `geometry_compare.py` on every dumped file | 1 on any failure |
 
 `schema_diff.py` expects `{"<SCHEMA>": {"entities": {"<Name>": {"supertype", "abstract",
@@ -32,6 +33,11 @@ read as an older name of the same variable.
 `ARC_IFC_SCHEMA_DUMP=<file> cargo test -p arc-io-ifc --test schema_tables`; the dump also holds the
 attribute types, the record positions with their derived flags, the inverse attributes, the
 enumerations and the selects.
+
+`pset_diff.py` reads the dump `ARC_IFC_PSET_DUMP=<file> cargo test -p arc-io-ifc --test psets`
+writes when the templates are generated (`cargo xtask ifc-psets`). The written files themselves are
+compared with the templates by `cargo run -p arc-io-ifc --example pset_check <files>`, which prints one
+JSON line per file and exits 1 on any finding.
 
 Run from the repository root: `tools/ifc-oracle/run_all.sh`.
 

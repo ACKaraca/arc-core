@@ -16,6 +16,7 @@
 
 mod global_id;
 pub(crate) mod step;
+mod values;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,6 +29,7 @@ use crate::loss::{Direction, LossHeader, LossLog, LossReport, Source};
 use crate::model::Parameter;
 
 pub use global_id::{derived_id, global_id, role};
+pub use values::{Measure, PropertyValue, QuantityValue};
 
 /// The length unit of the project. Every length of the model, and the area and volume of
 /// quantities and properties, are in this unit (squared or cubed).
@@ -224,6 +226,14 @@ pub enum ElementKind {
     /// IFC4 has no transom value: use `MEMBER` or a user-defined text). A member whose
     /// `host` is a curtain wall is a part of it; one without a host is contained in its storey.
     Member,
+    /// `IfcTransportElement` (`PredefinedType` from `IfcTransportElementTypeEnum`: `ELEVATOR`,
+    /// `ESCALATOR`, `MOVINGWALKWAY`, `CRANEWAY`, `LIFTINGGEAR`), contained in its storey; its type
+    /// is an `IfcTransportElementType`.
+    TransportElement,
+    /// `IfcPipeSegment` (`PredefinedType` from `IfcPipeSegmentTypeEnum`: `CULVERT`,
+    /// `FLEXIBLESEGMENT`, `RIGIDSEGMENT`, `GUTTER`, `SPOOL`), contained in its storey; its type is
+    /// an `IfcPipeSegmentType`.
+    PipeSegment,
 }
 
 impl ElementKind {
@@ -245,6 +255,8 @@ impl ElementKind {
             Self::CurtainWall => "IFCCURTAINWALL",
             Self::Plate => "IFCPLATE",
             Self::Member => "IFCMEMBER",
+            Self::TransportElement => "IFCTRANSPORTELEMENT",
+            Self::PipeSegment => "IFCPIPESEGMENT",
         }
     }
 
@@ -311,6 +323,20 @@ impl ElementKind {
                 "BRACE", "CHORD", "COLLAR", "MEMBER", "MULLION", "PLATE", "POST", "PURLIN",
                 "RAFTER", "STRINGER", "STRUT", "STUD",
             ],
+            Self::TransportElement => &[
+                "ELEVATOR",
+                "ESCALATOR",
+                "MOVINGWALKWAY",
+                "CRANEWAY",
+                "LIFTINGGEAR",
+            ],
+            Self::PipeSegment => &[
+                "CULVERT",
+                "FLEXIBLESEGMENT",
+                "RIGIDSEGMENT",
+                "GUTTER",
+                "SPOOL",
+            ],
             Self::Roof => &[
                 "FLAT_ROOF",
                 "SHED_ROOF",
@@ -365,22 +391,7 @@ const WINDOW_PARTITIONINGS: &[&str] = &[
     "TRIPLE_PANEL_HORIZONTAL",
 ];
 
-/// A single value of a property, written with its IFC measure type.
-#[derive(Debug, Clone, PartialEq)]
-pub enum PropertyValue {
-    /// `IfcLabel`.
-    Label(String),
-    /// `IfcLengthMeasure`, in the length unit.
-    Length(f64),
-    /// `IfcAreaMeasure`, in the length unit squared.
-    Area(f64),
-    /// `IfcVolumeMeasure`, in the length unit cubed.
-    Volume(f64),
-    /// `IfcBoolean`.
-    Boolean(bool),
-}
-
-/// A property with a single value (`IfcPropertySingleValue`).
+/// A property of a property set: a single or an enumerated value.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Property {
@@ -391,7 +402,7 @@ pub struct Property {
 }
 
 impl Property {
-    /// A property with a single value.
+    /// A property named `name` with `value`.
     #[must_use]
     pub fn new(name: &str, value: PropertyValue) -> Self {
         Self {
@@ -420,17 +431,6 @@ impl PropertySet {
             properties,
         }
     }
-}
-
-/// The value of a quantity; it must not be negative.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum QuantityValue {
-    /// `IfcQuantityLength`, in the length unit.
-    Length(f64),
-    /// `IfcQuantityArea`, in the length unit squared.
-    Area(f64),
-    /// `IfcQuantityVolume`, in the length unit cubed.
-    Volume(f64),
 }
 
 /// A quantity of a quantity set.
@@ -589,6 +589,8 @@ impl ElementType {
             ElementKind::Plate => Some("IFCPLATETYPE"),
             ElementKind::Member => Some("IFCMEMBERTYPE"),
             ElementKind::CurtainWall => Some("IFCCURTAINWALLTYPE"),
+            ElementKind::TransportElement => Some("IFCTRANSPORTELEMENTTYPE"),
+            ElementKind::PipeSegment => Some("IFCPIPESEGMENTTYPE"),
             ElementKind::Opening
             | ElementKind::Space
             | ElementKind::Stair
@@ -708,7 +710,7 @@ impl Element {
 }
 
 /// The curve of a grid axis, in the plane of the grid's placement and the length unit.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AxisCurve {
     /// A straight axis from `start` to `end`, written as an `IfcPolyline` of two points.
     Line {
@@ -717,6 +719,9 @@ pub enum AxisCurve {
         /// The last point; at least the linear tolerance away from `start`.
         end: Point2,
     },
+    /// A polyline axis through two or more points, written as an `IfcPolyline`; consecutive
+    /// points are at least the linear tolerance apart.
+    Polyline(Vec<Point2>),
     /// A circular arc counterclockwise from `start_angle` to `end_angle`, written as an
     /// `IfcTrimmedCurve` of an `IfcCircle` trimmed by parameter values (the angles, converted to
     /// the plane angle unit of the project).
@@ -730,6 +735,123 @@ pub enum AxisCurve {
         /// The end angle in radians; greater than `start_angle` by at most a full turn.
         end_angle: f64,
     },
+    /// Lines, polylines and arcs joined end to start, written as an `IfcCompositeCurve`. Each
+    /// segment starts within the linear tolerance of where the previous one ends; when the last
+    /// one ends at the start of the first, the curve is closed.
+    Composite(Vec<AxisSegment>),
+}
+
+/// A segment of a composite axis (`IfcCompositeCurveSegment`).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct AxisSegment {
+    /// The curve: a line, a polyline or an arc, not a composite.
+    pub curve: AxisCurve,
+    /// `SameSense`: `false` runs the segment from the end of its curve to its start, as for an
+    /// arc that turns clockwise.
+    pub same_sense: bool,
+}
+
+impl AxisSegment {
+    /// A segment that runs along its curve.
+    #[must_use]
+    pub fn new(curve: AxisCurve) -> Self {
+        Self {
+            curve,
+            same_sense: true,
+        }
+    }
+
+    /// A segment that runs against its curve.
+    #[must_use]
+    pub fn reversed(curve: AxisCurve) -> Self {
+        Self {
+            curve,
+            same_sense: false,
+        }
+    }
+}
+
+/// A group of elements and grids (`IfcGroup`), assigned by one `IfcRelAssignsToGroup`.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Group {
+    /// The identifier its `GlobalId` is made from.
+    pub id: u128,
+    /// The name.
+    pub name: String,
+    /// The `Description`; `None` omits it.
+    pub description: Option<String>,
+    /// The `ObjectType`, the kind of grouping; `None` omits it.
+    pub object_type: Option<String>,
+    /// The identifiers of the elements and grids in the group, in order; a repeat is written
+    /// once. An empty group is written without the relationship.
+    pub members: Vec<u128>,
+}
+
+impl Group {
+    /// A group named `name` of `members`.
+    #[must_use]
+    pub fn new(id: u128, name: &str, members: Vec<u128>) -> Self {
+        Self {
+            id,
+            name: name.to_owned(),
+            description: None,
+            object_type: None,
+            members,
+        }
+    }
+}
+
+/// The georeferencing of the model: an `IfcMapConversion` from the model representation context
+/// to an `IfcProjectedCRS`. Eastings, northings and the orthogonal height are in meters, the map
+/// unit written with the reference system.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Georeference {
+    /// The `Name` of the coordinate reference system, such as `EPSG:32635`; not empty.
+    pub crs_name: String,
+    /// The `Description`; `None` omits it.
+    pub description: Option<String>,
+    /// The `GeodeticDatum`, such as `WGS84`; `None` omits it.
+    pub geodetic_datum: Option<String>,
+    /// The `VerticalDatum`; `None` omits it.
+    pub vertical_datum: Option<String>,
+    /// The `MapProjection`, such as `UTM`; `None` omits it.
+    pub map_projection: Option<String>,
+    /// The `MapZone`, such as `35N`; `None` omits it.
+    pub map_zone: Option<String>,
+    /// `Eastings` of the model origin.
+    pub eastings: f64,
+    /// `Northings` of the model origin.
+    pub northings: f64,
+    /// `OrthogonalHeight` of the model origin.
+    pub orthogonal_height: f64,
+    /// The direction of the model x axis in the map (`XAxisAbscissa`, `XAxisOrdinate`); `None`
+    /// omits both (no rotation).
+    pub x_axis: Option<Vector2>,
+    /// `Scale` from model to map lengths, positive; `None` omits it (1).
+    pub scale: Option<f64>,
+}
+
+impl Georeference {
+    /// A reference system named `crs_name` with the map coordinates of the model origin.
+    #[must_use]
+    pub fn new(crs_name: &str, eastings: f64, northings: f64, orthogonal_height: f64) -> Self {
+        Self {
+            crs_name: crs_name.to_owned(),
+            description: None,
+            geodetic_datum: None,
+            vertical_datum: None,
+            map_projection: None,
+            map_zone: None,
+            eastings,
+            northings,
+            orthogonal_height,
+            x_axis: None,
+            scale: None,
+        }
+    }
 }
 
 /// An axis of a grid (`IfcGridAxis`).
@@ -824,6 +946,10 @@ pub struct WriteModel {
     pub types: Vec<ElementType>,
     /// The grids, written in this order after the elements.
     pub grids: Vec<Grid>,
+    /// The groups, written in this order after the grids.
+    pub groups: Vec<Group>,
+    /// The georeferencing; `None` writes none.
+    pub georeference: Option<Georeference>,
     /// The length unit.
     pub length_unit: LengthUnit,
     /// The plane angle unit.
@@ -845,6 +971,8 @@ impl WriteModel {
             elements: Vec::new(),
             types: Vec::new(),
             grids: Vec::new(),
+            groups: Vec::new(),
+            georeference: None,
             length_unit: LengthUnit::Metre,
             angle_unit: AngleUnit::Radian,
             true_north: None,
@@ -949,6 +1077,7 @@ pub fn write(model: &WriteModel, options: &WriteOptions) -> Result<WriteOutput> 
         },
         ids: BTreeSet::new(),
         loss: LossLog::default(),
+        enumerations: BTreeMap::new(),
     };
     writer.header(options)?;
     let mut context = writer.context(model)?;
@@ -964,11 +1093,15 @@ pub fn write(model: &WriteModel, options: &WriteOptions) -> Result<WriteOutput> 
         options.cancel.check()?;
         writer.grid(grid, &mut context)?;
     }
+    for group in &model.groups {
+        options.cancel.check()?;
+        writer.group(group, &context)?;
+    }
     writer.relationships(model, &context, &kinds)?;
     writer.materials(model, &context)?;
     writer.data.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
     writer.loss.add_mapped(len64(
-        model.elements.len() + model.types.len() + model.grids.len(),
+        model.elements.len() + model.types.len() + model.grids.len() + model.groups.len(),
     ));
     let report = writer.loss.finish(LossHeader::new(
         "ifc",
@@ -1027,6 +1160,24 @@ const MIN_DIRECTION_LENGTH: f64 = 1.490_116_119_384_765_6e-8;
 fn unit(direction: &Vector3) -> Option<Vector3> {
     let length = direction.norm();
     (length.is_finite() && length > MIN_DIRECTION_LENGTH).then(|| direction / length)
+}
+
+/// The start and end of a line, polyline or arc; `None` for a composite or an empty polyline.
+fn curve_ends(curve: &AxisCurve) -> Option<(Point2, Point2)> {
+    match curve {
+        AxisCurve::Line { start, end } => Some((*start, *end)),
+        AxisCurve::Polyline(points) => Some((*points.first()?, *points.last()?)),
+        &AxisCurve::Arc {
+            center,
+            radius,
+            start_angle,
+            end_angle,
+        } => {
+            let at = |a: f64| center + Vector2::new(a.cos(), a.sin()) * radius;
+            Some((at(start_angle), at(end_angle)))
+        }
+        AxisCurve::Composite(_) => None,
+    }
 }
 
 fn len64(length: usize) -> u64 {
@@ -1208,6 +1359,8 @@ struct Writer<'a> {
     angle_scale: f64,
     ids: BTreeSet<u128>,
     loss: LossLog,
+    /// The `IfcPropertyEnumeration` written per name, with its items.
+    enumerations: BTreeMap<String, (Vec<String>, u64)>,
 }
 
 impl Writer<'_> {
@@ -1344,6 +1497,9 @@ impl Writer<'_> {
                 north,
             ],
         )?;
+        if let Some(georeference) = &model.georeference {
+            self.georeference(georeference, model_context)?;
+        }
         let body = self.subcontext("Body", model_context)?;
         let footprint = if model.grids.is_empty() {
             None
@@ -1675,18 +1831,10 @@ impl Writer<'_> {
 
     /// The curve of a grid axis in two dimensions.
     fn axis_curve(&mut self, curve: &AxisCurve) -> Result<u64> {
-        match *curve {
-            AxisCurve::Line { start, end } => {
-                let finite = [start.x, start.y, end.x, end.y]
-                    .iter()
-                    .all(|v| v.is_finite());
-                if !finite || (end - start).norm() * self.meters <= self.tolerance.linear {
-                    return Err(invalid("grid axis"));
-                }
-                let points = [self.point2(&start)?, self.point2(&end)?];
-                self.add("IFCPOLYLINE", &[references(&points)])
-            }
-            AxisCurve::Arc {
+        match curve {
+            AxisCurve::Line { start, end } => self.polyline_axis(&[*start, *end]),
+            AxisCurve::Polyline(points) => self.polyline_axis(points),
+            &AxisCurve::Arc {
                 center,
                 radius,
                 start_angle,
@@ -1727,7 +1875,186 @@ impl Writer<'_> {
                     ],
                 )
             }
+            AxisCurve::Composite(segments) => self.composite_axis(segments),
         }
+    }
+
+    /// An `IfcPolyline` of two or more points, consecutive points apart by the linear tolerance.
+    fn polyline_axis(&mut self, points: &[Point2]) -> Result<u64> {
+        let finite = points.iter().all(|p| p.x.is_finite() && p.y.is_finite());
+        let apart = points
+            .windows(2)
+            .all(|w| (w[1] - w[0]).norm() * self.meters > self.tolerance.linear);
+        if points.len() < 2 || !finite || !apart {
+            return Err(invalid("grid axis"));
+        }
+        let mut names = Vec::with_capacity(points.len());
+        for point in points {
+            names.push(self.point2(point)?);
+        }
+        self.add("IFCPOLYLINE", &[references(&names)])
+    }
+
+    /// An `IfcCompositeCurve` of line, polyline and arc segments joined end to start. The last
+    /// segment is `DISCONTINUOUS` unless it closes the curve, as the curve's continuity rule
+    /// requires.
+    fn composite_axis(&mut self, segments: &[AxisSegment]) -> Result<u64> {
+        let mut ends = Vec::with_capacity(segments.len());
+        for segment in segments {
+            let Some((start, end)) = curve_ends(&segment.curve) else {
+                return Err(invalid("grid axis"));
+            };
+            ends.push(if segment.same_sense {
+                (start, end)
+            } else {
+                (end, start)
+            });
+        }
+        let near = |a: Point2, b: Point2| (b - a).norm() * self.meters <= self.tolerance.linear;
+        if ends.is_empty() || !ends.windows(2).all(|w| near(w[0].1, w[1].0)) {
+            return Err(invalid("grid axis"));
+        }
+        let closed = match (ends.first(), ends.last()) {
+            (Some(first), Some(last)) => near(last.1, first.0),
+            _ => false,
+        };
+        let mut written = Vec::with_capacity(segments.len());
+        for (i, segment) in segments.iter().enumerate() {
+            let parent = self.axis_curve(&segment.curve)?;
+            let transition = if i + 1 < segments.len() || closed {
+                "CONTINUOUS"
+            } else {
+                "DISCONTINUOUS"
+            };
+            written.push(self.add(
+                "IFCCOMPOSITECURVESEGMENT",
+                &[
+                    enumeration(transition),
+                    boolean(segment.same_sense),
+                    reference(parent),
+                ],
+            )?);
+        }
+        self.add(
+            "IFCCOMPOSITECURVE",
+            &[references(&written), enumeration("U")],
+        )
+    }
+
+    /// An `IfcMapConversion` from the model context to an `IfcProjectedCRS` in meters.
+    fn georeference(&mut self, georeference: &Georeference, model_context: u64) -> Result<()> {
+        let g = georeference;
+        let numbers = [g.eastings, g.northings, g.orthogonal_height];
+        let texts = [
+            Some(&g.crs_name),
+            g.description.as_ref(),
+            g.geodetic_datum.as_ref(),
+            g.vertical_datum.as_ref(),
+            g.map_projection.as_ref(),
+            g.map_zone.as_ref(),
+        ];
+        let x_axis = match g.x_axis {
+            Some(v) => {
+                Some(unit(&Vector3::new(v.x, v.y, 0.0)).ok_or_else(|| invalid("georeference"))?)
+            }
+            None => None,
+        };
+        let valid = numbers.iter().all(|v| v.is_finite())
+            && !g.crs_name.is_empty()
+            && texts
+                .iter()
+                .flatten()
+                .all(|t| !t.contains('\0') && t.chars().count() <= 255)
+            && g.scale.is_none_or(|s| s.is_finite() && s > 0.0);
+        if !valid {
+            return Err(invalid("georeference"));
+        }
+        let text = |t: &Option<String>| t.as_deref().map_or(Parameter::Omitted, label);
+        let metre = self.add(
+            "IFCSIUNIT",
+            &[
+                Parameter::Derived,
+                enumeration("LENGTHUNIT"),
+                Parameter::Omitted,
+                enumeration("METRE"),
+            ],
+        )?;
+        let crs = self.add(
+            "IFCPROJECTEDCRS",
+            &[
+                label(&g.crs_name),
+                text(&g.description),
+                text(&g.geodetic_datum),
+                text(&g.vertical_datum),
+                text(&g.map_projection),
+                text(&g.map_zone),
+                reference(metre),
+            ],
+        )?;
+        let (abscissa, ordinate) = match x_axis {
+            Some(v) => (Parameter::Real(v.x), Parameter::Real(v.y)),
+            None => (Parameter::Omitted, Parameter::Omitted),
+        };
+        self.add(
+            "IFCMAPCONVERSION",
+            &[
+                reference(model_context),
+                reference(crs),
+                Parameter::Real(g.eastings),
+                Parameter::Real(g.northings),
+                Parameter::Real(g.orthogonal_height),
+                abscissa,
+                ordinate,
+                g.scale.map_or(Parameter::Omitted, Parameter::Real),
+            ],
+        )
+        .map(|_| ())
+    }
+
+    /// An `IfcGroup` and the `IfcRelAssignsToGroup` of its members.
+    fn group(&mut self, group: &Group, context: &Context) -> Result<()> {
+        let id = self.global_id(group.id)?;
+        let optional = |t: &Option<String>| t.as_deref().map_or(Parameter::Omitted, label);
+        let instance = self.add(
+            "IFCGROUP",
+            &[
+                id,
+                Parameter::Omitted,
+                label(&group.name),
+                optional(&group.description),
+                optional(&group.object_type),
+            ],
+        )?;
+        let mut seen = BTreeSet::new();
+        let mut members = Vec::with_capacity(group.members.len());
+        for &member in &group.members {
+            let written = context
+                .elements
+                .get(&member)
+                .or_else(|| context.grids.get(&member))
+                .copied()
+                .ok_or_else(|| bad_reference(member))?;
+            if seen.insert(written) {
+                members.push(written);
+            }
+        }
+        if members.is_empty() {
+            return Ok(());
+        }
+        let rel_id = self.global_id(derived_id(group.id, role::GROUP, 0))?;
+        self.add(
+            "IFCRELASSIGNSTOGROUP",
+            &[
+                rel_id,
+                Parameter::Omitted,
+                Parameter::Omitted,
+                Parameter::Omitted,
+                references(&members),
+                Parameter::Omitted,
+                reference(instance),
+            ],
+        )
+        .map(|_| ())
     }
 
     /// An element type: the rooted attributes, the `ElementType` text of a user-defined
@@ -2116,24 +2443,20 @@ impl Writer<'_> {
                 if !names.insert(property.name.as_str()) {
                     return Err(invalid("property name"));
                 }
-                let value = match &property.value {
-                    PropertyValue::Label(text) => typed("IFCLABEL", label(text)),
-                    PropertyValue::Length(v) => typed("IFCLENGTHMEASURE", Parameter::Real(*v)),
-                    PropertyValue::Area(v) => typed("IFCAREAMEASURE", Parameter::Real(*v)),
-                    PropertyValue::Volume(v) => typed("IFCVOLUMEMEASURE", Parameter::Real(*v)),
-                    PropertyValue::Boolean(v) => {
-                        typed("IFCBOOLEAN", enumeration(if *v { "T" } else { "F" }))
-                    }
+                property.value.check()?;
+                let written = match property.value.nominal(self.angle_scale) {
+                    Some(value) => self.add(
+                        "IFCPROPERTYSINGLEVALUE",
+                        &[
+                            label(&property.name),
+                            Parameter::Omitted,
+                            value,
+                            Parameter::Omitted,
+                        ],
+                    )?,
+                    None => self.enumerated(property)?,
                 };
-                properties.push(self.add(
-                    "IFCPROPERTYSINGLEVALUE",
-                    &[
-                        label(&property.name),
-                        Parameter::Omitted,
-                        value,
-                        Parameter::Omitted,
-                    ],
-                )?);
+                properties.push(written);
             }
             let set_id = self.global_id(derived_id(element.id, role::PROPERTY_SET, index))?;
             let definition = self.add(
@@ -2149,6 +2472,45 @@ impl Writer<'_> {
             self.defines(element.id, role::PROPERTY_REL, index, instance, definition)?;
         }
         Ok(())
+    }
+
+    /// An `IfcPropertyEnumeratedValue` and, once per enumeration name, its
+    /// `IfcPropertyEnumeration` (whose name is unique in a file). Two enumerations of one name
+    /// with other items are refused.
+    fn enumerated(&mut self, property: &Property) -> Result<u64> {
+        let PropertyValue::Enumerated {
+            enumeration,
+            items,
+            values,
+        } = &property.value
+        else {
+            return Err(invalid("property value"));
+        };
+        let labels = |texts: &[String]| {
+            Parameter::List(texts.iter().map(|t| typed("IFCLABEL", label(t))).collect())
+        };
+        let reference_to = match self.enumerations.get(enumeration) {
+            Some((known, instance)) if known == items => *instance,
+            Some(_) => return Err(invalid("property enumeration")),
+            None => {
+                let instance = self.add(
+                    "IFCPROPERTYENUMERATION",
+                    &[label(enumeration), labels(items), Parameter::Omitted],
+                )?;
+                self.enumerations
+                    .insert(enumeration.clone(), (items.clone(), instance));
+                instance
+            }
+        };
+        self.add(
+            "IFCPROPERTYENUMERATEDVALUE",
+            &[
+                label(&property.name),
+                Parameter::Omitted,
+                labels(values),
+                reference(reference_to),
+            ],
+        )
     }
 
     fn quantity_sets(&mut self, element: &Element, instance: u64) -> Result<()> {
@@ -2168,14 +2530,8 @@ impl Writer<'_> {
                 if !names.insert(quantity.name.as_str()) {
                     return Err(invalid("quantity name"));
                 }
-                let (type_name, value) = match quantity.value {
-                    QuantityValue::Length(v) => ("IFCQUANTITYLENGTH", v),
-                    QuantityValue::Area(v) => ("IFCQUANTITYAREA", v),
-                    QuantityValue::Volume(v) => ("IFCQUANTITYVOLUME", v),
-                };
-                if !value.is_finite() || value < 0.0 {
-                    return Err(invalid("quantity"));
-                }
+                quantity.value.check()?;
+                let (type_name, value) = quantity.value.parts();
                 quantities.push(self.add(
                     type_name,
                     &[
