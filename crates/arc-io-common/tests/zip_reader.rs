@@ -12,7 +12,7 @@ mod support;
 
 use arc_base::{Cancel, Limits};
 use arc_io_common::ReadOptions;
-use arc_io_common::zip::{Method, ZipArchive};
+use arc_io_common::zip::{Method, ZipArchive, write_archive};
 use support::{Layout, Spec, archive, archive_with, noise};
 
 fn options() -> ReadOptions {
@@ -148,4 +148,28 @@ fn a_descriptor_is_eight_bytes_when_the_local_header_is_zip64() {
     let bytes = archive(&[spec]);
     let mut zip = ZipArchive::open(&bytes, &options()).unwrap();
     assert_eq!(zip.read_entry(0).unwrap(), data);
+}
+
+#[test]
+fn written_archives_read_back() {
+    let big: Vec<u8> = (0..10_000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    for method in [Method::Stored, Method::Deflate] {
+        let entries: [(&str, &[u8]); 3] = [("a.txt", b"one"), ("dir/b.bin", &big), ("empty", b"")];
+        let bytes = write_archive(&entries, method).unwrap();
+        let mut zip = ZipArchive::open(&bytes, &options()).unwrap();
+        assert_eq!(zip.entries().len(), 3);
+        for (index, (name, data)) in entries.iter().enumerate() {
+            assert_eq!(zip.entries()[index].name, *name);
+            assert_eq!(zip.entries()[index].method, method);
+            assert_eq!(zip.read_entry(index).unwrap(), *data);
+        }
+        assert_eq!(write_archive(&entries, method).unwrap(), bytes);
+    }
+    let duplicate: [(&str, &[u8]); 2] = [("a.txt", b""), ("A.TXT", b"")];
+    let error = write_archive(&duplicate, Method::Stored).unwrap_err();
+    assert_eq!(error.code(), "io.zip.name_duplicate");
+    let error = write_archive(&[("/abs", b"")], Method::Stored).unwrap_err();
+    assert!(error.code().starts_with("io.zip."));
 }
