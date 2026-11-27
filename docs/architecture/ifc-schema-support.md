@@ -68,7 +68,8 @@ repository (ADR-0018). Output, one file per schema under `crates/arc-io-ifc/src/
   attributes (name, source entity, source attribute, aggregate kind and bounds);
 - defined types with their underlying type and WHERE rules, enumerations with their items in order,
   selects with their members;
-- in a later step, the WHERE rules, global rules and functions as expression trees.
+- the WHERE rules, derived attributes, global rules and functions as expression trees with every name
+  resolved to a slot, an attribute or a table index.
 
 Lookups are binary searches on upper-case names, so a name from a STEP file is found as written.
 `--check` regenerates and fails on any difference; `cargo xtask ci` runs it when the source directory
@@ -98,7 +99,8 @@ never counted as passed.
    the source attribute lies within the inverse bounds; `UNIQUE` clauses hold over the file.
 3. **Rules.** WHERE rules and global rules evaluated by an interpreter of the generated expression
    trees, with the EXPRESS functions interpreted; recursion and step counts are bounded by the
-   caller's limits, and exceeding them makes the rule not evaluated.
+   caller's limits, and exceeding them makes the rule not evaluated. A rule fails only when it is
+   `FALSE`; `UNKNOWN` passes and is counted apart.
 
 The writer builds every record through the tables and is tested to produce files with no finding at
 any level. Products use the checker for export self-validation.

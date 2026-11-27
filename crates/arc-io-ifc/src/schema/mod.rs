@@ -17,14 +17,23 @@ use crate::model::Schema;
 
 pub(crate) mod access;
 mod check;
+mod eval;
 mod inverse;
+mod level3;
+pub mod tree;
 
 pub use access::Typed;
 pub use check::{Conformance, Finding, RuleCount};
 pub use inverse::{InverseIndex, Referrer};
+pub use level3::{RuleScope, WhereCount};
+use tree::{Algorithm, Expr};
 
 #[cfg(arc_ifc_schema_tables)]
 mod generated {
+    use super::tree::{
+        Algorithm, BinaryOp, Branch, Builtin, Element, Expr, Increment, Local, Logical, Stmt,
+        UnaryOp,
+    };
     use super::{
         Aggregate, AggregateKind, Attribute, AttributeRef, Bound, DefinedType, Derived, Entity,
         Enumeration, Function, GlobalRule, Inverse, InverseAggregate, Named, SchemaTables, Select,
@@ -113,6 +122,8 @@ pub struct Derived {
     pub ty: TypeRef,
     /// The expression as written in the schema.
     pub source: &'static str,
+    /// The parsed expression, evaluated with `SELF` the instance.
+    pub tree: Expr,
 }
 
 /// An inverse attribute.
@@ -155,14 +166,9 @@ pub struct WhereRule {
     pub label: Option<&'static str>,
     /// The expression as written in the schema.
     pub source: &'static str,
-    /// The expression tree; generated with the rule interpreter, until then always `None`.
-    pub tree: Option<&'static Tree>,
+    /// The parsed expression.
+    pub tree: Expr,
 }
-
-/// The parsed form of a rule, function or expression. It has no values yet: the generator emits
-/// trees together with the interpreter that evaluates them.
-#[derive(Debug)]
-pub enum Tree {}
 
 /// A defined type (`TYPE IfcLabel = STRING;`).
 #[derive(Debug)]
@@ -208,8 +214,8 @@ pub struct Function {
     pub name: &'static str,
     /// The declaration as written, from `FUNCTION` to `END_FUNCTION;`.
     pub source: &'static str,
-    /// The parsed declaration; see [`Tree`].
-    pub tree: Option<&'static Tree>,
+    /// The parsed parameters, locals and body.
+    pub tree: Algorithm,
 }
 
 /// A global rule.
@@ -223,8 +229,8 @@ pub struct GlobalRule {
     pub where_rules: &'static [WhereRule],
     /// The declaration as written, from `RULE` to `END_RULE;`.
     pub source: &'static str,
-    /// The parsed declaration; see [`Tree`].
-    pub tree: Option<&'static Tree>,
+    /// The parsed locals and body; the domain rules read its variables.
+    pub tree: Algorithm,
 }
 
 /// A named type: an index into one of the tables.
@@ -515,6 +521,7 @@ mod tests {
         }),
         ty: TypeRef::Integer,
         source: "3",
+        tree: Expr::Integer(3),
     }];
 
     static TABLES: SchemaTables = SchemaTables {

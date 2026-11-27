@@ -52,3 +52,6 @@ io-ifc-conformance-aggregate-unique = Instance #{ $instance } of { $entity }: { 
 io-ifc-conformance-value-width = Instance #{ $instance } of { $entity }: the value of { $attribute } does not have the declared width.
 io-ifc-conformance-inverse-cardinality = Instance #{ $instance } of { $entity }: the number of instances in the inverse attribute { $attribute } is outside its bounds.
 io-ifc-conformance-unique-rule = Instance #{ $instance } of { $entity }: the values of { $attribute } repeat those of another instance although they must be unique.
+io-ifc-conformance-where-rule = Instance #{ $instance } of { $entity }: the domain rule { $attribute } does not hold.
+io-ifc-conformance-type-rule = Instance #{ $instance } of { $entity }: a value violates the domain rule { $attribute } of its type.
+io-ifc-conformance-global-rule = The file violates the global rule { $attribute }.

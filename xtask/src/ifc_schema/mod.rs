@@ -10,6 +10,7 @@ pub mod ast;
 pub mod emit;
 pub mod lexer;
 pub mod parser;
+pub mod trees;
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -35,10 +35,12 @@ fn run(path: &str) -> Result<Value, String> {
     let file = read(&bytes, &mut ReadOptions::default())
         .map_err(|e| e.to_string())?
         .file;
+    let start = std::time::Instant::now();
     let result = file
         .conformance(&Limits::DEFAULT, &Cancel::new())
         .map_err(|e| e.to_string())?;
     Ok(json!({
+        "seconds": start.elapsed().as_secs_f64(),
         "schema": result.schema,
         "truncated": result.truncated,
         "findings": result.findings.iter().map(|f| json!({
@@ -52,6 +54,15 @@ fn run(path: &str) -> Result<Value, String> {
             "passed": c.passed,
             "failed": c.failed,
             "not_evaluated": c.not_evaluated,
+        })).collect::<Vec<_>>(),
+        "where_rules": result.where_rules.iter().map(|c| json!({
+            "rule": c.name(),
+            "scope": format!("{:?}", c.scope),
+            "passed": c.passed,
+            "unknown": c.unknown,
+            "failed": c.failed,
+            "not_evaluated": c.not_evaluated,
+            "reason": c.reason,
         })).collect::<Vec<_>>(),
     }))
 }

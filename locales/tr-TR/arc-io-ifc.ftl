@@ -52,3 +52,6 @@ io-ifc-conformance-aggregate-unique = { $entity } türündeki #{ $instance } ör
 io-ifc-conformance-value-width = { $entity } türündeki #{ $instance } örneği: { $attribute } değeri tanımlı genişlikte değil.
 io-ifc-conformance-inverse-cardinality = { $entity } türündeki #{ $instance } örneği: { $attribute } ters özniteliğindeki örnek sayısı sınırlarının dışında.
 io-ifc-conformance-unique-rule = { $entity } türündeki #{ $instance } örneği: { $attribute } değerleri benzersiz olmalıyken başka bir örneğinkileri yineliyor.
+io-ifc-conformance-where-rule = { $entity } türündeki #{ $instance } örneği: { $attribute } alan kuralı sağlanmıyor.
+io-ifc-conformance-type-rule = { $entity } türündeki #{ $instance } örneği: bir değer, türünün { $attribute } alan kuralını ihlal ediyor.
+io-ifc-conformance-global-rule = Dosya { $attribute } genel kuralını ihlal ediyor.
