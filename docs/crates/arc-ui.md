@@ -103,6 +103,9 @@ return an `Intent` naming a command and never run one. Fallible functions return
   alpha. Drawing multiplies by a color token, so one atlas serves every theme. `edge_for` turns
   the icon token size and the pixels-per-point factor into the pixel edge.
 - References to files and embedded images in SVG sources are never resolved.
+- `icons::check` builds a list without keeping the atlas and returns the error codes above, so a
+  product tests its own icon set (`arc_app::shell::check_icons` adds the starter set first). The
+  shell draws command buttons from the atlas it builds at `edge_for(32, pixels_per_point)`.
 
 ### Localized strings (CORE-UI-024)
 
@@ -255,8 +258,9 @@ Objects are listed as hyphenated identifier texts.
 - `DockArea::direction` set to right to left puts the first part of a horizontal split at the
   right, orders the tabs of a group from the right and reverses the separator's drag and arrow
   keys; the split fraction stays the first part's share. Vertical splits do not change.
-- `DockArea` draws the main tree: a tab bar per group with a close button per tab, the active
-  panel's content, and separators that pointer drag or, when focused, the arrow keys along the
+- `DockArea` draws the main tree: a tab bar per group with a close button per tab (`flat_tab`:
+  the close mark shows while its tab is active, hovered or focused, and a focused tab or close
+  control has a focus outline), the active panel's content, and separators that pointer drag or, when focused, the arrow keys along the
   split (5 % per press) move. A tab dragged onto a group's outer quarter on a side splits the
   group on that side; onto its center it joins the group. Separators have the role splitter.
 

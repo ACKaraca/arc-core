@@ -190,7 +190,11 @@ fn config() -> ShellConfig {
         bindings: Vec::new(),
         appearance: arc_ui::Appearance::default(),
         toolbar: Vec::new(),
+        command_tabs: Vec::new(),
+        quick_access: Vec::new(),
+        icons: Vec::new(),
         status: Vec::new(),
+        status_text: None,
         display: None,
         overlays: None,
         work_plane: None,
@@ -1687,4 +1691,17 @@ fn a_plan_request_looks_straight_down_and_locks_rotation_until_a_camera_request(
     assert_eq!(camera(&shell), before);
     orbit(&mut shell, &mut app, &ctx, egui::pos2(200.0, 200.0));
     assert!((camera(&shell).forward() - before.forward()).norm() > 1e-3);
+}
+
+#[test]
+fn product_icons_are_checked_with_the_starter_set() {
+    let svg = "<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><rect width='8' height='8'/></svg>";
+    let icon = |name: &str, source: &str| (name.to_owned(), source.to_owned());
+    assert!(shell::check_icons(&[icon("wall", svg)]).is_ok());
+    let code = |icons: &[(String, String)]| shell::check_icons(icons).unwrap_err().code();
+    assert_eq!(code(&[icon("wall", "not svg")]), "ui.icon.invalid");
+    assert_eq!(code(&[icon("Wall", svg)]), "ui.icon.invalid");
+    assert_eq!(code(&[icon("check", svg)]), "ui.icon.duplicate");
+    let many: Vec<(String, String)> = (0..300).map(|i| icon(&format!("i{i}"), svg)).collect();
+    assert_eq!(code(&many), "ui.icon.too_many");
 }

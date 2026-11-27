@@ -204,6 +204,16 @@ impl IconAtlas {
     }
 }
 
+/// Checks that `icons` (name, SVG source) build into an atlas, without keeping it: the helper
+/// for a product's tests of its own icon set. Add [`STARTER`] to the list when the product's
+/// icons are drawn with it, as a duplicate name is an error.
+///
+/// # Errors
+/// The errors of [`IconAtlas::build`].
+pub fn check(icons: &[(&str, &str)]) -> Result<()> {
+    IconAtlas::build(icons, 16).map(|_| ())
+}
+
 /// An uploaded atlas, ready to draw.
 #[derive(Clone)]
 pub struct Icons {
@@ -239,6 +249,24 @@ mod tests {
 
     fn code(result: Result<IconAtlas>) -> &'static str {
         result.map(|_| "ok").unwrap_or_else(|e| e.code())
+    }
+
+    #[test]
+    fn check_reports_the_atlas_errors() {
+        assert!(check(STARTER).is_ok());
+        let ok = "<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><rect width='8' height='8'/></svg>";
+        assert!(check(&[("box", ok)]).is_ok());
+        assert_eq!(
+            check(&[("box", "not svg")]).unwrap_err().code(),
+            codes::ICON_INVALID.code
+        );
+        assert_eq!(
+            check(&[("check", ok), ("check", ok)]).unwrap_err().code(),
+            codes::ICON_DUPLICATE.code
+        );
+        let many: Vec<(String, &str)> = (0..=MAX_ICONS).map(|i| (format!("i{i}"), ok)).collect();
+        let many: Vec<(&str, &str)> = many.iter().map(|(n, s)| (n.as_str(), *s)).collect();
+        assert_eq!(check(&many).unwrap_err().code(), codes::ICON_TOO_MANY.code);
     }
 
     #[test]

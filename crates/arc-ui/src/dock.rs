@@ -15,7 +15,7 @@
 //! edge to join or split it.
 
 use arc_base::{Error, Result};
-use egui::{Button, Key, Modifiers, Rect, Role, Sense, Ui, UiBuilder, WidgetInfo, vec2};
+use egui::{Key, Modifiers, Rect, Role, Sense, Ui, UiBuilder, WidgetInfo, vec2};
 use serde::{Deserialize, Serialize};
 
 use crate::error::codes;
@@ -911,28 +911,31 @@ impl DockArea {
             child.visuals().widgets.noninteractive.bg_stroke,
             egui::StrokeKind::Inside,
         );
+        // A header bar behind the tabs, set off from the panel body by a line.
+        let header = Rect::from_min_size(
+            rect.min,
+            vec2(rect.width(), child.spacing().interact_size.y),
+        );
+        child
+            .painter()
+            .rect_filled(header, 0.0, child.visuals().extreme_bg_color);
+        child.painter().hline(
+            header.x_range(),
+            header.bottom(),
+            child.visuals().widgets.noninteractive.bg_stroke,
+        );
         let bar = self.direction.row(&mut child, false, |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
             for (index, panel) in tabs.iter().enumerate() {
                 let name = title(panel);
-                let tab = ui.add(
-                    Button::selectable(index == active, name.as_str())
-                        .sense(Sense::click_and_drag()),
-                );
+                let close = messages::DOCK_CLOSE.text(localize);
+                let (tab, x) = flat_tab(ui, &name, &name, active == index, &close, true);
                 if tab.clicked() {
                     changes.push(Change::Activate(panel.clone()));
                 }
                 if tab.drag_started() {
                     tab.dnd_set_drag_payload(TabDrag(panel.clone()));
                 }
-                let close = messages::DOCK_CLOSE.text(localize);
-                // A square of the token row height, so the target is as tall as the tab beside it.
-                let side = ui.spacing().interact_size.y;
-                let x = ui
-                    .add(egui::Button::new("×").min_size(egui::vec2(side, side)))
-                    .on_hover_text(close.as_str());
-                x.widget_info(|| {
-                    WidgetInfo::labeled(Role::Button, true, format!("{close} {name}"))
-                });
                 if x.clicked() {
                     changes.push(Change::Close(panel.clone()));
                 }
@@ -1063,10 +1066,135 @@ fn zone_rect(body: Rect, zone: Option<Side>) -> Rect {
     }
 }
 
+/// Draws one flat tab of the token row height: `label` (the tab's name, its modified mark
+/// included), an accent line on top when `active`, and, when `closable`, an unboxed "×" inside the
+/// tab that shows only while the tab is active or hovered (its space is always reserved, so
+/// nothing shifts). Returns the tab and the close control; `close` and `name` give the close
+/// button its accessible name. Without `closable` the second response never clicks.
+pub fn flat_tab(
+    ui: &mut Ui,
+    label: &str,
+    name: &str,
+    active: bool,
+    close: &str,
+    closable: bool,
+) -> (egui::Response, egui::Response) {
+    let pad = ui.spacing().button_padding.x;
+    let height = ui.spacing().interact_size.y;
+    let side = height;
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let strong = ui.visuals().widgets.noninteractive.fg_stroke.color;
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), strong);
+    let close_space = if closable { side } else { 0.0 };
+    let size = vec2(pad * 2.0 + galley.size().x + close_space, height);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let tab_rect = Rect::from_min_max(
+        rect.min,
+        egui::pos2(rect.right() - close_space, rect.bottom()),
+    );
+    let tab = ui.interact(
+        tab_rect,
+        ui.next_auto_id().with(("tab", name)),
+        Sense::click_and_drag(),
+    );
+    let x_rect = Rect::from_center_size(
+        egui::pos2(rect.right() - side * 0.5, rect.center().y),
+        vec2(side, side),
+    );
+    let x = ui.interact(
+        x_rect,
+        tab.id.with("close"),
+        if closable {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    if closable {
+        x.widget_info(|| WidgetInfo::labeled(Role::Button, true, format!("{close} {name}")));
+    }
+    tab.widget_info(|| WidgetInfo::selected(Role::Button, true, active, label));
+    // A focused tab or close control shows like a hovered one, so keyboard focus is visible.
+    let hot = tab.hovered()
+        || x.hovered()
+        || tab.has_focus()
+        || x.has_focus()
+        || ui.rect_contains_pointer(rect);
+    let visuals = ui.visuals();
+    let accent = visuals.hyperlink_color;
+    let weak = visuals.weak_text_color();
+    if active {
+        ui.painter().rect_filled(rect, 0.0, visuals.panel_fill);
+        ui.painter().hline(
+            rect.x_range(),
+            rect.top() + 1.0,
+            egui::Stroke::new(2.0, accent),
+        );
+    } else if hot {
+        ui.painter()
+            .rect_filled(rect, 0.0, visuals.widgets.hovered.bg_fill);
+    }
+    let focus = visuals.widgets.active.bg_stroke;
+    for focused in [&tab, &x].into_iter().filter(|r| r.has_focus()) {
+        ui.painter()
+            .rect_stroke(focused.rect, 0.0, focus, egui::StrokeKind::Inside);
+    }
+    let color = if active { strong } else { weak };
+    ui.painter().galley(
+        egui::pos2(rect.left() + pad, rect.center().y - galley.size().y * 0.5),
+        ui.painter()
+            .layout_no_wrap(label.to_owned(), font.clone(), color),
+        color,
+    );
+    if closable && (active || hot) {
+        if x.hovered() {
+            ui.painter().rect_filled(
+                x_rect.shrink(side * 0.2),
+                ui.visuals().widgets.hovered.corner_radius,
+                ui.visuals().widgets.active.bg_fill,
+            );
+        }
+        let c = x_rect.center();
+        let r = side * 0.14;
+        let stroke = egui::Stroke::new(1.3, if x.hovered() { strong } else { weak });
+        ui.painter()
+            .line_segment([c + vec2(-r, -r), c + vec2(r, r)], stroke);
+        ui.painter()
+            .line_segment([c + vec2(-r, r), c + vec2(r, -r)], stroke);
+    }
+    (tab, x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn a_focused_close_control_of_an_inactive_tab_is_drawn() {
+        let ctx = egui::Context::default();
+        let x_id = std::cell::Cell::new(None);
+        let frame = || {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let (_, x) = flat_tab(ui, "Layers", "Layers", false, "Close", true);
+                x_id.set(Some(x.id));
+            });
+            out.textures_delta.clear();
+            out.shapes
+                .iter()
+                .filter(|s| matches!(s.shape, egui::Shape::LineSegment { .. }))
+                .count()
+        };
+        // Neither active nor hovered: the close control is hidden.
+        assert_eq!(frame(), 0);
+        if let Some(id) = x_id.get() {
+            ctx.memory_mut(|m| m.request_focus(id));
+        }
+        frame();
+        assert!(frame() >= 2, "the focused close control is not drawn");
+    }
 
     fn tabs(names: &[&str]) -> Dock {
         Dock::Tabs {

@@ -8,8 +8,8 @@ use std::sync::Arc;
 use arc_app::product::{Entry, Extractor, FileType, Product, ProductBuilder};
 use arc_app::render::SnapshotRenderer;
 use arc_app::shell::{
-    self, CommandLinePanel, DiagnosticsPanelView, LogPanel, OutlinerPanel, PropertiesPanel,
-    SettingsPanel, ShellConfig, ViewportPanel,
+    self, ButtonSize, CommandGroup, CommandLinePanel, CommandTab, DiagnosticsPanelView, LogPanel,
+    OutlinerPanel, PropertiesPanel, SettingsPanel, ShellConfig, ToolItem, ViewportPanel,
 };
 use arc_base::math::Point3;
 use arc_base::{Cancel, Color, Error, Result};
@@ -250,7 +250,31 @@ pub fn config(seed: u64) -> Result<ShellConfig> {
         ],
         appearance: appearance(),
         toolbar: Vec::new(),
+        command_tabs: vec![CommandTab {
+            label: TAB_HOME.message_id.into(),
+            groups: vec![CommandGroup {
+                label: GROUP_FILE.message_id.into(),
+                items: [
+                    (FILE_NEW, arc_app::commands::FILE_NEW, "plus"),
+                    (FILE_OPEN, arc_app::commands::FILE_OPEN, "search"),
+                    (FILE_SAVE, arc_app::commands::FILE_SAVE, "check"),
+                ]
+                .into_iter()
+                .map(|(label, line, icon)| ToolItem::IconButton {
+                    label: label.message_id.into(),
+                    hint: None,
+                    line: line.into(),
+                    icon: icon.into(),
+                    size: ButtonSize::Large,
+                })
+                .collect(),
+            }],
+            context: None,
+        }],
+        quick_access: Vec::new(),
+        icons: Vec::new(),
         status: Vec::new(),
+        status_text: None,
         display: None,
         overlays: None,
         work_plane: None,
@@ -309,6 +333,21 @@ struct Message {
     message_id: &'static str,
 }
 
+const TAB_HOME: Message = Message {
+    message_id: "shell-tab-home",
+};
+const GROUP_FILE: Message = Message {
+    message_id: "shell-group-file",
+};
+const FILE_NEW: Message = Message {
+    message_id: "shell-file-new",
+};
+const FILE_OPEN: Message = Message {
+    message_id: "shell-file-open",
+};
+const FILE_SAVE: Message = Message {
+    message_id: "shell-file-save",
+};
 const TITLE: Message = Message {
     message_id: "shell-title",
 };
