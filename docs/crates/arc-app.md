@@ -582,7 +582,8 @@ passes the answers. Fallible functions return `arc_base::Error` with the codes i
 
 - `Application::new(product, config)` holds the product, a `SettingsStore` over the product's
   settings, the recent files and the tabs in display order. A `Tab` has a `TabId` that is never
-  reused, its document (with its own undo history), the package when it has a file, the
+  reused, not even by another `Application` of the process (one counter), its document (with
+  its own undo history), the package when it has a file, the
   recovery journal, the banners and the view states (`views`, `views_mut`; opaque
   `Box<dyn Any + Send>` values the shell keeps).
 - A tab is dirty when its document's revision differs from the revision of its saved state and
@@ -967,6 +968,29 @@ needs no window:
   strokes without Ctrl, Alt or Command are the field's and no binding takes them (a product can
   bind Delete without a rename deleting objects). The command line handles Ctrl+Z, Ctrl+Y and
   Ctrl+Shift+Z whenever no text field has the focus, so a product needs no binding for them.
+- Command tabs (`ShellConfig::command_tabs`) replace the flat toolbar strip when given. A row of
+  tab labels (real, keyboard-reachable tabs, each padded 12 points either side, highlighted on
+  hover) sits under the menu bar: the current tab has an
+  accent underline, a double click on it folds the panel away or back (kept per window), and
+  picking another tab while folded expands it. Below the row a fixed-height panel lays the
+  current tab's groups out left to right in a horizontal scroll area, without wrapping: each
+  group draws its items, its label centered underneath in the muted text color, and a thin
+  separator divides groups. `ToolItem::IconButton` is large (a 32 point icon above a label of up
+  to two lines, 64 points wide) or small (a 16 point icon beside the label; consecutive small
+  buttons stack three to a column); `Choice` and `ZoomExtents` draw as in the flat strip; `ZoomExtentsIcon` is the zoom-extents
+  request drawn like an `IconButton` (large or small). A
+  contextual tab (`CommandTab::context`, a probe of the application and the active document
+  tab) is shown only while the probe is true, in the accent color; it becomes current when it
+  appears and the tab chosen before returns when it goes. Labels and hints are message
+  identifiers like `ToolItem::Button`, and a click submits the item's `line`.
+- `ShellConfig::quick_access` items draw as icon-only buttons in the menu bar row after the
+  menus, with the label and hint as the tooltip. `ShellConfig::status_text` returns strings
+  drawn right-aligned in the status bar, separated by dividers, after the toggles.
+- Product icons (`ShellConfig::icons`, name and SVG source) join the starter set in one atlas,
+  built at the scale's pixel edge and rebuilt when the scale changes. A name that is unknown, or
+  an atlas that failed to build (logged once), shows the label as text. Products check their set
+  in a test with `shell::check_icons`. Every icon button exposes its label as its accessible name
+  and as the tooltip.
 - The tab strip below the toolbar has one tab per open document: its name (the file name, or
   "Untitled document", numbered when several), a `*` while it has unsaved changes, a click to
   activate it and a close button (`ShellAction::ActivateTab`, `ShellAction::CloseTab`; closing asks

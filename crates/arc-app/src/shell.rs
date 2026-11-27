@@ -28,8 +28,8 @@ pub mod prefs;
 pub mod prompts;
 
 pub use chrome::{
-    ChoiceState, DisplayProbe, InitialView, OverlayProbe, ShellAction, StatusToggle, TabView,
-    ToolItem, WorkPlaneProbe,
+    ButtonSize, ChoiceState, CommandGroup, CommandTab, ContextProbe, DisplayProbe, InitialView,
+    OverlayProbe, ShellAction, StatusProbe, StatusToggle, TabView, ToolItem, WorkPlaneProbe,
 };
 pub use interaction::{
     ContextEntry, DynamicOutput, Interaction, InteractionContext, InteractionOutput, KeyInput,
@@ -268,8 +268,18 @@ pub struct ShellConfig {
     pub appearance: Appearance,
     /// The toolbar strip below the menu bar; empty draws none.
     pub toolbar: Vec<ToolItem>,
+    /// The command tabs below the menu bar; when not empty they replace the flat `toolbar`.
+    pub command_tabs: Vec<CommandTab>,
+    /// Compact icon-only buttons drawn in the menu bar row after the menus.
+    pub quick_access: Vec<ToolItem>,
+    /// The product's icons: name and SVG source, drawn together with
+    /// [`arc_ui::icons::STARTER`] (names must not repeat those). Check them in a test with
+    /// [`check_icons`].
+    pub icons: Vec<(String, String)>,
     /// The toggles of the status bar, after the cursor coordinates.
     pub status: Vec<StatusToggle>,
+    /// Texts the product shows right-aligned in the status bar for the active tab.
+    pub status_text: Option<StatusProbe>,
     /// What each viewport draws besides the scene; `None` draws the grid and the axes.
     pub display: Option<DisplayProbe>,
     /// What each viewport draws over the scene in model coordinates (labels); `None` draws
@@ -284,6 +294,25 @@ pub struct ShellConfig {
     /// from it, so identifiers that commands generate differ between steps. Pass entropy (the
     /// clock and the process), or a fixed value for a reproducible session.
     pub seed: u64,
+}
+
+/// The starter icons followed by the product's.
+fn merged_icons(product: &[(String, String)]) -> Vec<(&str, &str)> {
+    arc_ui::icons::STARTER
+        .iter()
+        .copied()
+        .chain(product.iter().map(|(n, s)| (n.as_str(), s.as_str())))
+        .collect()
+}
+
+/// Checks a product's icon set (name, SVG source) the way the shell builds it, together with the
+/// starter icons: for the product's tests.
+///
+/// # Errors
+/// The errors of [`arc_ui::IconAtlas::build`] (`ui.icon.invalid`, `ui.icon.too_large`,
+/// `ui.icon.too_many`, `ui.icon.duplicate`).
+pub fn check_icons(icons: &[(String, String)]) -> arc_base::Result<()> {
+    arc_ui::icons::check(&merged_icons(icons))
 }
 
 /// A menu label message.
@@ -542,7 +571,15 @@ pub struct Shell {
     recorder: Option<Recorder>,
     default_layout: DockLayout,
     toolbar: Vec<ToolItem>,
+    command_tabs: Vec<CommandTab>,
+    quick_access: Vec<ToolItem>,
+    product_icons: Vec<(String, String)>,
+    /// The icon atlas of the last scale it was built for; `None` before the first build.
+    icons: Option<(f32, arc_ui::Icons)>,
+    /// The atlas failed to build: labels are drawn as text.
+    icons_failed: bool,
     status: Vec<StatusToggle>,
+    status_text: Option<StatusProbe>,
     display: Option<DisplayProbe>,
     overlays: Option<OverlayProbe>,
     work_plane: Option<WorkPlaneProbe>,
@@ -711,12 +748,51 @@ impl Shell {
             recorder: None,
             default_layout: config.layout,
             toolbar: config.toolbar,
+            command_tabs: config.command_tabs,
+            quick_access: config.quick_access,
+            product_icons: config.icons,
+            icons: None,
+            icons_failed: false,
             status: config.status,
+            status_text: config.status_text,
             display: config.display,
             overlays: config.overlays,
             work_plane: config.work_plane,
             initial_view: config.initial_view,
             language: String::new(),
+        }
+    }
+
+    /// Builds the icon atlas (the starter set and the product's icons) at the edge the current
+    /// scale needs and uploads it, again when the scale changes. A failure is logged once and
+    /// leaves the labels drawn as text.
+    fn ensure_icons(&mut self, ctx: &egui::Context) {
+        let uses = |items: &[ToolItem]| {
+            items
+                .iter()
+                .any(|i| matches!(i, ToolItem::IconButton { .. }))
+        };
+        let any = uses(&self.toolbar)
+            || uses(&self.quick_access)
+            || self
+                .command_tabs
+                .iter()
+                .any(|t| t.groups.iter().any(|g| uses(&g.items)));
+        let ppp = ctx.pixels_per_point();
+        if !any || self.icons_failed || self.icons.as_ref().is_some_and(|(p, _)| *p == ppp) {
+            return;
+        }
+        let edge = arc_ui::IconAtlas::edge_for(32.0, ppp);
+        match arc_ui::IconAtlas::build(&merged_icons(&self.product_icons), edge) {
+            Ok(atlas) => self.icons = Some((ppp, atlas.upload(ctx))),
+            Err(e) => {
+                tracing::error!(
+                    code = e.code(),
+                    "icon atlas failed; labels are drawn as text"
+                );
+                self.icons_failed = true;
+                self.icons = None;
+            }
         }
     }
 
@@ -1320,6 +1396,20 @@ impl Shell {
             _ => None,
         };
         let tools = chrome::tool_views(&self.toolbar, app, active, input.localize);
+        let quick = chrome::tool_views(&self.quick_access, app, active, input.localize);
+        let commands = if main {
+            let id = egui::Id::NULL.with(("arc-command-tabs", window));
+            chrome::command_bar(ctx, id, &self.command_tabs, app, active, input.localize)
+        } else {
+            None
+        };
+        let status_text = match (&self.status_text, active) {
+            (Some(probe), Some(tab)) => (probe.0)(app, tab, input.localize),
+            _ => Vec::new(),
+        };
+        if main {
+            self.ensure_icons(ctx);
+        }
         let toggles = chrome::toggle_views(&self.status, app, active, input.localize);
         actions.extend(
             chrome::toggle_key_intents(&self.status, &toggles, &input.raw.events)
@@ -1375,6 +1465,13 @@ impl Shell {
             tools: &tools,
             toggles: &toggles,
             cursor: &cursor_text,
+            status_text: &status_text,
+            commands: commands.as_ref(),
+            quick: &quick,
+            look: chrome::Look {
+                icons: self.icons.as_ref().map(|(_, icons)| icons),
+                colors: &colors,
+            },
             localize: input.localize,
         };
         let full = {

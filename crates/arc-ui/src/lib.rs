@@ -78,7 +78,7 @@ pub use command_line::{
     CommandLineView, History, LineAction, LineCommands, LineContext, LineStatus, prompt_text,
 };
 pub use diagnostics::{DiagnosticsFilter, DiagnosticsPanel, filter_in};
-pub use dock::{Axis, Dock, DockArea, DockLayout, Floating, Side, Target};
+pub use dock::{Axis, Dock, DockArea, DockLayout, Floating, Side, Target, flat_tab};
 pub use dynamic_input::{DynamicEvent, DynamicField, DynamicInput, Relative, show_fields};
 pub use error::codes;
 #[cfg(feature = "viewport")]

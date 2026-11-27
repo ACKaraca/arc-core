@@ -91,7 +91,12 @@ impl From<&Error> for Banner {
     }
 }
 
-/// Identifies an open tab for the lifetime of the application; never reused.
+/// The next tab identifier: one counter for the process, so the identifiers of two applications
+/// never meet and state a product keeps per tab outside its application cannot collide.
+static NEXT_TAB: AtomicU64 = AtomicU64::new(0);
+
+/// Identifies an open tab for the lifetime of the process; never reused, not even by another
+/// application of the process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TabId(u64);
 
@@ -272,7 +277,6 @@ pub struct Application {
     session: Session,
     tabs: Vec<Tab>,
     active: Option<TabId>,
-    next_tab: u64,
 }
 
 impl std::fmt::Debug for Application {
@@ -304,7 +308,6 @@ impl Application {
             session,
             tabs: Vec::new(),
             active: None,
-            next_tab: 0,
         }
     }
 
@@ -554,8 +557,7 @@ impl Application {
     }
 
     fn push(&mut self, mut tab: Tab) -> TabId {
-        let id = TabId(self.next_tab);
-        self.next_tab += 1;
+        let id = TabId(NEXT_TAB.fetch_add(1, Ordering::Relaxed));
         tab.id = id;
         self.tabs.push(tab);
         self.active = Some(id);
