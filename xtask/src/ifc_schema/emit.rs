@@ -267,7 +267,10 @@ fn header(static_name: &str, name: &str, file_name: &str, blake3: &str) -> Strin
 }
 
 /// Writes the tables of `schema` as the static `static_name`.
-#[allow(clippy::too_many_lines, reason = "one block per table of the schema, in output order")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one block per table of the schema, in output order"
+)]
 pub fn emit(
     schema: &Schema,
     static_name: &str,
