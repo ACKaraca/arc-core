@@ -63,10 +63,11 @@ fn repeated_element_is_materialized_once_and_its_repeats_counted() {
         &mut ReadOptions::default(),
     )
     .unwrap();
-    // The budget left for the views is the file's parsed estimate plus 4 KiB: enough for one
-    // 300-byte wall and its one reference, far from enough for 500 copies of it.
+    // The budget left for the views is the file's parsed estimate plus 24 KiB: the inverse index
+    // of the 500 references (32 bytes each) and one 300-byte wall with its one reference, far from
+    // enough for 500 copies of the wall.
     let limits = Limits {
-        memory_bytes: Some(output.file.parsed_bytes() + 4096),
+        memory_bytes: Some(output.file.parsed_bytes() + 24 * 1024),
         ..Limits::CONSTRAINED
     };
     let views = output

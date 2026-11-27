@@ -24,6 +24,17 @@ use crate::model::{IfcFile, Instance, Parameter, Record};
 use crate::schema::access::{Attr, known};
 use crate::step::MAX_NESTING;
 
+mod import;
+
+pub(crate) use import::UNDERSTOOD_IMPORT;
+pub use import::{
+    ClassCoverage, ClassificationRef, ClassificationSystem, Connection, ConstituentView, CrsView,
+    GeoReference, GeoSource, GroupView, ImportViews, LayerUsage, LayerView, MaterialAssociation,
+    MaterialRef, Matrix, ObjectKind, ObjectView, Origin, OwnerHistory, PlacementState,
+    PlacementView, ProfileView, ResolvedProperty, ResolvedPropertySet, ResolvedQuantity,
+    ResolvedQuantitySet, SpaceBoundary, StyleView, UnitKind, UnitSystem, UnitView,
+};
+
 /// The entity types the typed views read. Records of any other type are kept as generic instances
 /// and counted as preserved in the loss report of the read.
 pub(crate) const UNDERSTOOD: &[&str] = &[
@@ -288,6 +299,9 @@ pub struct TypedViews {
     pub property_sets: Vec<PropertySet>,
     /// The quantity sets, in order of first assignment.
     pub quantity_sets: Vec<QuantitySet>,
+    /// The import views: objects with their resolved definitions, units, georeferencing and the
+    /// coverage of every entity class.
+    pub import: ImportViews,
     /// The loss report of the views.
     pub report: LossReport,
 }
@@ -336,11 +350,15 @@ impl IfcFile {
     pub fn typed_views(&self, limits: &Limits, cancel: &Cancel) -> Result<TypedViews> {
         cancel.check()?;
         let mut reader = Reader::new(self, limits, cancel);
+        if self.tables().is_some() {
+            reader.imp.index = self.inverse_index(limits, cancel)?;
+        }
         reader.scan()?;
         let spatial = reader.build_spatial()?;
         let types = reader.type_assignments()?;
         let property_sets = reader.property_sets()?;
         let quantity_sets = reader.quantity_sets()?;
+        let import = reader.import(&property_sets, &quantity_sets, &types)?;
         let report = reader.log.finish(LossHeader::new(
             "ifc",
             self.schema.identifier(),
@@ -352,6 +370,7 @@ impl IfcFile {
             types,
             property_sets,
             quantity_sets,
+            import,
             report,
         })
     }
@@ -384,6 +403,7 @@ struct Reader<'f> {
     quantities: BTreeMap<u64, Arc<Quantity>>,
     placed: BTreeSet<u64>,
     path: BTreeSet<u64>,
+    imp: import::State,
 }
 
 impl<'f> Reader<'f> {
@@ -415,6 +435,7 @@ impl<'f> Reader<'f> {
             quantities: BTreeMap::new(),
             placed: BTreeSet::new(),
             path: BTreeSet::new(),
+            imp: import::State::default(),
         }
     }
 
@@ -450,6 +471,9 @@ impl<'f> Reader<'f> {
     }
 
     fn lose(&mut self, reason: Reason, kind: &str, source: u64, count: u64) {
+        if count > 0 {
+            self.imp.flagged.insert(source);
+        }
         self.log
             .add(reason, kind, Some(Source::Decimal(source)), count);
     }
@@ -500,10 +524,15 @@ impl<'f> Reader<'f> {
         let file = self.file;
         for instance in file.instances() {
             self.cancel.check()?;
-            if instance
-                .records
-                .iter()
-                .any(|r| SPATIAL.contains(&r.type_name.as_str()))
+            // By the schema where its tables are present, so that parts of IFC4X3 facilities
+            // (`IfcBridgePart`, `IfcRoadPart`, ...) and external spatial elements are spatial too.
+            let by_schema = self.is_a(instance.name, "IFCSPATIALELEMENT")
+                || self.is_a(instance.name, "IFCSPATIALSTRUCTUREELEMENT");
+            if by_schema
+                || instance
+                    .records
+                    .iter()
+                    .any(|r| SPATIAL.contains(&r.type_name.as_str()))
             {
                 self.spatial.insert(instance.name);
             }
@@ -524,6 +553,12 @@ impl<'f> Reader<'f> {
             "IFCRELDEFINESBYTYPE" => self.typing(name, record),
             "IFCRELDEFINESBYPROPERTIES" => self.definitions_of(name, record),
             _ => {}
+        }
+        if UNDERSTOOD.contains(&record.type_name.as_str()) {
+            self.imp.touched.insert(name);
+        }
+        if self.file.tables().is_some() {
+            self.import_relationship(name, record);
         }
     }
 
@@ -547,7 +582,10 @@ impl<'f> Reader<'f> {
             if !self.file.contains(child) {
                 self.lose(reasons::TARGET_MISSING, kind, name, 1);
             } else if !parent_spatial || !self.spatial.contains(&child) {
-                self.lose(reasons::NOT_MAPPED, kind, name, 1);
+                // The spatial tree cannot hold it; the import views map the aggregation of every
+                // object, so the relationship is not marked as read in part.
+                self.log
+                    .add(reasons::NOT_MAPPED, kind, Some(Source::Decimal(name)), 1);
             } else if !self.aggregated.insert((parent, child)) {
                 self.lose(reasons::DUPLICATE_PLACEMENT, kind, name, 1);
             } else {
@@ -732,6 +770,7 @@ impl<'f> Reader<'f> {
             .iter()
             .fold(base, |sum, &p| sum.saturating_add(copied_bytes(p)));
         self.charge(bytes)?;
+        self.imp.touched.insert(name);
         let kind = record.type_name.as_str();
         let [global_id, label, description] = values.map(|p| self.opt(got_text(p), name, kind));
         let entity = Arc::new(RootedEntity {
@@ -863,6 +902,7 @@ impl<'f> Reader<'f> {
             return Ok(None);
         }
         self.cancel.check()?;
+        self.imp.touched.insert(name);
         let bytes = record
             .parameters
             .iter()
@@ -1014,6 +1054,7 @@ impl<'f> Reader<'f> {
             return Ok(None);
         };
         self.cancel.check()?;
+        self.imp.touched.insert(name);
         let bytes = record
             .parameters
             .iter()

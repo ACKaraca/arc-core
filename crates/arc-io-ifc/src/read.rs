@@ -11,7 +11,7 @@ use crate::loss::{Direction, LossHeader, LossLog, LossReport, Source};
 use crate::model::{IfcFile, Layout, Parameter, Record, Schema, SourceBytes};
 use crate::options::{ReadOptions, ReadOutput};
 use crate::step::{self, Notes};
-use crate::views::UNDERSTOOD;
+use crate::views::{UNDERSTOOD, UNDERSTOOD_IMPORT};
 
 /// Reads an IFC file. The bytes are either the STEP physical file itself or a ZIP archive whose
 /// single `.ifc` entry is the physical file; the ZIP signature selects which. Resource-fork and
@@ -148,7 +148,9 @@ fn report_of(file: &IfcFile, limits: Limits, notes: &Notes, cancel: &Cancel) -> 
     for instance in file.instances() {
         cancel.check()?;
         for record in &instance.records {
-            if !UNDERSTOOD.contains(&record.type_name.as_str()) {
+            if !UNDERSTOOD.contains(&record.type_name.as_str())
+                && !UNDERSTOOD_IMPORT.contains(&record.type_name.as_str())
+            {
                 log.add(
                     reasons::ENTITY_PRESERVED,
                     &record.type_name,

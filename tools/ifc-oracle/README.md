@@ -26,6 +26,7 @@ read as an older name of the same variable.
 | `schema_diff.py <tables.json> [schema ...]` | entities, supertypes, abstract flags and explicit attributes of a JSON dump of the `arc-io-ifc` schema tables against IfcOpenShell's schema introspection; skips (exit 0) when the file does not exist | 1 on a difference |
 | `conformance_compare.py [--json] [--rules] <files or directories>` | `IfcFile::conformance` (`cargo run -p arc-io-ifc --example conformance`; set `ARC_CONFORMANCE` to a built binary to skip `cargo`) against `ifcopenshell.validate`, per rule class and (instance, attribute): agree, Arc only, oracle only. Without `--rules`, levels 1 and 2 against the validator without EXPRESS rules; with it, also level 3 against the validator with EXPRESS rules: entity and type rules per (instance, `Owner.Label`), global rules per rule name, followed by a table per rule with the checks Arc evaluated and could not evaluate | 1 when a file cannot be checked by either side |
 | `pset_diff.py <templates.json> [schema ...]` | names, kinds, data types and quantity kinds of a JSON dump of the `arc-io-ifc` property and quantity set templates against IfcOpenShell's `PsetQto` templates; enumeration items, and data types the published definitions leave open, are listed as source differences without failing; skips (exit 0) when the file does not exist | 1 on a difference |
+| `views_compare.py [--verbose] [--max-diffs N] <files or directories>` | the import views (`cargo run --release -p arc-io-ifc --example import_views`; set `ARC_IMPORT_VIEWS` to a built binary to skip `cargo`) against IfcOpenShell (`ifcopenshell.util.element`, `util.unit`, `util.placement`, `util.classification` and the entities themselves), per category: products and types by class, containment, aggregation, nesting, type assignment, predefined type, property sets (set names, property names, values), quantities, materials (kind, names, layer thicknesses), classifications, openings, fills, groups, georeference, units, placements, element connections, space boundaries, surface styles, owner history, storey elevations; prints compared, agreeing and differing items per category and every difference | 1 on a difference that is not a documented convention |
 | `run_all.sh [directory]` | runs the `arc-io-ifc` tests with `ARC_IFC_DUMP`, then `validate.py` and `geometry_compare.py` on every dumped file | 1 on any failure |
 
 `schema_diff.py` expects `{"<SCHEMA>": {"entities": {"<Name>": {"supertype", "abstract",
@@ -73,3 +74,23 @@ behaves as follows (IfcOpenShell 0.9.0):
 
 A rule Arc cannot evaluate is reported as not evaluated in the table per rule; on these files there
 is none except for instances whose structure level 1 already rejects.
+
+## Import view differences
+
+`views_compare.py` compares the import views with IfcOpenShell 0.9.0 on the 35 buildingSMART sample files
+(`git clone --depth 1 https://github.com/buildingSMART/Sample-Test-Files`, kept outside the repository)
+and on the files `cargo test -p arc-io-ifc --test import_views` dumps with `ARC_IFC_DUMP` in IFC2X3,
+IFC4 and IFC4X3. Every difference found had a cause in one of the conventions below; they are tallied
+under their name in the output and do not fail the run.
+
+| Category | Convention | Cause |
+|---|---|---|
+| containment | none (the comparison reads `IfcRelContainedInSpatialStructure` itself) | `util.get_container` reads the inverse `ContainedInStructure`, which only `IfcElement` declares; spatial zones and the parts of IFC4X3 facilities are contained too |
+| predefined type | `ObjectType` returned where no usable `PredefinedType` exists | `util.get_predefined_type` falls back to `ObjectType` when the entity has no `PredefinedType` (IFC2X3 `IfcBuildingElementProxy`, doors, windows) or it is unset; arc reports the `PredefinedType` of the type (`NOTDEFINED`) and leaves `ObjectType` in `object_type` |
+| surface styles | `util.get_styles` finds no styles where the representation context has no TargetView (IFC2X3) | `util.get_styles` selects the `Model`, `Body`, `MODEL_VIEW` representation; IFC2X3 contexts have no target view, so it finds none. The comparison reads the styled items of every representation item itself |
+| units | GRAM is scaled to kilogram (arc) or taken as 1 (IfcOpenShell) | `util.unit` scales a named unit by its prefix only. arc gives the factor to the SI base unit of the unit type, so `GRAM` is 0.001 and a derived unit with a gram element follows |
+
+Two rules of the views differ in choice, not in fact, and are not hidden by the comparison: the type
+object defines the predefined type (the occurrence's value stays only where the type says `NOTDEFINED`),
+as `util.get_predefined_type` does; and a classification reference of the type is inherited unless the
+occurrence has one of the same system, as `util.classification.get_references` does.
