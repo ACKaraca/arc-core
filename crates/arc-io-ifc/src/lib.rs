@@ -29,9 +29,11 @@
 //! # Ok::<(), arc_base::Error>(())
 //! ```
 
+pub mod alignment;
 mod edit;
 pub mod error;
 pub mod geometry;
+pub mod ids;
 pub mod loss;
 pub mod model;
 pub mod options;
@@ -39,6 +41,7 @@ pub mod psets;
 mod read;
 pub mod schema;
 mod step;
+pub mod stream;
 mod text;
 pub mod views;
 pub mod write;
