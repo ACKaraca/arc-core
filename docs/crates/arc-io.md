@@ -1505,7 +1505,7 @@ The structs of the model are marked non-exhaustive and are built with their `new
 `PropertySet::new`, `Property::new`, `QuantitySet::new`, `Quantity::new`, `ElementType::new`,
 `MaterialLayer::new`, `LayerSetUsage::new`); their fields are public and set after construction.
 
-An `Element` has an identifier, a kind (`ElementKind`: wall, slab, door, window, opening, space), a name, a long name (spaces), the
+An `Element` has an identifier, a kind (`ElementKind`: wall, slab, door, window, opening, space, roof, covering, stair, stair flight, railing), a name, a long name (spaces), the
 identifier of its storey, a `Placement` relative to the storey (origin, local z axis, local x axis), an
 optional `Body`, a predefined type, an operation type (doors) or partitioning type (windows), the overall
 width and height (doors and windows), a host, property sets, quantity sets, the identifier of its
@@ -1572,6 +1572,23 @@ layer from the reference line or plane (an offset that is not finite is refused)
   `ROOFING`, `MOLDING`, `SKIRTINGBOARD`, `INSULATION`, `MEMBRANE`, `SLEEVING`, `WRAPPING`). Its type
   is an `IfcCoveringType` with the same predefined values, whose layers are written as for a slab
   type (`ElementKind::Covering`).
+- Stairs: `IfcStair` (`ElementKind::Stair`) with the `PredefinedType` values of `IfcStairTypeEnum`
+  (`STRAIGHT_RUN_STAIR`, `QUARTER_TURN_STAIR` for an L, `HALF_TURN_STAIR` for a U and the others;
+  another text is `USERDEFINED`, none is `NOTDEFINED`). The parts of a stair are the elements whose
+  `host` is that stair: `IfcStairFlight` (`ElementKind::StairFlight`), a landing (an `IfcSlab` with
+  the predefined type `LANDING`) and an `IfcRailing` (`ElementKind::Railing`). Per stair with parts
+  the writer adds one `IfcRelAggregates` (relating object the stair, `derived_id(stair, AGGREGATES, 0)`)
+  listing the parts in model order; a part is decomposed, so it is not in the storey's
+  `IfcRelContainedInSpatialStructure`, while the stair, a flight or railing without a host and a
+  slab without a host are. A stair, flight or railing has no element type, and a host of another
+  kind than a stair is refused. A flight writes `NumberOfRisers`, `NumberOfTreads`, `RiserHeight` and
+  `TreadLength` from `Element::flight` (`FlightDimensions`; both lengths positive, in the length
+  unit; omitted when `None`) and its `PredefinedType` from `IfcStairFlightTypeEnum` (`STRAIGHT`,
+  `WINDER`, `SPIRAL`, `CURVED`, `FREEFORM`). A railing's `PredefinedType` takes `IfcRailingTypeEnum`
+  (`HANDRAIL`, `GUARDRAIL`, `BALUSTRADE`); a railing is a part of a stair only when its host names
+  one, and is contained in its storey otherwise. Bodies, placements (relative to the storey for
+  every part), property sets and quantity sets (for example `Qto_StairFlightBaseQuantities` and
+  `Qto_RailingBaseQuantities` with `Length`) are written as for the other elements.
 - Element types: `IfcWallType`, `IfcSlabType`, `IfcRoofType`, `IfcCoveringType`, `IfcDoorType` and `IfcWindowType`, after the
   elements, in model order, with the rules of the predefined type below (the text of a user-defined
   predefined type is the `ElementType` attribute) and, for doors and windows, the operation or

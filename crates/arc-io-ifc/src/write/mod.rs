@@ -185,6 +185,21 @@ pub enum ElementKind {
     /// contain them). By convention `Element::name` holds the room number and
     /// `Element::long_name` the room name.
     Space,
+    /// `IfcStair` (`PredefinedType` from `IfcStairTypeEnum`, for example `STRAIGHT_RUN_STAIR`,
+    /// `QUARTER_TURN_STAIR` for an L or `HALF_TURN_STAIR` for a U). A stair decomposes into its
+    /// parts: an element whose `host` is the stair (flights, landings and railings) is
+    /// aggregated by it (`IfcRelAggregates`) and not contained in the storey. A stair has no
+    /// element type.
+    Stair,
+    /// `IfcStairFlight` (`PredefinedType` from `IfcStairFlightTypeEnum`) with the counts and
+    /// dimensions of [`Element::flight`]. A flight whose `host` is a stair is a part of it; one
+    /// without a host is contained in its storey. A flight has no element type.
+    StairFlight,
+    /// `IfcRailing` (`PredefinedType` from `IfcRailingTypeEnum`: `HANDRAIL`, `GUARDRAIL`,
+    /// `BALUSTRADE`). A railing whose `host` is a stair is a part of it; one without a host is
+    /// contained in its storey. A railing has no element type. A landing is an `IfcSlab` with the
+    /// predefined type `LANDING`, a part of a stair in the same way.
+    Railing,
 }
 
 impl ElementKind {
@@ -198,6 +213,9 @@ impl ElementKind {
             Self::Space => "IFCSPACE",
             Self::Roof => "IFCROOF",
             Self::Covering => "IFCCOVERING",
+            Self::Stair => "IFCSTAIR",
+            Self::StairFlight => "IFCSTAIRFLIGHT",
+            Self::Railing => "IFCRAILING",
         }
     }
 
@@ -231,6 +249,24 @@ impl ElementKind {
                 "SLEEVING",
                 "WRAPPING",
             ],
+            Self::Stair => &[
+                "STRAIGHT_RUN_STAIR",
+                "TWO_STRAIGHT_RUN_STAIR",
+                "QUARTER_WINDING_STAIR",
+                "QUARTER_TURN_STAIR",
+                "HALF_WINDING_STAIR",
+                "HALF_TURN_STAIR",
+                "TWO_QUARTER_WINDING_STAIR",
+                "TWO_QUARTER_TURN_STAIR",
+                "THREE_QUARTER_WINDING_STAIR",
+                "THREE_QUARTER_TURN_STAIR",
+                "SPIRAL_STAIR",
+                "DOUBLE_RETURN_STAIR",
+                "CURVED_RUN_STAIR",
+                "TWO_CURVED_RUN_STAIR",
+            ],
+            Self::StairFlight => &["STRAIGHT", "WINDER", "SPIRAL", "CURVED", "FREEFORM"],
+            Self::Railing => &["HANDRAIL", "GUARDRAIL", "BALUSTRADE"],
             Self::Roof => &[
                 "FLAT_ROOF",
                 "SHED_ROOF",
@@ -506,7 +542,38 @@ impl ElementType {
             ElementKind::Window => Some("IFCWINDOWTYPE"),
             ElementKind::Roof => Some("IFCROOFTYPE"),
             ElementKind::Covering => Some("IFCCOVERINGTYPE"),
-            ElementKind::Opening | ElementKind::Space => None,
+            ElementKind::Opening
+            | ElementKind::Space
+            | ElementKind::Stair
+            | ElementKind::StairFlight
+            | ElementKind::Railing => None,
+        }
+    }
+}
+
+/// The counts and dimensions of a stair flight (`IfcStairFlight`), in the length unit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct FlightDimensions {
+    /// `NumberOfRisers`.
+    pub risers: u32,
+    /// `NumberOfTreads`.
+    pub treads: u32,
+    /// `RiserHeight`, positive.
+    pub riser_height: f64,
+    /// `TreadLength`, positive.
+    pub tread_length: f64,
+}
+
+impl FlightDimensions {
+    /// The dimensions of a flight.
+    #[must_use]
+    pub fn new(risers: u32, treads: u32, riser_height: f64, tread_length: f64) -> Self {
+        Self {
+            risers,
+            treads,
+            riser_height,
+            tread_length,
         }
     }
 }
@@ -545,9 +612,14 @@ pub struct Element {
     pub overall_height: Option<f64>,
     /// Openings: the element the opening voids (`IfcRelVoidsElement`), a wall, slab, door or
     /// window; required. Doors and windows: the opening they fill (`IfcRelFillsElement`); a chain
-    /// of hosts must not return to its start. Must be `None`
-    /// for walls and slabs.
+    /// of hosts must not return to its start. Flights, landings (slabs) and railings: optionally
+    /// the stair they are a part of (`IfcRelAggregates`); a part is not contained in the storey.
+    /// Must be `None` for walls, spaces, roofs, coverings and stairs, and for a slab that is
+    /// not part of a stair.
     pub host: Option<u128>,
+    /// Stair flights: the `NumberOfRisers`, `NumberOfTreads`, `RiserHeight` and `TreadLength`;
+    /// `None` omits them. Ignored for the other kinds.
+    pub flight: Option<FlightDimensions>,
     /// The property sets.
     pub property_sets: Vec<PropertySet>,
     /// The quantity sets.
@@ -577,6 +649,7 @@ impl Element {
             overall_width: None,
             overall_height: None,
             host: None,
+            flight: None,
             property_sets: Vec::new(),
             quantity_sets: Vec::new(),
             element_type: None,
@@ -733,6 +806,14 @@ pub fn write(model: &WriteModel, options: &WriteOptions) -> Result<WriteOutput> 
     })
 }
 
+/// Whether an element of this kind with a host is a part of that stair.
+fn is_stair_part(kind: ElementKind) -> bool {
+    matches!(
+        kind,
+        ElementKind::Slab | ElementKind::StairFlight | ElementKind::Railing
+    )
+}
+
 /// The shortest direction the writer accepts. A shorter one has components whose squares lose
 /// their precision or vanish, so its angle is not defined; this is the square root of the machine
 /// epsilon of `f64`.
@@ -811,11 +892,14 @@ fn check_references(model: &WriteModel) -> Result<BTreeMap<u128, ElementKind>> {
         let allowed = match element.kind {
             ElementKind::Opening => host_kind.is_some_and(|k| k != ElementKind::Opening),
             ElementKind::Door | ElementKind::Window => host_kind == Some(ElementKind::Opening),
+            ElementKind::Slab | ElementKind::StairFlight | ElementKind::Railing => {
+                host_kind == Some(ElementKind::Stair)
+            }
             ElementKind::Wall
-            | ElementKind::Slab
             | ElementKind::Space
             | ElementKind::Roof
-            | ElementKind::Covering => false,
+            | ElementKind::Covering
+            | ElementKind::Stair => false,
         };
         if !allowed {
             return Err(bad_reference(host));
@@ -1269,6 +1353,23 @@ impl Writer<'_> {
                 operation,
                 user_operation.unwrap_or(Parameter::Omitted),
             ]);
+        } else if element.kind == ElementKind::StairFlight {
+            match element.flight {
+                Some(flight) => {
+                    let sizes = [flight.riser_height, flight.tread_length];
+                    if !sizes.iter().all(|v| v.is_finite() && *v > 0.0) {
+                        return Err(invalid("flight dimensions"));
+                    }
+                    parameters.extend([
+                        Parameter::Integer(i64::from(flight.risers)),
+                        Parameter::Integer(i64::from(flight.treads)),
+                        Parameter::Real(flight.riser_height),
+                        Parameter::Real(flight.tread_length),
+                    ]);
+                }
+                None => parameters.extend(std::iter::repeat_n(Parameter::Omitted, 4)),
+            }
+            parameters.push(predefined);
         } else {
             parameters.push(predefined);
         }
@@ -1825,12 +1926,14 @@ impl Writer<'_> {
                 references(&storeys),
             )?;
         }
+        self.stair_parts(model, context)?;
         for storey in &model.storeys {
             let contained: Vec<u64> = model
                 .elements
                 .iter()
                 .filter(|e| e.storey == storey.id)
                 .filter(|e| !matches!(e.kind, ElementKind::Opening | ElementKind::Space))
+                .filter(|e| !(e.host.is_some() && is_stair_part(e.kind)))
                 .filter_map(|e| context.elements.get(&e.id).copied())
                 .collect();
             let spaces: Vec<u64> = model
@@ -1868,6 +1971,7 @@ impl Writer<'_> {
                 return Err(bad_reference(host));
             };
             match kinds.get(&element.id) {
+                Some(kind) if is_stair_part(*kind) => {}
                 Some(ElementKind::Opening) => self.relationship(
                     "IFCRELVOIDSELEMENT",
                     derived_id(element.id, role::VOIDS, 0),
@@ -1883,6 +1987,33 @@ impl Writer<'_> {
             }
         }
         self.type_relationships(model, context)
+    }
+
+    /// One `IfcRelAggregates` per stair with parts: the flights, landings and railings that name
+    /// it as their host, in model order.
+    fn stair_parts(&mut self, model: &WriteModel, context: &Context) -> Result<()> {
+        for element in model
+            .elements
+            .iter()
+            .filter(|e| e.kind == ElementKind::Stair)
+        {
+            // The parts of a stair, in model order: aggregated by it, not contained in a storey.
+            let parts: Vec<u64> = model
+                .elements
+                .iter()
+                .filter(|e| e.host == Some(element.id) && is_stair_part(e.kind))
+                .filter_map(|e| context.elements.get(&e.id).copied())
+                .collect();
+            if let (false, Some(&stair)) = (parts.is_empty(), context.elements.get(&element.id)) {
+                self.relationship(
+                    "IFCRELAGGREGATES",
+                    derived_id(element.id, role::AGGREGATES, 0),
+                    reference(stair),
+                    references(&parts),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// One `IfcRelDefinesByType` per element type with occurrences.
