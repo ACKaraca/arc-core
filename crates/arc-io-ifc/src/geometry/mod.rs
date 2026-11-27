@@ -28,6 +28,7 @@ mod opening;
 mod place;
 mod polygon;
 mod profile;
+mod sectioned;
 mod solid;
 mod surface;
 mod swept;
@@ -331,6 +332,7 @@ impl<'f> Evaluator<'f> {
             "IFCSURFACECURVESWEPTAREASOLID" | "IFCFIXEDREFERENCESWEPTAREASOLID" => {
                 self.directrix_sweep(record)
             }
+            "IFCSECTIONEDSPINE" | "IFCSECTIONEDSOLIDHORIZONTAL" => self.sectioned(name, record),
             "IFCADVANCEDBREP" | "IFCADVANCEDBREPWITHVOIDS" => self.advanced_brep(name, record),
             "IFCTRIANGULATEDFACESET"
             | "IFCPOLYGONALFACESET"
@@ -339,6 +341,11 @@ impl<'f> Evaluator<'f> {
             | "IFCFACEBASEDSURFACEMODEL"
             | "IFCSHELLBASEDSURFACEMODEL" => self.faces(name, record),
             "IFCGEOMETRICSET" | "IFCGEOMETRICCURVESET" => self.geometric_set(name, record),
+            "IFCCARTESIANPOINT" => {
+                let p = self.point(name)?;
+                self.charge_shape()?;
+                Ok(Self::own(Shape::Polylines(vec![vec![p, p]])))
+            }
             "IFCBSPLINESURFACEWITHKNOTS" | "IFCRATIONALBSPLINESURFACEWITHKNOTS" => {
                 self.bspline_surface_item(name, record)
             }

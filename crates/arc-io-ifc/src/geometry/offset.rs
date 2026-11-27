@@ -12,7 +12,8 @@
 //!   the last), with the distance measured along the basis polyline; a non-zero `OffsetLongitudinal` is not applied
 //!   (reported as approximated). The entity is `IfcPointByDistanceExpression` of IFC4X3.
 //! - `IfcGeometricSet` and `IfcGeometricCurveSet`: the curves and points of `Elements` as one shape of
-//!   polylines, never a body. A point is a polyline of two equal points. A surface element is not
+//!   polylines, never a body. A point (here and as a representation item of its own) is a polyline of two
+//!   equal points. A surface element is not
 //!   evaluated and is reported with its type.
 
 use arc_base::math::{Point3, Vector3};

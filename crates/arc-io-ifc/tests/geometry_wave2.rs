@@ -468,6 +468,17 @@ fn geometric_sets_are_curves_and_points_not_bodies() {
         vec![arc_base::math::Point3::new(5.0, 5.0, 5.0); 2]
     );
     assert!(lines[2].len() > 8);
+    // A point as an item of its own.
+    let point = "#10=IFCCARTESIANPOINT((1.,2.,3.));\n";
+    let g = dumped(
+        "wave2",
+        "point-item",
+        &fixture_with(point, "#10", "Point", ""),
+    );
+    assert_eq!(
+        polylines(&g, 902),
+        vec![vec![arc_base::math::Point3::new(1.0, 2.0, 3.0); 2]]
+    );
     // A surface element is reported and the rest is kept.
     let mixed =
         "#10=IFCGEOMETRICSET((#11,#12));\n#11=IFCPLANE(#6);\n#12=IFCCARTESIANPOINT((1.,2.,3.));\n";
@@ -553,4 +564,53 @@ fn the_openings_flag_leaves_the_wall_solid() {
         1
     );
     let _ = (TAU, Step::new);
+}
+
+#[test]
+fn a_face_without_area_is_left_out_of_a_faceted_brep_and_reported() {
+    // A unit cube shell plus a face of three collinear points: the shell is evaluated without it.
+    let mut b = Step::new();
+    let c: Vec<u64> = (0..8)
+        .map(|k| {
+            b.point(
+                f64::from(k & 1),
+                f64::from((k >> 1) & 1),
+                f64::from((k >> 2) & 1),
+            )
+        })
+        .collect();
+    let mut faces = Vec::new();
+    for f in [
+        [0, 2, 3, 1],
+        [4, 5, 7, 6],
+        [0, 1, 5, 4],
+        [2, 6, 7, 3],
+        [0, 4, 6, 2],
+        [1, 3, 7, 5],
+    ] {
+        let points: Vec<String> = f.iter().map(|&k| format!("#{}", c[k])).collect();
+        let l = b.add(&format!("IFCPOLYLOOP(({}))", points.join(",")));
+        let o = b.add(&format!("IFCFACEOUTERBOUND(#{l},.T.)"));
+        faces.push(format!("#{}", b.add(&format!("IFCFACE((#{o}))"))));
+    }
+    let middle = b.point(0.5, 0.0, 0.0);
+    let flat = b.add(&format!("IFCPOLYLOOP((#{},#{middle},#{}))", c[0], c[1]));
+    let bound = b.add(&format!("IFCFACEOUTERBOUND(#{flat},.T.)"));
+    faces.push(format!("#{}", b.add(&format!("IFCFACE((#{bound}))"))));
+    let shell = b.add(&format!("IFCCLOSEDSHELL(({}))", faces.join(",")));
+    let lines = format!("#10=IFCFACETEDBREP(#{shell});\n{}", b.lines);
+    let g = dumped(
+        "wave2",
+        "brep-face-without-area",
+        &fixture_with(&lines, "#10", "Brep", ""),
+    );
+    close(measure(&g).0, 1.0, 1e-9, "the cube");
+    assert_eq!(
+        loss_count(&g, reasons::GEOMETRY_DEGENERATE.code, "IFCFACE"),
+        1
+    );
+    assert_eq!(
+        loss_count(&g, reasons::GEOMETRY_APPROXIMATED.code, "IFCFACETEDBREP"),
+        1
+    );
 }

@@ -1,4 +1,4 @@
-//! Boolean operations on closed triangle meshes (CORE-MESH-025): union, difference and
+//! Boolean operations on closed triangle meshes (CORE-MESH-013, CORE-MESH-014): union, difference and
 //! intersection of two solids given as closed, consistently oriented (outward counterclockwise)
 //! triangle meshes.
 //!
@@ -6,7 +6,7 @@
 //!
 //! 1. **Welding.** Both operands are welded into one point pool: points closer than the linear
 //!    tolerance are one point, triangles that collapse are dropped. An operand that is then not a
-//!    closed oriented 2-manifold of positive volume is refused (`mesh.boolean.not_closed`).
+//!    closed oriented 2-manifold of positive volume is refused (`mesh.boolean.invalid_input`).
 //! 2. **Intersection.** Every pair of triangles of the two operands whose boxes meet is
 //!    intersected. A distance to the other plane within the tolerance counts as zero, so a vertex
 //!    or an edge on a face is a contact, not a crossing. Triangles that lie in one plane
@@ -202,7 +202,7 @@ fn prepare(mesh: &TriMesh, pool: &mut Pool) -> Result<Side> {
         }
     }
     if tris.is_empty() || !closed || volume.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
-        return Err(Error::new(codes::BOOLEAN_NOT_CLOSED));
+        return Err(Error::new(codes::BOOLEAN_INVALID_INPUT));
     }
     Ok(Side { tris })
 }
@@ -784,7 +784,7 @@ fn winding(pool: &Pool, side: &Side, p: &Point3) -> f64 {
 /// # Errors
 ///
 /// `mesh.tolerance.invalid` for a tolerance that is not finite and positive;
-/// `mesh.boolean.not_closed` for an operand that is not a closed oriented 2-manifold of positive
+/// `mesh.boolean.invalid_input` for an operand that is not a closed oriented 2-manifold of positive
 /// volume; `mesh.boolean.failed` when the arrangement cannot be computed at the tolerance or the
 /// result is not closed; `mesh.limit.exceeded` beyond `limits` or the bound on triangle pairs.
 pub fn boolean(
@@ -992,6 +992,86 @@ mod tests {
     }
 
     #[test]
+    fn identical_operands_and_a_cylinder_prism_with_a_slot() {
+        let a = cuboid([0.0; 3], [2.0; 3]);
+        assert!((vol(&run(&a, &a, BooleanOp::Union)) - 8.0).abs() < 1e-9);
+        assert!((vol(&run(&a, &a, BooleanOp::Intersection)) - 8.0).abs() < 1e-9);
+        assert_eq!(run(&a, &a, BooleanOp::Difference).triangle_count(), 0);
+        // A 64-sided prism (radius 1, height 2) minus a slab |x| <= 0.25 through it: the polygon area
+        // inside the slab is computed by clipping the polygon, independently of the boolean.
+        let n: u32 = 64;
+        let ring = |z: f64| -> Vec<Point3> {
+            (0..n)
+                .map(|k| {
+                    let t = std::f64::consts::TAU * f64::from(k) / f64::from(n);
+                    Point3::new(t.cos(), t.sin(), z)
+                })
+                .collect()
+        };
+        let mut positions = ring(0.0);
+        positions.extend(ring(2.0));
+        positions.push(Point3::new(0.0, 0.0, 0.0));
+        positions.push(Point3::new(0.0, 0.0, 2.0));
+        let (bottom, top) = (2 * n, 2 * n + 1);
+        let mut triangles = Vec::new();
+        for k in 0..n {
+            let m = (k + 1) % n;
+            triangles.extend([
+                [bottom, m, k],
+                [top, n + k, n + m],
+                [k, m, n + m],
+                [k, n + m, n + k],
+            ]);
+        }
+        let prism = TriMeshBuilder::new(positions, triangles)
+            .build(&Limits::DEFAULT)
+            .unwrap();
+        let slab = cuboid([-0.25, -2.0, -1.0], [0.25, 2.0, 3.0]);
+        let result = run(&prism, &slab, BooleanOp::Difference);
+        let ring_area = |lo: f64, hi: f64| -> f64 {
+            // The area of the polygon with the vertices above between x = lo and x = hi.
+            let pts: Vec<(f64, f64)> = (0..n)
+                .map(|k| {
+                    let t = std::f64::consts::TAU * f64::from(k) / f64::from(n);
+                    (t.cos(), t.sin())
+                })
+                .collect();
+            let clip =
+                |poly: Vec<(f64, f64)>, keep: &dyn Fn(f64) -> bool, edge: f64| -> Vec<(f64, f64)> {
+                    let mut out = Vec::new();
+                    for i in 0..poly.len() {
+                        let (p, q) = (poly[i], poly[(i + 1) % poly.len()]);
+                        if keep(p.0) {
+                            out.push(p);
+                        }
+                        if keep(p.0) != keep(q.0) {
+                            let t = (edge - p.0) / (q.0 - p.0);
+                            out.push((edge, p.1 + t * (q.1 - p.1)));
+                        }
+                    }
+                    out
+                };
+            let poly = clip(pts, &|x| x >= lo, lo);
+            let poly = clip(poly, &|x| x <= hi, hi);
+            (0..poly.len())
+                .map(|i| {
+                    let (p, q) = (poly[i], poly[(i + 1) % poly.len()]);
+                    p.0 * q.1 - q.0 * p.1
+                })
+                .sum::<f64>()
+                / 2.0
+        };
+        let polygon = ring_area(-1.0, 1.0);
+        let expected = (polygon - ring_area(-0.25, 0.25)) * 2.0;
+        assert!(
+            (vol(&result) - expected).abs() < 1e-9,
+            "{} vs {expected}",
+            vol(&result)
+        );
+        assert!(manifold(&result));
+    }
+
+    #[test]
     fn open_operand_is_refused() {
         let a = cuboid([0.0; 3], [1.0; 3]);
         let open = TriMeshBuilder::new(
@@ -1001,7 +1081,7 @@ mod tests {
         .build(&Limits::DEFAULT)
         .unwrap();
         let error = boolean(&a, &open, BooleanOp::Union, &TOL, &Limits::DEFAULT).unwrap_err();
-        assert_eq!(error.code(), codes::BOOLEAN_NOT_CLOSED.code);
+        assert_eq!(error.code(), codes::BOOLEAN_INVALID_INPUT.code);
     }
 
     /// Cells of the 6x6x6 grid inside a box with integer corners.

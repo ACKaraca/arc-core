@@ -210,6 +210,45 @@ impl Surf {
         (fix(su), fix(sv))
     }
 
+    /// The largest parameter step along `axis` (0 for `u`, 1 for `v`) whose chord and diagonal stay
+    /// within `chord` of the surface; `None` where the surface is straight along the axis (or the
+    /// parameter is not a length of an arc the caller can step).
+    pub(crate) fn max_step(&self, chord: f64, axis: usize) -> Option<f64> {
+        // The diagonal of a cell is within the chord too: the step is the chord step over the square
+        // root of two.
+        let step = |radius: f64| {
+            std::f64::consts::FRAC_1_SQRT_2
+                * 2.0
+                * (1.0 - chord / radius.max(chord * 1.0001))
+                    .clamp(-1.0, 1.0)
+                    .acos()
+        };
+        match (&self.kind, axis) {
+            (Kind::Sphere { r }, _) => Some(step(*r)),
+            (Kind::Torus { big, small }, 0) => Some(step(big + small)),
+            (Kind::Torus { small, .. }, _) => Some(step(*small)),
+            (
+                Kind::Revolution {
+                    curve,
+                    origin,
+                    axis: a,
+                },
+                0,
+            ) => {
+                let widest = curve
+                    .iter()
+                    .map(|c| {
+                        let w = c - origin;
+                        (w - a * a.dot(&w)).norm()
+                    })
+                    .fold(0.0, f64::max);
+                Some(step(widest))
+            }
+            (Kind::Revolution { .. }, _) => Some(1.0),
+            _ => None,
+        }
+    }
+
     /// The `u` and `v` values of a lattice of interior points over the box, for the surfaces whose
     /// flat triangles would leave the surface by more than `chord`; `None` for a ruled surface,
     /// whose boundary points are enough.
@@ -219,37 +258,14 @@ impl Surf {
         lo: (f64, f64),
         hi: (f64, f64),
     ) -> Option<(Vec<f64>, Vec<f64>)> {
-        let step = |radius: f64| {
-            2.0 * (1.0 - chord / radius.max(chord * 1.0001))
-                .clamp(-1.0, 1.0)
-                .acos()
-        };
-        let (du, dv) = match &self.kind {
-            Kind::Sphere { r } => (step(*r), step(*r)),
-            Kind::Torus { big, small } => (step(big + small), step(*small)),
-            Kind::Revolution {
-                curve,
-                origin,
-                axis,
-            } => {
-                let widest = curve
-                    .iter()
-                    .map(|c| {
-                        let w = c - origin;
-                        (w - axis * axis.dot(&w)).norm()
-                    })
-                    .fold(0.0, f64::max);
-                (step(widest), 1.0)
-            }
-            Kind::Spline(s) => {
-                let (us, vs, _) = s.grid(chord);
-                let keep = |values: Vec<f64>, a: f64, b: f64| -> Vec<f64> {
-                    values.into_iter().filter(|x| *x > a && *x < b).collect()
-                };
-                return Some((keep(us, lo.0, hi.0), keep(vs, lo.1, hi.1)));
-            }
-            _ => return None,
-        };
+        if let Kind::Spline(s) = &self.kind {
+            let (us, vs, _) = s.grid(chord);
+            let keep = |values: Vec<f64>, a: f64, b: f64| -> Vec<f64> {
+                values.into_iter().filter(|x| *x > a && *x < b).collect()
+            };
+            return Some((keep(us, lo.0, hi.0), keep(vs, lo.1, hi.1)));
+        }
+        let (du, dv) = (self.max_step(chord, 0)?, self.max_step(chord, 1)?);
         let lattice = |a: f64, b: f64, d: f64| -> Vec<f64> {
             if d.is_nan() || d <= 1e-4 {
                 return Vec::new();
@@ -266,6 +282,15 @@ impl Surf {
                 .collect()
         };
         Some((lattice(lo.0, hi.0, du), lattice(lo.1, hi.1, dv)))
+    }
+
+    /// Whether the row `v` is degenerate (a pole): every `u` there is one point.
+    pub(crate) fn is_pole(&self, v: f64) -> bool {
+        match &self.kind {
+            Kind::Sphere { .. } => v.abs() >= PI / 2.0 - 1e-9,
+            Kind::Cone { r, tan } => tan.abs() > 1e-12 && (v + r / tan).abs() < 1e-9,
+            _ => false,
+        }
     }
 
     /// The `v` of the degenerate row (a pole) toward which `v` increases when `up`, if any.

@@ -145,10 +145,10 @@ pub mod codes {
         message_id: "mesh-lod-invalid",
     };
     /// An operand of a boolean operation is not a closed, consistently oriented mesh of positive volume.
-    pub const BOOLEAN_NOT_CLOSED: ErrorCode = ErrorCode {
-        code: "mesh.boolean.not_closed",
+    pub const BOOLEAN_INVALID_INPUT: ErrorCode = ErrorCode {
+        code: "mesh.boolean.invalid_input",
         category: Category::InvalidInput,
-        message_id: "mesh-boolean-not-closed",
+        message_id: "mesh-boolean-invalid-input",
     };
     /// The arrangement of a boolean operation cannot be computed at the tolerance, or its result is not closed.
     pub const BOOLEAN_FAILED: ErrorCode = ErrorCode {
@@ -182,7 +182,7 @@ pub mod codes {
         REPAIR_INVALID,
         SIMPLIFY_INVALID,
         LOD_INVALID,
-        BOOLEAN_NOT_CLOSED,
+        BOOLEAN_INVALID_INPUT,
         BOOLEAN_FAILED,
     ];
 }

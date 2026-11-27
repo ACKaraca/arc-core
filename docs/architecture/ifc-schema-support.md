@@ -155,12 +155,20 @@ the order; `*` marks IFC4X3 entities.
 | Solids and sets | `IfcFacetedBrepWithVoids`, `IfcTriangulatedIrregularNetwork`*, `IfcGeometricSet`, `IfcGeometricCurveSet`, 2D transformation operators | Inner shells, flags, members | 1 |
 | Placement | `IfcGridPlacement`, `IfcAxis1Placement`, context world coordinate systems and true north | Composition | 1 |
 | Swept solids | Tapered extrusion, revolved area solid (tapered), swept disk solid (polygonal), surface curve, fixed reference and directrix derived* swept area solids | Sweeps with frames along the directrix | 2 |
-| CSG | `IfcBlock`, `IfcSphere`, `IfcRightCircularCone`, `IfcRightCircularCylinder`, `IfcRectangularPyramid`, `IfcCsgSolid`, general `IfcBooleanResult` | Primitives tessellated; general booleans by the route chosen under open decisions | 2 |
+| CSG | `IfcBlock`, `IfcSphere`, `IfcRightCircularCone`, `IfcRightCircularCylinder`, `IfcRectangularPyramid`, `IfcCsgSolid`, general `IfcBooleanResult` | Primitives tessellated; general booleans and openings by the first-party mesh boolean of `arc-mesh` | 2 |
 | Curved B-rep | `IfcAdvancedBrep` (with voids), `IfcAdvancedFace`, `IfcFaceSurface`, `IfcEdgeCurve`, `IfcOrientedEdge`, `IfcEdgeLoop`, `IfcVertexPoint` | Trimmed-surface tessellation in parameter space, planar faces first | 3 |
 | Surfaces | `IfcPlane`, cylindrical, spherical and toroidal surfaces, surfaces of linear extrusion and revolution, B-spline surfaces (rational), rectangular trimmed and curve bounded surfaces, `IfcSectionedSurface`* | Evaluated in parameter space and tessellated within the tolerance | 3 |
 | Curves on surfaces | `IfcPcurve`, `IfcSurfaceCurve`, `IfcIntersectionCurve`, `IfcSeamCurve`, boundary curves | Through surface evaluation | 3 |
 | Alignment | Alignment entities*, `IfcCurveSegment`*, clothoid, sine, cosine and polynomial spirals*, `IfcGradientCurve`*, `IfcSegmentedReferenceCurve`*, `IfcOffsetCurveByDistances`*, `IfcLinearPlacement`*, `IfcAxis2PlacementLinear`*, `IfcPointByDistanceExpression`*, `IfcSectionedSolidHorizontal`* | Numeric evaluation with a stated error; preserved until then | 4 |
 | Not meshed | Bounding box (optional box mesh), annotation fill areas, text literals, hatching and tile styles, light sources, styled items | Exposed through typed views of annotation and styles | 1–3 |
+
+Waves 2 and 3 are implemented as far as the table of
+[arc-io](../crates/arc-io.md#coverage-of-the-representation-items) states: general booleans and openings of any
+body, the CSG primitives, offset curves (including `IfcOffsetCurveByDistances`), geometric sets, sweeps with
+parameters, tapered revolutions, B-spline curves and surfaces, advanced B-reps on planes, quadrics, swept and
+B-spline surfaces, and sectioned solids (including `IfcSectionedSolidHorizontal`). Not yet evaluated: rectangular
+trimmed and curve bounded surfaces, surface curves as items, `IfcBoxedHalfSpace`, a polygonal boundary that clips
+the solid, and the alignment entities of wave 4.
 
 Every result states the chordal error it was tessellated with; tolerances come from
 `arc_base::Tolerance`. Geometry evaluation of `arc-io-ifc` depends on `arc-geom` (layer 1).

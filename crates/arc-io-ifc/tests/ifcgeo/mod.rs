@@ -64,6 +64,8 @@ pub fn representation_of(lines: &str) -> &'static str {
         | "IFCREVOLVEDAREASOLIDTAPERED"
         | "IFCEXTRUDEDAREASOLIDTAPERED" => "AdvancedSweptSolid",
         "IFCADVANCEDBREP" | "IFCADVANCEDBREPWITHVOIDS" => "AdvancedBrep",
+        "IFCSECTIONEDSPINE" => "SectionedSpine",
+        "IFCSECTIONEDSOLIDHORIZONTAL" => "AdvancedSweptSolid",
         "IFCFACETEDBREP" => "Brep",
         "IFCGEOMETRICCURVESET" => "GeometricCurveSet",
         "IFCGEOMETRICSET" => "GeometricSet",

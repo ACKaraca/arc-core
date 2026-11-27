@@ -21,7 +21,8 @@
 //! loops are given counterclockwise seen from outside. A face that is not planar within the linear
 //! tolerance is triangulated in the projection onto its mean plane and reported as approximated.
 //! An item with any face that cannot be evaluated is skipped as a whole, so no shell is emitted with
-//! a face missing.
+//! a face missing; a face whose outer loop has no area (collinear points) is the exception: it adds
+//! nothing to a mesh, so it is left out and reported, and the item is reported as approximated.
 
 use crate::schema::access::known;
 use std::collections::BTreeMap;
@@ -89,7 +90,11 @@ impl Welder {
         let a = self.vertex(budget, t[0])?;
         let b = self.vertex(budget, t[1])?;
         let c = self.vertex(budget, t[2])?;
-        self.triangles.push([a, b, c]);
+        // A triangle with two welded corners (a face of a pole) has no area: its two other edges
+        // cancel, so leaving it out keeps the mesh closed.
+        if a != b && b != c && a != c {
+            self.triangles.push([a, b, c]);
+        }
         Ok(())
     }
 
@@ -380,9 +385,37 @@ impl Evaluator<'_> {
         let Some(outer_loop) = outer_loop else {
             return Err(skip(reasons::GEOMETRY_DEGENERATE, kind));
         };
+        // A face whose outer loop has no area (collinear points) adds nothing to a mesh: it is left
+        // out and reported, and the item is reported as approximated, instead of skipping the shell.
+        if self.sliver(&outer_loop) {
+            self.log.add(
+                reasons::GEOMETRY_DEGENERATE,
+                kind,
+                Some(Source::Decimal(face)),
+                1,
+            );
+            *deviation = deviation.max(2.0 * self.tol.linear);
+            return Ok(());
+        }
         let mut all = vec![outer_loop];
         all.extend(ordered);
         self.emit_planar(&all, welder, deviation)
+    }
+
+    /// Whether the loop has no area within the linear tolerance: its Newell area is at most the
+    /// tolerance times its largest extent.
+    fn sliver(&self, points: &[Point3]) -> bool {
+        let Some(first) = points.first() else {
+            return true;
+        };
+        let mut area = Vector3::zeros();
+        let mut extent = 0.0_f64;
+        for (k, a) in points.iter().enumerate() {
+            let b = points[(k + 1) % points.len()];
+            area += (a - first).cross(&(b - first));
+            extent = extent.max((a - first).norm());
+        }
+        area.norm() / 2.0 <= self.tol.linear * extent
     }
 
     /// The points of an `IfcPolyLoop`, with three or more and at most [`MAX_LOOP_VERTICES`]. Repeats

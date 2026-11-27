@@ -44,7 +44,7 @@ use super::surface::{Kind, Surf, unwrap_near};
 use super::{Evaluator, MAX_LOOP_VERTICES, Piece, Shape, Step};
 
 /// The most lattice points of one face.
-const MAX_LATTICE: usize = 40_000;
+const MAX_LATTICE: usize = 250_000;
 
 /// The samples of a curve: parameter and point, and the period of the parameter if the curve is closed.
 struct Sampled {
@@ -573,16 +573,13 @@ struct Ring {
 }
 
 impl Evaluator<'_> {
-    /// Tessellates a face on a curved surface, as the module documentation describes.
-    #[allow(clippy::too_many_lines, reason = "one pass from loops to triangles")]
-    fn curved_face(
+    /// The loops of a face in parameter space (unwrapped along each loop, poles expanded) with the
+    /// number of periods each winds in `u` and in `v`.
+    fn parametrize(
         &mut self,
         surf: &Surf,
         loops: &[Vec<Point3>],
-        sense: bool,
-        welder: &mut Welder,
-    ) -> Step<()> {
-        let kind = "IFCADVANCEDFACE";
+    ) -> Step<Vec<(Vec<Ring>, [i32; 2])>> {
         let (pu, pv) = surf.periods();
         let mut rings: Vec<(Vec<Ring>, [i32; 2])> = Vec::new();
         let mut reference: Option<(f64, f64)> = None;
@@ -600,6 +597,7 @@ impl Evaluator<'_> {
             }
             let first = ring[0].uv;
             reference = reference.or(Some((first[0], first[1])));
+            let ring = expand_poles(surf, ring);
             let (cu, cv) = surf.uv(&points[0], hint);
             let winding = |closing: f64, start: f64, period: Option<f64>| -> i32 {
                 period.map_or(0, |p| {
@@ -611,6 +609,21 @@ impl Evaluator<'_> {
             let w = [winding(cu, first[0], pu), winding(cv, first[1], pv)];
             rings.push((ring, w));
         }
+        Ok(rings)
+    }
+
+    /// Tessellates a face on a curved surface, as the module documentation describes.
+    #[allow(clippy::too_many_lines, reason = "one pass from loops to triangles")]
+    fn curved_face(
+        &mut self,
+        surf: &Surf,
+        loops: &[Vec<Point3>],
+        sense: bool,
+        welder: &mut Welder,
+    ) -> Step<()> {
+        let kind = "IFCADVANCEDFACE";
+        let (pu, pv) = surf.periods();
+        let rings = self.parametrize(surf, loops)?;
         // The outer ring is first; the others are shifted by periods to lie near it.
         let winding_rings: Vec<usize> = rings
             .iter()
@@ -695,7 +708,16 @@ impl Evaluator<'_> {
                     };
                     let (a, z) = (ring[0].uv, ring[ring.len() - 1].uv);
                     let tip = surf.point(a[0], pole);
+                    let side = seam(surf, self.tol.tessellation_chord, other, a, [a[0], pole]);
                     let mut polygon = ring;
+                    // Up the right side (a copy of the left side's points one period on), across the
+                    // pole, and down the left side.
+                    for (uv, at) in &side {
+                        polygon.push(Ring {
+                            uv: [uv[0] + period, uv[1]],
+                            at: Some(*at),
+                        });
+                    }
                     polygon.push(Ring {
                         uv: [z[0], pole],
                         at: Some(tip),
@@ -704,6 +726,12 @@ impl Evaluator<'_> {
                         uv: [a[0], pole],
                         at: Some(tip),
                     });
+                    for (uv, at) in side.iter().rev() {
+                        polygon.push(Ring {
+                            uv: *uv,
+                            at: Some(*at),
+                        });
+                    }
                     polygons.push(polygon);
                 }
                 2 => {
@@ -713,9 +741,31 @@ impl Evaluator<'_> {
                     let shift =
                         unwrap_near(high[0].uv[axis], low[0].uv[axis], period) - high[0].uv[axis];
                     high.iter_mut().for_each(|r| r.uv[axis] += shift);
-                    high.reverse();
+                    let side = seam(
+                        surf,
+                        self.tol.tessellation_chord,
+                        other,
+                        low[0].uv,
+                        high[0].uv,
+                    );
                     let mut polygon = low;
+                    for (uv, at) in &side {
+                        polygon.push(Ring {
+                            uv: [
+                                uv[0] + if axis == 0 { period } else { 0.0 },
+                                uv[1] + if axis == 1 { period } else { 0.0 },
+                            ],
+                            at: Some(*at),
+                        });
+                    }
+                    high.reverse();
                     polygon.extend(high);
+                    for (uv, at) in side.iter().rev() {
+                        polygon.push(Ring {
+                            uv: *uv,
+                            at: Some(*at),
+                        });
+                    }
                     polygons.push(polygon);
                 }
                 _ => return Err(skip(reasons::GEOMETRY_NOT_EVALUATED, kind)),
@@ -781,6 +831,64 @@ impl Evaluator<'_> {
         }
         Ok(())
     }
+}
+
+/// The ring with each vertex at a pole replaced by the two ends of the degenerate edge there: at the
+/// parameter `u` of the vertex before it and of the vertex after it.
+fn expand_poles(surf: &Surf, ring: Vec<Ring>) -> Vec<Ring> {
+    let n = ring.len();
+    let period = surf.periods().0;
+    let mut out = Vec::with_capacity(n);
+    for (k, r) in ring.iter().enumerate() {
+        if !surf.is_pole(r.uv[1]) {
+            out.push(*r);
+            continue;
+        }
+        let prev = ring[(k + n - 1) % n].uv[0];
+        let next = ring[(k + 1) % n].uv[0];
+        let next = period.map_or(next, |p| unwrap_near(next, prev, p));
+        out.push(Ring {
+            uv: [prev, r.uv[1]],
+            at: r.at,
+        });
+        out.push(Ring {
+            uv: [next, r.uv[1]],
+            at: r.at,
+        });
+    }
+    out
+}
+
+/// The interior points of the seam from `from` to `to` (parameters), spaced by the largest step along
+/// `other` that keeps the chord, with their points on the surface.
+fn seam(
+    surf: &Surf,
+    chord: f64,
+    other: usize,
+    from: [f64; 2],
+    to: [f64; 2],
+) -> Vec<([f64; 2], Point3)> {
+    let span = (to[other] - from[other]).abs();
+    let count = surf
+        .max_step(chord, other)
+        .filter(|d| *d > 1e-4)
+        .map_or(1.0, |d| (span / d).ceil().clamp(1.0, 4096.0));
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "bounded above"
+    )]
+    let count = count as usize;
+    (1..count)
+        .map(|k| {
+            let f = (k as f64) / (count as f64);
+            let uv = [
+                from[0] + (to[0] - from[0]) * f,
+                from[1] + (to[1] - from[1]) * f,
+            ];
+            (uv, surf.point(uv[0], uv[1]))
+        })
+        .collect()
 }
 
 fn windings_sign(w: &[i32; 2], axis: usize) -> i32 {

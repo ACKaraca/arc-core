@@ -866,13 +866,25 @@ fn openings_that_cannot_be_subtracted_are_reported() {
         )
     };
     let brep = opening(
-        &format!("#50=IFCFACETEDBREP(#300);\n{}", cube_shell(300, 0.0, 1.0, false)),
+        &format!(
+            "#50=IFCFACETEDBREP(#300);\n{}",
+            cube_shell(300, 0.0, 1.0, false)
+        ),
         "Brep",
     );
     let geometry = evaluate(&fixture(&brep));
-    close(measure_of(&geometry, 902).0, 2.4 - 0.1, 1e-9, "the brep opening is cut");
+    close(
+        measure_of(&geometry, 902).0,
+        2.4 - 0.1,
+        1e-9,
+        "the brep opening is cut",
+    );
     assert_eq!(
-        loss_count(&geometry, reasons::OPENING_NOT_SUBTRACTED.code, "IFCRELVOIDSELEMENT"),
+        loss_count(
+            &geometry,
+            reasons::OPENING_NOT_SUBTRACTED.code,
+            "IFCRELVOIDSELEMENT"
+        ),
         0
     );
     // An opening whose body is a polyline is not a solid: the wall stays solid and it is reported.
@@ -881,9 +893,18 @@ fn openings_that_cannot_be_subtracted_are_reported() {
         "Curve3D",
     );
     let geometry = evaluate(&fixture(&line));
-    close(measure_of(&geometry, 902).0, 2.4, 1e-9, "the wall stays solid");
+    close(
+        measure_of(&geometry, 902).0,
+        2.4,
+        1e-9,
+        "the wall stays solid",
+    );
     assert_eq!(
-        loss_count(&geometry, reasons::OPENING_NOT_SUBTRACTED.code, "IFCRELVOIDSELEMENT"),
+        loss_count(
+            &geometry,
+            reasons::OPENING_NOT_SUBTRACTED.code,
+            "IFCRELVOIDSELEMENT"
+        ),
         1
     );
     // Without the subtraction every opening is reported.
