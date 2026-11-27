@@ -1315,6 +1315,80 @@ assignments, the property sets, the quantity sets and a loss report of the views
 - A relationship member of the wrong kind drops that member only; the other members of the list are kept.
 - Entity types the views do not read stay generic instances and are not part of the views.
 
+### Import views
+
+`TypedViews::import` (`ImportViews`) is the neutral model an importer maps to its own: it holds no
+product mapping. It is built from the schema tables by attribute name, so IFC2X3, IFC4 and IFC4X3 share
+one code path; without the tables of the file's schema (`IfcFile::tables` is `None`) it is empty and
+the coverage lists every instance as not read. It shares the budget, the cancellation checks and the
+inverse index (`IfcFile::inverse_index`) with the views above.
+
+- Objects: `ImportViews::objects` holds an `ObjectView` for every `IfcObjectDefinition` that is not a
+  group, in ascending instance name (`ImportViews::object(instance)`), with `ObjectKind` product,
+  type or other. An object has `GlobalId`, `Name`, `Description`, `ObjectType` (`ElementType` of a type
+  object), `Tag`, `PredefinedType` and the effective predefined type: the type object's value wins, as
+  the type defines it, unless the type says `NOTDEFINED` (or `USERDEFINED` without an `ElementType`), in
+  which case the occurrence's own value stays; `user_defined_type` names the kind of an effective
+  `USERDEFINED`. The type object is the `IfcRelDefinesByType` target, the container the
+  `IfcRelContainedInSpatialStructure` structure, `aggregate_parent` and `parts` come from
+  `IfcRelAggregates` for every object and `nest_parent` and `nested` from `IfcRelNests`. Spatial
+  elements are the `IfcSpatialElement` (IFC2X3: `IfcSpatialStructureElement`) subtypes of the schema, so
+  the parts of the IFC4X3 facilities are in the spatial tree.
+- Placements: `placement` is the world transform of `ObjectPlacement` (row-major 4x4, translation in
+  meters). An `IfcLocalPlacement` chain is walked iteratively, bounded by the nesting limit, with every
+  result kept for the chains that share a parent. A chain that meets `IfcGridPlacement` or
+  `IfcLinearPlacement` stops there with `PlacementState::NotResolved` naming the entity (reported as
+  `io.ifc.not_mapped`); a repeated placement or a chain deeper than the limit is `Cut`
+  (`io.ifc.cycle_cut`). Storeys, buildings and sites give `elevation` in meters; a site gives
+  `latitude_longitude` in decimal degrees.
+- Sets: property and quantity sets are merged with those of the type object by set name and then by
+  property name; the occurrence's value wins (`Origin::Occurrence`, `Origin::Type` for what is
+  inherited). The sets of a type object are those of `HasPropertySets`. A set is built once and its
+  properties are shared.
+- Units: `UnitSystem` holds the project's unit assignment (`IfcSIUnit` with prefix, `IfcConversionBasedUnit`
+  with or without offset, `IfcDerivedUnit` as the product of its elements' factors to the power of their
+  exponents, `IfcMonetaryUnit`) with the factor of each to the SI base unit of its type (meter, kilogram,
+  second, radian); `GRAM` is 0.001. An SI prefix scales the unit once. A conversion that refers to itself,
+  or whose factor is not positive, has no factor. `length_to_meters` is applied to every length the views
+  report; without a length unit meters are assumed (`io.ifc.unit_assumed`). A property or quantity value
+  stays as the file states it; `ResolvedProperty::scale_to_si` and `ResolvedQuantity::si_value` carry the
+  conversion with the unit that applies, the explicit one or else the project's unit of the measure's
+  type (`IFCLENGTHMEASURE` is `LENGTHUNIT`). A unit with an offset, such as a temperature scale, has
+  no factor for values.
+- Materials: `IfcRelAssociatesMaterial` gives `IfcMaterial`, `IfcMaterialList`, a layer set with its
+  usage (direction, sense, offset, reference extent) and the layers' thicknesses in meters, a profile
+  set with its usage, or a constituent set. An object without a material takes the type's
+  (`Origin::Type`). A material's surface styles come from its `IfcMaterialDefinitionRepresentation`.
+- Styles: the `IfcStyledItem`s of a product's representation items, followed through `IfcMappedItem` to
+  three levels, give surface style colors and transparency. Styles on deeper items stay unread.
+- Classification: `IfcRelAssociatesClassification` gives references with identification (`ItemReference`
+  in IFC2X3), name, location and the system found through `ReferencedSource`. A reference of the type is
+  inherited unless the occurrence has one of the same system.
+- Openings and fills: `IfcRelVoidsElement` and `IfcRelFillsElement` give `openings` and `voids` and
+  `filled_by` and `fills`.
+- Connections and boundaries: `IfcRelConnectsElements` and its subtypes give `Connection` entries with
+  the connection types of a path connection and the realizing elements; `IfcRelSpaceBoundary` and its
+  first and second level subtypes give `SpaceBoundary` entries with level, parent and corresponding
+  boundary. Objects refer to them by index.
+- Groups: `IfcRelAssignsToGroup` gives `GroupView` entries (groups, systems and zones) with their
+  members, and `groups` on each member.
+- Georeferencing: `IfcMapConversion` and its `IfcProjectedCRS` (IFC4 and IFC4X3); in IFC2X3, or when no
+  map conversion exists, the `ePSet_MapConversion` and `ePSet_ProjectedCRS` property sets of the project
+  or a site. Values are in the units of the map, `map_unit_to_meters` converts them.
+- Owner history: `OwnerHistory` of each object, with state, change action, dates and the names of the
+  user, the organization and the application.
+- Coverage: `ImportViews::coverage` lists every entity class of the file (a complex instance under its
+  part names joined by `+`) with the instances read completely (`interpreted`), read in part
+  (`partial`, with a loss item for what was unusable) and not read (`preserved`: kept in the file
+  model, written back unchanged by `IfcFile::write_step`). The three add up to `total`. Geometry items
+  are read by `IfcFile::geometry`, not by these views, and so count as `preserved` here.
+- Bounds: every list is deduplicated, every chain (placements, units, classification sources, mapped
+  representations) is bounded and cycle-checked, and the objects' copies of shared sets, materials and
+  styles are charged against `memory_bytes`. The inverse index is charged against the same budget.
+
+The oracle comparison of these views with IfcOpenShell is `tools/ifc-oracle/views_compare.py` (see
+`tools/ifc-oracle/README.md`).
+
 ### Loss reports
 
 `read` returns a loss report of the read; `typed_views` returns a loss report of the views. Both are

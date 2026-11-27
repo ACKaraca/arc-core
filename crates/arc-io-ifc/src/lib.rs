@@ -55,7 +55,12 @@ pub use schema::{
     Conformance, Finding, InverseIndex, Referrer, RuleCount, RuleScope, Typed, WhereCount,
 };
 pub use views::{
-    Nominal, Number, Property, PropertySet, PropertyValue, Quantity, QuantityKind, QuantitySet,
-    RootedEntity, SpatialNode, TypeAssignment, TypedViews, Value,
+    ClassCoverage, ClassificationRef, ClassificationSystem, Connection, ConstituentView, CrsView,
+    GeoReference, GeoSource, GroupView, ImportViews, LayerUsage, LayerView, MaterialAssociation,
+    MaterialRef, Matrix, Nominal, Number, ObjectKind, ObjectView, Origin, OwnerHistory,
+    PlacementState, PlacementView, ProfileView, Property, PropertySet, PropertyValue, Quantity,
+    QuantityKind, QuantitySet, ResolvedProperty, ResolvedPropertySet, ResolvedQuantity,
+    ResolvedQuantitySet, RootedEntity, SpaceBoundary, SpatialNode, StyleView, TypeAssignment,
+    TypedViews, UnitKind, UnitSystem, UnitView, Value,
 };
 pub use write::{WriteModel, WriteOptions, WriteOutput, global_id, ifc_zip, write};
