@@ -263,11 +263,36 @@ fn output_is_deterministic_and_has_the_header() {
     assert!(!first.report.has_loss());
 }
 
+/// Renaming one wall of a written file changes its line only; the oracle validates the result.
+#[test]
+fn an_edited_house_changes_one_line() {
+    let output = write(&house(), &options()).unwrap();
+    let file = read_back(&output.bytes);
+    let mut edited = file.clone();
+    let wall = edited.instances_of("IFCWALL").next().unwrap().name;
+    edited
+        .set_attribute(wall, 0, 2, Parameter::Text("Wall renamed \u{e7}".into()))
+        .unwrap();
+    let after = edited.write_step(&Limits::CONSTRAINED).unwrap();
+    support::dump("house-edited.ifc", &after);
+    let before = String::from_utf8(output.bytes.clone()).unwrap();
+    let after = String::from_utf8(after).unwrap();
+    let changed: Vec<_> = before
+        .lines()
+        .zip(after.lines())
+        .filter(|(a, b)| a != b)
+        .collect();
+    assert_eq!(before.lines().count(), after.lines().count());
+    assert_eq!(changed.len(), 1);
+    assert!(changed[0].1.contains("'Wall renamed \\X2\\00E7\\X0\\'"));
+}
+
 #[test]
 fn house_reads_back_with_structure_relations_and_volumes() {
     let output = write(&house(), &options()).unwrap();
     support::dump("house.ifc", &output.bytes);
     let file = read_back(&output.bytes);
+
     let views = file
         .typed_views(&Limits::CONSTRAINED, &Cancel::new())
         .unwrap();

@@ -7,6 +7,7 @@
 //! `memory_bytes`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 
 use arc_base::{ErrorCode, Limits, Result};
 
@@ -28,8 +29,8 @@ pub(crate) const PARAMETER_BYTES: u64 = 48;
 /// Estimated bytes of one record, besides its type name.
 pub(crate) const RECORD_BYTES: u64 = 64;
 
-/// Estimated bytes of one instance: its name, its index entry and its record list.
-pub(crate) const INSTANCE_BYTES: u64 = 96;
+/// Estimated bytes of one instance: its name, its index entry, its record list and its byte span.
+pub(crate) const INSTANCE_BYTES: u64 = 120;
 
 /// What the reader saw that is not an error but is reported in the loss report.
 #[derive(Debug, Default)]
@@ -48,10 +49,15 @@ pub(crate) struct Notes {
     pub(crate) sections: BTreeMap<&'static str, u64>,
 }
 
-/// The header records and the instances of a physical file.
+/// The header records and the instances of a physical file, each with the byte span of its
+/// source text (from the first byte of its keyword or `#` to its `;`, both included).
 pub(crate) struct Parsed {
     pub(crate) header: Vec<Record>,
+    pub(crate) header_spans: Vec<Range<usize>>,
     pub(crate) instances: Vec<Instance>,
+    pub(crate) spans: Vec<Range<usize>>,
+    /// The offset of the `ENDSEC` that closes the last data section.
+    pub(crate) data_end: usize,
     pub(crate) estimated_bytes: u64,
     pub(crate) notes: Notes,
 }
@@ -71,12 +77,14 @@ pub(crate) fn parse(data: &[u8], limits: &Limits, control: &mut Control<'_>) -> 
         used: 0,
         names: BTreeSet::new(),
         notes: Notes::default(),
+        data_end: 0,
     };
     parser.byte_order_mark();
     parser.keyword("ISO-10303-21")?;
     parser.expect(b';')?;
-    let header = parser.header()?;
+    let (header, header_spans) = parser.header()?;
     let mut instances = Vec::new();
+    let mut spans = Vec::new();
     let mut data_sections = 0u64;
     loop {
         parser.skip_space()?;
@@ -89,7 +97,7 @@ pub(crate) fn parse(data: &[u8], limits: &Limits, control: &mut Control<'_>) -> 
             .map_err(|_| at_offset(codes::IFC_STRUCTURE_INVALID, to_u64(at)))?;
         match word {
             "DATA" => {
-                parser.data_section(&mut instances)?;
+                parser.data_section(&mut instances, &mut spans)?;
                 data_sections = data_sections.saturating_add(1);
             }
             "ANCHOR" => parser.skipped_section("ANCHOR")?,
@@ -106,7 +114,10 @@ pub(crate) fn parse(data: &[u8], limits: &Limits, control: &mut Control<'_>) -> 
     parser.trailer();
     Ok(Parsed {
         header,
+        header_spans,
         instances,
+        spans,
+        data_end: parser.data_end,
         estimated_bytes: parser.used,
         notes: parser.notes,
     })
@@ -127,6 +138,8 @@ struct Parser<'a, 'c, 'p> {
     /// The instance names read so far, across all data sections.
     names: BTreeSet<u64>,
     notes: Notes,
+    /// The offset of the `ENDSEC` of the last data section read so far.
+    data_end: usize,
 }
 
 impl<'a> Parser<'a, '_, '_> {
@@ -251,10 +264,11 @@ impl<'a> Parser<'a, '_, '_> {
     }
 
     /// The header section: records up to `ENDSEC;`.
-    fn header(&mut self) -> Result<Vec<Record>> {
+    fn header(&mut self) -> Result<(Vec<Record>, Vec<Range<usize>>)> {
         self.keyword("HEADER")?;
         self.expect(b';')?;
         let mut records = Vec::new();
+        let mut spans = Vec::new();
         loop {
             self.skip_space()?;
             if self.peek().is_none() {
@@ -264,25 +278,30 @@ impl<'a> Parser<'a, '_, '_> {
             let word = self.ident()?;
             if word == "ENDSEC" {
                 self.expect(b';')?;
-                return Ok(records);
+                return Ok((records, spans));
             }
             self.pos = start;
             check_count(records.len(), self.limits.array_length, "array_length")?;
             records.push(self.record()?);
             self.expect(b';')?;
+            spans.push(start..self.pos);
         }
     }
 
     /// A data section after its keyword: optional parameters, `;`, instances up to `ENDSEC;`.
     /// Instances of every data section go into one list and one set of names.
-    fn data_section(&mut self, out: &mut Vec<Instance>) -> Result<()> {
+    fn data_section(
+        &mut self,
+        out: &mut Vec<Instance>,
+        spans: &mut Vec<Range<usize>>,
+    ) -> Result<()> {
         self.skip_space()?;
         if self.peek() == Some(b'(') {
             self.pos += 1;
             self.items(1)?;
         }
         self.expect(b';')?;
-        self.instances(out)
+        self.instances(out, spans)
     }
 
     /// A section that is not read (`ANCHOR`, `REFERENCE`, `SIGNATURE`): its statements are parsed,
@@ -321,18 +340,20 @@ impl<'a> Parser<'a, '_, '_> {
     }
 
     /// The instances of a data section, up to `ENDSEC;`.
-    fn instances(&mut self, out: &mut Vec<Instance>) -> Result<()> {
+    fn instances(&mut self, out: &mut Vec<Instance>, spans: &mut Vec<Range<usize>>) -> Result<()> {
         loop {
             self.skip_space()?;
             match self.peek() {
                 None => return Err(self.fail(codes::IFC_TRUNCATED)),
                 Some(b'#') => {
+                    let start = self.pos;
                     let instance = self.instance()?;
                     if !self.names.insert(instance.name) {
                         return Err(self.fail(codes::IFC_INSTANCE_DUPLICATE));
                     }
                     check_count(out.len(), self.limits.record_count, "record_count")?;
                     out.push(instance);
+                    spans.push(start..self.pos);
                     self.control
                         .step(to_u64(self.pos), to_u64(self.data.len()))?;
                 }
@@ -340,6 +361,7 @@ impl<'a> Parser<'a, '_, '_> {
                     let start = self.pos;
                     let word = self.ident()?;
                     if word == "ENDSEC" {
+                        self.data_end = start;
                         self.expect(b';')?;
                         return Ok(());
                     }

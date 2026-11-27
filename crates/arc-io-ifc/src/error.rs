@@ -100,6 +100,30 @@ pub mod codes {
         message_id: "io-ifc-write-id-duplicate",
     };
 
+    /// An edit names an instance that is not in the file, or an attribute position that its
+    /// record does not have.
+    pub const IFC_EDIT_TARGET_MISSING: ErrorCode = ErrorCode {
+        code: "io.ifc.edit_target_missing",
+        category: Category::NotFound,
+        message_id: "io-ifc-edit-target-missing",
+    };
+    /// An edit would leave a reference to an instance that is not in the file: a new value refers
+    /// to a missing instance, or the instance to remove is still referred to.
+    pub const IFC_EDIT_REFERENCE_DANGLING: ErrorCode = ErrorCode {
+        code: "io.ifc.edit_reference_dangling",
+        category: Category::Conflict,
+        message_id: "io-ifc-edit-reference-dangling",
+    };
+    /// An edited value cannot be written to a physical file: an instance without records, a
+    /// number that is not finite, a NUL in a text, a malformed type name, enumeration or binary,
+    /// nesting deeper than the writer follows, no instance name left, or a header without
+    /// `FILE_DESCRIPTION`, `FILE_NAME` and `FILE_SCHEMA` in that order.
+    pub const IFC_EDIT_VALUE_INVALID: ErrorCode = ErrorCode {
+        code: "io.ifc.edit_value_invalid",
+        category: Category::InvalidInput,
+        message_id: "io-ifc-edit-value-invalid",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         IFC_TRUNCATED,
@@ -113,6 +137,9 @@ pub mod codes {
         IFC_WRITE_VALUE_INVALID,
         IFC_WRITE_REFERENCE_INVALID,
         IFC_WRITE_ID_DUPLICATE,
+        IFC_EDIT_TARGET_MISSING,
+        IFC_EDIT_REFERENCE_DANGLING,
+        IFC_EDIT_VALUE_INVALID,
     ];
 }
 

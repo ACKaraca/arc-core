@@ -32,4 +32,7 @@ io-ifc-loss-geometry-approximated = { $count } geometry items were approximated:
 io-ifc-write-value-invalid = A value of the model cannot be written to IFC: a number that is not finite, a negative quantity, a size that is not positive, a degenerate placement or true north, a NUL character, or a repeated name in a set or among the sets of an element.
 io-ifc-write-reference-invalid = An element names a storey or host that is not in the model or of a kind the relationship does not allow, an opening has no host, or a chain of hosts returns to its start.
 io-ifc-write-id-duplicate = Two objects of the IFC file would have the same GlobalId.
+io-ifc-edit-target-missing = The edit names an instance or an attribute that is not in the IFC file.
+io-ifc-edit-reference-dangling = The edit would leave a reference to an instance that is not in the IFC file.
+io-ifc-edit-value-invalid = The edited value cannot be written to an IFC file.
 io-ifc-loss-not-written = { $count } degenerate bodies or empty property or quantity sets were not written.

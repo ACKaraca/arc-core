@@ -1,12 +1,14 @@
 //! The entry point of the reader: a physical file, or an IFC-ZIP archive holding one.
 
+use std::sync::Arc;
+
 use arc_base::{Cancel, Error, Limits, Result};
 use arc_io_common::ReadOptions as ArchiveOptions;
 use arc_io_common::zip::ZipArchive;
 
 use crate::error::{codes, reasons};
 use crate::loss::{Direction, LossHeader, LossLog, LossReport, Source};
-use crate::model::{IfcFile, Parameter, Record, Schema};
+use crate::model::{IfcFile, Layout, Parameter, Record, Schema, SourceBytes};
 use crate::options::{ReadOptions, ReadOutput};
 use crate::step::{self, Notes};
 use crate::views::UNDERSTOOD;
@@ -68,7 +70,7 @@ pub fn read(bytes: &[u8], options: &mut ReadOptions<'_>) -> Result<ReadOutput> {
 }
 
 /// Whether an archive entry is a resource fork or other metadata rather than model data.
-fn is_metadata(name: &str) -> bool {
+pub(crate) fn is_metadata(name: &str) -> bool {
     name.split('/').any(|part| part == "__MACOSX")
         || name
             .rsplit('/')
@@ -89,12 +91,14 @@ fn read_physical(data: &[u8], options: &mut ReadOptions<'_>, skipped: Notes) -> 
     let schema = schema_of(&parsed.header)?;
     let mut notes = parsed.notes;
     notes.skipped_entries = skipped.skipped_entries;
-    let file = IfcFile::new(
-        schema,
-        parsed.header,
-        parsed.instances,
-        parsed.estimated_bytes,
-    );
+    let layout = Layout {
+        source: SourceBytes(Arc::from(data)),
+        header: parsed.header.into_iter().zip(parsed.header_spans).collect(),
+        spans: parsed.spans.into_iter().map(Some).collect(),
+        data_end: parsed.data_end,
+        ..Layout::default()
+    };
+    let file = IfcFile::new(schema, parsed.instances, parsed.estimated_bytes, layout);
     let report = report_of(&file, limits, &notes, &options.cancel)?;
     Ok(ReadOutput { file, report })
 }

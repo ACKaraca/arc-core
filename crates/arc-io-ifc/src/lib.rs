@@ -29,6 +29,7 @@
 //! # Ok::<(), arc_base::Error>(())
 //! ```
 
+mod edit;
 pub mod error;
 pub mod geometry;
 pub mod loss;
@@ -53,4 +54,4 @@ pub use views::{
     Nominal, Number, Property, PropertySet, PropertyValue, Quantity, QuantityKind, QuantitySet,
     RootedEntity, SpatialNode, TypeAssignment, TypedViews, Value,
 };
-pub use write::{WriteModel, WriteOptions, WriteOutput, global_id, write};
+pub use write::{WriteModel, WriteOptions, WriteOutput, global_id, ifc_zip, write};

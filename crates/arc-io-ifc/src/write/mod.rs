@@ -15,12 +15,13 @@
 //! identifier of their object and a role.
 
 mod global_id;
-mod step;
+pub(crate) mod step;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use arc_base::math::{Point2, Point3, Vector2, Vector3};
 use arc_base::{Cancel, Error, Limits, Result, Tolerance};
+use arc_io_common::zip::{Method, write_archive};
 
 use crate::error::{codes, limit, reasons};
 use crate::loss::{Direction, LossHeader, LossLog, LossReport, Source};
@@ -899,6 +900,23 @@ pub struct WriteOutput {
     pub bytes: Vec<u8>,
     /// The loss report of the write.
     pub report: LossReport,
+}
+
+/// Packs a physical file as an IFC-ZIP archive: one deflated entry named `entry_name`, which
+/// [`crate::read`] reads back. The physical file comes from [`write()`] or
+/// [`crate::IfcFile::write_step`].
+///
+/// # Errors
+///
+/// `io.ifc.archive_entry_missing` when `entry_name` does not end in `.ifc` or names metadata
+/// (`__MACOSX/`, `._`), so the reader would not find it; `io.zip.name_invalid` or
+/// `io.zip.path_unsafe` for a name the archive reader refuses; `io.limit_exceeded` for a file of
+/// 4 GiB or more.
+pub fn ifc_zip(entry_name: &str, physical: &[u8]) -> Result<Vec<u8>> {
+    if !entry_name.to_ascii_lowercase().ends_with(".ifc") || crate::read::is_metadata(entry_name) {
+        return Err(Error::new(codes::IFC_ARCHIVE_ENTRY_MISSING));
+    }
+    write_archive(&[(entry_name, physical)], Method::Deflate)
 }
 
 /// Writes the model as an IFC4 physical file.
