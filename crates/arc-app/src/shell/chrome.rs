@@ -877,7 +877,8 @@ fn paint_large(
     font: egui::FontId,
     colors: &Colors,
 ) {
-    let mut job = egui::text::LayoutJob::simple(label.to_owned(), font, colors.text, LARGE_W - 8.0);
+    let mut job =
+        egui::text::LayoutJob::simple(label.to_owned(), font, colors.text, rect.width() - 8.0);
     job.halign = egui::Align::Center;
     let top = if let Some(image) = image {
         let at = egui::pos2(rect.center().x, rect.top() + PAD + LARGE_ICON / 2.0);
@@ -934,7 +935,19 @@ fn icon_button(
         )
     };
     let (size, galley) = match (form, &image) {
-        (Form::Large, _) => (egui::vec2(LARGE_W, ROW_H), None),
+        // Wide enough for the label's longest word, so wrapping never splits a word.
+        (Form::Large, _) => {
+            let widest = label
+                .split_whitespace()
+                .map(|word| {
+                    ui.painter()
+                        .layout_no_wrap(word.to_owned(), font.clone(), colors.text)
+                        .size()
+                        .x
+                })
+                .fold(0.0_f32, f32::max);
+            (egui::vec2(LARGE_W.max(widest + 8.0), ROW_H), None)
+        }
         (Form::Quick, Some(_)) => (egui::vec2(QUICK_SIZE, QUICK_SIZE), None),
         _ => {
             let (galley, size) = beside_text(ui);
@@ -1633,6 +1646,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_large_button_is_wide_enough_for_its_longest_word() {
+        let ctx = egui::Context::default();
+        let colors = arc_ui::ThemeId::Dark.theme().colors;
+        let look = Look {
+            icons: None,
+            colors: &colors,
+        };
+        let width = |label: &str| {
+            let view = ToolView::Icon {
+                label: label.into(),
+                hint: None,
+                line: "LINE".into(),
+                icon: "plus".into(),
+                size: ButtonSize::Large,
+            };
+            let mut used = 0.0;
+            let raw = egui::RawInput::default();
+            let mut out = ctx.run_ui(raw, |ui| {
+                let mut reply = None;
+                ui.horizontal(|ui| draw_view(ui, &view, &look, false, &mut reply));
+                used = ui.min_rect().width();
+            });
+            out.textures_delta.clear();
+            used
+        };
+        assert!((width("Wall") - LARGE_W).abs() < 0.5);
+        assert!(width("Uncharacteristically long") > LARGE_W + 20.0);
     }
 
     #[test]
