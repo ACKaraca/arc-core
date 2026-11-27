@@ -1,5 +1,6 @@
-//! The generated schema tables (ADR-0018). They exist only where `cargo xtask ifc-schema` was run;
-//! with `ARC_IFC_SCHEMA_DIR` set they are required, otherwise the tests skip.
+//! The generated schema tables (ADR-0018). The IFC4X3 tables are stored in the repository; those of
+//! IFC2X3 and IFC4 exist only where `cargo xtask ifc-schema` was run. With `ARC_IFC_SCHEMA_DIR` set
+//! all are required, otherwise the checks that need the other two are skipped.
 //!
 //! With `ARC_IFC_SCHEMA_DUMP=<file>` the tables are written as JSON for
 //! `tools/ifc-oracle/schema_diff.py`.
@@ -17,25 +18,35 @@ const SCHEMAS: [(Schema, &str); 3] = [
     (Schema::Ifc4x3, "IFC4X3"),
 ];
 
-fn tables() -> Option<Vec<(&'static str, &'static SchemaTables)>> {
-    let found: Option<Vec<_>> = SCHEMAS
+/// The tables of the schemas that are present. Those of IFC4X3 are stored in the repository and
+/// must be; the IFC2X3 and IFC4 tables are generated locally, and without them the tests that need
+/// them skip (with `ARC_IFC_SCHEMA_DIR` set they are required).
+fn tables() -> Vec<(&'static str, &'static SchemaTables)> {
+    let found: Vec<_> = SCHEMAS
         .iter()
-        .map(|(s, key)| SchemaTables::of(s).map(|t| (*key, t)))
+        .filter_map(|(s, key)| SchemaTables::of(s).map(|t| (*key, t)))
         .collect();
-    if found.is_none() {
+    assert!(
+        found.iter().any(|(k, _)| *k == "IFC4X3"),
+        "the IFC4X3 tables are part of the repository"
+    );
+    if found.len() < SCHEMAS.len() {
         assert!(
             std::env::var_os("ARC_IFC_SCHEMA_DIR").is_none(),
             "ARC_IFC_SCHEMA_DIR is set but the tables are not generated: run cargo xtask ifc-schema"
         );
-        eprintln!("skipped: schema tables not generated (cargo xtask ifc-schema)");
+        eprintln!("note: IFC2X3 or IFC4 tables not generated (cargo xtask ifc-schema)");
     }
     found
 }
 
+fn of<'a>(all: &[(&str, &'a SchemaTables)], key: &str) -> Option<&'a SchemaTables> {
+    all.iter().find(|(k, _)| *k == key).map(|(_, t)| *t)
+}
+
 #[test]
 fn tables_are_sorted_and_consistent() {
-    let Some(all) = tables() else { return };
-    for (key, t) in all {
+    for (key, t) in tables() {
         let upper = |n: &str| n.to_ascii_uppercase();
         assert!(
             t.entities
@@ -66,8 +77,15 @@ fn tables_are_sorted_and_consistent() {
 
 #[test]
 fn known_entities_resolve() {
-    let Some(all) = tables() else { return };
-    let ifc4 = all[1].1;
+    let all = tables();
+    let ifc4x3 = of(&all, "IFC4X3").unwrap();
+    assert_eq!(ifc4x3.name, "IFC4X3_ADD2");
+    assert!(ifc4x3.entity("IfcDoorStyle").is_none());
+    assert!(ifc4x3.entity("IfcAlignment").is_some());
+    let wall = ifc4x3.entity_index("IFCWALL").unwrap();
+    assert!(ifc4x3.is_subtype_of(wall, ifc4x3.entity_index("IfcRoot").unwrap()));
+    assert!(ifc4x3.enumeration("IfcWallTypeEnum").is_some());
+    let Some(ifc4) = of(&all, "IFC4") else { return };
     assert_eq!(ifc4.name, "IFC4");
     let wall = ifc4.entity_index("IFCWALL").unwrap();
     let root = ifc4.entity_index("IfcRoot").unwrap();
@@ -93,8 +111,6 @@ fn known_entities_resolve() {
     assert!(ifc4.function("IfcCorrectDimensions").is_some());
     assert!(ifc4.rule("IfcSingleProjectInstance").is_some());
     assert!(ifc4.entity("IfcDoorStyle").is_some());
-    assert!(all[2].1.entity("IfcDoorStyle").is_none());
-    assert!(all[2].1.entity("IfcAlignment").is_some());
 }
 
 fn bound(b: Bound) -> Value {
@@ -181,7 +197,7 @@ fn dump_for_the_oracle() {
     let Some(path) = std::env::var_os("ARC_IFC_SCHEMA_DUMP") else {
         return;
     };
-    let Some(all) = tables() else { return };
+    let all = tables();
     let out: serde_json::Map<_, _> = all
         .iter()
         .map(|(k, t)| ((*k).to_owned(), dump(t)))

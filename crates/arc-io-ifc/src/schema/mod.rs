@@ -7,9 +7,10 @@
 //! case and finds a name as a STEP file writes it. Cross references are indexes into the tables of
 //! the same schema.
 //!
-//! The generated files are not part of the repository until the license basis of ADR-0018 is
-//! recorded: the build script enables them only when `src/schema/generated/` holds all three, and
-//! [`SchemaTables::of`] returns `None` otherwise.
+//! Only the IFC4X3 file is part of the repository (published under CC BY-ND 4.0, ADR-0018). The
+//! IFC2X3 and IFC4 files are generated locally; the build script enables each schema when its file
+//! is present in `src/schema/generated/`, and [`SchemaTables::of`] returns `None` for a schema
+//! without one.
 
 use std::cmp::Ordering;
 
@@ -23,15 +24,19 @@ pub use access::Typed;
 pub use check::{Conformance, Finding, RuleCount};
 pub use inverse::{InverseIndex, Referrer};
 
-#[cfg(arc_ifc_schema_tables)]
+#[cfg(any(arc_ifc_tables_ifc2x3, arc_ifc_tables_ifc4, arc_ifc_tables_ifc4x3))]
 mod generated {
+    #[allow(unused_imports)]
     use super::{
         Aggregate, AggregateKind, Attribute, AttributeRef, Bound, DefinedType, Derived, Entity,
         Enumeration, Function, GlobalRule, Inverse, InverseAggregate, Named, SchemaTables, Select,
         TypeRef, UniqueRule, WhereRule,
     };
+    #[cfg(arc_ifc_tables_ifc2x3)]
     include!("generated/ifc2x3.rs");
+    #[cfg(arc_ifc_tables_ifc4)]
     include!("generated/ifc4.rs");
+    #[cfg(arc_ifc_tables_ifc4x3)]
     include!("generated/ifc4x3.rs");
 }
 
@@ -344,23 +349,17 @@ fn index(i: usize) -> Option<u16> {
 }
 
 impl SchemaTables {
-    /// The tables of `schema`, or `None` for another schema or a build without the generated
-    /// tables.
+    /// The tables of `schema`, or `None` for another schema or when its generated file is absent.
     #[must_use]
     pub fn of(schema: &Schema) -> Option<&'static Self> {
-        #[cfg(arc_ifc_schema_tables)]
-        {
-            match schema {
-                Schema::Ifc2x3 => Some(&generated::IFC2X3),
-                Schema::Ifc4 => Some(&generated::IFC4),
-                Schema::Ifc4x3 => Some(&generated::IFC4X3),
-                Schema::Other(_) => None,
-            }
-        }
-        #[cfg(not(arc_ifc_schema_tables))]
-        {
-            let _ = schema;
-            None
+        match schema {
+            #[cfg(arc_ifc_tables_ifc2x3)]
+            Schema::Ifc2x3 => Some(&generated::IFC2X3),
+            #[cfg(arc_ifc_tables_ifc4)]
+            Schema::Ifc4 => Some(&generated::IFC4),
+            #[cfg(arc_ifc_tables_ifc4x3)]
+            Schema::Ifc4x3 => Some(&generated::IFC4X3),
+            _ => None,
         }
     }
 

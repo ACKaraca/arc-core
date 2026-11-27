@@ -85,7 +85,8 @@ fn unedited_files_are_written_byte_for_byte() {
             bytes,
             "{name}"
         );
-        support::dump(&format!("roundtrip-{name}.ifc"), &bytes);
+        // The shared fixture is a minimal layout for the views, not a conformant file.
+        support::dump_nonconformant(&format!("roundtrip-{name}.ifc"), &bytes);
     }
 }
 
@@ -112,7 +113,7 @@ fn one_changed_attribute_changes_one_line() {
         .unwrap();
     assert_eq!(file.span(8), None);
     let after = written(&file);
-    support::dump("roundtrip-edited.ifc", after.as_bytes());
+    support::dump_nonconformant("roundtrip-edited.ifc", after.as_bytes());
     assert_eq!(
         changed_lines(&text, &after),
         [(
@@ -339,7 +340,7 @@ fn ifc_zip_written_by_the_crate_reads_back() {
         file.write_step(&Limits::CONSTRAINED).unwrap(),
         text.as_bytes()
     );
-    support::dump("roundtrip.ifczip", &archive);
+    support::dump_nonconformant("roundtrip.ifczip", &archive);
     for bad in ["project.txt", "__MACOSX/project.ifc", "._project.ifc"] {
         assert_eq!(
             ifc_zip(bad, text.as_bytes()).unwrap_err().code(),

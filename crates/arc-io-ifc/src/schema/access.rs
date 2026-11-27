@@ -430,10 +430,12 @@ mod tests {
     #[test]
     fn fixed_positions_agree_with_the_tables() {
         let mut checked = 0;
+        let mut schemas = 0;
         for schema in [Schema::Ifc2x3, Schema::Ifc4, Schema::Ifc4x3] {
             let Some(tables) = SchemaTables::of(&schema) else {
-                return;
+                continue;
             };
+            schemas += 1;
             for attr in known::ALL {
                 let Some(entity) = tables.entity_index(attr.entity) else {
                     continue;
@@ -462,6 +464,6 @@ mod tests {
                 }
             }
         }
-        assert!(checked > 2 * known::ALL.len(), "{checked}");
+        assert!(checked > (schemas - 1) * known::ALL.len(), "{checked}");
     }
 }
