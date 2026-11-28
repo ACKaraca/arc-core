@@ -514,6 +514,110 @@ fn constrained_delaunay(vertices: &[Point2], edges: &[Edge]) -> Result<Vec<[u32;
         .collect())
 }
 
+/// The constrained Delaunay triangulation of a planar graph: `points` (boundary points and any
+/// interior points), `loops` of point indices that bound the region (counterclockwise outer loops,
+/// clockwise holes) and `edges` of point indices that must be edges of the triangulation inside
+/// the region without bounding it. Returns the counterclockwise triangles inside the loops, as
+/// indices into `points`; a point that equals an earlier one is merged into it.
+///
+/// A loop edge or constraint that passes through another point is split there. Used by
+/// `arc-mesh` to retriangulate a triangle along intersection segments.
+///
+/// # Errors
+///
+/// `geom.triangulate.edges_cross` when an edge crosses an earlier loop edge or constraint;
+/// `geom.precision.insufficient` when a point cannot be inserted.
+pub fn triangulate_graph(
+    points: &[Point2],
+    loops: &[Vec<u32>],
+    edges: &[[u32; 2]],
+) -> Result<Vec<[u32; 3]>> {
+    let crossing = || Error::new(codes::TRIANGULATE_EDGES_CROSS);
+    let mut cdt = ConstrainedDelaunayTriangulation::<spade::Point2<f64>>::new();
+    let mut handles: Vec<FixedVertexHandle> = Vec::with_capacity(points.len());
+    let mut index_of: Vec<Option<u32>> = Vec::new();
+    for (i, p) in points.iter().enumerate() {
+        let handle = cdt.insert(spade::Point2::new(p.x, p.y)).map_err(|error| {
+            Error::new(codes::PRECISION_INSUFFICIENT)
+                .with_detail("triangulation", error.to_string())
+        })?;
+        handles.push(handle);
+        if index_of.len() <= handle.index() {
+            index_of.resize(handle.index() + 1, None);
+        }
+        if let Some(slot) = index_of.get_mut(handle.index())
+            && slot.is_none()
+        {
+            *slot = u32::try_from(i).ok();
+        }
+    }
+    let handle_of = |i: u32| {
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| handles.get(i))
+            .copied()
+            .ok_or_else(crossing)
+    };
+    let mut boundary: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for lp in loops {
+        for (k, &a) in lp.iter().enumerate() {
+            let b = lp.get((k + 1) % lp.len()).copied().unwrap_or(a);
+            let (from, to) = (handle_of(a)?, handle_of(b)?);
+            if from == to {
+                continue;
+            }
+            let added = cdt.try_add_constraint(from, to);
+            if added.is_empty() {
+                return Err(crossing());
+            }
+            boundary.extend(added.iter().map(|e| e.as_undirected().index()));
+        }
+    }
+    for edge in edges {
+        let (from, to) = (handle_of(edge[0])?, handle_of(edge[1])?);
+        if from != to && cdt.try_add_constraint(from, to).is_empty() {
+            return Err(crossing());
+        }
+    }
+    // Flood fill from the outside, toggling the parity at every loop edge.
+    let mut inside: Vec<Option<bool>> = vec![None; cdt.num_all_faces()];
+    let mut queue = VecDeque::new();
+    let toggles = |edge: spade::handles::UndirectedEdgeHandle<'_, _, _, _, _>| {
+        boundary.contains(&edge.fix().index())
+    };
+    for edge in cdt.convex_hull() {
+        if let Some(face) = edge.rev().face().as_inner()
+            && let Some(slot) = inside.get_mut(face.fix().index())
+            && slot.is_none()
+        {
+            *slot = Some(toggles(edge.as_undirected()));
+            queue.push_back(face.fix());
+        }
+    }
+    while let Some(face) = queue.pop_front() {
+        let parity = inside.get(face.index()).copied().flatten().unwrap_or(false);
+        for edge in cdt.face(face).adjacent_edges() {
+            if let Some(next) = edge.rev().face().as_inner()
+                && let Some(slot) = inside.get_mut(next.fix().index())
+                && slot.is_none()
+            {
+                *slot = Some(parity != toggles(edge.as_undirected()));
+                queue.push_back(next.fix());
+            }
+        }
+    }
+    Ok(cdt
+        .inner_faces()
+        .filter(|face| inside.get(face.fix().index()).copied().flatten() == Some(true))
+        .filter_map(|face| {
+            let [a, b, c] = face
+                .vertices()
+                .map(|v| index_of.get(v.fix().index()).copied().flatten());
+            Some([a?, b?, c?])
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -1055,5 +1159,34 @@ mod tests {
         }
         let json = r#"{"vertices":[[0.0,0.0],[1.0,0.0],[0.0,1.0]],"triangles":[[0,2,1]]}"#;
         assert!(serde_json::from_str::<TriangleMesh2>(json).is_err());
+    }
+
+    #[test]
+    fn graph_keeps_interior_points_and_constraints() {
+        let points = [
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(2.0, 2.0),
+            Point2::new(0.0, 2.0),
+            Point2::new(1.0, 0.5),
+            Point2::new(1.0, 0.0),
+        ];
+        // The point (1, 0) lies on the bottom edge and is part of the outline.
+        let outline = vec![0, 5, 1, 2, 3];
+        let triangles = triangulate_graph(&points, &[outline], &[[3, 4]]).unwrap();
+        let area: f64 = triangles
+            .iter()
+            .map(|t| {
+                twice_area(
+                    &points[t[0] as usize],
+                    &points[t[1] as usize],
+                    &points[t[2] as usize],
+                )
+            })
+            .sum();
+        assert!((area - 8.0).abs() < 1e-12);
+        assert!(triangles.iter().any(|t| t.contains(&4)));
+        let crossing = triangulate_graph(&points, &[vec![0, 1, 2, 3]], &[[3, 1], [0, 2]]);
+        assert_eq!(code(crossing), "geom.triangulate.edges_cross");
     }
 }

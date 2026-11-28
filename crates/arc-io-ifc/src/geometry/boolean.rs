@@ -15,7 +15,12 @@
 //! the removed part lies inside it; otherwise the boundary clips the solid itself, which is not
 //! evaluated.
 //!
-//! Anything else (a union, a second operand that is a solid, a base surface that is not a plane, a
+//! A second operand that is a solid (any evaluated solid, CSG primitive or boolean result) is
+//! combined with the first by [`arc_mesh::boolean`] in the coordinates of the representation; when
+//! that is refused (an open or inverted operand, or a result that cannot be closed at the tolerance)
+//! the first operand is kept and the result is reported as approximated.
+//!
+//! Anything else (a half space that is not on a plane, a base surface that is not a plane, a
 //! polygonal boundary that clips the solid) leaves the first operand unchanged and is reported as
 //! approximated, so the element is never dropped. Clipping a mesh that is not closed leaves the cut
 //! open and is reported as approximated.
@@ -32,8 +37,13 @@ use super::attr::{self, named, skip};
 use super::polygon::{P2, charge_triangulation, prepare, ring_vertices, triangulate};
 use super::{
     Evaluator, Flow, MAX_LOOP_VERTICES, Piece, Shape, Step, TRIANGLE_BYTES, VERTEX_BYTES, index32,
+    shape_mesh,
 };
-use arc_mesh::TriMeshBuilder;
+use arc_mesh::boolean::BooleanOp;
+use arc_mesh::{TriMesh, TriMeshBuilder};
+
+/// The most triangles of two operands of a mesh boolean.
+const MAX_BOOLEAN_TRIANGLES: usize = 100_000;
 
 /// A half space the solid is cut by: a plane point, the unit normal of the kept side and the
 /// optional boundary of a polygonal bounded half space (in the frame of its position).
@@ -81,6 +91,16 @@ impl Evaluator<'_> {
             _ => None,
         };
         let Some(cut) = cut else {
+            let half = self
+                .file
+                .instance(second)
+                .and_then(|i| i.records.first())
+                .is_none_or(|r| r.type_name.contains("HALFSPACE"));
+            if !half
+                && let Some(done) = self.solid_boolean(name, operator, &pieces, second, depth)?
+            {
+                return Ok(done);
+            }
             self.log.add(
                 reasons::GEOMETRY_APPROXIMATED,
                 kind,
@@ -151,6 +171,75 @@ impl Evaluator<'_> {
             }
         }
         Ok(out)
+    }
+
+    /// The first operand combined with the solid `second` by a mesh boolean; `None` when the second
+    /// operand is not evaluated, the operator is unknown or an operand is not a closed solid (the
+    /// caller reports the approximation and keeps the first operand).
+    fn solid_boolean(
+        &mut self,
+        name: u64,
+        operator: Option<&str>,
+        firsts: &[Piece],
+        second: u64,
+        depth: u32,
+    ) -> Step<Option<Vec<Piece>>> {
+        let op = match operator {
+            Some("DIFFERENCE") => BooleanOp::Difference,
+            Some("UNION") => BooleanOp::Union,
+            Some("INTERSECTION") => BooleanOp::Intersection,
+            _ => return Ok(None),
+        };
+        let Some(seconds) = self.item(second, depth.saturating_add(1))? else {
+            return Ok(None);
+        };
+        let mut tools: Vec<TriMesh> = Vec::new();
+        for piece in seconds.iter() {
+            if let Some(mesh) = shape_mesh(&piece.shape, &piece.transform, &self.limits)? {
+                tools.push(mesh);
+            }
+        }
+        if tools.is_empty() {
+            return Ok(None);
+        }
+        let mut out = Vec::with_capacity(firsts.len());
+        for piece in firsts {
+            self.budget.step()?;
+            let Some(mut current) = shape_mesh(&piece.shape, &piece.transform, &self.limits)?
+            else {
+                out.push(piece.clone());
+                continue;
+            };
+            for tool in &tools {
+                self.budget.step()?;
+                let size = current
+                    .triangle_count()
+                    .saturating_add(tool.triangle_count());
+                if size > MAX_BOOLEAN_TRIANGLES {
+                    return Ok(None);
+                }
+                self.budget.array(size.saturating_mul(4))?;
+                self.budget.charge(
+                    u64::try_from(size)
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(8 * (VERTEX_BYTES + TRIANGLE_BYTES)),
+                )?;
+                match arc_mesh::boolean::boolean(&current, tool, op, &self.tol, &self.limits) {
+                    Ok(next) => current = next,
+                    Err(_) => return Ok(None),
+                }
+            }
+            if current.triangle_count() == 0 {
+                continue;
+            }
+            self.charge_shape()?;
+            out.push(Piece {
+                shape: std::sync::Arc::new(Shape::Mesh(current)),
+                transform: Transform3::identity(),
+            });
+        }
+        let _ = name;
+        Ok(Some(out))
     }
 
     /// The cut of a half space operand; `Ok(None)` for an operand that is not a half space on a

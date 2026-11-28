@@ -95,3 +95,21 @@ Two rules of the views differ in choice, not in fact, and are not hidden by the 
 object defines the predefined type (the occurrence's value stays only where the type says `NOTDEFINED`),
 as `util.get_predefined_type` does; and a classification reference of the type is inherited unless the
 occurrence has one of the same system, as `util.classification.get_references` does.
+
+## Geometry differences (waves 2 and 3)
+
+`geometry_compare.py` on the wave 2 and 3 fixtures (`ARC_IFC_DUMP` with `geometry_wave2` and `geometry_wave3`)
+agrees with `arc-io-ifc` at a chord tolerance of 0.1 mm (`--deflection 0.0001`) except where IfcOpenShell
+0.9.0.post1 behaves as follows:
+
+| Item | Oracle | Cause |
+|---|---|---|
+| `IfcRightCircularCone`, `IfcRightCircularCylinder` | no product; a boolean or an opening with one as an operand keeps the other operand | the engine does not tessellate these CSG primitives |
+| `IfcRevolvedAreaSolidTapered` | the volume of the untapered `IfcRevolvedAreaSolid` | the engine ignores `EndSweptArea` |
+| sweeps with `StartParam` or `EndParam` | no product | the engine does not apply the parameters |
+| `IfcOffsetCurveByDistances`, B-spline surface as an item | no product | not evaluated by the engine |
+| `IfcAdvancedBrepWithVoids` of the fixture | no product | not evaluated by the engine |
+| spherical cap with a pole vertex or an equator bound | open shell (volume 0) or the other side of the equator | the engine builds the face from the wire without the sense of its bound |
+| `IfcSurfaceWeightsPositive` of a rational B-spline surface | validation error "unsupported operand type(s) for -: 'list' and 'int'" | the rule runner fails on the derived weights array; the fixture `wave3-bspline-surface-rational-cylinder-validator-limit.ifc` is otherwise valid |
+| `VoidsHaveAdvancedFaces` | violated by every B-rep with voids whose void shells have only advanced faces | the published predicate is inverted; the fixture gives its void shell a plain face |
+| `IfcSphere`, curved bodies at the default chord (1 mm) | 0.2 to 0.4 % more volume | the discretizations differ; they agree at 0.1 mm |

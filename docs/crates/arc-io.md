@@ -1525,9 +1525,16 @@ evaluation. The representation items that are not listed below are not evaluated
 | `IfcCompositeProfileDef`, `IfcDerivedProfileDef`, `IfcMirroredProfileDef`, `IfcCenterLineProfileDef` | loops | See Profiles below. |
 | `IfcPolyline`, `IfcIndexedPolyCurve` (line and arc segments), `IfcCircle`, `IfcEllipse`, `IfcTrimmedCurve` (on a line, circle or ellipse), `IfcCompositeCurve` | loop, or polyline as a representation item | In 2D or 3D. See Curves below. |
 | `IfcExtrudedAreaSolidTapered` (`EndSweptArea` 4) | mesh | The end profile must have the loops of the start profile with equal point counts. |
-| `IfcRevolvedAreaSolid` (`SweptArea` 0, `Position` 1, `Axis` 2, `Angle` 3) | mesh | See Swept solids below. |
+| `IfcRevolvedAreaSolid` (`SweptArea` 0, `Position` 1, `Axis` 2, `Angle` 3) and `IfcRevolvedAreaSolidTapered` (`EndSweptArea` 4) | mesh | See Swept solids below. |
 | `IfcSweptDiskSolid`, `IfcSweptDiskSolidPolygonal`, `IfcSurfaceCurveSweptAreaSolid`, `IfcFixedReferenceSweptAreaSolid` | mesh | See Swept solids below. |
-| `IfcBooleanResult`, `IfcBooleanClippingResult` | mesh | A half space as the second operand. See Booleans below. |
+| `IfcBooleanResult`, `IfcBooleanClippingResult` | mesh | A half space or a solid as the second operand. See Booleans below. |
+| `IfcBlock`, `IfcRectangularPyramid`, `IfcRightCircularCone`, `IfcRightCircularCylinder`, `IfcSphere`, `IfcCsgSolid` | mesh | Built in the frame of `Position` (0); an `IfcCsgSolid` is its `TreeRootExpression`. See `geometry/csg.rs`. |
+| `IfcBSplineCurveWithKnots`, `IfcRationalBSplineCurveWithKnots` | polyline | De Boor on homogeneous coordinates, bisected at the chord tolerance per knot span. |
+| `IfcBSplineSurfaceWithKnots`, `IfcRationalBSplineSurfaceWithKnots` | open mesh | A grid per knot span, refined at the chord tolerance. |
+| `IfcOffsetCurve2D`, `IfcOffsetCurve3D`, `IfcOffsetCurveByDistances` (IFC4X3) | polyline | The mitered offset of the basis polyline. See `geometry/offset.rs`. |
+| `IfcGeometricSet`, `IfcGeometricCurveSet`, `IfcCartesianPoint` | polylines | Curves and points, never bodies; a point is a polyline of two equal points. |
+| `IfcAdvancedBrep`, `IfcAdvancedBrepWithVoids` | mesh | Advanced faces on planes, quadrics, swept surfaces and B-spline surfaces, trimmed by their edge loops. See Advanced B-reps below. |
+| `IfcSectionedSpine`, `IfcSectionedSolidHorizontal` (IFC4X3) | mesh | Lofts of cross sections. See `geometry/sectioned.rs`. |
 | `IfcTriangulatedFaceSet` (`Coordinates` 0, `CoordIndex` 3, `PnIndex` 4) | mesh | `Coordinates` is an `IfcCartesianPointList3D`. |
 | `IfcPolygonalFaceSet` (`Coordinates` 0, `Faces` 2, `PnIndex` 3) with `IfcIndexedPolygonalFace` (`CoordIndex` 0) and `IfcIndexedPolygonalFaceWithVoids` (`InnerCoordIndices` 1) | mesh | Each face is triangulated in its plane. |
 | `IfcFacetedBrep` (`Outer` 0), `IfcFacetedBrepWithVoids` (`Voids` 1) | mesh | The outer `IfcClosedShell` (`CfsFaces` 0). The faces of the void shells are added as they are, wound outward from the material. |
@@ -1570,36 +1577,62 @@ evaluation. The representation items that are not listed below are not evaluated
   a magnitude of a full turn or more has no end caps and a profile point on the axis is one vertex. A
   swept disk (hollow with `InnerRadius`) and the two directrix sweeps are swept along the directrix
   polyline with each interior vertex mitered (the section lies in the bisecting plane), so the volume is the
-  section area times the directrix length. A turn of more than about 154 degrees at a vertex, and a
-  `StartParam` or `EndParam`, are not evaluated. The profile of a directrix sweep is placed with its plane
+  section area times the directrix length. A turn of more than about 154 degrees at a vertex is not evaluated. `StartParam` and `EndParam`
+  limit the directrix to the part between them, in the parameter of the curve: the index of a polyline point, an
+  angle on a circle, an ellipse or a trimmed circle (in the plane angle unit of the file), the basis parameter
+  on a trimmed line, the knot parameter of a B-spline curve; another curve with parameters is not evaluated.
+  The tapered revolution moves each profile point linearly from its start to its end position over the turn
+  and requires the loops and point counts of the two profiles to match. The profile of a directrix sweep is placed with its plane
   perpendicular to the first segment; the reference surface and the fixed reference direction are not read.
-- Booleans: the operator is `.DIFFERENCE.` or `.INTERSECTION.`, the first operand is any item and the
-  second is an `IfcHalfSpaceSolid` or `IfcPolygonalBoundedHalfSpace` on an `IfcPlane`. The half space is the
-  side opposite the plane normal when `AgreementFlag` is `.T.` and the side of the normal when `.F.`. The
-  triangles are cut exactly by the plane (vertices within the linear tolerance are on it) and the section is
-  closed by a cap triangulated in the plane, holes included; a result that keeps nothing emits nothing. A
-  polygonal boundary is applied as the whole half space when it is convex and every point of the removed
-  part lies inside it. Anything else (a union, a second operand that is a solid, a base surface that is not a
-  plane, a boundary that clips the solid, a cut of a mesh that is not closed) leaves the first operand
-  unchanged and is reported as `io.ifc.geometry_approximated` with the record kind of the boolean.
+- Booleans: the operator is `.DIFFERENCE.`, `.INTERSECTION.` or `.UNION.`, the first operand is any item and
+  the second is an `IfcHalfSpaceSolid` or `IfcPolygonalBoundedHalfSpace` on an `IfcPlane`, or any evaluated solid
+  (an extrusion, a CSG primitive, a B-rep, a sweep, another boolean). A half space is the side opposite the
+  plane normal when `AgreementFlag` is `.T.` and the side of the normal when `.F.`. The triangles are cut
+  exactly by the plane (vertices within the linear tolerance are on it) and the section is closed by a cap
+  triangulated in the plane, holes included; a result that keeps nothing emits nothing. A polygonal
+  boundary is applied as the whole half space when it is convex and every point of the removed part lies
+  inside it. A solid second operand is combined with the first by `arc_mesh::boolean::boolean` (see the
+  specification of `arc-mesh`) in the coordinates of the representation, piece by piece, at most
+  100,000 triangles in both operands. An operand that is not a closed oriented mesh (an open surface
+  model, a shell wound inward), a result that cannot be closed at the tolerance, a half space that is
+  not on a plane, a boundary that clips the solid and an unknown operator leave the first operand
+  unchanged and are reported as `io.ifc.geometry_approximated` with the record kind of the boolean.
 - Openings: with `subtract_openings` (the default) the bodies of the opening elements of an element
-  (`IfcRelVoidsElement`) are subtracted from the element when each of its body items is an untapered
-  `IfcExtrudedAreaSolid` of one profile part, by `arc_geom::Polyhedron::subtract_prism`. An opening body is
-  an `IfcExtrudedAreaSolid` whose direction is perpendicular to its profile; a rectangular body that the
-  prism subtraction refuses along its extrusion axis is tried along its two other axes, which handles a
-  window body extruded along the height that passes through the thickness of the wall. A prism that starts
-  or ends on a face of the solid, and spans the solid, is extended past it by a millimeter. A round edge is
-  the inscribed polygon of the chord tolerance. An opening that is not subtracted (the subtraction is
-  refused, the body is not an extrusion, or the element has a solid body that is not an extrusion) is
-  reported as `io.ifc.opening_not_subtracted` with the record kind `IFCRELVOIDSELEMENT` and the opening
-  as source; an opening whose prism does not meet the solid is skipped without a report. Without the option
-  the report holds one `io.ifc.opening_not_subtracted` item whose count is the number of relationships
-  and the elements are emitted solid.
+  (`IfcRelVoidsElement`) are subtracted from its body. When each body item of the element is an untapered
+  `IfcExtrudedAreaSolid` of one profile part and the opening body is an `IfcExtrudedAreaSolid` whose
+  direction is perpendicular to its profile, the exact subtraction of
+  `arc_geom::Polyhedron::subtract_prism` is used; a rectangular body that it refuses along its extrusion
+  axis is tried along its two other axes, which handles a window body extruded along the height that passes
+  through the thickness of the wall. A prism that starts or ends on a face of the solid, and spans the solid,
+  is extended past it by a millimeter. A round edge is the inscribed polygon of the chord tolerance. Every
+  other pair (an element body that is not an extrusion, an opening body of any other kind of solid or
+  several of them, a prism that is refused along every axis) is done by the mesh boolean on the meshes of
+  both in world coordinates (the opening bodies are the `Body` items of the opening element); the item is then
+  in world coordinates with the identity transform. An opening that neither path subtracts (its body is not a
+  solid or not a closed one, or the result cannot be closed) is reported as `io.ifc.opening_not_subtracted`
+  with the record kind `IFCRELVOIDSELEMENT` and the opening as source; an opening that does not meet the
+  solid is skipped without a report. Without the option the report holds one `io.ifc.opening_not_subtracted`
+  item whose count is the number of relationships and the elements are emitted solid.
+- Advanced B-reps: the faces are `IfcAdvancedFace`s (and plain `IfcFace`s) of the closed shell and, with voids,
+  of the void shells; see `geometry/advanced.rs`. The edges of a loop are sampled once per edge curve with
+  the chord tolerance from the start to the end vertex in the sense of the edge, so faces share the points of
+  an edge. A planar face is triangulated in its plane; a face on another surface is mapped into the
+  parameter space of the surface and triangulated there with a constrained Delaunay triangulation
+  with interior points where flat triangles would leave the surface by more than the chord tolerance. A loop
+  that winds once around a periodic parameter is closed by the seam of the period (two such loops) or by the
+  pole of a sphere or the apex of a cone (one such loop); the points of a seam and of the loops are shared by
+  the two sides. A face that cannot be evaluated skips the item.
+- Sectioned solids: sections must have equal loop and point counts; `geometry/sectioned.rs` states the
+  placement of each section. `IfcSectionedSolidHorizontal` is reported as approximated because the default
+  orientation of its profile is an interpretation.
+
 - Not evaluated: every other representation item, profile, curve, loop, shell or placement kind. Each
   is reported as `io.ifc.geometry_not_evaluated` with the record kind of the entity, one item per kind
   with its count, and nothing is emitted for it. This covers the coverage table's "not evaluated" rows.
-  An item is emitted as a whole or not at all: a shell with any face that cannot be evaluated is not
-  emitted.
+  An item is emitted as a whole or not at all: a shell with a face that cannot be evaluated is not
+  emitted, except a face of a faceted B-rep whose outer loop has no area (its area is at most the linear
+  tolerance times its extent): that face is left out, reported as `io.ifc.geometry_degenerate` with the record
+  kind `IFCFACE`, and the item is reported as `io.ifc.geometry_approximated`.
 - Skips: an attribute of the wrong type skips its item and is reported as `io.ifc.value_unexpected`. An
   index outside its list, or a value that is not an index, is `io.ifc.index_invalid`. A degenerate item
   (zero or negative depth, a loop with zero area, a zero direction, a scale that is not positive, a
@@ -1642,14 +1675,171 @@ evaluation. The representation items that are not listed below are not evaluated
 
 #### Coverage of the representation items
 
-Kinds of IFC4 and IFC4X3 by support: *supported* (evaluated as defined), *approximated* (evaluated with a
-stated approximation) and *not evaluated* (reported as `io.ifc.geometry_not_evaluated`).
+Every subtype of `IfcRepresentationItem` in IFC4 and IFC4X3 by support: *supported* (evaluated as
+defined), *approximated* (evaluated with a stated approximation: a discretization at the chord
+tolerance, or the stated simplification) and *not evaluated* (reported as
+`io.ifc.geometry_not_evaluated`). *Abstract* kinds have no instances; their subtypes are listed.
+A kind that is only a part of another item (a placement, a loop, a face surface) is listed with the
+item it serves; it is not emitted by itself. Counts: 49 supported, 37 approximated, 42 not evaluated
+and 26 abstract of the 155 kinds.
 
-| Support | Kinds |
-|---|---|
-| supported | `IfcExtrudedAreaSolid`, `IfcTriangulatedFaceSet`, `IfcPolygonalFaceSet`, `IfcFacetedBrep`, `IfcFacetedBrepWithVoids`, `IfcFaceBasedSurfaceModel`, `IfcShellBasedSurfaceModel`, `IfcMappedItem` (uniform and non-uniform operators), `IfcPolyline`, `IfcIndexedPolyCurve` (lines and arcs), `IfcCompositeCurve`, `IfcTrimmedCurve` on `IfcLine`, `IfcCircle`, `IfcEllipse`; profiles rectangle, rounded rectangle, rectangle hollow, arbitrary closed, with voids, composite, derived, mirrored, center line; the half space booleans with a plane |
-| approximated | circles, ellipses, arcs and round profile corners (chord tolerance); `IfcExtrudedAreaSolidTapered`, `IfcRevolvedAreaSolid` (chord tolerance, faces of the taper may be skew), `IfcSweptDiskSolid`, `IfcSweptDiskSolidPolygonal`, `IfcSurfaceCurveSweptAreaSolid`, `IfcFixedReferenceSweptAreaSolid` (mitered polyline sweep); the I, L, T, U, C, Z, asymmetric I and trapezium profiles (radii as arcs, slopes not applied); `IfcPolygonalBoundedHalfSpace` (whole half space when the boundary does not clip); a boolean with any other second operand (first operand kept); openings (prisms through planar extrusions only) |
-| not evaluated | `IfcAdvancedBrep` and its subtypes, `IfcBooleanResult` with a solid second operand (general booleans), `IfcCsgSolid` and the CSG primitives, `IfcSectionedSpine`, `IfcSurfaceOfLinearExtrusion` and the other surfaces, `IfcBSplineCurve` and its subtypes, `IfcOffsetCurve2D`, `IfcOffsetCurve3D`, `IfcClothoid` and the other alignment curves, `IfcCompositeCurveOnSurface`, trimmed curves on a polyline, `IfcGeometricSet` and `IfcGeometricCurveSet`, `IfcAnnotationFillArea`, `IfcTextLiteral`, `IfcSectionedSolidHorizontal`, `IfcDirectrixCurveSweptAreaSolid` and the sweeps with `StartParam` or `EndParam`, `IfcTriangulatedIrregularNetwork`, `IfcCartesianPointList` as an item, the other profile kinds (`IfcArbitraryOpenProfileDef`, `IfcDerivedProfileDef` with a non-2D operator, `IfcCShapeProfileDef` slopes) |
+| Kind | Schemas | Support | Notes |
+|---|---|---|---|
+| `IfcAdvancedBrep` | IFC4, IFC4X3 | approximated | chord tolerance; faces on plane, cylinder, cone, sphere, torus, linear extrusion, revolution and B-spline surfaces |
+| `IfcAdvancedBrepWithVoids` | IFC4, IFC4X3 | approximated | chord tolerance; faces on plane, cylinder, cone, sphere, torus, linear extrusion, revolution and B-spline surfaces |
+| `IfcAdvancedFace` | IFC4, IFC4X3 | supported | part of an advanced face |
+| `IfcAnnotationFillArea` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcAxis1Placement` | IFC4, IFC4X3 | supported | parameter of other items |
+| `IfcAxis2Placement2D` | IFC4, IFC4X3 | supported | parameter of other items |
+| `IfcAxis2Placement3D` | IFC4, IFC4X3 | supported | parameter of other items |
+| `IfcAxis2PlacementLinear` | IFC4X3 | supported | placement of a section of a horizontal sectioned solid |
+| `IfcBSplineCurve` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcBSplineCurveWithKnots` | IFC4, IFC4X3 | approximated | knot-span bisection at the chord tolerance (curves); grid of cells at the chord tolerance (surface items) |
+| `IfcBSplineSurface` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcBSplineSurfaceWithKnots` | IFC4, IFC4X3 | approximated | knot-span bisection at the chord tolerance (curves); grid of cells at the chord tolerance (surface items) |
+| `IfcBlock` | IFC4, IFC4X3 | supported |  |
+| `IfcBooleanClippingResult` | IFC4, IFC4X3 | supported | as `IfcBooleanResult` |
+| `IfcBooleanResult` | IFC4, IFC4X3 | supported | half space on a plane, or a solid second operand by the mesh boolean; otherwise the first operand is kept (approximated) |
+| `IfcBoundaryCurve` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcBoundedCurve` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcBoundedSurface` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcBoundingBox` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcBoxedHalfSpace` | IFC4, IFC4X3 | not evaluated | the first operand is kept (reported) |
+| `IfcCartesianPoint` | IFC4, IFC4X3 | supported | as an item: a polyline of two equal points; a point of every other item |
+| `IfcCartesianPointList` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcCartesianPointList2D` | IFC4, IFC4X3 | supported | parameter of other items |
+| `IfcCartesianPointList3D` | IFC4, IFC4X3 | supported | parameter of other items |
+| `IfcCartesianTransformationOperator` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcCartesianTransformationOperator2D` | IFC4, IFC4X3 | not evaluated | not used by an item |
+| `IfcCartesianTransformationOperator2DnonUniform` | IFC4, IFC4X3 | not evaluated | not used by an item |
+| `IfcCartesianTransformationOperator3D` | IFC4, IFC4X3 | supported | mapping target |
+| `IfcCartesianTransformationOperator3DnonUniform` | IFC4, IFC4X3 | supported | mapping target |
+| `IfcCircle` | IFC4, IFC4X3 | approximated | chord tolerance |
+| `IfcClosedShell` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcClothoid` | IFC4X3 | not evaluated |  |
+| `IfcCompositeCurve` | IFC4, IFC4X3 | supported |  |
+| `IfcCompositeCurveOnSurface` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcCompositeCurveSegment` | IFC4, IFC4X3 | supported | part of a composite curve |
+| `IfcConic` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcConnectedFaceSet` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcCosineSpiral` | IFC4X3 | not evaluated |  |
+| `IfcCsgPrimitive3D` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcCsgSolid` | IFC4, IFC4X3 | supported | its root expression |
+| `IfcCurve` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcCurveBoundedPlane` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcCurveBoundedSurface` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcCurveSegment` | IFC4X3 | not evaluated |  |
+| `IfcCylindricalSurface` | IFC4, IFC4X3 | approximated | face surface of an advanced face (chord tolerance); not an item |
+| `IfcDirection` | IFC4, IFC4X3 | supported | parameter of other items |
+| `IfcDirectrixCurveSweptAreaSolid` | IFC4X3 | abstract | see the subtypes |
+| `IfcDirectrixDerivedReferenceSweptAreaSolid` | IFC4X3 | not evaluated |  |
+| `IfcEdge` | IFC4, IFC4X3 | approximated | an edge without geometry is the straight line between its vertices |
+| `IfcEdgeCurve` | IFC4, IFC4X3 | supported | part of an advanced face |
+| `IfcEdgeLoop` | IFC4, IFC4X3 | supported | part of an advanced face |
+| `IfcElementarySurface` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcEllipse` | IFC4, IFC4X3 | approximated | chord tolerance |
+| `IfcExtrudedAreaSolid` | IFC4, IFC4X3 | supported |  |
+| `IfcExtrudedAreaSolidTapered` | IFC4, IFC4X3 | approximated | chord tolerance; faces of a taper may be skew |
+| `IfcFace` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcFaceBasedSurfaceModel` | IFC4, IFC4X3 | supported |  |
+| `IfcFaceBound` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcFaceOuterBound` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcFaceSurface` | IFC4, IFC4X3 | supported | part of an advanced face |
+| `IfcFacetedBrep` | IFC4, IFC4X3 | supported |  |
+| `IfcFacetedBrepWithVoids` | IFC4, IFC4X3 | supported |  |
+| `IfcFillAreaStyleHatching` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcFillAreaStyleTiles` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcFixedReferenceSweptAreaSolid` | IFC4, IFC4X3 | approximated | mitered polyline sweep; `StartParam` and `EndParam` on a polyline, circle, ellipse, trimmed line or circle and B-spline curve |
+| `IfcGeometricCurveSet` | IFC4, IFC4X3 | supported | as `IfcGeometricSet` |
+| `IfcGeometricRepresentationItem` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcGeometricSet` | IFC4, IFC4X3 | supported | curves and points as polylines, never a body; a surface element is reported |
+| `IfcGradientCurve` | IFC4X3 | not evaluated |  |
+| `IfcHalfSpaceSolid` | IFC4, IFC4X3 | approximated | as the second operand of a boolean: a plane only |
+| `IfcIndexedPolyCurve` | IFC4, IFC4X3 | supported | line and arc segments |
+| `IfcIndexedPolygonalFace` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcIndexedPolygonalFaceWithVoids` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcIntersectionCurve` | IFC4, IFC4X3 | approximated | its 3D curve, as an edge curve of an advanced face |
+| `IfcLightSource` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcLightSourceAmbient` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcLightSourceDirectional` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcLightSourceGoniometric` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcLightSourcePositional` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcLightSourceSpot` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcLine` | IFC4, IFC4X3 | supported | as the basis of a trimmed curve and as an edge curve |
+| `IfcLoop` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcManifoldSolidBrep` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcMappedItem` | IFC4, IFC4X3 | supported | uniform and non-uniform operators |
+| `IfcOffsetCurve` | IFC4X3 | abstract | see the subtypes |
+| `IfcOffsetCurve2D` | IFC4, IFC4X3 | approximated | `Distance` along the mitered normal of the basis polyline; `SelfIntersect` not applied |
+| `IfcOffsetCurve3D` | IFC4, IFC4X3 | approximated | `Distance` along the mitered normal of the basis polyline; `SelfIntersect` not applied |
+| `IfcOffsetCurveByDistances` | IFC4X3 | approximated | lateral and vertical offsets interpolated along the basis polyline; longitudinal offsets not applied |
+| `IfcOpenShell` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcOrientedEdge` | IFC4, IFC4X3 | supported | part of an advanced face |
+| `IfcOuterBoundaryCurve` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcPath` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcPcurve` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcPlacement` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcPlanarBox` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcPlanarExtent` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcPlane` | IFC4, IFC4X3 | supported | face surface; not an item |
+| `IfcPoint` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcPointByDistanceExpression` | IFC4X3 | supported | placement of an offset curve or a section |
+| `IfcPointOnCurve` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcPointOnSurface` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcPolyLoop` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcPolygonalBoundedHalfSpace` | IFC4, IFC4X3 | approximated | whole half space when the boundary does not clip |
+| `IfcPolygonalFaceSet` | IFC4, IFC4X3 | supported |  |
+| `IfcPolyline` | IFC4, IFC4X3 | supported |  |
+| `IfcPolynomialCurve` | IFC4X3 | not evaluated |  |
+| `IfcRationalBSplineCurveWithKnots` | IFC4, IFC4X3 | approximated | knot-span bisection at the chord tolerance (curves); grid of cells at the chord tolerance (surface items) |
+| `IfcRationalBSplineSurfaceWithKnots` | IFC4, IFC4X3 | approximated | knot-span bisection at the chord tolerance (curves); grid of cells at the chord tolerance (surface items) |
+| `IfcRectangularPyramid` | IFC4, IFC4X3 | supported |  |
+| `IfcRectangularTrimmedSurface` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcReparametrisedCompositeCurveSegment` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcRevolvedAreaSolid` | IFC4, IFC4X3 | approximated | chord tolerance; faces of a taper may be skew |
+| `IfcRevolvedAreaSolidTapered` | IFC4, IFC4X3 | approximated | chord tolerance; each profile point moves linearly to its end position |
+| `IfcRightCircularCone` | IFC4, IFC4X3 | approximated | chord tolerance (inscribed polygon) |
+| `IfcRightCircularCylinder` | IFC4, IFC4X3 | approximated | chord tolerance (inscribed polygon) |
+| `IfcSeamCurve` | IFC4, IFC4X3 | approximated | its 3D curve, as an edge curve of an advanced face |
+| `IfcSecondOrderPolynomialSpiral` | IFC4X3 | not evaluated |  |
+| `IfcSectionedSolid` | IFC4X3 | abstract | see the subtypes |
+| `IfcSectionedSolidHorizontal` | IFC4X3 | approximated | default orientation of the profile is an interpretation; no longitudinal offsets |
+| `IfcSectionedSpine` | IFC4, IFC4X3 | approximated | the spine is not used; sections of equal point counts, joined by quads |
+| `IfcSectionedSurface` | IFC4X3 | not evaluated |  |
+| `IfcSegment` | IFC4X3 | abstract | see the subtypes |
+| `IfcSegmentedReferenceCurve` | IFC4X3 | not evaluated |  |
+| `IfcSeventhOrderPolynomialSpiral` | IFC4X3 | not evaluated |  |
+| `IfcShellBasedSurfaceModel` | IFC4, IFC4X3 | supported |  |
+| `IfcSineSpiral` | IFC4X3 | not evaluated |  |
+| `IfcSolidModel` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcSphere` | IFC4, IFC4X3 | approximated | chord tolerance (inscribed polygon) |
+| `IfcSphericalSurface` | IFC4, IFC4X3 | approximated | face surface of an advanced face (chord tolerance); not an item |
+| `IfcSpiral` | IFC4X3 | abstract | see the subtypes |
+| `IfcStyledItem` | IFC4, IFC4X3 | not evaluated | presentation; not geometry |
+| `IfcSubedge` | IFC4, IFC4X3 | approximated | the straight line between its vertices |
+| `IfcSurface` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcSurfaceCurve` | IFC4, IFC4X3 | approximated | its 3D curve, as an edge curve of an advanced face |
+| `IfcSurfaceCurveSweptAreaSolid` | IFC4, IFC4X3 | approximated | mitered polyline sweep; `StartParam` and `EndParam` on a polyline, circle, ellipse, trimmed line or circle and B-spline curve |
+| `IfcSurfaceOfLinearExtrusion` | IFC4, IFC4X3 | approximated | face surface of an advanced face (chord tolerance); not an item |
+| `IfcSurfaceOfRevolution` | IFC4, IFC4X3 | approximated | face surface of an advanced face (chord tolerance); not an item |
+| `IfcSweptAreaSolid` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcSweptDiskSolid` | IFC4, IFC4X3 | approximated | mitered polyline sweep; `StartParam` and `EndParam` on a polyline, circle, ellipse, trimmed line or circle and B-spline curve |
+| `IfcSweptDiskSolidPolygonal` | IFC4, IFC4X3 | approximated | mitered polyline sweep; `StartParam` and `EndParam` on a polyline, circle, ellipse, trimmed line or circle and B-spline curve |
+| `IfcSweptSurface` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcTessellatedFaceSet` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcTessellatedItem` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcTextLiteral` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcTextLiteralWithExtent` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcThirdOrderPolynomialSpiral` | IFC4X3 | not evaluated |  |
+| `IfcTopologicalRepresentationItem` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcToroidalSurface` | IFC4, IFC4X3 | approximated | face surface of an advanced face (chord tolerance); not an item |
+| `IfcTriangulatedFaceSet` | IFC4, IFC4X3 | supported |  |
+| `IfcTriangulatedIrregularNetwork` | IFC4X3 | not evaluated |  |
+| `IfcTrimmedCurve` | IFC4, IFC4X3 | approximated | on a line, circle or ellipse; chord tolerance |
+| `IfcVector` | IFC4, IFC4X3 | supported | parameter of other items |
+| `IfcVertex` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcVertexLoop` | IFC4, IFC4X3 | supported | ignored as a bound (a pole) |
+| `IfcVertexPoint` | IFC4, IFC4X3 | supported | part of an advanced face |
 
 The agreement with an independent geometry engine is measured per product with
 `tools/ifc-oracle/geometry_compare.py` (volume, area and bounding box, tolerance 0.1 % relative or 1e-6 absolute).
@@ -1658,7 +1848,19 @@ its end caps (volume and area too large); its derived profile applies the local 
 scales in another way; it produces no geometry for `IfcFacetedBrepWithVoids` or `IfcCenterLineProfileDef`; with its
 subtraction on it does not iterate the opening elements; and a polygonal bounded half space whose boundary clips
 the solid is not evaluated here (the first operand is kept and reported). The tubes of a swept disk differ by
-their polygon (0.1 to 0.2 % at a 0.1 mm chord) and every curved profile by its discretization.
+their polygon (0.1 to 0.2 % at a 0.1 mm chord) and every curved profile by its discretization. Waves 2 and 3
+add these differences of the engine (IfcOpenShell 0.9.0.post1): it produces no geometry for
+`IfcRightCircularCone` and `IfcRightCircularCylinder`, so a boolean or an opening whose operand is one of
+them keeps the other operand; it evaluates `IfcRevolvedAreaSolidTapered` as `IfcRevolvedAreaSolid` (the
+`EndSweptArea` is ignored); it produces no geometry for a sweep with `StartParam` or `EndParam`, for
+`IfcOffsetCurveByDistances`, for a B-spline surface as an item, or for the
+`IfcAdvancedBrepWithVoids` of the fixtures; it tessellates the face of a spherical
+cap or triangle with a pole vertex differently (the cap is on the other side of the equator, or the
+face is missing, so the shell is open); and the rule runner of its validator fails with a Python error on
+`IfcSurfaceWeightsPositive` of every rational B-spline surface, and holds `VoidsHaveAdvancedFaces` of
+the published schema, whose predicate is inverted (`= 0` where `> 0` is meant), against every
+B-rep with voids whose void shells have only advanced faces. A sphere, cone or cylinder differs by its
+discretization at the default chord tolerance (0.2 to 0.4 %) and agrees at 0.1 mm.
 
 #### Bounds
 

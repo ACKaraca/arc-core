@@ -15,6 +15,7 @@
 //!
 //! No function in this crate panics.
 
+pub mod boolean;
 pub mod bvh;
 pub mod distance;
 pub mod encoding;

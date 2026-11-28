@@ -60,10 +60,10 @@ pub(crate) fn arc_segments(radius: f64, sweep: f64, chord: f64) -> (usize, bool)
 }
 
 /// A circle or an ellipse: the local frame and the semi-axes along its x and y.
-struct Conic {
-    frame: Transform3,
-    a: f64,
-    b: f64,
+pub(crate) struct Conic {
+    pub(crate) frame: Transform3,
+    pub(crate) a: f64,
+    pub(crate) b: f64,
 }
 
 impl Conic {
@@ -103,7 +103,7 @@ impl Evaluator<'_> {
         self.curve_by_name(name, max, 0)
     }
 
-    fn curve_by_name(&mut self, name: u64, max: usize, depth: u32) -> Step<Vec<Point3>> {
+    pub(crate) fn curve_by_name(&mut self, name: u64, max: usize, depth: u32) -> Step<Vec<Point3>> {
         let file = self.file;
         let Some(record) = file.instance(name).and_then(|i| i.records.first()) else {
             return Err(skip(reasons::TARGET_MISSING, "IFCCURVE"));
@@ -156,6 +156,12 @@ impl Evaluator<'_> {
                 self.sample_conic(name, &conic, 0.0, TAU, max, &mut out)?;
                 Ok(out)
             }
+            "IFCBSPLINECURVEWITHKNOTS" | "IFCRATIONALBSPLINECURVEWITHKNOTS" => {
+                self.bspline_points(record, max)
+            }
+            "IFCOFFSETCURVE2D" | "IFCOFFSETCURVE3D" | "IFCOFFSETCURVEBYDISTANCES" => {
+                self.offset_curve(record, max, depth)
+            }
             "IFCTRIMMEDCURVE" => self.trimmed(name, record, max),
             "IFCCOMPOSITECURVE" => self.composite(record, max, depth),
             other => Err(skip(reasons::GEOMETRY_NOT_EVALUATED, other)),
@@ -163,7 +169,7 @@ impl Evaluator<'_> {
     }
 
     /// The points of a list of point instances, in order, with the budget charged and stepped.
-    fn points_of(&mut self, names: &[u64]) -> Step<Vec<Point3>> {
+    pub(crate) fn points_of(&mut self, names: &[u64]) -> Step<Vec<Point3>> {
         self.budget.charge(
             u64::try_from(names.len())
                 .unwrap_or(u64::MAX)
@@ -178,7 +184,7 @@ impl Evaluator<'_> {
     }
 
     /// The frame and semi-axes of an `IfcCircle` or `IfcEllipse`.
-    fn conic(&self, record: &Record) -> Step<Conic> {
+    pub(crate) fn conic(&self, record: &Record) -> Step<Conic> {
         let kind = record.type_name.as_str();
         let file = self.file;
         let frame = self.axis_any(attr::opt_reference(
@@ -199,7 +205,7 @@ impl Evaluator<'_> {
 
     /// Appends the points of the arc of `conic` from parameter `t0` over `sweep` radians (signed),
     /// including both ends.
-    fn sample_conic(
+    pub(crate) fn sample_conic(
         &mut self,
         name: u64,
         conic: &Conic,
@@ -364,6 +370,17 @@ impl Evaluator<'_> {
     }
 
     fn trimmed(&mut self, name: u64, record: &Record, max: usize) -> Step<Vec<Point3>> {
+        Ok(self.trimmed_ranged(name, record, max)?.0)
+    }
+
+    /// The points of a trimmed curve with the range of its basis parameter they span (radians for
+    /// a circle or an ellipse) and whether that parameter is an angle.
+    pub(crate) fn trimmed_ranged(
+        &mut self,
+        name: u64,
+        record: &Record,
+        max: usize,
+    ) -> Step<(Vec<Point3>, (f64, f64), bool)> {
         let kind = "IFCTRIMMEDCURVE";
         let file = self.file;
         let basis = attr::reference(named(file, record, "BasisCurve", 0), kind)?;
@@ -384,7 +401,7 @@ impl Evaluator<'_> {
                 };
                 let (s1, s2) = (param(first), param(second));
                 self.grow(0, 2, max, kind)?;
-                Ok(vec![origin + dir * s1, origin + dir * s2])
+                Ok((vec![origin + dir * s1, origin + dir * s2], (s1, s2), false))
             }
             "IFCCIRCLE" | "IFCELLIPSE" => {
                 let conic = self.conic(basis_record)?;
@@ -407,7 +424,7 @@ impl Evaluator<'_> {
                 }
                 let mut out = Vec::new();
                 self.sample_conic(name, &conic, t1, t2 - t1, max, &mut out)?;
-                Ok(out)
+                Ok((out, (t1, t2), true))
             }
             other => Err(skip(reasons::GEOMETRY_NOT_EVALUATED, other)),
         }
