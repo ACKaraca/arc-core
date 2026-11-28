@@ -53,10 +53,13 @@ pub(crate) fn arc_segments(radius: f64, sweep: f64, chord: f64) -> (usize, bool)
     let raw = sweep / (2.0 * half);
     let limit = MAX_CIRCLE_SEGMENTS as f64 * (sweep / TAU).max(1.0 / 64.0);
     let floor = (sweep / (TAU / 3.0)).ceil().max(1.0);
+    // The count stays far below `usize::MAX`, so `count + 1` cannot overflow; the array limit
+    // refuses a count this large before anything is allocated.
+    let most = f64::from(u32::MAX);
     if !raw.is_finite() || raw > limit {
-        return (limit.ceil().max(floor) as usize, true);
+        return (limit.ceil().max(floor).min(most) as usize, true);
     }
-    (raw.ceil().max(floor) as usize, false)
+    (raw.ceil().max(floor).min(most) as usize, false)
 }
 
 /// A circle or an ellipse: the local frame and the semi-axes along its x and y.
@@ -410,14 +413,12 @@ impl Evaluator<'_> {
                     Trim::Point(p) => conic.parameter_of(&p),
                 };
                 let (t1, mut t2) = (angle(first), angle(second));
-                if sense {
-                    while t2 <= t1 {
-                        t2 += TAU;
-                    }
-                } else {
-                    while t2 >= t1 {
-                        t2 -= TAU;
-                    }
+                // The next turn of `t2` after (or before) `t1`, computed in one step: repeated
+                // additions of a turn never end on parameters far beyond 2π.
+                if sense && t2 <= t1 {
+                    t2 = t1 + (TAU - (t1 - t2).rem_euclid(TAU));
+                } else if !sense && t2 >= t1 {
+                    t2 = t1 - (TAU - (t2 - t1).rem_euclid(TAU));
                 }
                 if !(t2 - t1).is_finite() || (t2 - t1).abs() > TAU * (1.0 + 1e-9) {
                     return Err(skip(reasons::GEOMETRY_DEGENERATE, kind));

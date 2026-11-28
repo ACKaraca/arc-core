@@ -463,6 +463,25 @@ fn trimmed_and_composite_curves() {
 }
 
 #[test]
+fn trims_far_beyond_one_turn_end() {
+    // Parameters whose difference is far more turns than a float resolves, or not finite once
+    // scaled, are evaluated or skipped in one step.
+    for (t1, t2) in [("1.E17", "0."), ("1.E308", "-1.E308"), ("-1.E17", "0.")] {
+        for sense in [".T.", ".F."] {
+            let lines = format!(
+                "#10=IFCEXTRUDEDAREASOLID(#11,#6,#2,1.);\n\
+#11=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#12);\n\
+#12=IFCCOMPOSITECURVE((#13),.F.);\n\
+#13=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#15);\n\
+#15=IFCTRIMMEDCURVE(#17,(IFCPARAMETERVALUE({t1})),(IFCPARAMETERVALUE({t2})),{sense},.PARAMETER.);\n\
+#17=IFCCIRCLE(#8,1.);\n"
+            );
+            let _ = evaluate(&fixture(&lines));
+        }
+    }
+}
+
+#[test]
 fn indexed_poly_curve_arcs_and_profile_voids() {
     let arc = "#12=IFCINDEXEDPOLYCURVE(#13,(IFCARCINDEX((1,2,3)),IFCLINEINDEX((3,1))),$);\n\
 #13=IFCCARTESIANPOINTLIST2D(((-1.,0.),(0.,1.),(1.,0.)));\n";
