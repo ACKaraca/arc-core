@@ -17,6 +17,9 @@ const STEP_BUDGET: u32 = 2_000_000;
 const MAX_REPEAT: u32 = 1000;
 /// The deepest nesting of groups.
 const MAX_DEPTH: u32 = 64;
+/// The deepest recursion of one match. The matcher recurses about once per character consumed, so
+/// this bounds the native stack; a match that needs more fails like one over the step budget.
+const MAX_RECURSION: u32 = 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Item {
@@ -373,6 +376,7 @@ impl Class {
 struct Matcher<'a> {
     text: &'a [char],
     steps: u32,
+    depth: u32,
 }
 
 impl Matcher<'_> {
@@ -383,9 +387,21 @@ impl Matcher<'_> {
         k: &mut dyn FnMut(&mut Self, usize) -> bool,
     ) -> bool {
         self.steps += 1;
-        if self.steps > STEP_BUDGET {
+        if self.steps > STEP_BUDGET || self.depth >= MAX_RECURSION {
             return false;
         }
+        self.depth += 1;
+        let found = self.step(node, pos, k);
+        self.depth -= 1;
+        found
+    }
+
+    fn step(
+        &mut self,
+        node: &Node,
+        pos: usize,
+        k: &mut dyn FnMut(&mut Self, usize) -> bool,
+    ) -> bool {
         match node {
             Node::Any => match self.text.get(pos) {
                 Some(c) if *c != '\n' && *c != '\r' => k(self, pos + 1),
@@ -422,6 +438,11 @@ impl Matcher<'_> {
         pos: usize,
         k: &mut dyn FnMut(&mut Self, usize) -> bool,
     ) -> bool {
+        if count == 0
+            && let Some(one) = self.single(inner)
+        {
+            return self.run(one, min, max, pos, k);
+        }
         if max.is_none_or(|m| count < m)
             && self.node(inner, pos, &mut |m: &mut Self, p| {
                 // An iteration that consumes nothing cannot make progress.
@@ -431,6 +452,56 @@ impl Matcher<'_> {
             return true;
         }
         count >= min && k(self, pos)
+    }
+
+    /// The node itself when it matches exactly one character and has no alternatives.
+    fn single<'n>(&self, node: &'n Node) -> Option<&'n Node> {
+        matches!(node, Node::Any | Node::Char(_) | Node::Class(_)).then_some(node)
+    }
+
+    fn one(&self, node: &Node, pos: usize) -> bool {
+        match (node, self.text.get(pos)) {
+            (Node::Any, Some(c)) => *c != '\n' && *c != '\r',
+            (Node::Char(x), Some(c)) => c == x,
+            (Node::Class(class), Some(c)) => class.contains(*c),
+            _ => false,
+        }
+    }
+
+    /// A repetition of a one-character node without recursion per character: the longest run,
+    /// then shorter ones, as the backtracking of [`Self::repeat`] would try them.
+    fn run(
+        &mut self,
+        one: &Node,
+        min: u32,
+        max: Option<u32>,
+        pos: usize,
+        k: &mut dyn FnMut(&mut Self, usize) -> bool,
+    ) -> bool {
+        let most = max.map_or(usize::MAX, |m| m as usize);
+        let mut length = 0;
+        while length < most && self.one(one, pos + length) {
+            self.steps += 1;
+            if self.steps > STEP_BUDGET {
+                return false;
+            }
+            length += 1;
+        }
+        let least = min as usize;
+        while length >= least {
+            if k(self, pos + length) {
+                return true;
+            }
+            if length == 0 {
+                break;
+            }
+            length -= 1;
+            self.steps += 1;
+            if self.steps > STEP_BUDGET {
+                return false;
+            }
+        }
+        false
     }
 }
 
@@ -464,6 +535,7 @@ impl Pattern {
         let mut matcher = Matcher {
             text: &chars,
             steps: 0,
+            depth: 0,
         };
         matcher.node(&self.root, 0, &mut |_, p| p == len)
     }
@@ -521,5 +593,32 @@ mod tests {
         let start = std::time::Instant::now();
         assert!(!p.is_match(&"a".repeat(60)));
         assert!(start.elapsed().as_secs() < 10);
+    }
+
+    #[test]
+    fn a_long_text_does_not_exhaust_the_stack() {
+        // Run on a thread with a small stack: matching must not recurse once per character.
+        let worker = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(|| {
+                let long = "a".repeat(1_000_000);
+                // A group recurses per repetition; past the bound it fails, without a crash.
+                assert!(
+                    !Pattern::new("(ab)*")
+                        .unwrap()
+                        .is_match(&"ab".repeat(500_000))
+                );
+                assert!(Pattern::new("(ab)*c").unwrap().is_match("ababc"));
+                (
+                    Pattern::new(".*").unwrap().is_match(&long),
+                    Pattern::new("a{1,3}").unwrap().is_match("aa")
+                        && !Pattern::new("a{1,3}").unwrap().is_match("aaaa")
+                        && Pattern::new("[a-z]+[0-9]{2}").unwrap().is_match("abc12"),
+                )
+            })
+            .unwrap();
+        let (long, short) = worker.join().unwrap();
+        assert!(long);
+        assert!(short);
     }
 }

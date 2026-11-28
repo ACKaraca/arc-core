@@ -2383,7 +2383,10 @@ Patterns are compiled by `ids::regex::Pattern`, an implementation of the pattern
 Schema: alternation, groups, `? * + {n} {n,} {n,m}`, `.`, classes with ranges, negation and
 subtraction, the escapes `\d \s \w \i \c` and their complements, `\p{..}` for the common categories
 and the single-character escapes. A pattern matches a whole string. Matching is by backtracking with
-a step budget of 2,000,000, so a hostile pattern such as `(a+)+b` stops with no match. Group
+a step budget of 2,000,000, so a hostile pattern such as `(a+)+b` stops with no match. A
+repetition of one character (`.*`, `[a-z]+`, `\d{3}`) is matched without recursion per character;
+any other match recurses at most 1,024 levels deep and fails beyond that, so a long value cannot
+exhaust the stack. Group
 extensions (`(?:`), back references and unknown escapes are refused when the document is read. A
 backslash before any other punctuation character is taken as that character.
 
