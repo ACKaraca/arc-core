@@ -292,8 +292,8 @@ along its edges, retriangulates it with `arc_geom::triangulate_graph`, classifie
 with the same or the opposite direction, or by the generalized winding number of one point per
 component that the curve does not cut) and selects them per operation. The result is checked closed
 (every directed edge has its opposite) and fails with `mesh.boolean.failed` otherwise; edges where the
-operands touch along a line may be shared by four triangles. The operands and the pairs are bounded
-(`mesh.limit.exceeded`). The Manifold-backed engine of the table above is not implemented; face provenance
+operands touch along a line may be shared by four triangles. The operands, the box tests of the candidate sweep and
+the pairs are bounded (`mesh.limit.exceeded`). The Manifold-backed engine of the table above is not implemented; face provenance
 and attributes are not carried over.
 
 ### Feature edges

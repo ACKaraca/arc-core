@@ -33,8 +33,8 @@
 //! fails with `mesh.boolean.failed` instead of being returned, so a caller can keep its operand.
 //! Edges where the operands touch along a line may be shared by four triangles.
 //!
-//! Work is bounded: the number of candidate triangle pairs and the size of the result are limited
-//! (`mesh.limit.exceeded`). Nothing in this module panics.
+//! Work is bounded: the number of box tests and candidate triangle pairs and the size of the result
+//! are limited (`mesh.limit.exceeded`). Normals within the angular tolerance count as parallel. Nothing in this module panics.
 
 use std::collections::{HashMap, HashSet};
 
@@ -58,6 +58,9 @@ pub enum BooleanOp {
 
 /// The most candidate pairs of triangles that are intersected.
 const MAX_PAIRS: usize = 4_000_000;
+
+/// The most box tests of the candidate sweep.
+const MAX_TESTS: usize = 16 * MAX_PAIRS;
 
 fn id(i: usize) -> u32 {
     u32::try_from(i).unwrap_or(u32::MAX)
@@ -190,9 +193,10 @@ fn prepare(mesh: &TriMesh, pool: &mut Pool) -> Result<Side> {
             *directed.entry((t[k], t[(k + 1) % 3])).or_insert(0) += 1;
         }
     }
-    let closed = directed
+    let unmatched = directed
         .iter()
-        .all(|(&(a, b), &n)| n == 1 && directed.get(&(b, a)) == Some(&1));
+        .filter(|&(&(a, b), &n)| n != 1 || directed.get(&(b, a)) != Some(&1))
+        .count();
     let mut volume = 0.0;
     if let Some(first) = tris.first() {
         let o = pool.p(first[0]);
@@ -201,8 +205,12 @@ fn prepare(mesh: &TriMesh, pool: &mut Pool) -> Result<Side> {
             volume += a.dot(&b.cross(&c));
         }
     }
-    if tris.is_empty() || !closed || volume.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
-        return Err(Error::new(codes::BOOLEAN_INVALID_INPUT));
+    if tris.is_empty()
+        || unmatched > 0
+        || volume.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+    {
+        return Err(Error::new(codes::BOOLEAN_INVALID_INPUT)
+            .with_detail("edges", i64::try_from(unmatched).unwrap_or(i64::MAX)));
     }
     Ok(Side { tris })
 }
@@ -247,7 +255,7 @@ enum Meet {
     Segment(u32, u32),
 }
 
-fn meet(pool: &mut Pool, ta: [u32; 3], ga: &Geo, tb: [u32; 3], gb: &Geo) -> Meet {
+fn meet(pool: &mut Pool, ta: [u32; 3], ga: &Geo, tb: [u32; 3], gb: &Geo, angular: f64) -> Meet {
     if ga.area2 == 0.0 || gb.area2 == 0.0 {
         return Meet::Nothing;
     }
@@ -262,7 +270,7 @@ fn meet(pool: &mut Pool, ta: [u32; 3], ga: &Geo, tb: [u32; 3], gb: &Geo) -> Meet
     }
     let dir = ga.n.cross(&gb.n);
     let all_zero = |d: &[f64; 3]| d.iter().all(|&x| x == 0.0);
-    if all_zero(&da) || all_zero(&db) || dir.norm() < 1e-9 {
+    if all_zero(&da) || all_zero(&db) || dir.norm() <= angular {
         return Meet::Coplanar;
     }
     let dir = dir / dir.norm();
@@ -379,27 +387,43 @@ fn candidates(pool: &Pool, a: &Side, b: &Side) -> Result<Vec<(u32, u32)>> {
     let axis = (0..3)
         .max_by(|&i, &j| (hi[i] - lo[i]).total_cmp(&(hi[j] - lo[j])))
         .unwrap_or(0);
-    let mut order: Vec<usize> = (0..bb.len()).collect();
-    order.sort_by(|&i, &j| bb[i].0[axis].total_cmp(&bb[j].0[axis]));
-    let mut out = Vec::new();
-    for (i, (l, h)) in ba.iter().enumerate() {
-        // The first box of b that ends at or after the start of this one is found by search over
-        // starts; boxes are sorted by their start, so every box that starts before `h` is a
-        // candidate and the ones that ended before `l` are filtered.
-        let end = order.partition_point(|&j| bb[j].0[axis] <= h[axis]);
-        for &j in order.iter().take(end) {
-            let (bl, bh) = &bb[j];
-            if bh[axis] < l[axis] {
-                continue;
-            }
-            if (0..3).all(|k| bl[k] <= h[k] && bh[k] >= l[k]) {
-                out.push((id(i), id(j)));
+    // Sweep along the axis: every box is tested against the boxes of the other side that started
+    // before it and have not ended, so separated boxes are never compared.
+    let start = |&(in_b, k): &(bool, usize)| if in_b { bb[k].0[axis] } else { ba[k].0[axis] };
+    let mut events: Vec<(bool, usize)> = (0..ba.len())
+        .map(|i| (false, i))
+        .chain((0..bb.len()).map(|j| (true, j)))
+        .collect();
+    events.sort_by(|x, y| start(x).total_cmp(&start(y)));
+    let (mut active_a, mut active_b): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+    let (mut out, mut tests) = (Vec::new(), 0_usize);
+    for &(in_b, k) in &events {
+        let ((l, h), active, boxes) = if in_b {
+            (&bb[k], &mut active_a, &ba)
+        } else {
+            (&ba[k], &mut active_b, &bb)
+        };
+        active.retain(|&j| boxes[j].1[axis] >= l[axis]);
+        tests = tests.saturating_add(active.len());
+        if tests > MAX_TESTS {
+            return Err(limit());
+        }
+        for &j in active.iter() {
+            let (bl, bh) = &boxes[j];
+            if (0..3).all(|m| bl[m] <= h[m] && bh[m] >= l[m]) {
+                out.push(if in_b { (id(j), id(k)) } else { (id(k), id(j)) });
                 if out.len() > MAX_PAIRS {
                     return Err(limit());
                 }
             }
         }
+        if in_b {
+            active_b.push(k);
+        } else {
+            active_a.push(k);
+        }
     }
+    out.sort_unstable();
     Ok(out)
 }
 
@@ -810,7 +834,7 @@ pub fn boolean(
     for (i, j) in candidates(&pool, &sa, &sb)? {
         let (ia, ib) = (i as usize, j as usize);
         let (ta, tb) = (sa.tris[ia], sb.tris[ib]);
-        match meet(&mut pool, ta, &ga[ia], tb, &gb[ib]) {
+        match meet(&mut pool, ta, &ga[ia], tb, &gb[ib], tolerance.angular) {
             Meet::Nothing => {}
             Meet::Segment(p, q) => {
                 segs_a[ia].push((p, q));
@@ -1082,6 +1106,11 @@ mod tests {
         .unwrap();
         let error = boolean(&a, &open, BooleanOp::Union, &TOL, &Limits::DEFAULT).unwrap_err();
         assert_eq!(error.code(), codes::BOOLEAN_INVALID_INPUT.code);
+        // One missing triangle leaves its three edges without their opposites.
+        assert_eq!(
+            error.details().get("edges"),
+            Some(&arc_base::error::Value::from(3_i64))
+        );
     }
 
     /// Cells of the 6x6x6 grid inside a box with integer corners.
