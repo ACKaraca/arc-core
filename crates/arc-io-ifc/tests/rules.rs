@@ -1,7 +1,8 @@
 //! Conformance level 3: the domain (`WHERE`) rules of entities and defined types and the global
 //! rules. A minimal valid file per schema passes every rule; each mutation violates one rule, which
 //! must be reported for the instance concerned with the rule's name in the schema, while nothing
-//! else of level 3 fails. The tests need the generated schema tables and skip without them. Every
+//! else of level 3 fails. The tests run on the schemas whose tables the build has: IFC4X3 always,
+//! IFC2X3 and IFC4 when they are generated locally (ADR-0018). Every
 //! file is written with `ARC_IFC_DUMP` for `tools/ifc-oracle/conformance_compare.py --rules`.
 
 #![allow(clippy::print_stderr, clippy::unwrap_used, reason = "test code")]
@@ -478,12 +479,10 @@ fn check(text: &str) -> Conformance {
         .unwrap()
 }
 
-fn tables_present() -> bool {
-    let present = SchemaTables::of(&Schema::Ifc4).is_some();
-    if !present {
-        eprintln!("skipped: schema tables not generated (cargo xtask ifc-schema)");
-    }
-    present
+/// Whether this build has the tables of `schema`. IFC4X3 is always present; the others are generated
+/// locally (ADR-0018), so the tests run on the schemas the build has.
+fn has_tables(schema: &str) -> bool {
+    SchemaTables::of(&Schema::from_identifier(schema)).is_some()
 }
 
 fn level3_failures(result: &Conformance) -> Vec<(u64, String)> {
@@ -497,10 +496,7 @@ fn level3_failures(result: &Conformance) -> Vec<(u64, String)> {
 
 #[test]
 fn the_base_file_passes_every_rule() {
-    if !tables_present() {
-        return;
-    }
-    for schema in SCHEMAS {
+    for schema in SCHEMAS.into_iter().filter(|s| has_tables(s)) {
         let text = file(schema, BASE);
         support::dump(&format!("rules-{schema}-base.ifc"), text.as_bytes());
         let result = check(&text);
@@ -529,12 +525,12 @@ fn the_base_file_passes_every_rule() {
 
 #[test]
 fn every_violated_rule_is_found() {
-    if !tables_present() {
-        return;
-    }
     let mut distinct = std::collections::BTreeSet::new();
     let mut errors = Vec::new();
     for (s, schema) in SCHEMAS.iter().enumerate() {
+        if !has_tables(schema) {
+            continue;
+        }
         for m in MUTATIONS {
             let Some(expected) = m.expected[s] else {
                 continue;
@@ -580,7 +576,9 @@ fn every_violated_rule_is_found() {
         }
     }
     assert!(errors.is_empty(), "{}", errors.join("\n"));
-    assert!(distinct.len() >= 90, "{}", distinct.len());
+    // About thirty distinct rules per schema; IFC2X3 and IFC4 count where their tables exist.
+    let schemas = SCHEMAS.iter().filter(|s| has_tables(s)).count();
+    assert!(distinct.len() >= 30 * schemas, "{}", distinct.len());
 }
 
 /// `UNKNOWN` passes and is counted apart: with a two-dimensional axis, the cross product of the
@@ -588,18 +586,15 @@ fn every_violated_rule_is_found() {
 /// the axis's dimension fails.
 #[test]
 fn unknown_passes_and_is_counted_apart() {
-    if !tables_present() {
-        return;
-    }
     let text = file(
-        "IFC4",
+        "IFC4X3_ADD2",
         &BASE.replacen(
             END,
             "#25=IFCCARTESIANPOINT((1.,0.,0.));\n#30=IFCDIRECTION((1.,0.));\n#31=IFCAXIS2PLACEMENT3D(#1,#30,#25);",
             1,
         ),
     );
-    support::dump_nonconformant("rules-IFC4-unknown.ifc", text.as_bytes());
+    support::dump_nonconformant("rules-IFC4X3_ADD2-unknown.ifc", text.as_bytes());
     let result = check(&text);
     assert_eq!(
         level3_failures(&result),
@@ -623,11 +618,8 @@ fn unknown_passes_and_is_counted_apart() {
 /// An instance whose structure is wrong is not evaluated for its rules, never passed.
 #[test]
 fn rules_of_a_malformed_instance_are_not_evaluated() {
-    if !tables_present() {
-        return;
-    }
     let text = file(
-        "IFC4",
+        "IFC4X3_ADD2",
         &BASE.replacen(
             "#2=IFCDIRECTION((0.,0.,1.));",
             "#2=IFCDIRECTION((0.,0.,1.),1);",
@@ -650,10 +642,10 @@ fn rules_of_a_malformed_instance_are_not_evaluated() {
 /// counts equal the schema's.
 #[test]
 fn every_rule_of_every_schema_is_counted() {
-    if !tables_present() {
-        return;
-    }
     for (schema, expected) in SCHEMAS.iter().zip([365, 679, 779]) {
+        if !has_tables(schema) {
+            continue;
+        }
         let result = check(&file(schema, BASE));
         assert_eq!(result.where_rules.len(), expected, "{schema}");
     }
@@ -664,11 +656,8 @@ fn every_rule_of_every_schema_is_counted() {
 /// nothing overflows, with the deepest nesting the large-model profile allows too.
 #[test]
 fn a_cycle_of_derived_attributes_is_not_evaluated() {
-    if !tables_present() {
-        return;
-    }
     let text = file(
-        "IFC4",
+        "IFC4X3_ADD2",
         &BASE.replacen(
             END,
             "#25=IFCCARTESIANPOINT((1.,0.,0.));\n#30=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#31);\n#31=IFCCOMPOSITECURVE((#30),.F.);",

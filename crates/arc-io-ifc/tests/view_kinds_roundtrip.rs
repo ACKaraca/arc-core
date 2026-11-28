@@ -16,13 +16,14 @@ mod support;
 
 use arc_base::math::{Point2, Point3, Vector3};
 use arc_base::{Cancel, Limits};
+use arc_io_ifc::schema::SchemaTables;
 use arc_io_ifc::write::{
-    Body, Element, ElementKind, ElementType, Placement, Property, PropertySet, PropertyValue,
-    Quantity, QuantitySet, QuantityValue, Spatial, Storey, WriteModel, WriteOptions,
+    Body, Element, ElementKind, ElementType, OutputSchema, Placement, Property, PropertySet,
+    PropertyValue, Quantity, QuantitySet, QuantityValue, Spatial, Storey, WriteModel, WriteOptions,
 };
 use arc_io_ifc::{
     IfcFile, Matrix, ObjectKind, ObjectView, Origin, ReadOptions, ResolvedPropertySet,
-    ResolvedQuantitySet, TypedViews, read, write,
+    ResolvedQuantitySet, Schema, TypedViews, read, write,
 };
 use arc_mesh::measure::{bounds, volume};
 
@@ -68,7 +69,18 @@ fn element(id: u128, kind: ElementKind, name: &str, predefined: Option<&str>) ->
 }
 
 fn written(model: &WriteModel, name: &str) -> (Vec<u8>, IfcFile) {
-    let output = write(model, &WriteOptions::default()).unwrap();
+    // The import views read through the schema tables; IFC4X3's are part of every build, IFC4's
+    // only where they were generated (ADR-0018).
+    let schema = if SchemaTables::of(&Schema::Ifc4).is_some() {
+        OutputSchema::Ifc4
+    } else {
+        OutputSchema::Ifc4x3
+    };
+    let options = WriteOptions {
+        schema,
+        ..WriteOptions::default()
+    };
+    let output = write(model, &options).unwrap();
     support::dump(name, &output.bytes);
     let file = read(&output.bytes, &mut ReadOptions::default())
         .unwrap()

@@ -1,7 +1,7 @@
 //! The conformance checker, levels 1 and 2: a minimal valid file per schema has no finding, and one
 //! structural error of each kind injected into it is found at the instance and attribute concerned.
-//! The tests need the generated schema tables and skip without them, except the check that nothing
-//! is counted as passed then. Every mutated file is written with `ARC_IFC_DUMP` for
+//! The tests run on the schemas whose tables the build has: IFC4X3 always, IFC2X3 and IFC4 when
+//! they are generated locally (ADR-0018). Every mutated file is written with `ARC_IFC_DUMP` for
 //! `tools/ifc-oracle/conformance_compare.py`.
 
 #![allow(clippy::print_stderr, clippy::unwrap_used, reason = "test code")]
@@ -56,12 +56,10 @@ fn check(text: &str) -> Conformance {
         .unwrap()
 }
 
-fn tables_present() -> bool {
-    let present = SchemaTables::of(&Schema::Ifc4).is_some();
-    if !present {
-        eprintln!("skipped: schema tables not generated (cargo xtask ifc-schema)");
-    }
-    present
+/// Whether this build has the tables of `schema`. IFC4X3 is always present; the others are generated
+/// locally (ADR-0018), so the tests run on the schemas the build has.
+fn has_tables(schema: &Schema) -> bool {
+    SchemaTables::of(schema).is_some()
 }
 
 /// The kinds of structural error: a name, the edit of the base, and the instance, attribute and
@@ -280,10 +278,7 @@ fn applies(m: &Mutation, schema: &Schema) -> bool {
 
 #[test]
 fn the_base_file_passes_in_every_schema() {
-    if !tables_present() {
-        return;
-    }
-    for (identifier, _) in SCHEMAS {
+    for (identifier, _) in SCHEMAS.into_iter().filter(|(_, s)| has_tables(s)) {
         let text = file(identifier, BASE);
         support::dump(
             &format!("conformance-{identifier}-base.ifc"),
@@ -306,10 +301,7 @@ fn the_base_file_passes_in_every_schema() {
 
 #[test]
 fn every_injected_error_is_found() {
-    if !tables_present() {
-        return;
-    }
-    for (identifier, schema) in SCHEMAS {
+    for (identifier, schema) in SCHEMAS.into_iter().filter(|(_, s)| has_tables(s)) {
         for m in MUTATIONS.iter().filter(|m| applies(m, &schema)) {
             assert_eq!(BASE.matches(m.from).count(), 1, "{}", m.name);
             let mut body = BASE.replacen(m.from, m.to, 1);
@@ -342,10 +334,7 @@ fn every_injected_error_is_found() {
 /// An integer where a real is declared is a real number, as EXPRESS makes integers reals.
 #[test]
 fn an_integer_is_a_real() {
-    if !tables_present() {
-        return;
-    }
-    let text = file("IFC4", &BASE.replace("((0.,0.,0.))", "((0,0,0))"));
+    let text = file("IFC4X3_ADD2", &BASE.replace("((0.,0.,0.))", "((0,0,0))"));
     assert!(check(&text).findings.is_empty());
 }
 
@@ -353,11 +342,8 @@ fn an_integer_is_a_real() {
 /// evaluated, never passed.
 #[test]
 fn rules_that_cannot_be_decided_are_not_evaluated() {
-    if !tables_present() {
-        return;
-    }
     let text = file(
-        "IFC4",
+        "IFC4X3_ADD2",
         &BASE.replacen(
             "#1=IFCCARTESIANPOINT((0.,0.,0.));",
             "#1=IFCCARTESIANPOINT();",
@@ -369,7 +355,7 @@ fn rules_that_cannot_be_decided_are_not_evaluated() {
     assert_eq!(result.count(rules::VALUE_TYPE).unwrap().not_evaluated, 1);
 
     let text = file(
-        "IFC4",
+        "IFC4X3_ADD2",
         &BASE.replacen("#16=", "#20=IFCNOTANENTITY(1);\n#16=", 1),
     );
     let result = check(&text);
@@ -405,14 +391,11 @@ fn without_tables_nothing_passes() {
 /// Findings are kept to the bound while the counts stay exact.
 #[test]
 fn findings_are_bounded() {
-    if !tables_present() {
-        return;
-    }
     let mut body = String::from(BASE);
     for i in 100..130 {
         body.push_str(&format!("#{i}=IFCCARTESIANPOINT((0.,0.,0.,0.));\n"));
     }
-    let text = file("IFC4", &body);
+    let text = file("IFC4X3_ADD2", &body);
     let limits = Limits {
         record_count: 10,
         ..Limits::DEFAULT
@@ -436,9 +419,12 @@ fn findings_are_bounded() {
 fn cancellation_stops_the_check() {
     let cancel = Cancel::new();
     cancel.cancel();
-    let parsed = read(file("IFC4", BASE).as_bytes(), &mut ReadOptions::default())
-        .unwrap()
-        .file;
+    let parsed = read(
+        file("IFC4X3_ADD2", BASE).as_bytes(),
+        &mut ReadOptions::default(),
+    )
+    .unwrap()
+    .file;
     if parsed.tables().is_some() {
         assert!(parsed.conformance(&Limits::DEFAULT, &cancel).is_err());
     }
@@ -448,10 +434,7 @@ fn cancellation_stops_the_check() {
 /// attributes its entity declares, with `*` where another part re-declares one as derived.
 #[test]
 fn a_valid_complex_instance_passes() {
-    if !tables_present() {
-        return;
-    }
-    for (identifier, _) in SCHEMAS {
+    for (identifier, _) in SCHEMAS.into_iter().filter(|(_, s)| has_tables(s)) {
         let body = BASE.replacen(
             "#16=",
             "#20=(IFCNAMEDUNIT(*,.LENGTHUNIT.)IFCSIUNIT($,.METRE.));\n#16=",

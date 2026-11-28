@@ -316,8 +316,8 @@ fn attributes_are_found_by_name_where_positions_differ() {
             .unwrap()
             .file;
         let Some(tables) = file.tables() else {
-            eprintln!("skipped: schema tables not generated (cargo xtask ifc-schema)");
-            return;
+            eprintln!("skipped {schema}: schema tables not generated (cargo xtask ifc-schema)");
+            continue;
         };
         let record = &file.instance(90).unwrap().records[0];
         let entity = tables.entity_index(&record.type_name).unwrap();
@@ -356,8 +356,8 @@ fn typed_attributes_follow_the_declared_type() {
         .unwrap()
         .file;
         let Some(tables) = file.tables() else {
-            eprintln!("skipped: schema tables not generated (cargo xtask ifc-schema)");
-            return;
+            eprintln!("skipped {schema}: schema tables not generated (cargo xtask ifc-schema)");
+            continue;
         };
         let record = |n: u64| &file.instance(n).unwrap().records[0];
         let boolean = tables.find("IfcBoolean").unwrap();
@@ -398,7 +398,7 @@ fn typed_attributes_follow_the_declared_type() {
 #[test]
 fn inverse_attributes_are_resolved_from_the_index() {
     let file = read(
-        support::project("IFC4").as_bytes(),
+        support::project("IFC4X3_ADD2").as_bytes(),
         &mut ReadOptions::default(),
     )
     .unwrap()

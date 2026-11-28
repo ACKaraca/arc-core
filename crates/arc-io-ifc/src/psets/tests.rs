@@ -85,9 +85,13 @@ static TEMPLATES: PsetTemplates = PsetTemplates {
 };
 
 fn file(body: &str) -> crate::IfcFile {
+    file_in("IFC4", body)
+}
+
+fn file_in(schema: &str, body: &str) -> crate::IfcFile {
     let text = format!(
         "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\nFILE_NAME('','',(''),(''),'','','');\n\
-         FILE_SCHEMA(('IFC4'));\nENDSEC;\nDATA;\n{body}ENDSEC;\nEND-ISO-10303-21;\n"
+         FILE_SCHEMA(('{schema}'));\nENDSEC;\nDATA;\n{body}ENDSEC;\nEND-ISO-10303-21;\n"
     );
     read(text.as_bytes(), &mut ReadOptions::default())
         .unwrap()
@@ -225,9 +229,7 @@ fn every_difference_is_reported_with_a_stable_code() {
 
 #[test]
 fn applicability_is_judged_with_the_schema_tables() {
-    if crate::schema::SchemaTables::of(&crate::Schema::Ifc4).is_none() {
-        return;
-    }
+    // IFC4X3, whose tables every build has.
     let body = format!(
         "{GOOD}#20=IFCSLAB('4YvctVUKr0kugbFTf53O9L',$,$,$,$,$,$,$,$);
 #21=IFCWALL('5YvctVUKr0kugbFTf53O9L',$,$,$,$,$,$,$,$);
@@ -235,7 +237,13 @@ fn applicability_is_judged_with_the_schema_tables() {
 #23=IFCRELDEFINESBYPROPERTIES('7YvctVUKr0kugbFTf53O9L',$,$,$,(#20,#21),#10);
 "
     );
-    let result = run(&body);
+    let result = check::check(
+        &file_in("IFC4X3_ADD2", &body),
+        &TEMPLATES,
+        &Limits::CONSTRAINED,
+        &Cancel::new(),
+    )
+    .unwrap();
     let findings: Vec<_> = result
         .findings
         .iter()
