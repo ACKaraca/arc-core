@@ -270,11 +270,17 @@ const LAYER_LIMIT: ErrorCode = ErrorCode {
     message_id: "test-layer-limit",
 };
 
-static SETUP_CALLS: AtomicUsize = AtomicUsize::new(0);
+/// The setup a product would install, counting its calls in `calls`. Each test owns its counter,
+/// so tests running in parallel do not see each other's calls.
+fn limit_layers_counting(calls: Arc<AtomicUsize>) -> impl Fn(&Document) -> arc_base::Result<()> {
+    move |document| {
+        calls.fetch_add(1, Ordering::Relaxed);
+        limit_layers(document)
+    }
+}
 
 /// The setup a product would install: a document validator that allows two layers.
 fn limit_layers(document: &Document) -> arc_base::Result<()> {
-    SETUP_CALLS.fetch_add(1, Ordering::Relaxed);
     document.add_validator(Arc::new(|_, after, _| {
         let layers = after
             .iter_type(arc_shell_cli::LAYER)
@@ -295,7 +301,8 @@ fn the_setup_hook_validator_rejects_an_invalid_command_through_the_protocol() {
     let dir = TempDir::new("hook");
     let file = dir.path("sheet.arc");
     let root = dir.0.to_str().unwrap().to_owned();
-    let before = SETUP_CALLS.load(Ordering::Relaxed);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let setup = limit_layers_counting(calls.clone());
     let requests: Vec<Value> = std::iter::once(initialize(&["read", "edit"]))
         .chain(["a", "b", "c"].iter().enumerate().map(|(i, name)| {
             run_command(
@@ -312,7 +319,7 @@ fn the_setup_hook_validator_rejects_an_invalid_command_through_the_protocol() {
             &[&file],
             &["--create", "--allow-edit", "--write-root", &root],
         ),
-        Some(&limit_layers),
+        Some(&setup),
         &requests,
     );
     assert_eq!(
@@ -321,7 +328,7 @@ fn the_setup_hook_validator_rejects_an_invalid_command_through_the_protocol() {
         "{}",
         served.output.stderr
     );
-    assert_eq!(SETUP_CALLS.load(Ordering::Relaxed) - before, 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert!(served.answers[1]["result"]["revision"].is_u64());
     assert!(served.answers[2]["result"]["revision"].is_u64());
     assert_eq!(served.answers[3]["error"]["message"], "test.layer.limit");
@@ -334,10 +341,11 @@ fn the_setup_hook_runs_for_every_document_a_subcommand_opens() {
     let b = dir.path("b.arc");
     drop(Package::create(&a, &Metadata::default(), &owner()).unwrap());
     drop(Package::create(&b, &Metadata::default(), &owner()).unwrap());
-    let before = SETUP_CALLS.load(Ordering::Relaxed);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let setup = limit_layers_counting(calls.clone());
     let served = serve(
         words(&["serve", "--stdio"], &[&a, &b], &[]),
-        Some(&limit_layers),
+        Some(&setup),
         &[],
     );
     assert_eq!(
@@ -346,7 +354,7 @@ fn the_setup_hook_runs_for_every_document_a_subcommand_opens() {
         "{}",
         served.output.stderr
     );
-    assert_eq!(SETUP_CALLS.load(Ordering::Relaxed) - before, 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 
 #[test]
