@@ -166,15 +166,17 @@ impl<R: Read> Window<'_, R> {
                         self.start = at + i + 2;
                         break;
                     }
-                    at = self.buffer.len().saturating_sub(1).max(self.start + 2);
                     if self.eof {
                         return Err(at_offset(
                             codes::IFC_TRUNCATED,
                             self.base + self.buffer.len() as u64,
                         ));
                     }
-                    self.fill_with(false)?;
-                    at = at.min(self.buffer.len());
+                    // Consume the comment read so far, keeping a last byte that may be its `*`,
+                    // so a long comment does not grow the window.
+                    self.start = self.buffer.len().saturating_sub(1).max(at);
+                    self.fill()?;
+                    at = self.start;
                 }
                 continue;
             }

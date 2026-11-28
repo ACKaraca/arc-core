@@ -153,6 +153,25 @@ fn the_window_stays_small_on_a_large_file() {
 }
 
 #[test]
+fn a_long_comment_between_statements_keeps_the_window_small() {
+    let comment = format!("/*{}*/", "x".repeat(4_000_000));
+    let text = format!(
+        "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\nFILE_NAME('a','',(),(),'','','');\n\
+         FILE_SCHEMA(('IFC4X3_ADD2'));\nENDSEC;\nDATA;\n{comment}\n#1=IFCWALL('w',$,$,$,$,$,$,$,$);\n\
+         ENDSEC;\nEND-ISO-10303-21;\n"
+    );
+    let (l, s, c) = limits();
+    let index = StreamIndex::build(&mut Choppy(text.as_bytes(), 100_000), &l, &s, &c).unwrap();
+    assert_eq!(index.len(), 1);
+    assert_eq!(
+        index.span(1).map(|r| text.as_bytes()[r.start as usize]),
+        Some(b'#')
+    );
+    let window = index.summary().peak_window_bytes;
+    assert!(window < 400_000, "window {window}");
+}
+
+#[test]
 fn malformed_and_hostile_sources_fail_with_codes() {
     let (l, s, c) = limits();
     let good = awkward();
