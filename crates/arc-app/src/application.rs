@@ -444,6 +444,7 @@ impl Application {
 
     /// True when tab `id` accepts no edits: it is read-only, or it is not open.
     #[must_use]
+    #[cfg(feature = "window")]
     pub(crate) fn is_read_only_tab(&self, id: TabId) -> bool {
         match self.tab(id) {
             Ok(tab) => tab.is_read_only(),

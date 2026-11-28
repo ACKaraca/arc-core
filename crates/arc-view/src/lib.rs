@@ -1,4 +1,4 @@
-//! Derived drawings of 3D models for the Arc suite (first part: plan views).
+//! Derived drawings of 3D models for the Arc suite: plan views, sections and elevations.
 //!
 //! A product describes a view with a [`ViewDef`] (direction, cut plane and ranges, crop, detail
 //! level, crease angle, scale, overrides and bounds) and supplies its objects through the

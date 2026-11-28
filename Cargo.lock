@@ -291,6 +291,7 @@ name = "arc-io-ifc"
 version = "0.1.0"
 dependencies = [
  "arc-base",
+ "arc-geom",
  "arc-io-common",
  "arc-mesh",
  "proptest",
@@ -4510,6 +4511,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "fluent-bundle",
  "serde",
  "serde_json",

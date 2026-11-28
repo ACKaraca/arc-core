@@ -21,8 +21,10 @@
 //! loops are given counterclockwise seen from outside. A face that is not planar within the linear
 //! tolerance is triangulated in the projection onto its mean plane and reported as approximated.
 //! An item with any face that cannot be evaluated is skipped as a whole, so no shell is emitted with
-//! a face missing.
+//! a face missing; a face whose outer loop has no area (collinear points) is the exception: it adds
+//! nothing to a mesh, so it is left out and reported, and the item is reported as approximated.
 
+use crate::schema::access::known;
 use std::collections::BTreeMap;
 
 use arc_base::Limits;
@@ -47,7 +49,7 @@ const INDEX_BYTES: u64 = 48;
 pub(crate) struct Welder {
     index: BTreeMap<[u64; 3], u32>,
     positions: Vec<Point3>,
-    triangles: Vec<[u32; 3]>,
+    pub(crate) triangles: Vec<[u32; 3]>,
 }
 
 /// The key of a point: its bits, with the sign of zero normalized.
@@ -60,7 +62,7 @@ fn key(p: &Point3) -> [u64; 3] {
 }
 
 impl Welder {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             index: BTreeMap::new(),
             positions: Vec::new(),
@@ -88,11 +90,15 @@ impl Welder {
         let a = self.vertex(budget, t[0])?;
         let b = self.vertex(budget, t[1])?;
         let c = self.vertex(budget, t[2])?;
-        self.triangles.push([a, b, c]);
+        // A triangle with two welded corners (a face of a pole) has no area: its two other edges
+        // cancel, so leaving it out keeps the mesh closed.
+        if a != b && b != c && a != c {
+            self.triangles.push([a, b, c]);
+        }
         Ok(())
     }
 
-    fn finish(self, limits: &Limits) -> Step<arc_mesh::TriMesh> {
+    pub(crate) fn finish(self, limits: &Limits) -> Step<arc_mesh::TriMesh> {
         TriMeshBuilder::new(self.positions, self.triangles)
             .build(limits)
             .map_err(Flow::Hard)
@@ -133,26 +139,55 @@ fn corners(points: &[Point3], pn: Option<&[i64]>, values: &[i64], kind: &str) ->
         .collect()
 }
 
+/// The member list of a face or shell based surface model.
+fn surface_model_members(kind: &str) -> crate::schema::access::Attr {
+    if kind == "IFCSHELLBASEDSURFACEMODEL" {
+        known::SHELL_MODEL_BOUNDARY
+    } else {
+        known::FACE_MODEL_FACES
+    }
+}
+
 impl Evaluator<'_> {
     /// The pieces of a face-based item: one mesh of all its faces.
     pub(crate) fn faces(&mut self, name: u64, record: &Record) -> Step<Vec<Piece>> {
         let kind = record.type_name.as_str();
         let mut welder = Welder::new();
         let mut deviation = 0.0_f64;
-        let first = record.parameters.first();
+        let file = self.file;
         match kind {
             "IFCTRIANGULATEDFACESET" => self.triangulated(record, &mut welder)?,
             "IFCPOLYGONALFACESET" => self.polygonal(record, &mut welder, &mut deviation)?,
-            "IFCFACETEDBREP" => {
-                let shell = attr::reference(first, kind)?;
+            "IFCFACETEDBREP" | "IFCFACETEDBREPWITHVOIDS" => {
+                let shell = attr::reference(file.attr(record, known::BREP_OUTER), kind)?;
                 for face in self.shell_faces(shell)? {
                     self.budget.step()?;
                     self.add_face(face, &mut welder, &mut deviation)?;
                 }
+                if kind == "IFCFACETEDBREPWITHVOIDS" {
+                    // The shells of the voids are wound outward from the material, so their faces
+                    // are added as they are.
+                    let (voids, _) = attr::distinct_references(
+                        &mut self.budget,
+                        attr::named(file, record, "Voids", 1),
+                        kind,
+                        usize::MAX,
+                    )?;
+                    for void in voids {
+                        for face in self.shell_faces(void)? {
+                            self.budget.step()?;
+                            self.add_face(face, &mut welder, &mut deviation)?;
+                        }
+                    }
+                }
             }
             "IFCFACEBASEDSURFACEMODEL" | "IFCSHELLBASEDSURFACEMODEL" => {
-                let (members, _) =
-                    attr::distinct_references(&mut self.budget, first, kind, usize::MAX)?;
+                let (members, _) = attr::distinct_references(
+                    &mut self.budget,
+                    file.attr(record, surface_model_members(kind)),
+                    kind,
+                    usize::MAX,
+                )?;
                 for member in members {
                     for face in self.shell_faces(member)? {
                         self.budget.step()?;
@@ -188,10 +223,14 @@ impl Evaluator<'_> {
 
     fn triangulated(&mut self, record: &Record, welder: &mut Welder) -> Step<()> {
         let kind = "IFCTRIANGULATEDFACESET";
-        let coordinates = attr::reference(record.parameters.first(), kind)?;
+        let coordinates =
+            attr::reference(self.file.attr(record, known::FACE_SET_COORDINATES), kind)?;
         let points = self.point_list(coordinates)?;
-        let pn = self.pn_index(record.parameters.get(4))?;
-        let rows = attr::list(record.parameters.get(3), kind)?;
+        let pn = self.pn_index(self.file.attr(record, known::TRIANGULATED_PN_INDEX))?;
+        let rows = attr::list(
+            self.file.attr(record, known::TRIANGULATED_COORD_INDEX),
+            kind,
+        )?;
         self.budget.array(rows.len())?;
         for row in rows {
             self.budget.step()?;
@@ -211,12 +250,13 @@ impl Evaluator<'_> {
     fn polygonal(&mut self, record: &Record, welder: &mut Welder, deviation: &mut f64) -> Step<()> {
         let kind = "IFCPOLYGONALFACESET";
         let file = self.file;
-        let coordinates = attr::reference(record.parameters.first(), kind)?;
+        let coordinates =
+            attr::reference(self.file.attr(record, known::FACE_SET_COORDINATES), kind)?;
         let points = self.point_list(coordinates)?;
-        let pn = self.pn_index(record.parameters.get(3))?;
+        let pn = self.pn_index(file.attr(record, known::POLYGONAL_PN_INDEX))?;
         let (faces, _) = attr::distinct_references(
             &mut self.budget,
-            record.parameters.get(2),
+            file.attr(record, known::POLYGONAL_FACES),
             kind,
             usize::MAX,
         )?;
@@ -227,13 +267,17 @@ impl Evaluator<'_> {
             let mut loops = vec![corners(
                 &points,
                 pn.as_deref(),
-                &attr::integers(face_record.parameters.first(), kind)?,
+                &attr::integers(
+                    file.attr(face_record, known::INDEXED_FACE_COORD_INDEX),
+                    kind,
+                )?,
                 kind,
             )?];
             match face_record.type_name.as_str() {
                 "IFCINDEXEDPOLYGONALFACE" => {}
                 "IFCINDEXEDPOLYGONALFACEWITHVOIDS" => {
-                    for row in attr::list(face_record.parameters.get(1), kind)? {
+                    for row in attr::list(file.attr(face_record, known::INDEXED_FACE_INNER), kind)?
+                    {
                         let values = attr::integers(Some(row), kind)?;
                         loops.push(corners(&points, pn.as_deref(), &values, kind)?);
                     }
@@ -246,7 +290,7 @@ impl Evaluator<'_> {
     }
 
     /// Triangulates a planar face given by its loops and adds the triangles to the welder.
-    fn emit_planar(
+    pub(crate) fn emit_planar(
         &mut self,
         loops: &[Vec<Point3>],
         welder: &mut Welder,
@@ -263,7 +307,7 @@ impl Evaluator<'_> {
     }
 
     /// The faces of a shell, connected face set or open shell, in order.
-    fn shell_faces(&mut self, name: u64) -> Step<Vec<u64>> {
+    pub(crate) fn shell_faces(&mut self, name: u64) -> Step<Vec<u64>> {
         let file = self.file;
         let Some(instance) = file.instance(name) else {
             return Err(skip(reasons::TARGET_MISSING, "IFCCLOSEDSHELL"));
@@ -275,7 +319,7 @@ impl Evaluator<'_> {
             "IFCCLOSEDSHELL" | "IFCOPENSHELL" | "IFCCONNECTEDFACESET" => {
                 let (faces, _) = attr::distinct_references(
                     &mut self.budget,
-                    record.parameters.first(),
+                    file.attr(record, known::SHELL_FACES),
                     &record.type_name,
                     usize::MAX,
                 )?;
@@ -286,7 +330,12 @@ impl Evaluator<'_> {
     }
 
     /// Adds one `IfcFace`: its outer bound and holes, each loop with its orientation applied.
-    fn add_face(&mut self, face: u64, welder: &mut Welder, deviation: &mut f64) -> Step<()> {
+    pub(crate) fn add_face(
+        &mut self,
+        face: u64,
+        welder: &mut Welder,
+        deviation: &mut f64,
+    ) -> Step<()> {
         let kind = "IFCFACE";
         let file = self.file;
         let record =
@@ -297,7 +346,7 @@ impl Evaluator<'_> {
         // Bounds keep their repeats: a repeated bound is a repeated loop, and the region is refused.
         let bounds = attr::ordered_references(
             &mut self.budget,
-            record.parameters.first(),
+            file.attr(record, known::FACE_BOUNDS),
             kind,
             usize::MAX,
         )?;
@@ -311,10 +360,14 @@ impl Evaluator<'_> {
                 "IFCFACEBOUND" => false,
                 other => return Err(skip(reasons::GEOMETRY_NOT_EVALUATED, other)),
             };
-            let loop_name =
-                attr::reference(bound_record.parameters.first(), &bound_record.type_name)?;
+            let loop_name = attr::reference(
+                file.attr(bound_record, known::FACE_BOUND),
+                &bound_record.type_name,
+            )?;
             let mut points = self.polygon_loop(loop_name)?;
-            if attr::enumeration(bound_record.parameters.get(1)) == Some("F") {
+            if attr::enumeration(file.attr(bound_record, known::FACE_BOUND_ORIENTATION))
+                == Some("F")
+            {
                 points.reverse();
             }
             loops.push((outer, points));
@@ -332,15 +385,43 @@ impl Evaluator<'_> {
         let Some(outer_loop) = outer_loop else {
             return Err(skip(reasons::GEOMETRY_DEGENERATE, kind));
         };
+        // A face whose outer loop has no area (collinear points) adds nothing to a mesh: it is left
+        // out and reported, and the item is reported as approximated, instead of skipping the shell.
+        if self.sliver(&outer_loop) {
+            self.log.add(
+                reasons::GEOMETRY_DEGENERATE,
+                kind,
+                Some(Source::Decimal(face)),
+                1,
+            );
+            *deviation = deviation.max(2.0 * self.tol.linear);
+            return Ok(());
+        }
         let mut all = vec![outer_loop];
         all.extend(ordered);
         self.emit_planar(&all, welder, deviation)
     }
 
+    /// Whether the loop has no area within the linear tolerance: its Newell area is at most the
+    /// tolerance times its largest extent.
+    fn sliver(&self, points: &[Point3]) -> bool {
+        let Some(first) = points.first() else {
+            return true;
+        };
+        let mut area = Vector3::zeros();
+        let mut extent = 0.0_f64;
+        for (k, a) in points.iter().enumerate() {
+            let b = points[(k + 1) % points.len()];
+            area += (a - first).cross(&(b - first));
+            extent = extent.max((a - first).norm());
+        }
+        area.norm() / 2.0 <= self.tol.linear * extent
+    }
+
     /// The points of an `IfcPolyLoop`, with three or more and at most [`MAX_LOOP_VERTICES`]. Repeats
     /// are kept, since a face loop may reuse a point (a keyhole); only a closing repeat, whose last
     /// point is its first, is dropped.
-    fn polygon_loop(&mut self, name: u64) -> Step<Vec<Point3>> {
+    pub(crate) fn polygon_loop(&mut self, name: u64) -> Step<Vec<Point3>> {
         let kind = "IFCPOLYLOOP";
         let file = self.file;
         let record =
@@ -350,7 +431,7 @@ impl Evaluator<'_> {
         }
         let mut refs = attr::ordered_references(
             &mut self.budget,
-            record.parameters.first(),
+            file.attr(record, known::POLY_LOOP_POLYGON),
             kind,
             MAX_LOOP_VERTICES,
         )?;
@@ -377,7 +458,10 @@ impl Evaluator<'_> {
     /// counterclockwise seen from the Newell normal of the outer loop, and the deviation is the
     /// largest distance of a point from the plane through the outer loop's first point. `None` for a
     /// loop with zero area or a region that is not valid.
-    fn planar(&mut self, loops: &[Vec<Point3>]) -> Step<Option<(Vec<[Point3; 3]>, f64)>> {
+    pub(crate) fn planar(
+        &mut self,
+        loops: &[Vec<Point3>],
+    ) -> Step<Option<(Vec<[Point3; 3]>, f64)>> {
         // The total of the loops (holes included, each bridged twice) is capped before anything is
         // copied or triangulated.
         let lengths: Vec<usize> = loops.iter().map(Vec::len).collect();

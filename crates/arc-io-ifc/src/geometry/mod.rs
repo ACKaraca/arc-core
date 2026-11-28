@@ -14,21 +14,31 @@
 //! mapped items) shares one depth counter capped at [`MAX_NESTING`]. Cancellation is checked per
 //! product and every 1024 steps of a long loop.
 
+mod advanced;
 mod attr;
+mod boolean;
+mod bspline;
 mod budget;
+mod csg;
 mod curves;
 mod faces;
 mod mapped;
+mod offset;
+mod opening;
 mod place;
 mod polygon;
 mod profile;
+mod sectioned;
 mod solid;
+mod surface;
+mod swept;
 mod units;
 
 /// The most points of one loop or polyline that are evaluated; the triangulation is quadratic in
 /// the loop length. A longer loop is not evaluated.
 pub(crate) const MAX_LOOP_VERTICES: usize = 4096;
 
+use crate::schema::access::known;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -84,26 +94,49 @@ impl GeometryItem {
     ///
     /// The limits of [`arc_mesh::TriMeshBuilder::build`] apply to the new mesh.
     pub fn world_mesh(&self, limits: &Limits) -> Result<Option<TriMesh>> {
-        let Shape::Mesh(mesh) = self.shape.as_ref() else {
-            return Ok(None);
-        };
-        let reflected = self
-            .transform
-            .matrix()
-            .fixed_view::<3, 3>(0, 0)
-            .determinant()
-            < 0.0;
-        let positions = mesh
-            .positions()
-            .iter()
-            .map(|p| self.transform.transform_point(p))
-            .collect();
-        let triangles = mesh
-            .triangles()
-            .iter()
-            .map(|t| if reflected { [t[0], t[2], t[1]] } else { *t })
-            .collect();
-        TriMesh::new(positions, triangles, limits).map(Some)
+        shape_mesh(&self.shape, &self.transform, limits)
+    }
+}
+
+/// The mesh of `shape` moved by `transform`, with the winding of a reflection reversed so that the
+/// triangles face outward; `None` for polylines.
+pub(crate) fn shape_mesh(
+    shape: &Shape,
+    transform: &Transform3,
+    limits: &Limits,
+) -> Result<Option<TriMesh>> {
+    let Shape::Mesh(mesh) = shape else {
+        return Ok(None);
+    };
+    let reflected = transform.matrix().fixed_view::<3, 3>(0, 0).determinant() < 0.0;
+    let positions = mesh
+        .positions()
+        .iter()
+        .map(|p| transform.transform_point(p))
+        .collect();
+    let triangles = mesh
+        .triangles()
+        .iter()
+        .map(|t| if reflected { [t[0], t[2], t[1]] } else { *t })
+        .collect();
+    TriMesh::new(positions, triangles, limits).map(Some)
+}
+
+/// What a geometry evaluation does besides evaluating the representation items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GeometryOptions {
+    /// Subtract the bodies of the openings of an element (`IfcRelVoidsElement`) from the element's
+    /// extruded body, as the module `opening` describes. When false, or for an opening that cannot be
+    /// subtracted, the opening is reported as `io.ifc.opening_not_subtracted` and the element is
+    /// emitted solid.
+    pub subtract_openings: bool,
+}
+
+impl Default for GeometryOptions {
+    fn default() -> Self {
+        Self {
+            subtract_openings: true,
+        }
     }
 }
 
@@ -186,6 +219,8 @@ pub(crate) struct Evaluator<'f> {
     pub(crate) log: LossLog,
     /// Meters per length unit of the file, applied to every length read.
     pub(crate) scale: f64,
+    /// Radians per plane angle unit of the file, applied to every angle read.
+    pub(crate) angle: f64,
     /// The deepest recursion allowed: the nesting limit of the profile, at most [`MAX_NESTING`].
     pub(crate) depth_limit: u32,
     placements: BTreeMap<u64, Transform3>,
@@ -207,6 +242,7 @@ impl<'f> Evaluator<'f> {
             budget: Budget::new(limits, file.parsed_bytes(), cancel),
             log: LossLog::default(),
             scale: 1.0,
+            angle: 1.0,
             depth_limit: limits.nesting_depth.min(MAX_NESTING),
             placements: BTreeMap::new(),
             items: BTreeMap::new(),
@@ -283,13 +319,47 @@ impl<'f> Evaluator<'f> {
         let kind = record.type_name.as_str();
         match kind {
             "IFCMAPPEDITEM" => self.mapped(name, record, depth),
-            "IFCEXTRUDEDAREASOLID" => self.extrusion(record),
+            "IFCEXTRUDEDAREASOLID" | "IFCEXTRUDEDAREASOLIDTAPERED" => self.extrusion(record),
+            "IFCBOOLEANRESULT" | "IFCBOOLEANCLIPPINGRESULT" => self.boolean(name, record, depth),
+            "IFCREVOLVEDAREASOLID" | "IFCREVOLVEDAREASOLIDTAPERED" => self.revolution(name, record),
+            "IFCBLOCK"
+            | "IFCRECTANGULARPYRAMID"
+            | "IFCRIGHTCIRCULARCONE"
+            | "IFCRIGHTCIRCULARCYLINDER"
+            | "IFCSPHERE" => self.csg_primitive(name, record),
+            "IFCCSGSOLID" => self.csg_solid(name, record, depth),
+            "IFCSWEPTDISKSOLID" | "IFCSWEPTDISKSOLIDPOLYGONAL" => self.swept_disk(name, record),
+            "IFCSURFACECURVESWEPTAREASOLID" | "IFCFIXEDREFERENCESWEPTAREASOLID" => {
+                self.directrix_sweep(record)
+            }
+            "IFCSECTIONEDSPINE" | "IFCSECTIONEDSOLIDHORIZONTAL" => self.sectioned(name, record),
+            "IFCADVANCEDBREP" | "IFCADVANCEDBREPWITHVOIDS" => self.advanced_brep(name, record),
             "IFCTRIANGULATEDFACESET"
             | "IFCPOLYGONALFACESET"
             | "IFCFACETEDBREP"
+            | "IFCFACETEDBREPWITHVOIDS"
             | "IFCFACEBASEDSURFACEMODEL"
             | "IFCSHELLBASEDSURFACEMODEL" => self.faces(name, record),
-            "IFCPOLYLINE" | "IFCINDEXEDPOLYCURVE" => self.curve(record),
+            "IFCGEOMETRICSET" | "IFCGEOMETRICCURVESET" => self.geometric_set(name, record),
+            "IFCCARTESIANPOINT" => {
+                let p = self.point(name)?;
+                self.charge_shape()?;
+                Ok(Self::own(Shape::Polylines(vec![vec![p, p]])))
+            }
+            "IFCBSPLINESURFACEWITHKNOTS" | "IFCRATIONALBSPLINESURFACEWITHKNOTS" => {
+                self.bspline_surface_item(name, record)
+            }
+            "IFCPOLYLINE"
+            | "IFCBSPLINECURVEWITHKNOTS"
+            | "IFCRATIONALBSPLINECURVEWITHKNOTS"
+            | "IFCOFFSETCURVE2D"
+            | "IFCOFFSETCURVE3D"
+            | "IFCOFFSETCURVEBYDISTANCES"
+            | "IFCINDEXEDPOLYCURVE"
+            | "IFCCIRCLE"
+            | "IFCELLIPSE"
+            | "IFCTRIMMEDCURVE"
+            | "IFCCOMPOSITECURVE" => self.curve(name, record),
             _ => Err(attr::skip(reasons::GEOMETRY_NOT_EVALUATED, kind)),
         }
     }
@@ -349,10 +419,16 @@ impl<'f> Evaluator<'f> {
         if let Some(pair) = self.texts.get(&name) {
             return Ok(pair.clone());
         }
-        let identifier = attr::text(rep.parameters.get(1), "IFCSHAPEREPRESENTATION");
+        let identifier = attr::text(
+            self.file.attr(rep, known::REPRESENTATION_IDENTIFIER),
+            "IFCSHAPEREPRESENTATION",
+        );
         let identifier = self.settle(identifier, name)?.flatten();
         let identifier = shared_text(&mut self.budget, identifier)?;
-        let rtype = attr::text(rep.parameters.get(2), "IFCSHAPEREPRESENTATION");
+        let rtype = attr::text(
+            self.file.attr(rep, known::REPRESENTATION_TYPE),
+            "IFCSHAPEREPRESENTATION",
+        );
         let rtype = self.settle(rtype, name)?.flatten();
         let rtype = shared_text(&mut self.budget, rtype)?;
         let pair = (identifier, rtype);
@@ -374,7 +450,7 @@ impl<'f> Evaluator<'f> {
         };
         let step = attr::distinct_references(
             &mut self.budget,
-            record.parameters.get(2),
+            file.attr(record, known::PRODUCT_REPRESENTATIONS),
             "IFCPRODUCTDEFINITIONSHAPE",
             usize::MAX,
         );
@@ -407,7 +483,7 @@ impl<'f> Evaluator<'f> {
             let (identifier, rtype) = self.representation_texts(representation, rep)?;
             let step = attr::distinct_references(
                 &mut self.budget,
-                rep.parameters.get(3),
+                file.attr(rep, known::REPRESENTATION_ITEMS),
                 "IFCSHAPEREPRESENTATION",
                 usize::MAX,
             );
@@ -462,13 +538,15 @@ fn products(file: &IfcFile) -> Vec<(u64, Option<u64>, u64)> {
     let mut out = Vec::new();
     for instance in file.instances() {
         for record in &instance.records {
-            let Some(Parameter::Reference(shape)) = record.parameters.get(6) else {
+            let Some(Parameter::Reference(shape)) =
+                file.attr(record, known::PRODUCT_REPRESENTATION)
+            else {
                 continue;
             };
             if attr::typed(file, *shape, "IFCPRODUCTDEFINITIONSHAPE").is_none() {
                 continue;
             }
-            let placement = match record.parameters.get(5) {
+            let placement = match file.attr(record, known::PRODUCT_PLACEMENT) {
                 Some(Parameter::Reference(name)) => Some(*name),
                 _ => None,
             };
@@ -494,18 +572,54 @@ fn count_openings(evaluator: &mut Evaluator<'_>) {
 }
 
 /// The whole evaluation.
-fn run(file: &IfcFile, limits: &Limits, tol: &Tolerance, cancel: &Cancel) -> Result<Geometry> {
+fn run(
+    file: &IfcFile,
+    limits: &Limits,
+    tol: &Tolerance,
+    cancel: &Cancel,
+    options: &GeometryOptions,
+) -> Result<Geometry> {
     cancel.check()?;
     let mut evaluator = Evaluator::new(file, limits, tol, cancel);
     let units = evaluator.read_units()?;
-    count_openings(&mut evaluator);
+    if !options.subtract_openings {
+        count_openings(&mut evaluator);
+    }
+    let all = products(file);
+    let voids = if options.subtract_openings {
+        opening::voids(file)
+    } else {
+        BTreeMap::new()
+    };
+    let index: BTreeMap<u64, (Option<u64>, u64)> =
+        all.iter().map(|&(n, p, s)| (n, (p, s))).collect();
     let mut items = Vec::new();
-    for (product, placement, shape) in products(file) {
+    for (product, placement, shape) in all {
         evaluator.budget.check()?;
         let Some(world) = evaluator.product_transform(product, placement)? else {
             continue;
         };
+        let start = items.len();
         evaluator.product_items(product, shape, world, &mut items)?;
+        if let Some(openings) = voids.get(&product) {
+            let mut found: Vec<(u64, Option<u64>, u64)> = Vec::with_capacity(openings.len());
+            for opening in openings {
+                match index.get(opening) {
+                    Some(&(p, s)) => found.push((*opening, p, s)),
+                    // An opening without a body cannot be subtracted.
+                    None => evaluator.log.add(
+                        reasons::OPENING_NOT_SUBTRACTED,
+                        "IFCRELVOIDSELEMENT",
+                        Some(Source::Decimal(*opening)),
+                        1,
+                    ),
+                }
+            }
+            let openings = found;
+            if let Some(slice) = items.get_mut(start..) {
+                evaluator.subtract_openings(product, world, &openings, slice)?;
+            }
+        }
     }
     let report = evaluator.log.finish(LossHeader::new(
         "ifc",
@@ -547,6 +661,22 @@ impl IfcFile {
         cancel: &Cancel,
         tolerance: &Tolerance,
     ) -> Result<Geometry> {
-        run(self, limits, tolerance, cancel)
+        run(self, limits, tolerance, cancel, &GeometryOptions::default())
+    }
+
+    /// Evaluates the geometry of the products of the file as
+    /// [`Self::geometry_with_tolerance`] does, with the given options.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::geometry_with_tolerance`].
+    pub fn geometry_with_options(
+        &self,
+        limits: &Limits,
+        cancel: &Cancel,
+        tolerance: &Tolerance,
+        options: &GeometryOptions,
+    ) -> Result<Geometry> {
+        run(self, limits, tolerance, cancel, options)
     }
 }

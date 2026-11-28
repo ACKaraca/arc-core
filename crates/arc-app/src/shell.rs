@@ -296,6 +296,24 @@ pub struct ShellConfig {
     pub seed: u64,
 }
 
+/// The next invocation seed: a SplitMix64 step. A plain sequence with the golden-ratio step would
+/// cancel against the factor the command context applies to the document revision, so two steps
+/// could generate the same identifiers.
+fn next_step_seed(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Whether the icon atlas is to be built for `ppp`: icons are used, it was not built for this
+/// scale and did not fail at it (a failure at one scale, such as an edge over the limit, says
+/// nothing about another).
+fn icon_atlas_due(any: bool, failed_at: Option<f32>, built_at: Option<f32>, ppp: f32) -> bool {
+    any && failed_at != Some(ppp) && built_at != Some(ppp)
+}
+
 /// The starter icons followed by the product's.
 fn merged_icons(product: &[(String, String)]) -> Vec<(&str, &str)> {
     arc_ui::icons::STARTER
@@ -576,8 +594,8 @@ pub struct Shell {
     product_icons: Vec<(String, String)>,
     /// The icon atlas of the last scale it was built for; `None` before the first build.
     icons: Option<(f32, arc_ui::Icons)>,
-    /// The atlas failed to build: labels are drawn as text.
-    icons_failed: bool,
+    /// The scale the atlas last failed to build at: labels are drawn as text until it changes.
+    icons_failed: Option<f32>,
     status: Vec<StatusToggle>,
     status_text: Option<StatusProbe>,
     display: Option<DisplayProbe>,
@@ -752,7 +770,7 @@ impl Shell {
             quick_access: config.quick_access,
             product_icons: config.icons,
             icons: None,
-            icons_failed: false,
+            icons_failed: None,
             status: config.status,
             status_text: config.status_text,
             display: config.display,
@@ -779,7 +797,12 @@ impl Shell {
                 .iter()
                 .any(|t| t.groups.iter().any(|g| uses(&g.items)));
         let ppp = ctx.pixels_per_point();
-        if !any || self.icons_failed || self.icons.as_ref().is_some_and(|(p, _)| *p == ppp) {
+        if !icon_atlas_due(
+            any,
+            self.icons_failed,
+            self.icons.as_ref().map(|(p, _)| *p),
+            ppp,
+        ) {
             return;
         }
         let edge = arc_ui::IconAtlas::edge_for(32.0, ppp);
@@ -790,7 +813,7 @@ impl Shell {
                     code = e.code(),
                     "icon atlas failed; labels are drawn as text"
                 );
-                self.icons_failed = true;
+                self.icons_failed = Some(ppp);
                 self.icons = None;
             }
         }
@@ -1396,7 +1419,11 @@ impl Shell {
             }
             _ => None,
         };
-        let tools = chrome::tool_views(&self.toolbar, app, active, input.localize);
+        let tools = if chrome::flat_toolbar_shown(!self.command_tabs.is_empty(), main) {
+            chrome::tool_views(&self.toolbar, app, active, input.localize)
+        } else {
+            Vec::new()
+        };
         let quick = chrome::tool_views(&self.quick_access, app, active, input.localize);
         let commands = if main {
             let id = egui::Id::NULL.with(("arc-command-tabs", window));
@@ -2217,8 +2244,7 @@ impl Shell {
         let Some(mut view) = self.views.remove(&tab) else {
             return Err(Error::new(crate::codes::DOCUMENT_UNKNOWN));
         };
-        self.seed = self.seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let seed = self.seed;
+        let seed = next_step_seed(&mut self.seed);
         let mut deferred: Vec<(String, Json)> = Vec::new();
         // The selection a command set (`Context::set_selection`) becomes the tab's selection.
         let mut chosen: Option<Vec<ObjectId>> = None;
@@ -2554,14 +2580,15 @@ fn factory_error(id: &str) -> Error {
 fn viewport_config(camera: ViewFrame, colors: &Colors) -> ViewportConfig {
     let mut config = ViewportConfig::new(64, 64, camera);
     config.readback = false;
-    config.settings = render_settings(colors);
+    config.settings = render_settings(colors, arc_gpu::ShadingMode::default());
     config
 }
 
-/// The render settings of a viewport: a transparent background, so the widget's grid and axes
-/// show through under the drawing.
-fn render_settings(_colors: &Colors) -> arc_gpu::RenderSettings {
+/// The render settings of a viewport in the shading mode `mode`: a transparent background, so the
+/// widget's grid and axes show through under the drawing.
+fn render_settings(_colors: &Colors, mode: arc_gpu::ShadingMode) -> arc_gpu::RenderSettings {
     arc_gpu::RenderSettings {
+        mode,
         // The egui renderer samples the frame as premultiplied: transparent black adds nothing.
         background: arc_base::Color::from_srgb8([0, 0, 0, 0]),
         ..arc_gpu::RenderSettings::DEFAULT
@@ -2645,6 +2672,41 @@ fn same_orientation(camera: &ViewFrame, next: &ViewFrame) -> bool {
     (next.forward() - camera.forward()).norm() <= tol && (next.up() - camera.up()).norm() <= tol
 }
 
+/// The orthographic camera looking along `forward` with `up` on the screen, framed on the
+/// rectangle of `size` around `center`; a valid one locks the orientation.
+///
+/// # Errors
+///
+/// The errors of [`ViewFrame::new`] for a zero `forward` or an `up` parallel to it.
+fn facing(
+    center: Point3,
+    (forward, up): (Vector3, Vector3),
+    size: [f64; 2],
+    (aspect, camera): (f64, &ViewFrame),
+    locked: &mut bool,
+) -> Result<ViewFrame> {
+    let [w, h] = size;
+    // The rectangle fills the viewport in its tighter direction, with a narrow margin.
+    let height = (h.max(w / aspect) * 1.05).max(Tolerance::DEFAULT.linear);
+    let distance = height.max(PLAN_EYE);
+    // A zero `forward` puts the eye on the target, which the frame refuses.
+    let back = forward
+        .try_normalize(f64::EPSILON)
+        .unwrap_or_else(Vector3::zeros);
+    let frame = ViewFrame::new(
+        center - back * distance,
+        center,
+        up,
+        Projection::Orthographic { height },
+        camera.near().min(distance / 2.0),
+        camera.far().max(distance * 2.0),
+    );
+    if frame.is_ok() {
+        *locked = true;
+    }
+    frame
+}
+
 /// Applies a view request of the product to the camera: the framing itself is the zoom-extents pass.
 fn apply_view(
     request: ViewRequest,
@@ -2688,25 +2750,25 @@ fn apply_view(
         ViewRequest::Scale(factor) => {
             arc_gpu::navigation::zoom_at(camera, factor, &camera.target())
         }
-        ViewRequest::Plan { a, b, z } => {
-            let (w, h) = ((a[0] - b[0]).abs(), (a[1] - b[1]).abs());
-            // The rectangle fills the viewport in its tighter direction, with a narrow margin.
-            let height = (h.max(w / aspect) * 1.05).max(Tolerance::DEFAULT.linear);
-            let center = Point3::new((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, z);
-            let distance = height.max(PLAN_EYE);
-            let frame = ViewFrame::new(
-                center + Vector3::z() * distance,
-                center,
-                Vector3::y(),
-                Projection::Orthographic { height },
-                camera.near().min(distance / 2.0),
-                camera.far().max(distance * 2.0),
-            );
-            if frame.is_ok() {
-                *locked = true;
-            }
-            frame
-        }
+        ViewRequest::Plan { a, b, z } => facing(
+            Point3::new((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, z),
+            (-Vector3::z(), Vector3::y()),
+            [(a[0] - b[0]).abs(), (a[1] - b[1]).abs()],
+            (aspect, camera),
+            locked,
+        ),
+        ViewRequest::Facing {
+            center,
+            forward,
+            up,
+            size,
+        } => facing(
+            Point3::from(center),
+            (Vector3::from(forward), Vector3::from(up)),
+            [size[0].abs(), size[1].abs()],
+            (aspect, camera),
+            locked,
+        ),
         ViewRequest::Camera(frame) => {
             *locked = false;
             Ok(frame)
@@ -2999,6 +3061,13 @@ impl Panel for ViewportPanel {
         }
         if let Some(f) = &frame {
             display.update(&f.hidden, f.isolated.as_deref());
+            display.shading = f.shading.unwrap_or_default();
+            if let Some(Err(e)) = viewport
+                .as_ref()
+                .map(|vp| vp.set_section(f.section.clone()))
+            {
+                cx.actions.push(Action::Error(e));
+            }
             if let Some(text) = &f.banner {
                 over_viewport::paint_banner(ui, out.response.rect, text, cx.colors);
             }
@@ -3071,7 +3140,7 @@ impl Panel for ViewportPanel {
             *hover,
             highlight,
             overlay,
-            cx.colors,
+            render_settings(cx.colors, display.shading),
             cx.actions,
         );
         cx.actions.extend(out.errors.into_iter().map(Action::Error));
@@ -3144,7 +3213,7 @@ fn sync_viewport(
     hover: Option<ObjectId>,
     highlight: &[ObjectId],
     overlay: Option<arc_gpu::Overlay>,
-    colors: &Colors,
+    settings: arc_gpu::RenderSettings,
     actions: &mut Vec<Action>,
 ) {
     let Some(vp) = viewport else {
@@ -3155,7 +3224,7 @@ fn sync_viewport(
         vp.set_camera(*camera),
         vp.set_highlight(hover, highlight),
         vp.set_overlay(overlay),
-        vp.set_settings(render_settings(colors)),
+        vp.set_settings(settings),
     ];
     actions.extend(
         results
@@ -3794,6 +3863,34 @@ impl Panel for LogPanel {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_failed_icon_atlas_is_retried_at_another_scale() {
+        assert!(icon_atlas_due(true, None, None, 1.0));
+        assert!(!icon_atlas_due(true, Some(1.0), None, 1.0));
+        assert!(icon_atlas_due(true, Some(1.0), None, 2.0));
+        assert!(!icon_atlas_due(true, None, Some(2.0), 2.0));
+        assert!(!icon_atlas_due(false, None, None, 1.0));
+    }
+
+    /// The command context derives its stream as `seed ^ revision * MIX`; with one revision per
+    /// step the old additive sequence (`seed0 + n * MIX`) made every step's stream identical.
+    #[test]
+    fn consecutive_step_seeds_give_distinct_streams() {
+        const MIX: u64 = 0x9E37_79B9_7F4A_7C15;
+        let old = |n: u64| MIX.wrapping_mul(n) ^ n.wrapping_mul(MIX);
+        assert_eq!(old(1), old(2), "the additive sequence collides");
+        for start in [0u64, 1, 42, u64::MAX] {
+            let mut state = start;
+            let streams: Vec<u64> = (1..=1000u64)
+                .map(|revision| next_step_seed(&mut state) ^ revision.wrapping_mul(MIX))
+                .collect();
+            let mut sorted = streams.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), streams.len());
+        }
+    }
+
     use super::*;
     use arc_base::id::Identifier;
 

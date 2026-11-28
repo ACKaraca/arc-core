@@ -6,7 +6,7 @@
 //! [`read`] takes byte buffers and never paths. It returns an [`IfcFile`] with every instance,
 //! indexed by name and by entity type, and a [`LossReport`] that counts the entity types the views
 //! do not read as preserved. [`IfcFile::typed_views`] builds the typed views. Geometry evaluation
-//! (CORE-IO-015) is [`IfcFile::geometry`]. [`write()`](fn@write) writes an IFC4 file from the neutral
+//! (CORE-IO-015) is [`IfcFile::geometry`]. [`write()`](fn@write) writes an IFC4, IFC4X3 or IFC2X3 file from the neutral
 //! description of a building in [`write`](mod@write) (CORE-IO-016, first part).
 //!
 //! Every count, string, nesting level and instance is checked against the caller's
@@ -29,27 +29,41 @@
 //! # Ok::<(), arc_base::Error>(())
 //! ```
 
+pub mod alignment;
+mod edit;
 pub mod error;
 pub mod geometry;
+pub mod ids;
 pub mod loss;
 pub mod model;
 pub mod options;
+pub mod psets;
 mod read;
+pub mod schema;
 mod step;
+pub mod stream;
 mod text;
 pub mod views;
 pub mod write;
 
-pub use error::{codes, reasons};
-pub use geometry::{Geometry, GeometryItem, Shape, Units};
+pub use error::{codes, reasons, rules};
+pub use geometry::{Geometry, GeometryItem, GeometryOptions, Shape, Units};
 pub use loss::{LossItem, LossReport, Outcome, Severity};
 pub use model::{IfcFile, Instance, Parameter, Record, Schema};
 #[cfg(not(target_arch = "wasm32"))]
 pub use options::SystemClock;
 pub use options::{Clock, Progress, ReadOptions, ReadOutput};
 pub use read::read;
-pub use views::{
-    Nominal, Number, Property, PropertySet, PropertyValue, Quantity, QuantityKind, QuantitySet,
-    RootedEntity, SpatialNode, TypeAssignment, TypedViews, Value,
+pub use schema::{
+    Conformance, Finding, InverseIndex, Referrer, RuleCount, RuleScope, Typed, WhereCount,
 };
-pub use write::{WriteModel, WriteOptions, WriteOutput, global_id, write};
+pub use views::{
+    ClassCoverage, ClassificationRef, ClassificationSystem, Connection, ConstituentView, CrsView,
+    GeoReference, GeoSource, GroupView, ImportViews, LayerUsage, LayerView, MappedView,
+    MaterialAssociation, MaterialRef, Matrix, Nominal, Number, ObjectKind, ObjectView, Origin,
+    OwnerHistory, PlacementState, PlacementView, ProfileView, Property, PropertySet, PropertyValue,
+    Quantity, QuantityKind, QuantitySet, ResolvedProperty, ResolvedPropertySet, ResolvedQuantity,
+    ResolvedQuantitySet, RootedEntity, SpaceBoundary, SpatialNode, StyleView, TypeAssignment,
+    TypedViews, UnitKind, UnitSystem, UnitView, Value,
+};
+pub use write::{WriteModel, WriteOptions, WriteOutput, global_id, ifc_zip, write};

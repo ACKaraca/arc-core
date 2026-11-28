@@ -899,12 +899,20 @@ it is registered. Without a registration the shell behaves as before.
   frame around the viewport with a label at its top left corner while a temporary display state is
   active. None of this is saved. Framing everything (a zoom-extents request, the first framing of a
   document) frames only the objects the display state shows.
+- Visual style and section. `InteractionOutput::shading` (default `None`, which is `Shaded`) is the
+  `arc-gpu` shading mode the viewport draws with (wireframe, hidden line, shaded, shaded with
+  edges, consistent colors, X-ray); `section` (default `None`) is the `arc-gpu` section (planes and
+  an axis-aligned box) that clips the viewport's meshes. Both are read every frame, so a product
+  shows a saved view's visual style and section box by returning them while that view is open.
 - Camera requests. `Interaction::take_view` (default `None`) returns a `ViewRequest`, taken once
   per frame: `Extents`, `Previous` (the camera before the last request), `Window { a, b }`,
-  `Scale(factor)`, `Plan { a, b, z }` and `Camera(frame)` (the enum is non-exhaustive). `Plan` sets an orthographic camera
+  `Scale(factor)`, `Plan { a, b, z }`, `Facing { center, forward, up, size }` and `Camera(frame)`
+  (the enum is non-exhaustive). `Plan` sets an orthographic camera
   looking down −z with +y up, framed on the rectangle between the corners at height `z` with a 5 %
   margin, and locks the orientation: the viewport then takes pans and zooms but no rotation, and
-  the view cube is not shown. `Camera(frame)` sets a camera the controller read from
+  the view cube is not shown. `Facing` does the same looking along `forward` with `up` on the
+  screen, framed on a rectangle of `size` around `center`: a rotated plan, a section or an
+  elevation. `Camera(frame)` sets a camera the controller read from
   `InteractionContext::camera` earlier and releases the lock, so a product returns to the camera
   it left.
 - Extraction on request. `InteractionContext::ask_extraction(objects)` (at most 10 000 per call,

@@ -11,9 +11,12 @@
 //! code: encryption, other methods, several disks, unverifiable descriptors, overlapping entries,
 //! disagreeing headers and unsafe names. Offsets are absolute: an archive with data before its
 //! first entry (a self-extracting stub) is refused as a structure error.
+//!
+//! [`write_archive`] writes an archive of stored or deflated entries that this reader accepts.
 
 mod inflate;
 mod names;
+mod write;
 
 use std::collections::BTreeSet;
 
@@ -24,6 +27,7 @@ use crate::crc32::Crc32;
 use crate::error::{at_entry, codes, limit};
 use crate::options::ReadOptions;
 use inflate::{Bounds, inflate_entry};
+pub use write::write_archive;
 
 const END_SIGNATURE: u32 = 0x0605_4B50;
 const END_LEN: usize = 22;

@@ -73,13 +73,32 @@ fn parameter() -> impl Strategy<Value = Parameter> {
     })
 }
 
-/// Each outcome is `Ok` or an error of this family.
+/// Each outcome is `Ok` or an error of this family. A file that reads writes back byte for byte,
+/// and its first instance, rewritten in the canonical form, reads back to the same records.
 fn assert_clean(bytes: &[u8]) {
     match read(bytes, &mut ReadOptions::default()) {
         Ok(output) => {
             let _ = output
                 .file
                 .typed_views(&Limits::CONSTRAINED, &Cancel::new());
+            let mut file = output.file;
+            let _ = file.conformance(&Limits::CONSTRAINED, &Cancel::new());
+            if !bytes.starts_with(b"PK") {
+                assert_eq!(file.write_step(&Limits::LARGE_MODELS).unwrap(), bytes);
+            }
+            let Some(first) = file.instances().first().cloned() else {
+                return;
+            };
+            // A record the reader accepted may hold a reference it cannot resolve; the edit
+            // refuses that with a typed error.
+            match file.replace(first.name, first.records.clone()) {
+                Ok(()) => {
+                    let written = file.write_step(&Limits::LARGE_MODELS).unwrap();
+                    let again = read(&written, &mut ReadOptions::default()).unwrap();
+                    assert_eq!(again.file.instance(first.name), Some(&first));
+                }
+                Err(error) => assert!(error.code().starts_with("io.ifc.edit_"), "{error:?}"),
+            }
         }
         Err(error) => {
             let code = error.code();

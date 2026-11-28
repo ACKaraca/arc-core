@@ -100,6 +100,100 @@ pub mod codes {
         message_id: "io-ifc-write-id-duplicate",
     };
 
+    /// The tables of the requested output schema are not part of this build: IFC2X3 and IFC4
+    /// tables are generated locally and absent from a build without them. IFC4 output does not need
+    /// them; IFC4X3 tables are always present.
+    pub const IFC_WRITE_SCHEMA_UNAVAILABLE: ErrorCode = ErrorCode {
+        code: "io.ifc.write_schema_unavailable",
+        category: Category::Unsupported,
+        message_id: "io-ifc-write-schema-unavailable",
+    };
+    /// The file the writer produced does not conform to the tables of its schema (conformance
+    /// levels 1 to 3), or does not satisfy the model view the caller required. A defect of the
+    /// writer or of the schema mapping, never written out; the arguments name the number of
+    /// findings and the first one.
+    pub const IFC_WRITE_NOT_CONFORMANT: ErrorCode = ErrorCode {
+        code: "io.ifc.write_not_conformant",
+        category: Category::Internal,
+        message_id: "io-ifc-write-not-conformant",
+    };
+    /// The model does not satisfy the exchange requirements of the model view the caller required
+    /// ([`ViewCheck::Enforce`](crate::write::ViewCheck::Enforce)).
+    pub const IFC_WRITE_VIEW_VIOLATED: ErrorCode = ErrorCode {
+        code: "io.ifc.write_view_violated",
+        category: Category::InvalidInput,
+        message_id: "io-ifc-write-view-violated",
+    };
+
+    /// An edit names an instance that is not in the file, or an attribute position that its
+    /// record does not have.
+    pub const IFC_EDIT_TARGET_MISSING: ErrorCode = ErrorCode {
+        code: "io.ifc.edit_target_missing",
+        category: Category::NotFound,
+        message_id: "io-ifc-edit-target-missing",
+    };
+    /// An edit would leave a reference to an instance that is not in the file: a new value refers
+    /// to a missing instance, or the instance to remove is still referred to.
+    pub const IFC_EDIT_REFERENCE_DANGLING: ErrorCode = ErrorCode {
+        code: "io.ifc.edit_reference_dangling",
+        category: Category::Conflict,
+        message_id: "io-ifc-edit-reference-dangling",
+    };
+    /// An edited value cannot be written to a physical file: an instance without records, a
+    /// number that is not finite, a NUL in a text, a malformed type name, enumeration or binary,
+    /// nesting deeper than the writer follows, no instance name left, or a header without
+    /// `FILE_DESCRIPTION`, `FILE_NAME` and `FILE_SCHEMA` in that order.
+    pub const IFC_EDIT_VALUE_INVALID: ErrorCode = ErrorCode {
+        code: "io.ifc.edit_value_invalid",
+        category: Category::InvalidInput,
+        message_id: "io-ifc-edit-value-invalid",
+    };
+
+    /// A curve, alignment layout or linear placement is not evaluable: an attribute is missing or of
+    /// the wrong type, a segment has no length or a parameter is not finite, a list is longer than
+    /// the limits allow, or a reference does not lead to a curve.
+    pub const IFC_CURVE_INVALID: ErrorCode = ErrorCode {
+        code: "io.ifc.curve_invalid",
+        category: Category::CorruptData,
+        message_id: "io-ifc-curve-invalid",
+    };
+    /// A curve type or a parameter combination of an alignment is outside what the evaluator
+    /// covers; the argument `kind` names the entity or segment type.
+    pub const IFC_CURVE_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "io.ifc.curve_unsupported",
+        category: Category::Unsupported,
+        message_id: "io-ifc-curve-unsupported",
+    };
+    /// A distance along a curve lies outside the curve by more than the tolerance.
+    pub const IFC_DISTANCE_OUT_OF_RANGE: ErrorCode = ErrorCode {
+        code: "io.ifc.distance_out_of_range",
+        category: Category::InvalidInput,
+        message_id: "io-ifc-distance-out-of-range",
+    };
+
+    /// An IDS file is not a valid IDS document: not well-formed XML, an element or attribute
+    /// outside the schema, a missing required element, a restriction that cannot hold, or a pattern
+    /// that is not in the pattern language of XML Schema.
+    pub const IDS_INVALID: ErrorCode = ErrorCode {
+        code: "io.ids.invalid",
+        category: Category::CorruptData,
+        message_id: "io-ids-invalid",
+    };
+    /// An IDS file is valid but uses something the checker does not evaluate; the argument `kind`
+    /// names it.
+    pub const IDS_UNSUPPORTED: ErrorCode = ErrorCode {
+        code: "io.ids.unsupported",
+        category: Category::Unsupported,
+        message_id: "io-ids-unsupported",
+    };
+    /// The tables of the schema of the checked file are not part of this build: the IFC2X3 and IFC4
+    /// tables are generated locally; IFC4X3 tables are always present.
+    pub const IDS_SCHEMA_UNAVAILABLE: ErrorCode = ErrorCode {
+        code: "io.ids.schema_unavailable",
+        category: Category::Unsupported,
+        message_id: "io-ids-schema-unavailable",
+    };
+
     /// Every code of this crate, for the registry check.
     pub const ALL: &[ErrorCode] = &[
         IFC_TRUNCATED,
@@ -113,6 +207,18 @@ pub mod codes {
         IFC_WRITE_VALUE_INVALID,
         IFC_WRITE_REFERENCE_INVALID,
         IFC_WRITE_ID_DUPLICATE,
+        IFC_WRITE_SCHEMA_UNAVAILABLE,
+        IFC_WRITE_NOT_CONFORMANT,
+        IFC_WRITE_VIEW_VIOLATED,
+        IFC_EDIT_TARGET_MISSING,
+        IFC_EDIT_REFERENCE_DANGLING,
+        IFC_EDIT_VALUE_INVALID,
+        IFC_CURVE_INVALID,
+        IFC_CURVE_UNSUPPORTED,
+        IFC_DISTANCE_OUT_OF_RANGE,
+        IDS_INVALID,
+        IDS_UNSUPPORTED,
+        IDS_SCHEMA_UNAVAILABLE,
     ];
 }
 
@@ -292,6 +398,60 @@ pub mod reasons {
         message_id: "io-ifc-loss-not-written",
     };
 
+    /// The output schema has no such attribute: a value of the model that is set (not `$`, not
+    /// `NOTDEFINED`) is not written. The record kind is `ENTITY.Attribute` of the writer's IFC4
+    /// layout.
+    pub const ATTRIBUTE_NOT_REPRESENTABLE: Reason = Reason {
+        code: "io.ifc.write_attribute_unrepresentable",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-attribute-unrepresentable",
+    };
+    /// A value is not an item of the enumeration the output schema declares for the attribute, and
+    /// is written as `NOTDEFINED` (or `USERDEFINED`) instead. The record kind is `ENTITY.Attribute`.
+    pub const VALUE_NOT_REPRESENTABLE: Reason = Reason {
+        code: "io.ifc.write_value_unrepresentable",
+        outcome: Outcome::Approximated,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-value-unrepresentable",
+    };
+    /// The output schema does not declare an entity (or a measure type) the model needs, such as
+    /// `IfcRoofType`, `IfcPipeSegment` or `IfcMapConversion` in IFC2X3: the object, with what
+    /// belongs only to it, is not written. The record kind is the entity; the source is the
+    /// object's `GlobalId` where it has one.
+    pub const ENTITY_NOT_REPRESENTABLE: Reason = Reason {
+        code: "io.ifc.write_entity_unrepresentable",
+        outcome: Outcome::Dropped,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-entity-unrepresentable",
+    };
+    /// The output schema requires an attribute the model has no value for (such as `Sizeable` of
+    /// an IFC2X3 `IfcDoorStyle`); a neutral value (`NOTDEFINED`, `FALSE`) is written. The record
+    /// kind is `ENTITY.Attribute`.
+    pub const DEFAULT_SUPPLIED: Reason = Reason {
+        code: "io.ifc.write_default_supplied",
+        outcome: Outcome::Approximated,
+        severity: Severity::Info,
+        message_id: "io-ifc-loss-default-supplied",
+    };
+    /// A quantity set named after a quantity set template (`Qto_...`) is written as the
+    /// `BaseQuantities` set of IFC2X3, which has no templates; its quantity names are the
+    /// caller's.
+    pub const SET_RENAMED: Reason = Reason {
+        code: "io.ifc.write_set_renamed",
+        outcome: Outcome::Approximated,
+        severity: Severity::Info,
+        message_id: "io-ifc-loss-set-renamed",
+    };
+    /// The self-check of the written file could not run within the limits; the file is written
+    /// without it.
+    pub const SELF_CHECK_SKIPPED: Reason = Reason {
+        code: "io.ifc.write_self_check_skipped",
+        outcome: Outcome::Failed,
+        severity: Severity::Warning,
+        message_id: "io-ifc-loss-self-check-skipped",
+    };
+
     /// Every reason of this crate, for the registry check.
     pub const ALL: &[Reason] = &[
         ENTITY_PRESERVED,
@@ -315,6 +475,181 @@ pub mod reasons {
         UNIT_ASSUMED,
         GEOMETRY_APPROXIMATED,
         NOT_WRITTEN,
+        ATTRIBUTE_NOT_REPRESENTABLE,
+        VALUE_NOT_REPRESENTABLE,
+        ENTITY_NOT_REPRESENTABLE,
+        DEFAULT_SUPPLIED,
+        SET_RENAMED,
+        SELF_CHECK_SKIPPED,
+    ];
+}
+
+/// The rules of the conformance checker ([`crate::IfcFile::conformance`]): each has a stable code,
+/// the level it belongs to and the message of a finding. A finding names the instance, its entity
+/// and, where one is concerned, the attribute.
+pub mod rules {
+    /// A conformance rule.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Rule {
+        /// The stable code, `io.ifc.conformance_*`.
+        pub code: &'static str,
+        /// The level: 1 instance structure, 2 inverse attributes and uniqueness, 3 domain and
+        /// global rules.
+        pub level: u8,
+        /// The Fluent message of a finding; its arguments are `instance`, `entity` and `attribute`.
+        pub message_id: &'static str,
+    }
+
+    /// The entity of an instance is not declared in the file's schema.
+    pub const ENTITY_UNKNOWN: Rule = Rule {
+        code: "io.ifc.conformance_entity_unknown",
+        level: 1,
+        message_id: "io-ifc-conformance-entity-unknown",
+    };
+    /// The entity of a simple instance is abstract.
+    pub const ENTITY_ABSTRACT: Rule = Rule {
+        code: "io.ifc.conformance_entity_abstract",
+        level: 1,
+        message_id: "io-ifc-conformance-entity-abstract",
+    };
+    /// The parts of a complex instance do not form a valid combination: a part's supertype is
+    /// missing, two parts are alternatives of one `ONEOF`, or a part without a subtype among the
+    /// parts is abstract.
+    pub const COMPLEX_INVALID: Rule = Rule {
+        code: "io.ifc.conformance_complex_invalid",
+        level: 1,
+        message_id: "io-ifc-conformance-complex-invalid",
+    };
+    /// The number of parameters differs from the number of explicit attributes of the entity and
+    /// its supertypes (for a part of a complex instance, of the part's entity).
+    pub const ATTRIBUTE_COUNT: Rule = Rule {
+        code: "io.ifc.conformance_attribute_count",
+        level: 1,
+        message_id: "io-ifc-conformance-attribute-count",
+    };
+    /// `$` stands for an attribute that is not optional, or for an element of an aggregate that is
+    /// not `ARRAY OF OPTIONAL`.
+    pub const VALUE_MISSING: Rule = Rule {
+        code: "io.ifc.conformance_value_missing",
+        level: 1,
+        message_id: "io-ifc-conformance-value-missing",
+    };
+    /// `*` stands for an attribute that is not re-declared as derived, or a derived attribute holds
+    /// something else than `*`.
+    pub const DERIVED_MISPLACED: Rule = Rule {
+        code: "io.ifc.conformance_derived_misplaced",
+        level: 1,
+        message_id: "io-ifc-conformance-derived-misplaced",
+    };
+    /// A value is not of the kind its type declares (integer, real, number, boolean, logical,
+    /// string, binary, reference, enumeration, aggregate), or a typed parameter stands where no
+    /// select is declared.
+    pub const VALUE_TYPE: Rule = Rule {
+        code: "io.ifc.conformance_value_type",
+        level: 1,
+        message_id: "io-ifc-conformance-value-type",
+    };
+    /// An enumeration value is not an item of its enumeration.
+    pub const ENUMERATION_ITEM: Rule = Rule {
+        code: "io.ifc.conformance_enumeration_item",
+        level: 1,
+        message_id: "io-ifc-conformance-enumeration-item",
+    };
+    /// A value of a select is not one of its members: a typed parameter of another type, a value
+    /// without its type, or a reference to an instance of an entity the select does not list.
+    pub const SELECT_MEMBER: Rule = Rule {
+        code: "io.ifc.conformance_select_member",
+        level: 1,
+        message_id: "io-ifc-conformance-select-member",
+    };
+    /// A reference names an instance of an entity that is neither the declared entity nor one of
+    /// its subtypes.
+    pub const REFERENCE_TYPE: Rule = Rule {
+        code: "io.ifc.conformance_reference_type",
+        level: 1,
+        message_id: "io-ifc-conformance-reference-type",
+    };
+    /// A reference names an instance that is not in the file.
+    pub const REFERENCE_DANGLING: Rule = Rule {
+        code: "io.ifc.conformance_reference_dangling",
+        level: 1,
+        message_id: "io-ifc-conformance-reference-dangling",
+    };
+    /// An aggregate has fewer or more elements than its bounds allow.
+    pub const AGGREGATE_SIZE: Rule = Rule {
+        code: "io.ifc.conformance_aggregate_size",
+        level: 1,
+        message_id: "io-ifc-conformance-aggregate-size",
+    };
+    /// A `SET` or an aggregate declared `UNIQUE` holds an element twice.
+    pub const AGGREGATE_UNIQUE: Rule = Rule {
+        code: "io.ifc.conformance_aggregate_unique",
+        level: 1,
+        message_id: "io-ifc-conformance-aggregate-unique",
+    };
+    /// A string or binary value is longer than its declared width, or of another length where the
+    /// width is fixed.
+    pub const VALUE_WIDTH: Rule = Rule {
+        code: "io.ifc.conformance_value_width",
+        level: 1,
+        message_id: "io-ifc-conformance-value-width",
+    };
+    /// The number of instances that refer to an instance through the attribute of an inverse
+    /// attribute is outside the inverse attribute's bounds.
+    pub const INVERSE_CARDINALITY: Rule = Rule {
+        code: "io.ifc.conformance_inverse_cardinality",
+        level: 2,
+        message_id: "io-ifc-conformance-inverse-cardinality",
+    };
+    /// Two instances share the values of the attributes of a `UNIQUE` rule.
+    pub const UNIQUE_RULE: Rule = Rule {
+        code: "io.ifc.conformance_unique_rule",
+        level: 2,
+        message_id: "io-ifc-conformance-unique-rule",
+    };
+    /// A domain (`WHERE`) rule of the instance's entity or a supertype evaluates to `FALSE`; the
+    /// attribute of the finding is `Entity.Label`.
+    pub const WHERE_RULE: Rule = Rule {
+        code: "io.ifc.conformance_where_rule",
+        level: 3,
+        message_id: "io-ifc-conformance-where-rule",
+    };
+    /// A domain rule of the defined type of an attribute value of the instance (or of a type it is
+    /// based on) evaluates to `FALSE`; the attribute of the finding is `Type.Label`.
+    pub const TYPE_RULE: Rule = Rule {
+        code: "io.ifc.conformance_type_rule",
+        level: 3,
+        message_id: "io-ifc-conformance-type-rule",
+    };
+    /// A domain rule of a global rule evaluates to `FALSE` for the file; the finding has instance 0
+    /// and the attribute `Rule.Label`.
+    pub const GLOBAL_RULE: Rule = Rule {
+        code: "io.ifc.conformance_global_rule",
+        level: 3,
+        message_id: "io-ifc-conformance-global-rule",
+    };
+
+    /// Every rule, in the order the checker reports them.
+    pub const ALL: &[Rule] = &[
+        ENTITY_UNKNOWN,
+        ENTITY_ABSTRACT,
+        COMPLEX_INVALID,
+        ATTRIBUTE_COUNT,
+        VALUE_MISSING,
+        DERIVED_MISPLACED,
+        VALUE_TYPE,
+        ENUMERATION_ITEM,
+        SELECT_MEMBER,
+        REFERENCE_TYPE,
+        REFERENCE_DANGLING,
+        AGGREGATE_SIZE,
+        AGGREGATE_UNIQUE,
+        VALUE_WIDTH,
+        INVERSE_CARDINALITY,
+        UNIQUE_RULE,
+        WHERE_RULE,
+        TYPE_RULE,
+        GLOBAL_RULE,
     ];
 }
 
@@ -324,7 +659,7 @@ mod tests {
 
     use arc_base::error::registry_problems;
 
-    use super::{codes, reasons};
+    use super::{codes, reasons, rules};
 
     const CATALOG: &str = include_str!("../../../locales/en-US/arc-io-ifc.ftl");
     const CATALOG_TR: &str = include_str!("../../../locales/tr-TR/arc-io-ifc.ftl");
@@ -362,6 +697,15 @@ mod tests {
                 reason.message_id
             );
         }
+        for rule in rules::ALL {
+            assert!(
+                rule.code.starts_with("io.ifc.conformance_"),
+                "{}",
+                rule.code
+            );
+            assert!(seen.insert(rule.code), "{} twice", rule.code);
+            assert!(seen.insert(rule.message_id), "{} twice", rule.message_id);
+        }
         for entry in codes::ALL {
             assert!(!seen.contains(entry.code) && !seen.contains(entry.message_id));
         }
@@ -373,6 +717,9 @@ mod tests {
             .iter()
             .map(|c| c.message_id)
             .chain(reasons::ALL.iter().map(|r| r.message_id))
+            .chain(rules::ALL.iter().map(|r| r.message_id))
+            .chain(crate::psets::findings::ALL.iter().map(|f| f.message_id))
+            .chain(crate::write::VIEW_RULES.iter().map(|f| f.message_id))
             .collect();
         for catalog in [CATALOG, CATALOG_TR] {
             let defined = catalog_ids(catalog);
@@ -391,6 +738,18 @@ mod tests {
         }
         for reason in reasons::ALL {
             let cell = format!("| `{}` | `{}` |", reason.code, reason.outcome.as_str());
+            assert!(SPECIFICATION.contains(&cell), "{cell} is not documented");
+        }
+        for rule in rules::ALL {
+            let cell = format!("| `{}` | {} |", rule.code, rule.level);
+            assert!(SPECIFICATION.contains(&cell), "{cell} is not documented");
+        }
+        for finding in crate::psets::findings::ALL {
+            let cell = format!("| `{}` |", finding.code);
+            assert!(SPECIFICATION.contains(&cell), "{cell} is not documented");
+        }
+        for rule in crate::write::VIEW_RULES {
+            let cell = format!("| `{}` |", rule.code);
             assert!(SPECIFICATION.contains(&cell), "{cell} is not documented");
         }
     }

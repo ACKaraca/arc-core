@@ -8,7 +8,7 @@ attributes, subdivision surfaces, mesh booleans, simplification, repair and geom
 - Indexed triangle meshes with grouped attributes, and the half-edge polygon mesh for editing.
 - Typed attribute storage on vertices, corners, faces and edges.
 - Catmull–Clark subdivision with creases following the published OpenSubdiv rules.
-- Mesh booleans (wrapping Manifold), meshlets (wrapping `meshopt`), and first-party simplification,
+- Mesh booleans (first-party for closed meshes of moderate size; a Manifold wrapper is the planned engine for large ones), meshlets (wrapping `meshopt`), and first-party simplification,
   level-of-detail chains, repair, measurements and ray and distance queries.
 - Plane sections of meshes, used by derived views and section caps.
 - Repair operations with change reports.
@@ -281,6 +281,21 @@ the tolerance apart and `intersecting` set; a mesh wholly inside another without
 positive distance, because only surfaces are compared. The walk is bounded by
 `64 · array_length` node and triangle pairs.
 
+### Booleans
+
+`boolean::boolean` implements CORE-MESH-013 and CORE-MESH-014 for closed, outward-oriented triangle
+meshes of positive volume; the module documentation states every rule. It welds both operands into one
+point pool at the linear tolerance, intersects every pair of triangles whose boxes meet (a distance to the
+other plane within the tolerance counts as zero, so touching and coplanar faces are handled, not
+guessed), gives each triangle the shared points of the intersection curve and of its neighbors
+along its edges, retriangulates it with `arc_geom::triangulate_graph`, classifies the pieces (coplanar
+with the same or the opposite direction, or by the generalized winding number of one point per
+component that the curve does not cut) and selects them per operation. The result is checked closed
+(every directed edge has its opposite) and fails with `mesh.boolean.failed` otherwise; edges where the
+operands touch along a line may be shared by four triangles. The operands, the box tests of the candidate sweep and
+the pairs are bounded (`mesh.limit.exceeded`). The Manifold-backed engine of the table above is not implemented; face provenance
+and attributes are not carried over.
+
 ### Feature edges
 
 `features::feature_edges` implements CORE-MESH-024 after welding exactly equal positions, so
@@ -345,3 +360,5 @@ The codes `arc-mesh` owns. A code is never reused for a different meaning; messa
 | `mesh.repair.invalid` | `invalid_input` | A repair option is out of range |
 | `mesh.simplify.invalid` | `invalid_input` | A simplification target or error bound is missing, not finite or negative |
 | `mesh.lod.invalid` | `invalid_input` | A level-of-detail parameter is out of range, or a chain is empty |
+| `mesh.boolean.invalid_input` | `invalid_input` | An operand of a boolean operation is not a closed, consistently oriented mesh of positive volume; the detail `edges` counts its unmatched edges |
+| `mesh.boolean.failed` | `failed_operation` | The arrangement of a boolean operation cannot be computed at the tolerance, or its result is not closed |

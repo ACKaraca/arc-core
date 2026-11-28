@@ -6,6 +6,7 @@
     clippy::panic,
     clippy::too_many_lines,
     clippy::cognitive_complexity,
+    clippy::print_stderr,
     reason = "test code: fixtures and assertions"
 )]
 
@@ -233,4 +234,196 @@ fn instances_are_indexed_by_name_and_by_type() {
     let walls: Vec<u64> = file.instances_of("ifcwall").map(|i| i.name).collect();
     assert_eq!(walls, [8, 9]);
     assert_eq!(file.instances_of("IFCNOTHING").count(), 0);
+}
+
+/// The project with the description of the property `IsExternal` set to `Outside`.
+fn described(schema: &str) -> arc_io_ifc::TypedViews {
+    let text = support::project(schema).replace(
+        "IFCPROPERTYSINGLEVALUE('IsExternal',$,",
+        "IFCPROPERTYSINGLEVALUE('IsExternal','Outside',",
+    );
+    read(text.as_bytes(), &mut ReadOptions::default())
+        .unwrap()
+        .file
+        .typed_views(&Limits::CONSTRAINED, &Cancel::new())
+        .unwrap()
+}
+
+/// The second attribute of a property is `Description` in IFC2X3 and IFC4 and `Specification` in
+/// IFC4X3; the view reads it as the description in each.
+#[test]
+fn property_description_is_read_by_name_in_every_schema() {
+    for schema in ["IFC2X3", "IFC4", "IFC4X3_ADD2"] {
+        let views = described(schema);
+        let property = views.property_sets[0]
+            .properties
+            .iter()
+            .find(|p| p.name.as_deref() == Some("IsExternal"))
+            .unwrap();
+        assert_eq!(property.description.as_deref(), Some("Outside"), "{schema}");
+    }
+}
+
+/// With the tables, a value beyond the attributes of the file's schema is not read: IFC2X3 has no
+/// `Formula`, so a fifth parameter of a quantity gives no formula. Without them, the position the
+/// attribute has where it exists is read.
+#[test]
+fn attributes_the_schema_lacks_are_absent() {
+    let text = support::project("IFC2X3").replace(
+        "#42=IFCQUANTITYVOLUME('Volume',$,$,IFCVOLUMEMEASURE(1.25));",
+        "#42=IFCQUANTITYVOLUME('Volume',$,$,IFCVOLUMEMEASURE(1.25),'L*W*H');",
+    );
+    let file = read(text.as_bytes(), &mut ReadOptions::default())
+        .unwrap()
+        .file;
+    let views = file
+        .typed_views(&Limits::CONSTRAINED, &Cancel::new())
+        .unwrap();
+    let volume = views.quantity_sets[0]
+        .quantities
+        .iter()
+        .find(|q| q.kind == QuantityKind::Volume)
+        .unwrap();
+    let expected = if file.tables().is_some() {
+        None
+    } else {
+        Some("L*W*H")
+    };
+    assert_eq!(volume.formula.as_deref(), expected);
+}
+
+/// `IfcPropertyDependencyRelationship` lists its attributes in another order in IFC2X3 than in IFC4
+/// and IFC4X3; reading by name finds each where its schema puts it.
+#[test]
+fn attributes_are_found_by_name_where_positions_differ() {
+    let layouts = [
+        (
+            "IFC2X3",
+            "#90=IFCPROPERTYDEPENDENCYRELATIONSHIP(#1,#2,'Dep','Text',$);",
+        ),
+        (
+            "IFC4",
+            "#90=IFCPROPERTYDEPENDENCYRELATIONSHIP('Dep','Text',#1,#2,$);",
+        ),
+        (
+            "IFC4X3_ADD2",
+            "#90=IFCPROPERTYDEPENDENCYRELATIONSHIP('Dep','Text',#1,#2,$);",
+        ),
+    ];
+    for (schema, line) in layouts {
+        let text = support::project(schema).replace("#30=", &format!("{line}\n#30="));
+        let file = read(text.as_bytes(), &mut ReadOptions::default())
+            .unwrap()
+            .file;
+        let Some(tables) = file.tables() else {
+            eprintln!("skipped {schema}: schema tables not generated (cargo xtask ifc-schema)");
+            continue;
+        };
+        let record = &file.instance(90).unwrap().records[0];
+        let entity = tables.entity_index(&record.type_name).unwrap();
+        assert_eq!(
+            file.attribute(record, "name"),
+            Some(&arc_io_ifc::Parameter::Text("Dep".into())),
+            "{schema}"
+        );
+        assert_eq!(
+            file.typed_attribute(record, "DependingProperty"),
+            Some(arc_io_ifc::Typed::Entity(1)),
+            "{schema}"
+        );
+        let (position, attribute) = tables.attribute_position(entity, "Description").unwrap();
+        assert_eq!(attribute.name, "Description");
+        assert_eq!(position, if schema == "IFC2X3" { 3 } else { 1 });
+        assert_eq!(
+            file.typed_attribute(record, "Expression"),
+            Some(arc_io_ifc::Typed::Omitted)
+        );
+        // A value of another type than declared is not read as that type.
+        assert_eq!(file.typed_attribute(record, "NoSuchAttribute"), None);
+    }
+}
+
+/// Typed reads resolve selects, enumerations, defined types and aggregates by the declared type.
+#[test]
+fn typed_attributes_follow_the_declared_type() {
+    use arc_io_ifc::Typed;
+    use arc_io_ifc::schema::Named;
+    for schema in ["IFC2X3", "IFC4", "IFC4X3_ADD2"] {
+        let file = read(
+            support::project(schema).as_bytes(),
+            &mut ReadOptions::default(),
+        )
+        .unwrap()
+        .file;
+        let Some(tables) = file.tables() else {
+            eprintln!("skipped {schema}: schema tables not generated (cargo xtask ifc-schema)");
+            continue;
+        };
+        let record = |n: u64| &file.instance(n).unwrap().records[0];
+        let boolean = tables.find("IfcBoolean").unwrap();
+        assert!(matches!(boolean, Named::Defined(_)));
+        assert_eq!(
+            file.typed_attribute(record(20), "NominalValue"),
+            Some(Typed::Selected {
+                member: boolean,
+                value: Box::new(Typed::Boolean(true))
+            }),
+            "{schema}"
+        );
+        assert_eq!(
+            file.typed_attribute(record(30), "UnitType"),
+            Some(Typed::Enumeration("LENGTHUNIT"))
+        );
+        assert_eq!(
+            file.typed_attribute(record(30), "Dimensions"),
+            Some(Typed::Derived)
+        );
+        assert_eq!(
+            file.typed_attribute(record(12), "RelatedObjects"),
+            Some(Typed::Aggregate(vec![Typed::Entity(4), Typed::Entity(5)]))
+        );
+        assert_eq!(
+            file.typed_attribute(record(5), "Elevation"),
+            Some(Typed::Real(3000.0))
+        );
+        assert!(file.typed_attribute(record(1), "GlobalId").is_some());
+        assert_eq!(
+            file.typed_attribute(record(20), "Name"),
+            Some(Typed::String("IsExternal"))
+        );
+    }
+}
+
+/// The inverse index resolves inverse attributes by name over the referrers of an instance.
+#[test]
+fn inverse_attributes_are_resolved_from_the_index() {
+    let file = read(
+        support::project("IFC4X3_ADD2").as_bytes(),
+        &mut ReadOptions::default(),
+    )
+    .unwrap()
+    .file;
+    let index = file
+        .inverse_index(&Limits::CONSTRAINED, &Cancel::new())
+        .unwrap();
+    // #8 is related by containment (#14), typing (#15) and two property definitions (#17, #19).
+    let referrers: Vec<u64> = index.referrers(8).iter().map(|r| r.instance).collect();
+    assert_eq!(referrers, [14, 15, 17, 19]);
+    if file.tables().is_none() {
+        assert_eq!(index.inverse(&file, 8, "IsDefinedBy"), None);
+        return;
+    }
+    assert_eq!(index.inverse(&file, 8, "IsDefinedBy"), Some(vec![17, 19]));
+    assert_eq!(
+        index.inverse(&file, 8, "ContainedInStructure"),
+        Some(vec![14])
+    );
+    assert_eq!(index.inverse(&file, 4, "Decomposes"), Some(vec![12]));
+    assert_eq!(index.inverse(&file, 4, "NoSuchInverse"), None);
+    // A record count too small for the index is a limit error.
+    let tight = Limits {
+        record_count: 3,
+        ..Limits::CONSTRAINED
+    };
+    assert!(file.inverse_index(&tight, &Cancel::new()).is_err());
 }

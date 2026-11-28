@@ -14,6 +14,7 @@ The toolchain is pinned in `rust-toolchain.toml`. The gate also needs `cargo-nex
 ```sh
 cargo xtask ci      # every gate: format, clippy, layers, wasm, tests, features, deny, audit, catalogs, schemas
 cargo xtask layers  # the layering check alone
+cargo xtask ifc-schema --schema-dir <dir>  # IFC schema tables from the published EXPRESS files
 ```
 
 ## What arc-core is

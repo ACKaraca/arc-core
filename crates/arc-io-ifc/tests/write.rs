@@ -11,6 +11,8 @@
 
 use std::collections::BTreeMap;
 
+mod support;
+
 use arc_base::math::{Point2, Point3, Vector2, Vector3};
 use arc_base::{Cancel, Limits};
 use arc_io_ifc::write::{
@@ -100,8 +102,8 @@ fn house() -> WriteModel {
         "Pset_WallCommon",
         vec![
             Property::new("IsExternal", PropertyValue::Boolean(true)),
-            Property::new("Reference", PropertyValue::Label("W-01 \\ ç".into())),
-            Property::new("Width", PropertyValue::Length(0.2)),
+            Property::new("Reference", PropertyValue::Identifier("W-01 \\ ç".into())),
+            Property::new("FireRating", PropertyValue::Label("REI 60".into())),
         ],
     ));
     first.quantity_sets.push(QuantitySet::new(
@@ -252,7 +254,7 @@ fn output_is_deterministic_and_has_the_header() {
     assert!(text.contains("FILE_SCHEMA(('IFC4'));\nENDSEC;\nDATA;\n#1="));
     assert!(text.ends_with("ENDSEC;\nEND-ISO-10303-21;\n"));
     assert!(text.contains("'Wall ''south'' \\X2\\011F\\X0\\'"));
-    assert!(text.contains("IFCLABEL('W-01 \\\\ \\X2\\00E7\\X0\\')"));
+    assert!(text.contains("IFCIDENTIFIER('W-01 \\\\ \\X2\\00E7\\X0\\')"));
     assert!(text.contains("IFCBOOLEAN(.T.)"));
     assert!(text.contains(".DOOR.,.SINGLE_SWING_LEFT.,$);"));
     assert!(text.contains(".WINDOW.,.USERDEFINED.,'tilt and turn');"));
@@ -261,10 +263,36 @@ fn output_is_deterministic_and_has_the_header() {
     assert!(!first.report.has_loss());
 }
 
+/// Renaming one wall of a written file changes its line only; the oracle validates the result.
+#[test]
+fn an_edited_house_changes_one_line() {
+    let output = write(&house(), &options()).unwrap();
+    let file = read_back(&output.bytes);
+    let mut edited = file.clone();
+    let wall = edited.instances_of("IFCWALL").next().unwrap().name;
+    edited
+        .set_attribute(wall, 0, 2, Parameter::Text("Wall renamed \u{e7}".into()))
+        .unwrap();
+    let after = edited.write_step(&Limits::CONSTRAINED).unwrap();
+    support::dump("house-edited.ifc", &after);
+    let before = String::from_utf8(output.bytes.clone()).unwrap();
+    let after = String::from_utf8(after).unwrap();
+    let changed: Vec<_> = before
+        .lines()
+        .zip(after.lines())
+        .filter(|(a, b)| a != b)
+        .collect();
+    assert_eq!(before.lines().count(), after.lines().count());
+    assert_eq!(changed.len(), 1);
+    assert!(changed[0].1.contains("'Wall renamed \\X2\\00E7\\X0\\'"));
+}
+
 #[test]
 fn house_reads_back_with_structure_relations_and_volumes() {
     let output = write(&house(), &options()).unwrap();
+    support::dump("house.ifc", &output.bytes);
     let file = read_back(&output.bytes);
+
     let views = file
         .typed_views(&Limits::CONSTRAINED, &Cancel::new())
         .unwrap();
@@ -339,7 +367,7 @@ fn house_reads_back_with_structure_relations_and_volumes() {
         .iter()
         .map(|p| p.name.clone().unwrap())
         .collect();
-    assert_eq!(names, ["IsExternal", "Reference", "Width"]);
+    assert_eq!(names, ["IsExternal", "Reference", "FireRating"]);
     assert!(matches!(
         &set.properties[1].value,
         arc_io_ifc::PropertyValue::Single { nominal: Some(n), .. }
@@ -370,15 +398,16 @@ fn house_reads_back_with_structure_relations_and_volumes() {
     );
 }
 
-/// The reader does not subtract openings, so each body keeps its own volume.
+/// The geometry subtracts the prism openings of the walls by default, so a wall loses the volume of
+/// its door or window.
 #[test]
 fn house_body_volumes_read_back() {
     let file = read_back(&write(&house(), &options()).unwrap().bytes);
     let (volumes, report) = volumes(&file);
     let expected = [
-        (WALLS[0], 6.0),
+        (WALLS[0], 6.0 - 0.378),
         (WALLS[1], 4.8),
-        (WALLS[2], 6.0),
+        (WALLS[2], 6.0 - 0.288),
         (WALLS[3], 4.8),
         (SLAB, 15.8),
         (DOOR_OPENING, 0.378),
@@ -391,7 +420,39 @@ fn house_body_volumes_read_back() {
         let got = volumes[&global_id(id)];
         assert!((got - value).abs() < 1e-9, "{id:x}: {got} != {value}");
     }
-    let unsubtracted = report
+    assert!(
+        report
+            .items
+            .iter()
+            .all(|i| i.reason != reasons::OPENING_NOT_SUBTRACTED.code)
+    );
+    assert_eq!(report.summary.dropped, 0);
+}
+
+/// Without the subtraction each body keeps its own volume and the openings are counted.
+#[test]
+fn house_openings_are_counted_when_not_subtracted() {
+    let file = read_back(&write(&house(), &options()).unwrap().bytes);
+    let options = arc_io_ifc::GeometryOptions {
+        subtract_openings: false,
+    };
+    let geometry = file
+        .geometry_with_options(
+            &Limits::CONSTRAINED,
+            &Cancel::new(),
+            &arc_base::Tolerance::DEFAULT,
+            &options,
+        )
+        .unwrap();
+    let wall = geometry
+        .items
+        .iter()
+        .find(|i| gid_of(&file, i.product) == global_id(WALLS[0]))
+        .unwrap();
+    let mesh = wall.world_mesh(&Limits::CONSTRAINED).unwrap().unwrap();
+    assert!((volume(&mesh, &Limits::CONSTRAINED).unwrap() - 6.0).abs() < 1e-9);
+    let unsubtracted = geometry
+        .report
         .items
         .iter()
         .find(|i| i.reason == reasons::OPENING_NOT_SUBTRACTED.code)
@@ -400,7 +461,6 @@ fn house_body_volumes_read_back() {
         unsubtracted.arguments.get("count"),
         Some(&arc_io_ifc::loss::Argument::Int(2))
     );
-    assert_eq!(report.summary.dropped, 0);
 }
 
 #[test]
@@ -415,6 +475,7 @@ fn millimetres_read_back_in_meters() {
         wall
     }];
     let output = write(&model, &options()).unwrap();
+    support::dump("wall-mm.ifc", &output.bytes);
     let text = std::str::from_utf8(&output.bytes).unwrap();
     assert!(text.contains("IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.)"));
     let (volumes, _) = volumes(&read_back(&output.bytes));
@@ -605,7 +666,7 @@ fn house_with_spaces() -> WriteModel {
         "Pset_SpaceCommon",
         vec![Property::new(
             "Reference",
-            PropertyValue::Label("101".into()),
+            PropertyValue::Identifier("101".into()),
         )],
     ));
     room.quantity_sets.push(QuantitySet::new(
@@ -643,6 +704,7 @@ fn house_with_spaces() -> WriteModel {
 fn spaces_are_aggregated_by_their_storey_and_read_back() {
     let model = house_with_spaces();
     let output = write(&model, &options()).unwrap();
+    support::dump("house-spaces.ifc", &output.bytes);
     assert_eq!(output.bytes, write(&model, &options()).unwrap().bytes);
     let file = read_back(&output.bytes);
     let views = file
@@ -720,6 +782,7 @@ fn space_refusals_match_the_other_elements() {
         depth: 2.0,
     });
     let output = write(&model, &options()).unwrap();
+    support::dump("space-prism.ifc", &output.bytes);
     assert_eq!(output.report.items.len(), 1);
     assert_eq!(output.report.items[0].reason, "io.ifc.not_written");
 }
@@ -780,6 +843,7 @@ fn house_with_types() -> WriteModel {
 #[test]
 fn types_and_layer_sets_read_back() {
     let output = write(&house_with_types(), &options()).unwrap();
+    support::dump("house-types.ifc", &output.bytes);
     let file = read_back(&output.bytes);
     let views = file
         .typed_views(&Limits::CONSTRAINED, &Cancel::new())
@@ -877,6 +941,7 @@ fn type_references_and_layers_are_checked() {
     let mut model = house_with_types();
     model.elements[0].element_type = None;
     let output = write(&model, &options()).unwrap();
+    support::dump("house-types-no-layer-set.ifc", &output.bytes);
     assert!(
         output
             .report
@@ -915,6 +980,7 @@ fn ceilings_are_coverings_with_a_type_a_layer_set_and_voids() {
     opening.host = Some(COVERING);
     model.elements.push(opening);
     let output = write(&model, &options()).unwrap();
+    support::dump("house-ceilings.ifc", &output.bytes);
     let file = read_back(&output.bytes);
     let covering = file.instance(instance_of(&file, COVERING)).unwrap();
     assert_eq!(covering.records[0].type_name, "IFCCOVERING");
@@ -958,6 +1024,7 @@ fn house_with_roof() -> WriteModel {
 #[test]
 fn roofs_and_roof_types_read_back() {
     let output = write(&house_with_roof(), &options()).unwrap();
+    support::dump("house-roof.ifc", &output.bytes);
     let file = read_back(&output.bytes);
     let roof = file.instance(instance_of(&file, ROOF)).unwrap();
     assert_eq!(roof.records[0].type_name, "IFCROOF");
@@ -986,42 +1053,61 @@ fn roofs_and_roof_types_read_back() {
     );
 }
 
-/// Writes the sample files for an external check when `ARC_IFC_WRITE_SAMPLES` names a directory.
+/// The FNV-1a hash of the bytes the default (IFC4) path writes for the house models. Any change to
+/// these hashes means the output of existing callers changed (U12 keeps IFC4 bytes as they were).
 #[test]
-fn samples_for_external_validation() {
-    let Some(directory) = std::env::var_os("ARC_IFC_WRITE_SAMPLES") else {
-        return;
+fn ifc4_output_bytes_are_pinned() {
+    let hash = |model: &WriteModel| {
+        let bytes = write(model, &options()).unwrap().bytes;
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
     };
-    let directory = std::path::PathBuf::from(directory);
-    std::fs::write(
-        directory.join("house.ifc"),
-        write(&house(), &options()).unwrap().bytes,
-    )
-    .unwrap();
-    std::fs::write(
-        directory.join("house-types.ifc"),
-        write(&house_with_types(), &options()).unwrap().bytes,
-    )
-    .unwrap();
-    std::fs::write(
-        directory.join("house-roof.ifc"),
-        write(&house_with_roof(), &options()).unwrap().bytes,
-    )
-    .unwrap();
-    std::fs::write(
-        directory.join("house-spaces.ifc"),
-        write(&house_with_spaces(), &options()).unwrap().bytes,
-    )
-    .unwrap();
-    let mut model = house();
-    model.length_unit = LengthUnit::Millimetre;
-    model.angle_unit = AngleUnit::Radian;
-    model.true_north = None;
-    model.elements.truncate(1);
-    model.elements[0].body = Some(extrusion(10_000.0, 200.0, 3000.0));
-    std::fs::write(
-        directory.join("wall-mm.ifc"),
-        write(&model, &options()).unwrap().bytes,
-    )
-    .unwrap();
+    let got = [
+        hash(&house()),
+        hash(&house_with_spaces()),
+        hash(&house_with_types()),
+        hash(&house_with_roof()),
+    ];
+    assert_eq!(
+        got,
+        [
+            10_215_848_592_676_611_460,
+            15_356_604_462_979_120_629,
+            300_421_111_199_933_991,
+            12_817_192_702_147_000_733
+        ]
+    );
+}
+
+/// Every model of this file in IFC4X3 and IFC2X3: written, self-checked and dumped for the oracle.
+#[test]
+fn models_write_in_every_schema() {
+    use arc_io_ifc::write::OutputSchema;
+    let models: Vec<(&str, WriteModel)> = vec![
+        ("house", house()),
+        ("spaces", house_with_spaces()),
+        ("types", house_with_types()),
+        ("roof", house_with_roof()),
+    ];
+    for (name, model) in &models {
+        for (schema, tag, available) in [
+            (OutputSchema::Ifc4, "ifc4", true),
+            (OutputSchema::Ifc4x3, "ifc4x3", true),
+            (
+                OutputSchema::Ifc2x3,
+                "ifc2x3",
+                arc_io_ifc::write::OutputSchema::Ifc2x3.available(),
+            ),
+        ] {
+            if !available {
+                continue;
+            }
+            let mut options = options();
+            options.schema = schema;
+            let output = write(model, &options).unwrap_or_else(|e| panic!("{name} {tag}: {e:?}"));
+            support::dump(&format!("{name}-{tag}.ifc"), &output.bytes);
+            assert!(output.findings.is_empty(), "{name} {tag}");
+        }
+    }
 }

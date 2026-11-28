@@ -11,6 +11,42 @@
 
 use arc_io_common::crc32::checksum;
 
+/// Writes a file a test produced to `$ARC_IFC_DUMP/<name>` for the oracle in `tools/ifc-oracle`
+/// (`ARC_IFC_OUT` is the older name of the variable). Does nothing when neither is set.
+///
+/// The file must pass the conformance checker without a finding wherever the schema tables exist:
+/// every file a test writes is conformant unless the test says otherwise with
+/// [`dump_nonconformant`].
+pub fn dump(name: &str, bytes: &[u8]) {
+    assert_conformant(name, bytes);
+    dump_nonconformant(name, bytes);
+}
+
+/// Checks every level of the conformance checker on a file; nothing is checked without tables.
+pub fn assert_conformant(name: &str, bytes: &[u8]) {
+    let file = arc_io_ifc::read(bytes, &mut arc_io_ifc::ReadOptions::default())
+        .unwrap()
+        .file;
+    let result = file
+        .conformance(&arc_base::Limits::DEFAULT, &arc_base::Cancel::new())
+        .unwrap();
+    if result.schema.is_some() {
+        assert!(result.findings.is_empty(), "{name}: {:?}", result.findings);
+        assert_eq!(result.failed(), 0, "{name}");
+    }
+}
+
+/// Writes a file like [`dump`] without requiring it to be conformant.
+pub fn dump_nonconformant(name: &str, bytes: &[u8]) {
+    let Some(dir) = std::env::var_os("ARC_IFC_DUMP").or_else(|| std::env::var_os("ARC_IFC_OUT"))
+    else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(name), bytes).unwrap();
+}
+
 /// The minimal project in the given schema identifier: a project, a site, a building, two
 /// storeys, a space, two walls with a type, a property set with one property of each kind, and an
 /// element quantity set with one quantity of each kind. IFC2X3 has no `Formula` attribute on the

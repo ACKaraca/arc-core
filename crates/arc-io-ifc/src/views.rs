@@ -1,11 +1,11 @@
 //! Typed views over the generic model (CORE-IO-014): the spatial structure, the element types,
 //! the property sets and the quantity sets.
 //!
-//! Attribute positions are those of IFC2X3, IFC4 and IFC4X3, which agree for every attribute the
-//! views read, except the quantity and bounded-value layouts that the reader reads by position and
-//! that the fixtures cover per schema. The schema is not consulted; the caller can read
-//! [`IfcFile::schema`] to know which schema the values came from. A value of another kind than the
-//! view expects is not read and is counted in the loss report as dropped.
+//! Attributes are read by name through the tables of the file's schema (see
+//! [`crate::schema`]), so an attribute the schema does not declare, such as `Formula` of a quantity
+//! or `SetPointValue` of a bounded value in IFC2X3, is absent. Without the tables the position the
+//! attribute has in IFC2X3, IFC4 and IFC4X3 is used. A value of another kind than the view expects
+//! is not read and is counted in the loss report as dropped.
 //!
 //! Each distinct instance is materialized once per [`TypedViews`]: the views share it through
 //! [`Arc`], so a name listed many times in the file costs one entity. Every list of related
@@ -21,7 +21,20 @@ use arc_base::{Cancel, Error, Limits, Result};
 use crate::error::{codes, limit, reasons};
 use crate::loss::{Direction, LossHeader, LossLog, LossReport, Reason, Source};
 use crate::model::{IfcFile, Instance, Parameter, Record};
+use crate::schema::access::{Attr, known};
 use crate::step::MAX_NESTING;
+
+mod import;
+
+pub(crate) use import::UNDERSTOOD_IMPORT;
+pub use import::{
+    ClassCoverage, ClassificationRef, ClassificationSystem, Connection, ConstituentView, CrsView,
+    GeoReference, GeoSource, GroupView, ImportViews, LayerUsage, LayerView, MappedView,
+    MaterialAssociation, MaterialRef, Matrix, ObjectKind, ObjectView, Origin, OwnerHistory,
+    PlacementState, PlacementView, ProfileView, ResolvedProperty, ResolvedPropertySet,
+    ResolvedQuantity, ResolvedQuantitySet, SpaceBoundary, StyleView, UnitKind, UnitSystem,
+    UnitView,
+};
 
 /// The entity types the typed views read. Records of any other type are kept as generic instances
 /// and counted as preserved in the loss report of the read.
@@ -287,6 +300,9 @@ pub struct TypedViews {
     pub property_sets: Vec<PropertySet>,
     /// The quantity sets, in order of first assignment.
     pub quantity_sets: Vec<QuantitySet>,
+    /// The import views: objects with their resolved definitions, units, georeferencing and the
+    /// coverage of every entity class.
+    pub import: ImportViews,
     /// The loss report of the views.
     pub report: LossReport,
 }
@@ -335,11 +351,15 @@ impl IfcFile {
     pub fn typed_views(&self, limits: &Limits, cancel: &Cancel) -> Result<TypedViews> {
         cancel.check()?;
         let mut reader = Reader::new(self, limits, cancel);
+        if self.tables().is_some() {
+            reader.imp.index = self.inverse_index(limits, cancel)?;
+        }
         reader.scan()?;
         let spatial = reader.build_spatial()?;
         let types = reader.type_assignments()?;
         let property_sets = reader.property_sets()?;
         let quantity_sets = reader.quantity_sets()?;
+        let import = reader.import(&property_sets, &quantity_sets, &types)?;
         let report = reader.log.finish(LossHeader::new(
             "ifc",
             self.schema.identifier(),
@@ -351,6 +371,7 @@ impl IfcFile {
             types,
             property_sets,
             quantity_sets,
+            import,
             report,
         })
     }
@@ -383,6 +404,7 @@ struct Reader<'f> {
     quantities: BTreeMap<u64, Arc<Quantity>>,
     placed: BTreeSet<u64>,
     path: BTreeSet<u64>,
+    imp: import::State,
 }
 
 impl<'f> Reader<'f> {
@@ -414,6 +436,7 @@ impl<'f> Reader<'f> {
             quantities: BTreeMap::new(),
             placed: BTreeSet::new(),
             path: BTreeSet::new(),
+            imp: import::State::default(),
         }
     }
 
@@ -449,6 +472,9 @@ impl<'f> Reader<'f> {
     }
 
     fn lose(&mut self, reason: Reason, kind: &str, source: u64, count: u64) {
+        if count > 0 {
+            self.imp.flagged.insert(source);
+        }
         self.log
             .add(reason, kind, Some(Source::Decimal(source)), count);
     }
@@ -499,10 +525,15 @@ impl<'f> Reader<'f> {
         let file = self.file;
         for instance in file.instances() {
             self.cancel.check()?;
-            if instance
-                .records
-                .iter()
-                .any(|r| SPATIAL.contains(&r.type_name.as_str()))
+            // By the schema where its tables are present, so that parts of IFC4X3 facilities
+            // (`IfcBridgePart`, `IfcRoadPart`, ...) and external spatial elements are spatial too.
+            let by_schema = self.is_a(instance.name, "IFCSPATIALELEMENT")
+                || self.is_a(instance.name, "IFCSPATIALSTRUCTUREELEMENT");
+            if by_schema
+                || instance
+                    .records
+                    .iter()
+                    .any(|r| SPATIAL.contains(&r.type_name.as_str()))
             {
                 self.spatial.insert(instance.name);
             }
@@ -524,14 +555,20 @@ impl<'f> Reader<'f> {
             "IFCRELDEFINESBYPROPERTIES" => self.definitions_of(name, record),
             _ => {}
         }
+        if UNDERSTOOD.contains(&record.type_name.as_str()) {
+            self.imp.touched.insert(name);
+        }
+        if self.file.tables().is_some() {
+            self.import_relationship(name, record);
+        }
     }
 
     /// `IfcRelAggregates`: `RelatingObject` 4, `RelatedObjects` 5.
     fn aggregates(&mut self, name: u64, record: &Record) {
         let kind = record.type_name.as_str();
         let parts = (
-            got_reference(record.parameters.get(4)),
-            got_references(record.parameters.get(5)),
+            got_reference(self.file.attr(record, known::AGGREGATES_RELATING)),
+            got_references(self.file.attr(record, known::AGGREGATES_RELATED)),
         );
         let (Ok(Some(parent)), Ok(children)) = parts else {
             return self.bad(name, kind);
@@ -546,7 +583,10 @@ impl<'f> Reader<'f> {
             if !self.file.contains(child) {
                 self.lose(reasons::TARGET_MISSING, kind, name, 1);
             } else if !parent_spatial || !self.spatial.contains(&child) {
-                self.lose(reasons::NOT_MAPPED, kind, name, 1);
+                // The spatial tree cannot hold it; the import views map the aggregation of every
+                // object, so the relationship is not marked as read in part.
+                self.log
+                    .add(reasons::NOT_MAPPED, kind, Some(Source::Decimal(name)), 1);
             } else if !self.aggregated.insert((parent, child)) {
                 self.lose(reasons::DUPLICATE_PLACEMENT, kind, name, 1);
             } else {
@@ -560,8 +600,8 @@ impl<'f> Reader<'f> {
     fn containment(&mut self, name: u64, record: &Record) {
         let kind = record.type_name.as_str();
         let parts = (
-            got_references(record.parameters.get(4)),
-            got_reference(record.parameters.get(5)),
+            got_references(self.file.attr(record, known::CONTAINED_RELATED)),
+            got_reference(self.file.attr(record, known::CONTAINED_RELATING)),
         );
         let (Ok(related), Ok(Some(structure))) = parts else {
             return self.bad(name, kind);
@@ -589,8 +629,8 @@ impl<'f> Reader<'f> {
     fn typing(&mut self, name: u64, record: &Record) {
         let kind = record.type_name.as_str();
         let parts = (
-            got_references(record.parameters.get(4)),
-            got_reference(record.parameters.get(5)),
+            got_references(self.file.attr(record, known::TYPE_RELATED)),
+            got_reference(self.file.attr(record, known::TYPE_RELATING)),
         );
         let (Ok(related), Ok(Some(element_type))) = parts else {
             return self.bad(name, kind);
@@ -616,8 +656,8 @@ impl<'f> Reader<'f> {
     fn definitions_of(&mut self, name: u64, record: &Record) {
         let kind = record.type_name.as_str();
         let parts = (
-            got_references(record.parameters.get(4)),
-            got_definitions(record.parameters.get(5)),
+            got_references(self.file.attr(record, known::PROPERTIES_RELATED)),
+            got_definitions(self.file.attr(record, known::PROPERTIES_RELATING)),
         );
         let (Ok(related), Ok(definitions)) = parts else {
             return self.bad(name, kind);
@@ -724,16 +764,16 @@ impl<'f> Reader<'f> {
             return Ok(None);
         };
         self.cancel.check()?;
-        let parameters = &record.parameters;
+        let values =
+            [known::GLOBAL_ID, known::NAME, known::DESCRIPTION].map(|a| file.attr(record, a));
         let base = ENTITY_BYTES.saturating_add(to_u64(record.type_name.len()));
-        let bytes = [0usize, 2, 3].iter().fold(base, |sum, &i| {
-            sum.saturating_add(copied_bytes(parameters.get(i)))
-        });
+        let bytes = values
+            .iter()
+            .fold(base, |sum, &p| sum.saturating_add(copied_bytes(p)));
         self.charge(bytes)?;
+        self.imp.touched.insert(name);
         let kind = record.type_name.as_str();
-        let global_id = self.opt(got_text(parameters.first()), name, kind);
-        let label = self.opt(got_text(parameters.get(2)), name, kind);
-        let description = self.opt(got_text(parameters.get(3)), name, kind);
+        let [global_id, label, description] = values.map(|p| self.opt(got_text(p), name, kind));
         let entity = Arc::new(RootedEntity {
             instance: name,
             type_name: record.type_name.clone(),
@@ -814,7 +854,11 @@ impl<'f> Reader<'f> {
         let Some(head) = self.entity(definition)? else {
             return Ok(None);
         };
-        let names = self.references(record.parameters.get(4), definition, "IFCPROPERTYSET");
+        let names = self.references(
+            self.file.attr(record, known::PSET_PROPERTIES),
+            definition,
+            "IFCPROPERTYSET",
+        );
         let mut properties = Vec::new();
         for name in names.items {
             if let Some(property) = self.property(name, definition)? {
@@ -859,13 +903,24 @@ impl<'f> Reader<'f> {
             return Ok(None);
         }
         self.cancel.check()?;
-        let parameters = &record.parameters;
-        let bytes = (0..6).fold(PROPERTY_BYTES, |sum, i| {
-            sum.saturating_add(copied_bytes(parameters.get(i)))
-        });
+        self.imp.touched.insert(name);
+        let bytes = record
+            .parameters
+            .iter()
+            .take(6)
+            .fold(PROPERTY_BYTES, |sum, p| {
+                sum.saturating_add(copied_bytes(Some(p)))
+            });
         self.fixed(bytes)?;
-        let label = self.opt(got_text(parameters.first()), name, kind);
-        let description = self.opt(got_text(parameters.get(1)), name, kind);
+        let label = self.opt(
+            got_text(file.attr(record, known::PROPERTY_NAME)),
+            name,
+            kind,
+        );
+        let description = file
+            .attr(record, known::PROPERTY_DESCRIPTION)
+            .or_else(|| file.attr(record, known::PROPERTY_SPECIFICATION));
+        let description = self.opt(got_text(description), name, kind);
         let value = self.property_value(kind, record, name);
         let property = Arc::new(Property {
             instance: name,
@@ -878,31 +933,36 @@ impl<'f> Reader<'f> {
     }
 
     fn property_value(&mut self, kind: &str, record: &Record, source: u64) -> PropertyValue {
-        let p = |i: usize| record.parameters.get(i);
+        let file = self.file;
+        let p = |a| file.attr(record, a);
         match kind {
             "IFCPROPERTYSINGLEVALUE" => PropertyValue::Single {
-                nominal: self.opt(got_nominal(p(2)), source, kind),
-                unit: self.opt(got_reference(p(3)), source, kind),
+                nominal: self.opt(got_nominal(p(known::SINGLE_NOMINAL)), source, kind),
+                unit: self.opt(got_reference(p(known::SINGLE_UNIT)), source, kind),
             },
             "IFCPROPERTYENUMERATEDVALUE" => {
-                let values = self.nominals(p(2), source, kind);
+                let values = self.nominals(p(known::ENUMERATED_VALUES), source, kind);
                 PropertyValue::Enumerated {
                     values,
-                    reference: self.opt(got_reference(p(3)), source, kind),
+                    reference: self.opt(
+                        got_reference(p(known::ENUMERATED_REFERENCE)),
+                        source,
+                        kind,
+                    ),
                 }
             }
             "IFCPROPERTYLISTVALUE" => {
-                let values = self.nominals(p(2), source, kind);
+                let values = self.nominals(p(known::LIST_VALUES), source, kind);
                 PropertyValue::List {
                     values,
-                    unit: self.opt(got_reference(p(3)), source, kind),
+                    unit: self.opt(got_reference(p(known::LIST_UNIT)), source, kind),
                 }
             }
             _ => PropertyValue::Bounded {
-                upper: self.opt(got_nominal(p(2)), source, kind),
-                lower: self.opt(got_nominal(p(3)), source, kind),
-                unit: self.opt(got_reference(p(4)), source, kind),
-                set_point: self.opt(got_nominal(p(5)), source, kind),
+                upper: self.opt(got_nominal(p(known::BOUNDED_UPPER)), source, kind),
+                lower: self.opt(got_nominal(p(known::BOUNDED_LOWER)), source, kind),
+                unit: self.opt(got_reference(p(known::BOUNDED_UNIT)), source, kind),
+                set_point: self.opt(got_nominal(p(known::BOUNDED_SET_POINT)), source, kind),
             },
         }
     }
@@ -946,7 +1006,11 @@ impl<'f> Reader<'f> {
         let Some(head) = self.entity(definition)? else {
             return Ok(None);
         };
-        let names = self.references(record.parameters.get(5), definition, "IFCELEMENTQUANTITY");
+        let names = self.references(
+            self.file.attr(record, known::QUANTITIES),
+            definition,
+            "IFCELEMENTQUANTITY",
+        );
         let mut quantities = Vec::new();
         for name in names.items {
             if let Some(quantity) = self.quantity(name, definition)? {
@@ -991,16 +1055,22 @@ impl<'f> Reader<'f> {
             return Ok(None);
         };
         self.cancel.check()?;
-        let parameters = &record.parameters;
-        let bytes = (0..5).fold(QUANTITY_BYTES, |sum, i| {
-            sum.saturating_add(copied_bytes(parameters.get(i)))
-        });
+        self.imp.touched.insert(name);
+        let bytes = record
+            .parameters
+            .iter()
+            .take(5)
+            .fold(QUANTITY_BYTES, |sum, p| {
+                sum.saturating_add(copied_bytes(Some(p)))
+            });
         self.fixed(bytes)?;
-        let label = self.opt(got_text(parameters.first()), name, kind);
-        let description = self.opt(got_text(parameters.get(1)), name, kind);
-        let unit = self.opt(got_reference(parameters.get(2)), name, kind);
-        let value = self.opt(got_number(parameters.get(3)), name, kind);
-        let formula = self.opt(got_text(parameters.get(4)), name, kind);
+        let (value_attr, formula_attr) = quantity_attrs(quantity_kind);
+        let p = |a| file.attr(record, a);
+        let label = self.opt(got_text(p(known::QUANTITY_NAME)), name, kind);
+        let description = self.opt(got_text(p(known::QUANTITY_DESCRIPTION)), name, kind);
+        let unit = self.opt(got_reference(p(known::QUANTITY_UNIT)), name, kind);
+        let value = self.opt(got_number(p(value_attr)), name, kind);
+        let formula = self.opt(got_text(p(formula_attr)), name, kind);
         let quantity = Arc::new(Quantity {
             instance: name,
             kind: quantity_kind,
@@ -1026,6 +1096,18 @@ fn quantity_kind(type_name: &str) -> Option<QuantityKind> {
         "IFCQUANTITYTIME" => QuantityKind::Time,
         _ => return None,
     })
+}
+
+/// The value and formula attributes of a quantity kind.
+fn quantity_attrs(kind: QuantityKind) -> (Attr, Attr) {
+    match kind {
+        QuantityKind::Length => (known::LENGTH_VALUE, known::LENGTH_FORMULA),
+        QuantityKind::Area => (known::AREA_VALUE, known::AREA_FORMULA),
+        QuantityKind::Volume => (known::VOLUME_VALUE, known::VOLUME_FORMULA),
+        QuantityKind::Count => (known::COUNT_VALUE, known::COUNT_FORMULA),
+        QuantityKind::Weight => (known::WEIGHT_VALUE, known::WEIGHT_FORMULA),
+        QuantityKind::Time => (known::TIME_VALUE, known::TIME_FORMULA),
+    }
 }
 
 fn to_u64(value: usize) -> u64 {

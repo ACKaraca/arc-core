@@ -8,10 +8,11 @@
 //! negative or not finite. When no usable length unit exists, meters are assumed and reported as
 //! `io.ifc.unit_assumed`.
 
-use arc_base::Result;
+use arc_base::{Cancel, Limits, Result, Tolerance};
 
 use crate::error::reasons;
-use crate::model::{Parameter, Record};
+use crate::model::{IfcFile, Parameter, Record};
+use crate::schema::access::known;
 
 use super::Evaluator;
 use super::attr;
@@ -52,11 +53,11 @@ fn prefix_factor(prefix: &str) -> Option<f64> {
 
 /// The factor of an SI unit record (its prefix); `None` when the record is not an SI unit or its
 /// prefix is unknown.
-fn si_factor(record: &Record) -> Option<f64> {
+fn si_factor(file: &IfcFile, record: &Record) -> Option<f64> {
     if record.type_name != "IFCSIUNIT" {
         return None;
     }
-    match record.parameters.get(2) {
+    match file.attr(record, known::SI_PREFIX) {
         None | Some(Parameter::Omitted | Parameter::Derived) => Some(1.0),
         Some(Parameter::Enumeration(prefix)) => prefix_factor(prefix),
         _ => None,
@@ -64,8 +65,8 @@ fn si_factor(record: &Record) -> Option<f64> {
 }
 
 /// The name of an SI unit (`METRE`, `RADIAN`, ...).
-fn si_name(record: &Record) -> Option<&str> {
-    attr::enumeration(record.parameters.get(3))
+fn si_name<'a>(file: &IfcFile, record: &'a Record) -> Option<&'a str> {
+    attr::enumeration(file.attr(record, known::SI_NAME))
 }
 
 impl Evaluator<'_> {
@@ -78,11 +79,11 @@ impl Evaluator<'_> {
             let Some(record) = self.file.instance(unit).and_then(|i| i.records.first()) else {
                 continue;
             };
-            let unit_type = attr::enumeration(record.parameters.get(1));
+            let unit_type = attr::enumeration(self.file.attr(record, known::UNIT_TYPE));
             match record.type_name.as_str() {
                 "IFCSIUNIT" => {
-                    let factor = si_factor(record);
-                    match (unit_type, si_name(record), factor) {
+                    let factor = si_factor(self.file, record);
+                    match (unit_type, si_name(self.file, record), factor) {
                         (Some("LENGTHUNIT"), Some("METRE"), Some(f)) if length.is_none() => {
                             length = Some(f);
                         }
@@ -112,6 +113,7 @@ impl Evaluator<'_> {
         }
         let meters_per_length_unit = length.unwrap_or(1.0);
         self.scale = meters_per_length_unit;
+        self.angle = angle.unwrap_or(1.0);
         Ok(Units {
             meters_per_length_unit,
             radians_per_angle_unit: angle.unwrap_or(1.0),
@@ -127,7 +129,7 @@ impl Evaluator<'_> {
             .instances_of("IFCPROJECT")
             .next()
             .and_then(|i| i.records.first())
-            .and_then(|r| match r.parameters.get(8) {
+            .and_then(|r| match file.attr(r, known::PROJECT_UNITS) {
                 Some(Parameter::Reference(name)) => Some(*name),
                 _ => None,
             });
@@ -142,7 +144,7 @@ impl Evaluator<'_> {
         let Some(record) = attr::typed(file, assignment, "IFCUNITASSIGNMENT") else {
             return Vec::new();
         };
-        match record.parameters.first() {
+        match file.attr(record, known::UNIT_ASSIGNMENT_UNITS) {
             Some(Parameter::List(items)) => items
                 .iter()
                 .filter_map(|item| match item {
@@ -157,7 +159,8 @@ impl Evaluator<'_> {
     /// The factor of an `IfcConversionBasedUnit`: the value of its `IfcMeasureWithUnit` times the
     /// factor of the SI unit that measure refers to.
     fn conversion_factor(&self, record: &Record) -> Option<f64> {
-        let Some(Parameter::Reference(measure)) = record.parameters.get(3) else {
+        let Some(Parameter::Reference(measure)) = self.file.attr(record, known::CONVERSION_FACTOR)
+        else {
             return None;
         };
         self.measure_with_unit(*measure)
@@ -165,7 +168,7 @@ impl Evaluator<'_> {
 
     fn measure_with_unit(&self, name: u64) -> Option<f64> {
         let measure = attr::typed(self.file, name, "IFCMEASUREWITHUNIT")?;
-        let value = match measure.parameters.first()? {
+        let value = match self.file.attr(measure, known::MEASURE_VALUE)? {
             Parameter::Typed { value, .. } => match value.as_ref() {
                 Parameter::Real(real) => *real,
                 Parameter::Integer(integer) => *integer as f64,
@@ -175,12 +178,25 @@ impl Evaluator<'_> {
             Parameter::Integer(integer) => *integer as f64,
             _ => return None,
         };
-        let Some(Parameter::Reference(component)) = measure.parameters.get(1) else {
+        let Some(Parameter::Reference(component)) = self.file.attr(measure, known::MEASURE_UNIT)
+        else {
             return None;
         };
         let component = attr::typed(self.file, *component, "IFCSIUNIT")?;
-        let factor = value * si_factor(component)?;
+        let factor = value * si_factor(self.file, component)?;
         // A factor that is zero, negative or not finite makes the unit unusable: meters are assumed.
         (factor.is_finite() && factor > 0.0).then_some(factor)
+    }
+}
+
+impl Units {
+    /// Reads the length and plane angle units of the file (see the module documentation).
+    ///
+    /// # Errors
+    ///
+    /// `base.cancelled` when the token was cancelled.
+    pub fn of(file: &IfcFile, limits: &Limits, cancel: &Cancel) -> Result<Self> {
+        cancel.check()?;
+        Evaluator::new(file, limits, &Tolerance::DEFAULT, cancel).read_units()
     }
 }

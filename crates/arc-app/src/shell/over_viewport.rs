@@ -24,6 +24,8 @@ pub(super) struct DisplayState {
     isolated: Option<HashSet<ObjectId>>,
     /// Whether the renderer has been told the current state.
     applied: bool,
+    /// The shading mode the controller asks for.
+    pub(super) shading: arc_gpu::ShadingMode,
 }
 
 impl DisplayState {

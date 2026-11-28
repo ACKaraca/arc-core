@@ -760,7 +760,8 @@ the process that owns stdin and stdout is the [headless runner](#headless-runner
 | `command.describe` | `command` (identifier or alias), optional `document` | that command's entry |
 | `command.validate` | `command`, `params` (default `{}`) | `valid`, `violations` (pointer and kind, as in parameter validation) |
 | `command.run` | `document`, `command`, `params` (default `{}`), optional `expectedRevision`, `preview` (default `false`), `seed` (default 0) | `command` (identifier), `revision`, `value`, `diagnostics`, `preview`, `summary`, and for a preview `baseRevision` |
-| `command.cancel` | `id`, the request id of a `command.run` | `cancelled`: whether a running or waiting run was found |
+| `command.prompt` | `document`, `text`, `seed` (default 0) | `state` (`idle`, `prompt`, `rejected`, `ran` or `cancelled`); `prompt` (`key`, `messageId`, `arguments`, `accepts`, `hasDefault`) for `prompt` and `rejected`; `error` (the error data) for `rejected`; the fields of a `command.run` result for `ran` |
+| `command.cancel` | `id`, the request id of a `command.run` or `command.prompt` | `cancelled`: whether a running or waiting run was found |
 
 - An entry is the catalog entry plus `permitted` (the granted classes cover the command's).
   The architecture lists every exposed command, so commands the session may not run are listed
@@ -791,6 +792,31 @@ the process that owns stdin and stdout is the [headless runner](#headless-runner
   notification `event.notify` with `params` `{"event": "command.progress", "requestId",
   "fraction", "messageId"}` before the run's response. A session receives the progress of its
   own runs until it unsubscribes from `command.progress` ([Events](#events)).
+
+### Prompt method
+
+`command.prompt` (added to protocol 1.0 without a version change; the schemas carry a note)
+answers the current prompt of the session with typed text. The session keeps one command line
+(`CommandLine`) per document, so the text goes to `CommandLine::submit`: with a prompt asked it is
+read by `PromptSession::answer_text` exactly as typed text is at the command line (coordinate entry
+included, an empty text accepts the default, a text starting with `'` is a transparent command);
+with none asked it is a command line that starts the command it names, and an empty one repeats the
+last command.
+
+- `state` says what followed: `prompt` (the next prompt, in `prompt`), `rejected` (the answer was
+  not accepted: `error` is the error data, and `prompt` is asked again), `ran` (the command
+  completed and ran through `Invoker::invoke` like `command.run`, so exposure, permissions and
+  limits are checked and a recorder sees it; the result has the fields of a `command.run` result),
+  `cancelled` and `idle` (an empty text with nothing to repeat). A prompt reports `accepts`, the
+  kind names it takes (`point`, `distance`, `angle`, `pick`, `selection`, `text`, `number`,
+  `expression`, `keyword`).
+- A command that is not exposed on `automation` is not started (-32001, `cmd.not_exposed`). Other
+  errors are those of the command line (`cmd.unknown`, `cmd.line.*`, `cmd.prompt.ended`) and of
+  the run; the prompt session is unchanged by an error of the answer itself.
+- The request is queued with the session's runs and counts toward the 64 queued requests;
+  `command.cancel` cancels it while it waits and, once it completes a command, cancels that run at
+  its next checkpoint. The selection of the session is what the command sees and takes what it
+  leaves, as for `command.run`. It takes no `expectedRevision` and no `preview`.
 
 ### History methods
 

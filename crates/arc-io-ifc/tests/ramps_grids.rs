@@ -1,8 +1,7 @@
 //! IFC writing of ramps, curtain walls with plates and members, and grids (CORE-IO-016):
 //! attributes, aggregation of the parts, containment, grid axes and refusals.
 //!
-//! `ARC_IFC_OUT=<directory>` also writes the model of the first test there, for an independent
-//! validator.
+//! `ARC_IFC_DUMP=<directory>` writes the produced files there, for the independent oracle.
 
 #![allow(
     clippy::unwrap_used,
@@ -12,6 +11,8 @@
     clippy::cognitive_complexity,
     reason = "test code: fixtures and assertions"
 )]
+
+mod support;
 
 use arc_base::math::{Point2, Point3, Vector3};
 use arc_io_ifc::write::{
@@ -163,15 +164,9 @@ fn en(text: &str) -> Parameter {
 fn ramps_curtain_walls_and_grids_read_back() {
     let model = model();
     let output = write(&model, &options()).unwrap();
+    support::dump("ramps-grids.ifc", &output.bytes);
     assert_eq!(output.bytes, write(&model, &options()).unwrap().bytes);
     assert!(!output.report.has_loss(), "{:?}", output.report);
-    if let Ok(dir) = std::env::var("ARC_IFC_OUT") {
-        std::fs::write(
-            std::path::Path::new(&dir).join("ramps_grids.ifc"),
-            &output.bytes,
-        )
-        .unwrap();
-    }
     let file = read(&output.bytes, &mut ReadOptions::default())
         .unwrap()
         .file;
@@ -326,6 +321,7 @@ fn arc_angles_follow_the_angle_unit() {
     let mut model = model();
     model.angle_unit = AngleUnit::Degree;
     let output = write(&model, &options()).unwrap();
+    support::dump("ramps-degrees.ifc", &output.bytes);
     let text = String::from_utf8(output.bytes).unwrap();
     assert!(text.contains("IFCPARAMETERVALUE(90.)"), "{text}");
 }
@@ -382,4 +378,41 @@ fn invalid_parts_and_grids_are_refused() {
     let mut bad = model();
     bad.grids.push(bad.grids[0].clone());
     assert_eq!(code(&bad), "io.ifc.write_id_duplicate");
+}
+
+/// The bytes of the default (IFC4) path for the ramp, curtain wall and grid model stay as written.
+#[test]
+fn ramp_output_bytes_are_pinned() {
+    let bytes = write(&model(), &options()).unwrap().bytes;
+    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    assert_eq!(hash, 12_422_165_792_295_622_897, "{} bytes", bytes.len());
+}
+
+/// Every model of this file in IFC4X3 and IFC2X3: written, self-checked and dumped for the oracle.
+#[test]
+fn models_write_in_every_schema() {
+    use arc_io_ifc::write::OutputSchema;
+    let models: Vec<(&str, WriteModel)> = vec![("ramps", model())];
+    for (name, model) in &models {
+        for (schema, tag, available) in [
+            (OutputSchema::Ifc4, "ifc4", true),
+            (OutputSchema::Ifc4x3, "ifc4x3", true),
+            (
+                OutputSchema::Ifc2x3,
+                "ifc2x3",
+                arc_io_ifc::write::OutputSchema::Ifc2x3.available(),
+            ),
+        ] {
+            if !available {
+                continue;
+            }
+            let mut options = options();
+            options.schema = schema;
+            let output = write(model, &options).unwrap_or_else(|e| panic!("{name} {tag}: {e:?}"));
+            support::dump(&format!("{name}-{tag}.ifc"), &output.bytes);
+            assert!(output.findings.is_empty(), "{name} {tag}");
+        }
+    }
 }

@@ -9,6 +9,8 @@
     reason = "test code: fixtures and assertions"
 )]
 
+mod support;
+
 use arc_base::math::{Point3, Vector3};
 use arc_base::{Cancel, Limits};
 use arc_io_ifc::write::{
@@ -171,6 +173,7 @@ fn references(parameter: &Parameter) -> Vec<u64> {
 fn stairs_parts_and_railings_read_back() {
     let model = model();
     let output = write(&model, &options()).unwrap();
+    support::dump("stairs.ifc", &output.bytes);
     assert_eq!(output.bytes, write(&model, &options()).unwrap().bytes);
     assert!(!output.report.has_loss(), "{:?}", output.report);
     let file = read(&output.bytes, &mut ReadOptions::default())
@@ -265,6 +268,17 @@ fn stairs_parts_and_railings_read_back() {
     assert!((volume(&mesh, &Limits::CONSTRAINED).unwrap() - expected).abs() < 1e-9);
 }
 
+/// The aggregation of parts is grouped by host in one pass; the bytes stay what the
+/// container-by-element scan wrote.
+#[test]
+fn stair_output_bytes_are_pinned() {
+    let bytes = write(&model(), &options()).unwrap().bytes;
+    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    assert_eq!(hash, 3_995_293_198_085_456_176, "{} bytes", bytes.len());
+}
+
 #[test]
 fn invalid_stair_parts_are_refused() {
     let code = |model: &WriteModel| write(model, &options()).unwrap_err().code();
@@ -279,4 +293,31 @@ fn invalid_stair_parts_are_refused() {
     let mut bad = model();
     bad.elements[1].flight = Some(FlightDimensions::new(5, 4, 0.0, TREAD));
     assert_eq!(code(&bad), "io.ifc.write_value_invalid");
+}
+
+/// Every model of this file in IFC4X3 and IFC2X3: written, self-checked and dumped for the oracle.
+#[test]
+fn models_write_in_every_schema() {
+    use arc_io_ifc::write::OutputSchema;
+    let models: Vec<(&str, WriteModel)> = vec![("stairs", model())];
+    for (name, model) in &models {
+        for (schema, tag, available) in [
+            (OutputSchema::Ifc4, "ifc4", true),
+            (OutputSchema::Ifc4x3, "ifc4x3", true),
+            (
+                OutputSchema::Ifc2x3,
+                "ifc2x3",
+                arc_io_ifc::write::OutputSchema::Ifc2x3.available(),
+            ),
+        ] {
+            if !available {
+                continue;
+            }
+            let mut options = options();
+            options.schema = schema;
+            let output = write(model, &options).unwrap_or_else(|e| panic!("{name} {tag}: {e:?}"));
+            support::dump(&format!("{name}-{tag}.ifc"), &output.bytes);
+            assert!(output.findings.is_empty(), "{name} {tag}");
+        }
+    }
 }

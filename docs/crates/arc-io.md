@@ -762,7 +762,7 @@ because the layer table does not allow one format crate to depend on another.
 
 `arc-io-common` holds the bounded ZIP and XML readers that CORE-IO-007 names, so that every
 ZIP- and XML-based format reads them the same way. It depends on `arc-base`, on `miniz_oxide` for
-inflation and on `quick-xml` for XML parsing; it reads byte buffers only, has no product type and
+inflation and deflation and on `quick-xml` for XML parsing; it reads byte buffers only, has no product type and
 builds for `wasm32-unknown-unknown`. Format crates depend on it through same-layer edges that are
 added when each one starts using it (ADR-0001, amendment "Shared bounded ZIP and XML readers").
 The limits are `arc_base::Limits`, used directly: the crate defines no limits type of its own, so
@@ -838,6 +838,12 @@ the field names and profile values are those of [interchange.md](../architecture
 - The budget is the archive's: every call to `read_entry` charges the bytes it produced against
   `decompressed_bytes`, whether the entry then passes its CRC-32 check or not. Reading an entry again
   uses budget again, and an entry that fails its checks cannot be inflated without limit.
+- `write_archive(entries, method)` writes an archive of (name, data) entries in the given order, all
+  stored or all deflated with `miniz_oxide` at level 6. Names are checked like the reader's names and
+  for duplicates, and flagged as UTF-8; folder conflicts are not checked. The output is deterministic:
+  every entry carries the DOS time 1980-01-01 00:00 and no extra fields. ZIP64 is not written: an
+  entry, an offset or the directory of 4 GiB or more, or more than 65,534 entries, is
+  `io.limit_exceeded`.
 
 ### XML documents
 
@@ -1117,7 +1123,7 @@ triangle meshes of the geometry evaluation (a lower-layer edge) and on `serde` f
 readers take byte buffers and never paths, and the crate builds for `wasm32-unknown-unknown`. The
 geometry evaluation (CORE-IO-015) is described in [Geometry evaluation as implemented](#geometry-evaluation-as-implemented).
 The first part of writing (CORE-IO-016) is described in [IFC writing as implemented](#ifc-writing-as-implemented).
-Streaming (CORE-IO-017) and IDS (CORE-IO-018) are not implemented.
+The alignment part of geometry evaluation is described in [Alignments and linear placement as implemented](#alignments-and-linear-placement-as-implemented). Streaming (CORE-IO-017) is described in [Streaming read as implemented](#streaming-read-as-implemented). IDS (CORE-IO-018) is described in [IDS as implemented](#ids-as-implemented).
 
 ### Reading
 
@@ -1173,11 +1179,12 @@ Streaming (CORE-IO-017) and IDS (CORE-IO-018) are not implemented.
   that a byte that starts no well-formed UTF-8 sequence is read as ISO 8859-1 and counted
   (`io.ifc.text_latin1`). A raw tab, carriage return or line feed is kept and counted
   (`io.ifc.text_control_kept`). Any other raw control byte below 0x20 is refused.
-- What is not read: the content of the header beyond `FILE_SCHEMA` is not interpreted; the parameter
-  count and the parameter types of an entity are not checked against the schema, and no WHERE rule is
-  evaluated. An entity keeps the values its file gives, whatever the schema says of them.
+- What is not read: the content of the header beyond `FILE_SCHEMA` is not interpreted. Reading does
+  not check the parameter count or types of an entity against the schema; an entity keeps the values
+  its file gives, whatever the schema says of them. The [conformance checker](#schema-aware-access-and-conformance)
+  checks them, and the `WHERE` and global rules, on request.
 - Memory estimate: the parser charges an estimate of the memory it allocates against `memory_bytes`:
-  48 bytes per parameter, 64 bytes per record plus its type name, 96 bytes per instance, and the raw
+  48 bytes per parameter, 64 bytes per record plus its type name, 120 bytes per instance (its span included), and the raw
   length of each string, binary literal, enumeration and type name. The constants are in
   `crates/arc-io-ifc/src/step.rs`. The estimate is kept on the file as `IfcFile::parsed_bytes`.
 
@@ -1189,6 +1196,62 @@ an instance by name with a binary search over an index built once when the file 
 all instances per query. `Instance` holds its name and its records; `Record` holds its type name and its
 parameters; `Parameter` is the enumeration of the parameter kinds above. `parsed_bytes()` is the memory
 estimate of the parser.
+
+### Round trip and editing
+
+The parser records the byte span of every header record and every instance, from its first byte to
+its `;`, and the offset of the `ENDSEC` that closes the last data section. `IfcFile` keeps one shared
+copy of the physical file (for an IFC-ZIP archive, the inflated entry) and the spans as offsets into
+it, part of the 120 bytes per instance of the parser's estimate; no instance holds a copy of its text.
+`span(name)` returns the span of an unchanged instance and `source_text(name)` its bytes. Because
+spans are offsets, the streaming reader (CORE-IO-017) keeps them into a seekable source instead
+of a buffer.
+
+`write_step(limits)` writes the file back. Every byte that no edit touched is copied from the source:
+the header, white space, line breaks, comments between statements, skipped sections and the bytes
+after `END-ISO-10303-21;`. A file read and written without edits is therefore identical to its source
+byte for byte. Comments are not semantic in ISO 10303-21; they are kept where they lie between
+statements and inside unchanged instances, and dropped inside an edited instance, which is written
+whole in the canonical form of [Encoding and determinism](#encoding-and-determinism) on its own
+span, a complex instance as `#n=(A(...)B(...));`. An edit thus changes only the lines of the edited
+instances. A removed instance drops its text, the spaces after it and one line break. Added
+instances are written one per line, in the order they were added, before the `ENDSEC` of the last
+data section, with the line break the file uses there (`\r\n` or `\n`).
+
+`header` is public and editable: `FILE_DESCRIPTION` (view definition and implementation level),
+`FILE_NAME` and `FILE_SCHEMA` are kept as read. A header record that differs from the one read is
+written in the canonical form in its place, records beyond those read follow the last one, and an
+edited header must start with `FILE_DESCRIPTION`, `FILE_NAME` and `FILE_SCHEMA`, otherwise
+`io.ifc.edit_value_invalid`. Editing `FILE_SCHEMA` does not change `schema`, which stays the one read.
+
+The edit API keeps instance names: no edit renumbers, and `add(records)` returns a name above every
+name the file has held, so a removed name is not reused. `replace(name, records)` keeps the name and
+the place in the file; `set_attribute(name, record, index, value)` sets one parameter (record 0 of a
+simple instance); `remove(name)` returns the removed instance. Every value is checked before it is
+stored, so that the file stays writable: reals finite, texts without NUL, enumerations of letters,
+digits and `_`, binaries of the reader's form, type names in upper case, nesting at most 64. No edit
+leaves a dangling reference: a value that refers to an instance not in the file (other than the edited
+instance itself) and the removal of an instance another instance still refers to are refused with
+`io.ifc.edit_reference_dangling`; a missing instance, record or parameter is
+`io.ifc.edit_target_missing`. References that were already dangling in the file read are kept as
+read, but a replacement that carries one is refused. A removal scans every instance for references
+and rebuilds the indexes, so it costs time in proportion to the file; the other edits update the
+indexes in place.
+
+`ifc_zip(entry_name, bytes)` packs a physical file as an IFC-ZIP archive of one deflated entry with
+`arc_io_common::zip::write_archive`; the entry name must end in `.ifc` and not name metadata, so that
+`read` finds it, or the call fails with `io.ifc.archive_entry_missing`.
+
+The tests write every edge case of the clear text encoding back byte for byte (the minimal project in
+each schema, CR LF line breaks, comments inside and between instances, a byte order mark, trailing
+padding and garbage, a skipped section and a second data section with a complex instance, a file on
+one line), check that one changed attribute changes one line, that every parameter kind is written
+canonically and reads back equal, the name policy, every refusal, header edits and IFC-ZIP output.
+Truncating each edge-case file at every byte and flipping random bytes of the project either fails
+with an `io.*` error or reads a file that writes back byte for byte; the hostile-input tests also
+rewrite the first instance canonically and read it back equal. With `ARC_IFC_ROUNDTRIP_DIR` set,
+`tests/roundtrip.rs` round-trips every `.ifc` file under that directory, such as the output of
+`ARC_IFC_DUMP` or a sample corpus outside the repository.
 
 ### Typed views
 
@@ -1241,13 +1304,97 @@ assignments, the property sets, the quantity sets and a loss report of the views
   `Name` 0, `Description` 1, `Unit` 2, its value at 3 and `Formula` 4. `Formula` exists in IFC4 and
   IFC4X3 only, so IFC2X3 gives no formula. A count is an integer, the others are reals; a measure wrapper
   such as `IFCAREAMEASURE(12.5)` is read through. Another quantity type is `io.ifc.not_mapped`.
-- Schemas: the reader reads attributes by position and does not consult the schema. The positions of the
-  rooted attributes, the relationships, the property values and the quantity values agree in IFC2X3, IFC4
-  and IFC4X3. The two exceptions are the layouts named above (`Formula` and `SetPointValue`), which are
-  absent in IFC2X3. The minimal project is tested in each schema identifier, with an IFC2X3 layout of its
-  quantities and bounded value; the schema of a file is available as `IfcFile::schema`.
+- Schemas: the views read every attribute by name through the
+  [schema tables](#schema-aware-access-and-conformance) of the file's schema; the positions given above
+  are those of the tables. An attribute the schema does not declare is absent: `Formula` and
+  `SetPointValue` in IFC2X3. The description of a property is `Description` in IFC2X3 and IFC4 and
+  `Specification` in IFC4X3. Without the tables, or for a schema or entity they do not declare, the
+  positions above are used; a test checks each of them against the tables of all three schemas. The
+  minimal project is tested in each schema identifier, with an IFC2X3 layout of its quantities and
+  bounded value; the schema of a file is available as `IfcFile::schema`.
 - A relationship member of the wrong kind drops that member only; the other members of the list are kept.
 - Entity types the views do not read stay generic instances and are not part of the views.
+
+### Import views
+
+`TypedViews::import` (`ImportViews`) is the neutral model an importer maps to its own: it holds no
+product mapping. It is built from the schema tables by attribute name, so IFC2X3, IFC4 and IFC4X3 share
+one code path; without the tables of the file's schema (`IfcFile::tables` is `None`) it is empty and
+the coverage lists every instance as not read. It shares the budget, the cancellation checks and the
+inverse index (`IfcFile::inverse_index`) with the views above.
+
+- Objects: `ImportViews::objects` holds an `ObjectView` for every `IfcObjectDefinition` that is not a
+  group, in ascending instance name (`ImportViews::object(instance)`), with `ObjectKind` product,
+  type or other. An object has `GlobalId`, `Name`, `Description`, `ObjectType` (`ElementType` of a type
+  object), `Tag`, `PredefinedType` and the effective predefined type: the type object's value wins, as
+  the type defines it, unless the type says `NOTDEFINED` (or `USERDEFINED` without an `ElementType`), in
+  which case the occurrence's own value stays; `user_defined_type` names the kind of an effective
+  `USERDEFINED`. The type object is the `IfcRelDefinesByType` target, the container the
+  `IfcRelContainedInSpatialStructure` structure, `aggregate_parent` and `parts` come from
+  `IfcRelAggregates` for every object and `nest_parent` and `nested` from `IfcRelNests`. Spatial
+  elements are the `IfcSpatialElement` (IFC2X3: `IfcSpatialStructureElement`) subtypes of the schema, so
+  the parts of the IFC4X3 facilities are in the spatial tree.
+- Placements: `placement` is the world transform of `ObjectPlacement` (row-major 4x4, translation in
+  meters). An `IfcLocalPlacement` chain is walked iteratively, bounded by the nesting limit, with every
+  result kept for the chains that share a parent. A chain that meets `IfcGridPlacement` or
+  `IfcLinearPlacement` stops there with `PlacementState::NotResolved` naming the entity (reported as
+  `io.ifc.not_mapped`); a repeated placement or a chain deeper than the limit is `Cut`
+  (`io.ifc.cycle_cut`). Storeys, buildings and sites give `elevation` in meters; a site gives
+  `latitude_longitude` in decimal degrees.
+- Sets: property and quantity sets are merged with those of the type object by set name and then by
+  property name; the occurrence's value wins (`Origin::Occurrence`, `Origin::Type` for what is
+  inherited). The sets of a type object are those of `HasPropertySets`. A set is built once and its
+  properties are shared.
+- Units: `UnitSystem` holds the project's unit assignment (`IfcSIUnit` with prefix, `IfcConversionBasedUnit`
+  with or without offset, `IfcDerivedUnit` as the product of its elements' factors to the power of their
+  exponents, `IfcMonetaryUnit`) with the factor of each to the SI base unit of its type (meter, kilogram,
+  second, radian); `GRAM` is 0.001. An SI prefix scales the unit once. A conversion that refers to itself,
+  or whose factor is not positive, has no factor. `length_to_meters` is applied to every length the views
+  report; without a length unit meters are assumed (`io.ifc.unit_assumed`). A property or quantity value
+  stays as the file states it; `ResolvedProperty::scale_to_si` and `ResolvedQuantity::si_value` carry the
+  conversion with the unit that applies, the explicit one or else the project's unit of the measure's
+  type (`IFCLENGTHMEASURE` is `LENGTHUNIT`). A unit with an offset, such as a temperature scale, has
+  no factor for values.
+- Materials: `IfcRelAssociatesMaterial` gives `IfcMaterial`, `IfcMaterialList`, a layer set with its
+  usage (direction, sense, offset, reference extent) and the layers' thicknesses in meters, a profile
+  set with its usage, or a constituent set. An object without a material takes the type's
+  (`Origin::Type`). A material's surface styles come from its `IfcMaterialDefinitionRepresentation`.
+- Styles: the `IfcStyledItem`s of a product's representation items, followed through `IfcMappedItem` to
+  three levels, give surface style colors and transparency. Styles on deeper items stay unread.
+- Representations: `bodies` holds the items of a product's own representations that are not mapped
+  items, and `mapped` its `IfcMappedItem`s. A mapped item gives its `IfcRepresentationMap`, the
+  `IfcTypeProduct` whose `RepresentationMaps` lists the map (`type_object`) and a `transform` from the
+  map's coordinates to the product's placement: `MappingTarget` composed with `MappingOrigin`, translation
+  in meters, with the axes orthogonalized as the geometry evaluator does; `None` when it is not
+  evaluable. A type object gives its maps in `representation_maps`. The geometry itself is evaluated by
+  `IfcFile::geometry`; the bodies are not read here.
+- Classification: `IfcRelAssociatesClassification` gives references with identification (`ItemReference`
+  in IFC2X3), name, location and the system found through `ReferencedSource`. A reference of the type is
+  inherited unless the occurrence has one of the same system.
+- Openings and fills: `IfcRelVoidsElement` and `IfcRelFillsElement` give `openings` and `voids` and
+  `filled_by` and `fills`.
+- Connections and boundaries: `IfcRelConnectsElements` and its subtypes give `Connection` entries with
+  the connection types of a path connection and the realizing elements; `IfcRelSpaceBoundary` and its
+  first and second level subtypes give `SpaceBoundary` entries with level, parent and corresponding
+  boundary. Objects refer to them by index.
+- Groups: `IfcRelAssignsToGroup` gives `GroupView` entries (groups, systems and zones) with their
+  members, and `groups` on each member.
+- Georeferencing: `IfcMapConversion` and its `IfcProjectedCRS` (IFC4 and IFC4X3); in IFC2X3, or when no
+  map conversion exists, the `ePSet_MapConversion` and `ePSet_ProjectedCRS` property sets of the project
+  or a site. Values are in the units of the map, `map_unit_to_meters` converts them.
+- Owner history: `OwnerHistory` of each object, with state, change action, dates and the names of the
+  user, the organization and the application.
+- Coverage: `ImportViews::coverage` lists every entity class of the file (a complex instance under its
+  part names joined by `+`) with the instances read completely (`interpreted`), read in part
+  (`partial`, with a loss item for what was unusable) and not read (`preserved`: kept in the file
+  model, written back unchanged by `IfcFile::write_step`). The three add up to `total`. Geometry items
+  are read by `IfcFile::geometry`, not by these views, and so count as `preserved` here.
+- Bounds: every list is deduplicated, every chain (placements, units, classification sources, mapped
+  representations) is bounded and cycle-checked, and the objects' copies of shared sets, materials and
+  styles are charged against `memory_bytes`. The inverse index is charged against the same budget.
+
+The oracle comparison of these views with IfcOpenShell is `tools/ifc-oracle/views_compare.py` (see
+`tools/ifc-oracle/README.md`).
 
 ### Loss reports
 
@@ -1284,6 +1431,12 @@ reports no mapped records, so the `mapped` count is zero.
 | `io.ifc.unit_assumed` | `approximated` |
 | `io.ifc.geometry_approximated` | `approximated` |
 | `io.ifc.not_written` | `dropped` |
+| `io.ifc.write_attribute_unrepresentable` | `dropped` |
+| `io.ifc.write_value_unrepresentable` | `approximated` |
+| `io.ifc.write_entity_unrepresentable` | `dropped` |
+| `io.ifc.write_default_supplied` | `approximated` |
+| `io.ifc.write_set_renamed` | `approximated` |
+| `io.ifc.write_self_check_skipped` | `failed` |
 
 ### Limits
 
@@ -1316,7 +1469,8 @@ the wall-clock limit is not enforced unless the caller supplies a clock. The vie
 
 `IfcFile::geometry(limits, cancel)` evaluates the geometry of the products of the file;
 `IfcFile::geometry_with_tolerance` takes the `arc_base::Tolerance` to use, and `geometry` uses
-`Tolerance::DEFAULT`. The output is a `Geometry`: the items, the units and a loss report of the
+`Tolerance::DEFAULT`. `IfcFile::geometry_with_options` adds `GeometryOptions` (`subtract_openings`,
+true by default). The output is a `Geometry`: the items, the units and a loss report of the
 evaluation. The representation items that are not listed below are not evaluated and are reported.
 
 - Products: an instance whose sixth attribute `Representation` (position 6) refers to an
@@ -1365,14 +1519,25 @@ evaluation. The representation items that are not listed below are not evaluated
 | Item | Output | Notes |
 |---|---|---|
 | `IfcExtrudedAreaSolid` (`SweptArea` 0, `Position` 1, `ExtrudedDirection` 2, `Depth` 3) | mesh | Caps and sides. The direction is normalized and may be skew to the profile plane. A depth that is not positive, and a direction parallel to the profile plane, skip the item. |
-| `IfcRectangleProfileDef` (`Position` 2, `XDim` 3, `YDim` 4) | loop | Centered on its position; both dimensions positive. |
-| `IfcCircleProfileDef` (`Position` 2, `Radius` 3) | loop | A regular polygon; see Bounds for the segment count. |
-| `IfcArbitraryClosedProfileDef` (`OuterCurve` 2) | loop | |
+| Parameterized profiles: rectangle, rounded rectangle, rectangle hollow, circle, circle hollow, ellipse, I, L, T, U, C, Z, asymmetric I, trapezium | loops | Attributes are read by name through the schema tables, so each schema's layout reads as declared. See Profiles below. |
+| `IfcArbitraryClosedProfileDef` (`OuterCurve` 2) | loop | The curve is any curve of the curve rows. |
 | `IfcArbitraryProfileDefWithVoids` (`OuterCurve` 2, `InnerCurves` 3) | loops | Holes are bridged to the outer loop. |
-| `IfcPolyline` (`Points` 0) and `IfcIndexedPolyCurve` (`Points` 0, `Segments` 1) inside a profile | loop | Line segments only; the points must lie in the plane. |
+| `IfcCompositeProfileDef`, `IfcDerivedProfileDef`, `IfcMirroredProfileDef`, `IfcCenterLineProfileDef` | loops | See Profiles below. |
+| `IfcPolyline`, `IfcIndexedPolyCurve` (line and arc segments), `IfcCircle`, `IfcEllipse`, `IfcTrimmedCurve` (on a line, circle or ellipse), `IfcCompositeCurve` | loop, or polyline as a representation item | In 2D or 3D. See Curves below. |
+| `IfcExtrudedAreaSolidTapered` (`EndSweptArea` 4) | mesh | The end profile must have the loops of the start profile with equal point counts. |
+| `IfcRevolvedAreaSolid` (`SweptArea` 0, `Position` 1, `Axis` 2, `Angle` 3) and `IfcRevolvedAreaSolidTapered` (`EndSweptArea` 4) | mesh | See Swept solids below. |
+| `IfcSweptDiskSolid`, `IfcSweptDiskSolidPolygonal`, `IfcSurfaceCurveSweptAreaSolid`, `IfcFixedReferenceSweptAreaSolid` | mesh | See Swept solids below. |
+| `IfcBooleanResult`, `IfcBooleanClippingResult` | mesh | A half space or a solid as the second operand. See Booleans below. |
+| `IfcBlock`, `IfcRectangularPyramid`, `IfcRightCircularCone`, `IfcRightCircularCylinder`, `IfcSphere`, `IfcCsgSolid` | mesh | Built in the frame of `Position` (0); an `IfcCsgSolid` is its `TreeRootExpression`. See `geometry/csg.rs`. |
+| `IfcBSplineCurveWithKnots`, `IfcRationalBSplineCurveWithKnots` | polyline | De Boor on homogeneous coordinates, bisected at the chord tolerance per knot span. |
+| `IfcBSplineSurfaceWithKnots`, `IfcRationalBSplineSurfaceWithKnots` | open mesh | A grid per knot span, refined at the chord tolerance. |
+| `IfcOffsetCurve2D`, `IfcOffsetCurve3D`, `IfcOffsetCurveByDistances` (IFC4X3) | polyline | The mitered offset of the basis polyline. See `geometry/offset.rs`. |
+| `IfcGeometricSet`, `IfcGeometricCurveSet`, `IfcCartesianPoint` | polylines | Curves and points, never bodies; a point is a polyline of two equal points. |
+| `IfcAdvancedBrep`, `IfcAdvancedBrepWithVoids` | mesh | Advanced faces on planes, quadrics, swept surfaces and B-spline surfaces, trimmed by their edge loops. See Advanced B-reps below. |
+| `IfcSectionedSpine`, `IfcSectionedSolidHorizontal` (IFC4X3) | mesh | Lofts of cross sections. See `geometry/sectioned.rs`. |
 | `IfcTriangulatedFaceSet` (`Coordinates` 0, `CoordIndex` 3, `PnIndex` 4) | mesh | `Coordinates` is an `IfcCartesianPointList3D`. |
 | `IfcPolygonalFaceSet` (`Coordinates` 0, `Faces` 2, `PnIndex` 3) with `IfcIndexedPolygonalFace` (`CoordIndex` 0) and `IfcIndexedPolygonalFaceWithVoids` (`InnerCoordIndices` 1) | mesh | Each face is triangulated in its plane. |
-| `IfcFacetedBrep` (`Outer` 0) | mesh | The outer `IfcClosedShell` (`CfsFaces` 0). |
+| `IfcFacetedBrep` (`Outer` 0), `IfcFacetedBrepWithVoids` (`Voids` 1) | mesh | The outer `IfcClosedShell` (`CfsFaces` 0). The faces of the void shells are added as they are, wound outward from the material. |
 | `IfcFaceBasedSurfaceModel` (`FbsmFaces` 0) and `IfcShellBasedSurfaceModel` (`SbsmBoundary` 0) | mesh | The shells and connected face sets are `IfcClosedShell`, `IfcOpenShell` or `IfcConnectedFaceSet`. |
 | `IfcFace` (`Bounds` 0), `IfcFaceOuterBound` and `IfcFaceBound` (`Bound` 0, `Orientation` 1), `IfcPolyLoop` (`Polygon` 0) | part of a mesh | The outer bound is the first `IfcFaceOuterBound`, or else the first bound. `Orientation` `.F.` reverses the loop. Any other loop type is not evaluated. |
 | `IfcMappedItem` (`MappingSource` 0, `MappingTarget` 1) | the pieces of the mapped representation | `IfcRepresentationMap` (`MappingOrigin` 0, `MappedRepresentation` 1). `MappingTarget` is an `IfcCartesianTransformationOperator3D` or its `...3DnonUniform` form (`Scale` 3, `Scale2` 5, `Scale3` 6, which default to `Scale`). The map's items are composed with `MappingTarget * MappingOrigin`. |
@@ -1387,17 +1552,87 @@ evaluation. The representation items that are not listed below are not evaluated
   `io.ifc.geometry_approximated` with the record kind `IFCMAPPEDITEM`. A `Scale`, `Scale2` or `Scale3`
   that is not positive skips the item as `io.ifc.geometry_degenerate`; a mirror is expressed through
   the axes, not through a negative scale.
+- Profiles: the shapes have their origin at the center of their bounding box, `Depth` along y. I has equal
+  flanges; T has its flange at the top; U and C open toward +x with the web at -x; Z has its top flange
+  toward -x and its bottom flange toward +x and measures `FlangeWidth` from the center line of the web to the
+  tip; L has its vertical leg at -x and its horizontal leg at the bottom; the trapezium has its bottom edge
+  centered and its top edge starting `TopXOffset` from the bottom edge's left end. Each fillet and edge
+  radius the shape declares rounds the corner as a tangent arc (a radius larger than half of an adjacent
+  edge is reduced and reported as `io.ifc.geometry_approximated`); a flange, leg or web slope is not
+  applied and a slope that is not zero is reported the same way. A composite profile is the parts of its
+  profiles side by side (overlapping profiles give overlapping solids). A derived profile applies its 2D
+  operator (`Axis1`, `Axis2`, `LocalOrigin`, `Scale`, `Scale2`) to the parent; a mirrored profile negates x.
+  A center line profile is the strip of `Thickness` around a polyline, mitered at the corners.
+- Curves: arcs of an `IfcIndexedPolyCurve` (`IfcArcIndex`: start, a point on the arc, end) are the circle
+  through the three points, in 2D or 3D. A trimmed curve takes each trim as a parameter value (a length in
+  units of the vector on a line, an angle in the plane angle unit on a circle or ellipse) or a cartesian
+  point; `MasterRepresentation` `.CARTESIAN.` takes the point and any other value the parameter when both
+  are given. `SenseAgreement` `.T.` runs with increasing parameter from `Trim1` to `Trim2`, `.F.` against it.
+  A composite curve joins its parent curves, reversing those with `SameSense` `.F.`. Arcs and conics are
+  discretized with the chord tolerance: the segment count of an arc of sweep `s` is
+  `ceil(s / (2 acos(1 - c / r)))` (at least one segment per 120 degrees, at most 512 per turn; an ellipse uses
+  its larger semi-axis as `r`).
+- Swept solids: a revolved solid turns the profile about `Axis` (an `IfcAxis1Placement` in the coordinates
+  of `Position`) in steps that keep the chord deviation of the outermost point within the chord tolerance;
+  a magnitude of a full turn or more has no end caps and a profile point on the axis is one vertex. A
+  swept disk (hollow with `InnerRadius`) and the two directrix sweeps are swept along the directrix
+  polyline with each interior vertex mitered (the section lies in the bisecting plane), so the volume is the
+  section area times the directrix length. A turn of more than about 154 degrees at a vertex is not evaluated. `StartParam` and `EndParam`
+  limit the directrix to the part between them, in the parameter of the curve: the index of a polyline point, an
+  angle on a circle, an ellipse or a trimmed circle (in the plane angle unit of the file), the basis parameter
+  on a trimmed line, the knot parameter of a B-spline curve; another curve with parameters is not evaluated.
+  The tapered revolution moves each profile point linearly from its start to its end position over the turn
+  and requires the loops and point counts of the two profiles to match. The profile of a directrix sweep is placed with its plane
+  perpendicular to the first segment; the reference surface and the fixed reference direction are not read.
+- Booleans: the operator is `.DIFFERENCE.`, `.INTERSECTION.` or `.UNION.`, the first operand is any item and
+  the second is an `IfcHalfSpaceSolid` or `IfcPolygonalBoundedHalfSpace` on an `IfcPlane`, or any evaluated solid
+  (an extrusion, a CSG primitive, a B-rep, a sweep, another boolean). A half space is the side opposite the
+  plane normal when `AgreementFlag` is `.T.` and the side of the normal when `.F.`. The triangles are cut
+  exactly by the plane (vertices within the linear tolerance are on it) and the section is closed by a cap
+  triangulated in the plane, holes included; a result that keeps nothing emits nothing. A polygonal
+  boundary is applied as the whole half space when it is convex and every point of the removed part lies
+  inside it. A solid second operand is combined with the first by `arc_mesh::boolean::boolean` (see the
+  specification of `arc-mesh`) in the coordinates of the representation, piece by piece, at most
+  100,000 triangles in both operands. An operand that is not a closed oriented mesh (an open surface
+  model, a shell wound inward), a result that cannot be closed at the tolerance, a half space that is
+  not on a plane, a boundary that clips the solid and an unknown operator leave the first operand
+  unchanged and are reported as `io.ifc.geometry_approximated` with the record kind of the boolean.
+- Openings: with `subtract_openings` (the default) the bodies of the opening elements of an element
+  (`IfcRelVoidsElement`) are subtracted from its body. When each body item of the element is an untapered
+  `IfcExtrudedAreaSolid` of one profile part and the opening body is an `IfcExtrudedAreaSolid` whose
+  direction is perpendicular to its profile, the exact subtraction of
+  `arc_geom::Polyhedron::subtract_prism` is used; a rectangular body that it refuses along its extrusion
+  axis is tried along its two other axes, which handles a window body extruded along the height that passes
+  through the thickness of the wall. A prism that starts or ends on a face of the solid, and spans the solid,
+  is extended past it by a millimeter. A round edge is the inscribed polygon of the chord tolerance. Every
+  other pair (an element body that is not an extrusion, an opening body of any other kind of solid or
+  several of them, a prism that is refused along every axis) is done by the mesh boolean on the meshes of
+  both in world coordinates (the opening bodies are the `Body` items of the opening element); the item is then
+  in world coordinates with the identity transform. An opening that neither path subtracts (its body is not a
+  solid or not a closed one, or the result cannot be closed) is reported as `io.ifc.opening_not_subtracted`
+  with the record kind `IFCRELVOIDSELEMENT` and the opening as source; an opening that does not meet the
+  solid is skipped without a report. Without the option the report holds one `io.ifc.opening_not_subtracted`
+  item whose count is the number of relationships and the elements are emitted solid.
+- Advanced B-reps: the faces are `IfcAdvancedFace`s (and plain `IfcFace`s) of the closed shell and, with voids,
+  of the void shells; see `geometry/advanced.rs`. The edges of a loop are sampled once per edge curve with
+  the chord tolerance from the start to the end vertex in the sense of the edge, so faces share the points of
+  an edge. A planar face is triangulated in its plane; a face on another surface is mapped into the
+  parameter space of the surface and triangulated there with a constrained Delaunay triangulation
+  with interior points where flat triangles would leave the surface by more than the chord tolerance. A loop
+  that winds once around a periodic parameter is closed by the seam of the period (two such loops) or by the
+  pole of a sphere or the apex of a cone (one such loop); the points of a seam and of the loops are shared by
+  the two sides. A face that cannot be evaluated skips the item.
+- Sectioned solids: sections must have equal loop and point counts; `geometry/sectioned.rs` states the
+  placement of each section. `IfcSectionedSolidHorizontal` is reported as approximated because the default
+  orientation of its profile is an interpretation.
+
 - Not evaluated: every other representation item, profile, curve, loop, shell or placement kind. Each
   is reported as `io.ifc.geometry_not_evaluated` with the record kind of the entity, one item per kind
-  with its count, and nothing is emitted for it. This covers `IfcBooleanResult`,
-  `IfcBooleanClippingResult` (no operand is emitted in its place), `IfcSweptDiskSolid`,
-  `IfcRevolvedAreaSolid`, `IfcAdvancedBrep`, `IfcExtrudedAreaSolidTapered`, the CSG primitives, the other
-  profile types, `IfcArcIndex` (the indexed poly-curve holding it is skipped), the other curve types and
-  `IfcEdgeLoop`. An item is emitted as a whole or not at all: a shell with any face that cannot be
-  evaluated is not emitted.
-- Openings: `IfcRelVoidsElement` relationships are not subtracted. The report holds one
-  `io.ifc.opening_not_subtracted` item per file whose count is the number of such relationships, and
-  the elements are emitted solid.
+  with its count, and nothing is emitted for it. This covers the coverage table's "not evaluated" rows.
+  An item is emitted as a whole or not at all: a shell with a face that cannot be evaluated is not
+  emitted, except a face of a faceted B-rep whose outer loop has no area (its area is at most the linear
+  tolerance times its extent): that face is left out, reported as `io.ifc.geometry_degenerate` with the record
+  kind `IFCFACE`, and the item is reported as `io.ifc.geometry_approximated`.
 - Skips: an attribute of the wrong type skips its item and is reported as `io.ifc.value_unexpected`. An
   index outside its list, or a value that is not an index, is `io.ifc.index_invalid`. A degenerate item
   (zero or negative depth, a loop with zero area, a zero direction, a scale that is not positive, a
@@ -1438,6 +1673,195 @@ evaluation. The representation items that are not listed below are not evaluated
   projection onto the mean plane of its outer loop, with the original vertices, and reported as
   `io.ifc.geometry_approximated`.
 
+#### Coverage of the representation items
+
+Every subtype of `IfcRepresentationItem` in IFC4 and IFC4X3 by support: *supported* (evaluated as
+defined), *approximated* (evaluated with a stated approximation: a discretization at the chord
+tolerance, or the stated simplification) and *not evaluated* (reported as
+`io.ifc.geometry_not_evaluated`). *Abstract* kinds have no instances; their subtypes are listed.
+A kind that is only a part of another item (a placement, a loop, a face surface) is listed with the
+item it serves; it is not emitted by itself. Counts: 49 supported, 37 approximated, 42 not evaluated
+and 26 abstract of the 155 kinds.
+
+| Kind | Schemas | Support | Notes |
+|---|---|---|---|
+| `IfcAdvancedBrep` | IFC4, IFC4X3 | approximated | chord tolerance; faces on plane, cylinder, cone, sphere, torus, linear extrusion, revolution and B-spline surfaces |
+| `IfcAdvancedBrepWithVoids` | IFC4, IFC4X3 | approximated | chord tolerance; faces on plane, cylinder, cone, sphere, torus, linear extrusion, revolution and B-spline surfaces |
+| `IfcAdvancedFace` | IFC4, IFC4X3 | supported | part of an advanced face |
+| `IfcAnnotationFillArea` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcAxis1Placement` | IFC4, IFC4X3 | supported | parameter of other items |
+| `IfcAxis2Placement2D` | IFC4, IFC4X3 | supported | parameter of other items |
+| `IfcAxis2Placement3D` | IFC4, IFC4X3 | supported | parameter of other items |
+| `IfcAxis2PlacementLinear` | IFC4X3 | supported | placement of a section of a horizontal sectioned solid |
+| `IfcBSplineCurve` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcBSplineCurveWithKnots` | IFC4, IFC4X3 | approximated | knot-span bisection at the chord tolerance (curves); grid of cells at the chord tolerance (surface items) |
+| `IfcBSplineSurface` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcBSplineSurfaceWithKnots` | IFC4, IFC4X3 | approximated | knot-span bisection at the chord tolerance (curves); grid of cells at the chord tolerance (surface items) |
+| `IfcBlock` | IFC4, IFC4X3 | supported |  |
+| `IfcBooleanClippingResult` | IFC4, IFC4X3 | supported | as `IfcBooleanResult` |
+| `IfcBooleanResult` | IFC4, IFC4X3 | supported | half space on a plane, or a solid second operand by the mesh boolean; otherwise the first operand is kept (approximated) |
+| `IfcBoundaryCurve` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcBoundedCurve` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcBoundedSurface` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcBoundingBox` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcBoxedHalfSpace` | IFC4, IFC4X3 | not evaluated | the first operand is kept (reported) |
+| `IfcCartesianPoint` | IFC4, IFC4X3 | supported | as an item: a polyline of two equal points; a point of every other item |
+| `IfcCartesianPointList` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcCartesianPointList2D` | IFC4, IFC4X3 | supported | parameter of other items |
+| `IfcCartesianPointList3D` | IFC4, IFC4X3 | supported | parameter of other items |
+| `IfcCartesianTransformationOperator` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcCartesianTransformationOperator2D` | IFC4, IFC4X3 | not evaluated | not used by an item |
+| `IfcCartesianTransformationOperator2DnonUniform` | IFC4, IFC4X3 | not evaluated | not used by an item |
+| `IfcCartesianTransformationOperator3D` | IFC4, IFC4X3 | supported | mapping target |
+| `IfcCartesianTransformationOperator3DnonUniform` | IFC4, IFC4X3 | supported | mapping target |
+| `IfcCircle` | IFC4, IFC4X3 | approximated | chord tolerance |
+| `IfcClosedShell` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcClothoid` | IFC4X3 | not evaluated |  |
+| `IfcCompositeCurve` | IFC4, IFC4X3 | supported |  |
+| `IfcCompositeCurveOnSurface` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcCompositeCurveSegment` | IFC4, IFC4X3 | supported | part of a composite curve |
+| `IfcConic` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcConnectedFaceSet` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcCosineSpiral` | IFC4X3 | not evaluated |  |
+| `IfcCsgPrimitive3D` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcCsgSolid` | IFC4, IFC4X3 | supported | its root expression |
+| `IfcCurve` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcCurveBoundedPlane` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcCurveBoundedSurface` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcCurveSegment` | IFC4X3 | not evaluated |  |
+| `IfcCylindricalSurface` | IFC4, IFC4X3 | approximated | face surface of an advanced face (chord tolerance); not an item |
+| `IfcDirection` | IFC4, IFC4X3 | supported | parameter of other items |
+| `IfcDirectrixCurveSweptAreaSolid` | IFC4X3 | abstract | see the subtypes |
+| `IfcDirectrixDerivedReferenceSweptAreaSolid` | IFC4X3 | not evaluated |  |
+| `IfcEdge` | IFC4, IFC4X3 | approximated | an edge without geometry is the straight line between its vertices |
+| `IfcEdgeCurve` | IFC4, IFC4X3 | supported | part of an advanced face |
+| `IfcEdgeLoop` | IFC4, IFC4X3 | supported | part of an advanced face |
+| `IfcElementarySurface` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcEllipse` | IFC4, IFC4X3 | approximated | chord tolerance |
+| `IfcExtrudedAreaSolid` | IFC4, IFC4X3 | supported |  |
+| `IfcExtrudedAreaSolidTapered` | IFC4, IFC4X3 | approximated | chord tolerance; faces of a taper may be skew |
+| `IfcFace` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcFaceBasedSurfaceModel` | IFC4, IFC4X3 | supported |  |
+| `IfcFaceBound` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcFaceOuterBound` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcFaceSurface` | IFC4, IFC4X3 | supported | part of an advanced face |
+| `IfcFacetedBrep` | IFC4, IFC4X3 | supported |  |
+| `IfcFacetedBrepWithVoids` | IFC4, IFC4X3 | supported |  |
+| `IfcFillAreaStyleHatching` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcFillAreaStyleTiles` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcFixedReferenceSweptAreaSolid` | IFC4, IFC4X3 | approximated | mitered polyline sweep; `StartParam` and `EndParam` on a polyline, circle, ellipse, trimmed line or circle and B-spline curve |
+| `IfcGeometricCurveSet` | IFC4, IFC4X3 | supported | as `IfcGeometricSet` |
+| `IfcGeometricRepresentationItem` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcGeometricSet` | IFC4, IFC4X3 | supported | curves and points as polylines, never a body; a surface element is reported |
+| `IfcGradientCurve` | IFC4X3 | not evaluated |  |
+| `IfcHalfSpaceSolid` | IFC4, IFC4X3 | approximated | as the second operand of a boolean: a plane only |
+| `IfcIndexedPolyCurve` | IFC4, IFC4X3 | supported | line and arc segments |
+| `IfcIndexedPolygonalFace` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcIndexedPolygonalFaceWithVoids` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcIntersectionCurve` | IFC4, IFC4X3 | approximated | its 3D curve, as an edge curve of an advanced face |
+| `IfcLightSource` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcLightSourceAmbient` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcLightSourceDirectional` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcLightSourceGoniometric` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcLightSourcePositional` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcLightSourceSpot` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcLine` | IFC4, IFC4X3 | supported | as the basis of a trimmed curve and as an edge curve |
+| `IfcLoop` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcManifoldSolidBrep` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcMappedItem` | IFC4, IFC4X3 | supported | uniform and non-uniform operators |
+| `IfcOffsetCurve` | IFC4X3 | abstract | see the subtypes |
+| `IfcOffsetCurve2D` | IFC4, IFC4X3 | approximated | `Distance` along the mitered normal of the basis polyline; `SelfIntersect` not applied |
+| `IfcOffsetCurve3D` | IFC4, IFC4X3 | approximated | `Distance` along the mitered normal of the basis polyline; `SelfIntersect` not applied |
+| `IfcOffsetCurveByDistances` | IFC4X3 | approximated | lateral and vertical offsets interpolated along the basis polyline; longitudinal offsets not applied |
+| `IfcOpenShell` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcOrientedEdge` | IFC4, IFC4X3 | supported | part of an advanced face |
+| `IfcOuterBoundaryCurve` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcPath` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcPcurve` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcPlacement` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcPlanarBox` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcPlanarExtent` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcPlane` | IFC4, IFC4X3 | supported | face surface; not an item |
+| `IfcPoint` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcPointByDistanceExpression` | IFC4X3 | supported | placement of an offset curve or a section |
+| `IfcPointOnCurve` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcPointOnSurface` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcPolyLoop` | IFC4, IFC4X3 | supported | part of a mesh |
+| `IfcPolygonalBoundedHalfSpace` | IFC4, IFC4X3 | approximated | whole half space when the boundary does not clip |
+| `IfcPolygonalFaceSet` | IFC4, IFC4X3 | supported |  |
+| `IfcPolyline` | IFC4, IFC4X3 | supported |  |
+| `IfcPolynomialCurve` | IFC4X3 | not evaluated |  |
+| `IfcRationalBSplineCurveWithKnots` | IFC4, IFC4X3 | approximated | knot-span bisection at the chord tolerance (curves); grid of cells at the chord tolerance (surface items) |
+| `IfcRationalBSplineSurfaceWithKnots` | IFC4, IFC4X3 | approximated | knot-span bisection at the chord tolerance (curves); grid of cells at the chord tolerance (surface items) |
+| `IfcRectangularPyramid` | IFC4, IFC4X3 | supported |  |
+| `IfcRectangularTrimmedSurface` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcReparametrisedCompositeCurveSegment` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcRevolvedAreaSolid` | IFC4, IFC4X3 | approximated | chord tolerance; faces of a taper may be skew |
+| `IfcRevolvedAreaSolidTapered` | IFC4, IFC4X3 | approximated | chord tolerance; each profile point moves linearly to its end position |
+| `IfcRightCircularCone` | IFC4, IFC4X3 | approximated | chord tolerance (inscribed polygon) |
+| `IfcRightCircularCylinder` | IFC4, IFC4X3 | approximated | chord tolerance (inscribed polygon) |
+| `IfcSeamCurve` | IFC4, IFC4X3 | approximated | its 3D curve, as an edge curve of an advanced face |
+| `IfcSecondOrderPolynomialSpiral` | IFC4X3 | not evaluated |  |
+| `IfcSectionedSolid` | IFC4X3 | abstract | see the subtypes |
+| `IfcSectionedSolidHorizontal` | IFC4X3 | approximated | default orientation of the profile is an interpretation; no longitudinal offsets |
+| `IfcSectionedSpine` | IFC4, IFC4X3 | approximated | the spine is not used; sections of equal point counts, joined by quads |
+| `IfcSectionedSurface` | IFC4X3 | not evaluated |  |
+| `IfcSegment` | IFC4X3 | abstract | see the subtypes |
+| `IfcSegmentedReferenceCurve` | IFC4X3 | not evaluated |  |
+| `IfcSeventhOrderPolynomialSpiral` | IFC4X3 | not evaluated |  |
+| `IfcShellBasedSurfaceModel` | IFC4, IFC4X3 | supported |  |
+| `IfcSineSpiral` | IFC4X3 | not evaluated |  |
+| `IfcSolidModel` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcSphere` | IFC4, IFC4X3 | approximated | chord tolerance (inscribed polygon) |
+| `IfcSphericalSurface` | IFC4, IFC4X3 | approximated | face surface of an advanced face (chord tolerance); not an item |
+| `IfcSpiral` | IFC4X3 | abstract | see the subtypes |
+| `IfcStyledItem` | IFC4, IFC4X3 | not evaluated | presentation; not geometry |
+| `IfcSubedge` | IFC4, IFC4X3 | approximated | the straight line between its vertices |
+| `IfcSurface` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcSurfaceCurve` | IFC4, IFC4X3 | approximated | its 3D curve, as an edge curve of an advanced face |
+| `IfcSurfaceCurveSweptAreaSolid` | IFC4, IFC4X3 | approximated | mitered polyline sweep; `StartParam` and `EndParam` on a polyline, circle, ellipse, trimmed line or circle and B-spline curve |
+| `IfcSurfaceOfLinearExtrusion` | IFC4, IFC4X3 | approximated | face surface of an advanced face (chord tolerance); not an item |
+| `IfcSurfaceOfRevolution` | IFC4, IFC4X3 | approximated | face surface of an advanced face (chord tolerance); not an item |
+| `IfcSweptAreaSolid` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcSweptDiskSolid` | IFC4, IFC4X3 | approximated | mitered polyline sweep; `StartParam` and `EndParam` on a polyline, circle, ellipse, trimmed line or circle and B-spline curve |
+| `IfcSweptDiskSolidPolygonal` | IFC4, IFC4X3 | approximated | mitered polyline sweep; `StartParam` and `EndParam` on a polyline, circle, ellipse, trimmed line or circle and B-spline curve |
+| `IfcSweptSurface` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcTessellatedFaceSet` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcTessellatedItem` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcTextLiteral` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcTextLiteralWithExtent` | IFC4, IFC4X3 | not evaluated |  |
+| `IfcThirdOrderPolynomialSpiral` | IFC4X3 | not evaluated |  |
+| `IfcTopologicalRepresentationItem` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcToroidalSurface` | IFC4, IFC4X3 | approximated | face surface of an advanced face (chord tolerance); not an item |
+| `IfcTriangulatedFaceSet` | IFC4, IFC4X3 | supported |  |
+| `IfcTriangulatedIrregularNetwork` | IFC4X3 | not evaluated |  |
+| `IfcTrimmedCurve` | IFC4, IFC4X3 | approximated | on a line, circle or ellipse; chord tolerance |
+| `IfcVector` | IFC4, IFC4X3 | supported | parameter of other items |
+| `IfcVertex` | IFC4, IFC4X3 | abstract | see the subtypes |
+| `IfcVertexLoop` | IFC4, IFC4X3 | supported | ignored as a bound (a pole) |
+| `IfcVertexPoint` | IFC4, IFC4X3 | supported | part of an advanced face |
+
+The agreement with an independent geometry engine is measured per product with
+`tools/ifc-oracle/geometry_compare.py` (volume, area and bounding box, tolerance 0.1 % relative or 1e-6 absolute).
+At an equal chord tolerance every product agrees except where the engine differs: its tapered extrusion repeats
+its end caps (volume and area too large); its derived profile applies the local origin of the operator twice and
+scales in another way; it produces no geometry for `IfcFacetedBrepWithVoids` or `IfcCenterLineProfileDef`; with its
+subtraction on it does not iterate the opening elements; and a polygonal bounded half space whose boundary clips
+the solid is not evaluated here (the first operand is kept and reported). The tubes of a swept disk differ by
+their polygon (0.1 to 0.2 % at a 0.1 mm chord) and every curved profile by its discretization. Waves 2 and 3
+add these differences of the engine (IfcOpenShell 0.9.0.post1): it produces no geometry for
+`IfcRightCircularCone` and `IfcRightCircularCylinder`, so a boolean or an opening whose operand is one of
+them keeps the other operand; it evaluates `IfcRevolvedAreaSolidTapered` as `IfcRevolvedAreaSolid` (the
+`EndSweptArea` is ignored); it produces no geometry for a sweep with `StartParam` or `EndParam`, for
+`IfcOffsetCurveByDistances`, for a B-spline surface as an item, or for the
+`IfcAdvancedBrepWithVoids` of the fixtures; it tessellates the face of a spherical
+cap or triangle with a pole vertex differently (the cap is on the other side of the equator, or the
+face is missing, so the shell is open); and the rule runner of its validator fails with a Python error on
+`IfcSurfaceWeightsPositive` of every rational B-spline surface, and holds `VoidsHaveAdvancedFaces` of
+the published schema, whose predicate is inverted (`= 0` where `> 0` is meant), against every
+B-rep with voids whose void shells have only advanced faces. A sphere, cone or cylinder differs by its
+discretization at the default chord tolerance (0.2 to 0.4 %) and agrees at 0.1 mm.
+
 #### Bounds
 
 Every allocation is charged to one budget of the call before it is made, against `memory_bytes` minus
@@ -1450,7 +1874,7 @@ mesh, a polyline or a point list longer than `array_length` is refused, and a fa
 declared list length before its points are read. Exceeding a limit returns `io.limit_exceeded` with the
 argument `limit` naming `memory_bytes`, `record_count` or `array_length`.
 
-- A circle has `n = ceil(pi / acos(1 - c / r))` segments for the chord tolerance `c` (`tessellation_chord`)
+- A circle has `n = ceil(pi / acos(1 - c / r))` segments (arcs and ellipses as in Curves above) for the chord tolerance `c` (`tessellation_chord`)
   and radius `r`, at least 3 and at most 512 (`MAX_CIRCLE_SEGMENTS`). A circle that needs more is
   tessellated with 512 segments and reported as `io.ifc.geometry_approximated`.
 - A loop of more than 4096 points (`MAX_LOOP_VERTICES`) is not evaluated and is reported as
@@ -1467,6 +1891,267 @@ argument `limit` naming `memory_bytes`, `record_count` or `array_length`.
   only.
 - The evaluation adds no error codes. Its loss reasons are listed in the table of the loss reports.
 
+### Schema tables
+
+`arc_io_ifc::schema` holds tables of the IFC schemas IFC2X3 TC1, IFC4 ADD2 TC1 and IFC4X3 ADD2
+([ADR-0018](../adr/0018-ifc-schema-tables-from-express.md), proposed). The typed views, the geometry
+evaluation and the conformance checker use them; the writer does not yet.
+
+- `SchemaTables::of(&Schema)` returns the tables of a schema. Each table (`entities`,
+  `defined_types`, `enumerations`, `selects`, `functions`, `rules`) is sorted by the upper-case name;
+  `find`, `entity_index`, `entity`, `defined_type`, `enumeration`, `select`, `function` and `rule`
+  look a name up by binary search ignoring ASCII case. Cross references are `u16` indexes into the
+  tables of the same schema (`Named::{Entity, Defined, Enumeration, Select}`).
+- An `Entity` has its name, supertype index, abstract flag, the subtypes of its `ONEOF` supertype
+  expression, its declared explicit attributes in order (name, `TypeRef`, optional flag), its derived
+  attributes (type, expression text and tree and, for a re-declaration such as `SELF\IfcNamedUnit.Dimensions`,
+  the `AttributeRef` of the inherited attribute), its inverse attributes (source entity, source
+  attribute, `SET` or `BAG` with bounds), its `UNIQUE` rules and its `WHERE` rules.
+- A `TypeRef` is a simple type (`INTEGER`, `REAL`, `NUMBER`, `BOOLEAN`, `LOGICAL`, `STRING` and
+  `BINARY` with width), a named type or an aggregate (`ARRAY`, `LIST`, `SET`, `BAG` with lower and
+  upper `Bound`, `OPTIONAL` and `UNIQUE` flags and the element type, nested for aggregates of
+  aggregates). A bound is a value, unbounded (`?`) or an expression kept as text.
+- Defined types carry the underlying type and `WHERE` rules, enumerations their items in order,
+  selects their members. Functions and global rules carry their declaration text; global rules also
+  the entities they range over and their `WHERE` rules.
+- Every `WHERE` rule and derived attribute has its expression as a static tree
+  (`schema::tree::Expr`), and every function and global rule its parameters, local variables with their
+  initializers, aggregate kinds and array lower bounds, and statements (`Algorithm`: assignment,
+  `IF`, `CASE`, `REPEAT` with increment, `WHILE` and `UNTIL`, `RETURN`, `ESCAPE`, `SKIP`, compound). The
+  generator resolves every name: parameters, locals and query and loop variables become slots, `SELF`
+  and the attributes of the entity in an entity rule become attribute accesses on `SELF`, the entities a
+  global rule ranges over become populations, `Type.ITEM` and bare items become enumeration items
+  (checked against the enumerations), `PI` and `CONST_E` their values, calls become built-in functions,
+  schema functions, entity constructors or defined type conversions by table index; group qualifiers
+  (`e\Entity`) are checked and dropped, as attributes are found by name. A name that resolves to
+  nothing, an encoded string literal or a procedure call fails the generation; none occurs in the three
+  schemas.
+- `positions(entity)` lists the attributes of a record of the entity in STEP order, inherited ones
+  first, each marked `derived` where the entity or a supertype re-declares it, so the record holds `*`
+  there. `supertypes` and `is_subtype_of` walk the supertype chain, bounded by the table size.
+
+The tables are generated by `cargo xtask ifc-schema --schema-dir <dir> [--check]` into
+`crates/arc-io-ifc/src/schema/generated/`. Only `ifc4x3.rs` is stored in the repository: IFC4X3 ADD2 is
+published under CC BY-ND 4.0 and the file is a generated, format-shifted lookup table with its
+attribution and source in the header and in `THIRD_PARTY_NOTICES.md` (ADR-0018, Licensing). The
+IFC2X3 TC1 and IFC4 ADD2 TC1 releases are published under non-commercial terms, so `ifc2x3.rs` and
+`ifc4.rs` are generated locally and ignored by git. The build script of the crate sets one cfg per
+schema (`arc_ifc_tables_ifc2x3`, `arc_ifc_tables_ifc4`, `arc_ifc_tables_ifc4x3`) when its file exists;
+`SchemaTables::of` returns `None` for a schema without one. `--check` compares the stored file and
+any local file that is present.
+
+To regenerate, place the published files in one directory and run the task; it reads nothing else,
+never downloads and refuses a file whose BLAKE3 digest differs:
+
+| File | Published at (standards.buildingsmart.org) | BLAKE3 |
+|---|---|---|
+| `IFC2X3_TC1.exp` | `/IFC/RELEASE/IFC2x3/TC1/EXPRESS/IFC2X3_TC1.exp` | `459180dfdf194d1ebad81ae641d4472e8bbf65aac503d4d45369f08ca18859f1` |
+| `IFC4.exp` | `/IFC/RELEASE/IFC4/ADD2_TC1/EXPRESS/IFC4.exp` | `cd04dc1bf2db3f88947a7be1b9cfdea14229be69cb15cdcc743d4b266c29789e` |
+| `IFC4X3_ADD2.exp` | `/IFC/RELEASE/IFC4_3/HTML/IFC4X3_ADD2.exp` | `57a975a98ce9402c06d3702de93d32175a79de7bb923a7e8488286bce93fa6b0` |
+
+The generator (`xtask/src/ifc_schema/`) is a lexer and recursive-descent parser of ISO 10303-11
+written from the standard's grammar, and an emitter. It parses the whole schema, including function
+and rule bodies, statements and expressions (`QUERY`, intervals, aggregate initializers, group
+qualifiers, nested remarks, `--` remarks, doubled quotes in strings); input is limited to 16 MiB and
+nesting to 128 levels, and errors give the line and column. Interface specifications, procedures,
+subtype constraints and `ALIAS` are refused as unsupported, and so are constructs the tables cannot
+hold: multiple inheritance, supertype expressions other than one `ONEOF`, extensible or based-on
+types and re-declared explicit or inverse attributes. None occurs in the three schemas.
+
+With `ARC_IFC_SCHEMA_DIR` set to the schema directory, the tests of `xtask` check the declaration
+counts of [ifc-schema-support.md](../architecture/ifc-schema-support.md#schema-size) (entities, explicit
+and inverse attributes, entity and type `WHERE` rules plus global rules, functions, enumerations,
+selects, abstract entities and derived re-declarations; all equal) and that the generated files are
+current, and `tests/schema_tables.rs` requires the tables. Without it these tests skip.
+`ARC_IFC_SCHEMA_DUMP=<file>` makes `tests/schema_tables.rs` write the tables as JSON for
+`tools/ifc-oracle/schema_diff.py`.
+
+### Schema-aware access and conformance
+
+Access by name, over the tables of the file's schema (`IfcFile::tables`):
+
+- `SchemaTables::attribute_position(entity, name)` gives the record position of an explicit attribute
+  over the supertype chain and the attribute; names ignore ASCII case. `underlying` follows defined
+  types to their underlying type; `select_contains` and `select_accepts_entity` resolve select members
+  through nested selects; `decode(type, parameter)` reads a parameter by a declared type as a `Typed`
+  value (integer, real, boolean, logical, string, binary, entity reference, enumeration item, select
+  member with its typed parameter, aggregate, `$`, `*`), or `None` when the value is not of that type.
+- `IfcFile::attribute(record, name)` and `typed_attribute(record, name)` read an attribute of a simple
+  instance at the position the tables give; `instance_attribute(instance, name)` also reads a part of a
+  complex instance, whose record holds only the attributes its entity declares. All return `None` without
+  tables or for an entity or attribute the schema does not declare.
+- The typed views and the geometry evaluation read each attribute they use by name in the same way.
+  Without tables, or for an entity the schema does not declare, they use the attribute's position in
+  IFC2X3, IFC4 and IFC4X3; a test checks every such position against the tables of the three schemas.
+- `IfcFile::inverse_index(limits, cancel)` builds, on demand, the referrers of every instance (referring
+  instance, record and parameter position; references inside lists and typed parameters included). Each
+  entry counts against `record_count` and is charged 32 bytes against the share of `memory_bytes` left
+  after the parser. `InverseIndex::inverse(file, instance, name)` resolves an inverse attribute: the
+  instances of its entity, or a subtype, referring through its attribute, each once for a `SET`.
+
+`IfcFile::conformance(limits, cancel)` checks every instance against the tables and returns a
+`Conformance`: the schema checked against, the findings (instance, entity, attribute, `rules::Rule`) in
+file order, at most 10 000 and at most `record_count`, with `truncated` set when more failed, and one
+`RuleCount` per rule with the instances that passed, failed and were not evaluated. A rule is counted per
+instance it applies to; an instance is not evaluated for a rule the checker could not decide (the entity
+is unknown, the parameter count is wrong so the positions are unknown, a bound is an expression, a
+referenced instance has an unknown entity), and nothing undecided is counted as passed. Without tables
+every rule is not evaluated for every instance. A finding is reported once per instance, attribute and
+rule. The inverse index and the keys of the `UNIQUE` rules count against the limits; cancellation is
+checked per instance.
+
+| Code | Level | Rule |
+|---|---|---|
+| `io.ifc.conformance_entity_unknown` | 1 | The entity is declared in the schema |
+| `io.ifc.conformance_entity_abstract` | 1 | The entity of a simple instance is not abstract |
+| `io.ifc.conformance_complex_invalid` | 1 | The parts of a complex instance include the supertype of each part, at most one subtype of each `ONEOF`, and no abstract part without a subtype among the parts |
+| `io.ifc.conformance_attribute_count` | 1 | The parameter count equals the explicit attributes over the supertype chain (for a part of a complex instance, those its entity declares) |
+| `io.ifc.conformance_value_missing` | 1 | `$` only for an optional attribute, and inside an aggregate only for `ARRAY OF OPTIONAL` |
+| `io.ifc.conformance_derived_misplaced` | 1 | `*` exactly where the entity or a supertype re-declares the attribute as derived |
+| `io.ifc.conformance_value_type` | 1 | The value has the kind of the underlying type: integer; real or number (an integer is accepted, as EXPRESS makes integers reals); `.T.`/`.F.` for a boolean and also `.U.` for a logical; string; binary; reference; enumeration; list for an aggregate; a typed parameter only for a select |
+| `io.ifc.conformance_enumeration_item` | 1 | An enumeration value is an item of its enumeration |
+| `io.ifc.conformance_select_member` | 1 | A select value is a reference to an instance of a member entity (or a subtype) or a typed parameter naming a member type, through nested selects |
+| `io.ifc.conformance_reference_type` | 1 | A reference names an instance of the declared entity or a subtype |
+| `io.ifc.conformance_reference_dangling` | 1 | A reference names an instance of the file |
+| `io.ifc.conformance_aggregate_size` | 1 | An aggregate, nested ones included, has as many elements as its bounds allow (an array one per index) |
+| `io.ifc.conformance_aggregate_unique` | 1 | A `SET` or `UNIQUE` aggregate holds no element twice |
+| `io.ifc.conformance_value_width` | 1 | A string (in characters) or binary (in bits) is not longer than its width, and exactly as long where the width is `FIXED` |
+| `io.ifc.conformance_inverse_cardinality` | 2 | The instances referring through the attribute of each inverse attribute of the entity and its supertypes are within its bounds; exactly one for an inverse that is not an aggregate |
+| `io.ifc.conformance_unique_rule` | 2 | No two instances share the values of the attributes of a `UNIQUE` rule; every instance of a group that shares them fails, and an instance without a value for one of the attributes is not compared |
+| `io.ifc.conformance_where_rule` | 3 | Every domain (`WHERE`) rule of the instance's entity and its supertypes holds; the attribute of a finding is `Entity.Label` |
+| `io.ifc.conformance_type_rule` | 3 | Every explicit attribute value (inside aggregates and typed select values too) satisfies the domain rules of its defined type and the defined types that type is based on; the attribute of a finding is `Type.Label` |
+| `io.ifc.conformance_global_rule` | 3 | Every domain rule of every global rule holds for the file; a finding has instance 0, no entity and the attribute `Rule.Label` |
+
+Level 3 evaluates every domain rule through a bounded interpreter of the trees:
+
+- Entity rules apply to every instance of the declaring entity and its subtypes (any part of a
+  complex instance), with `SELF` the instance. Type rules apply to every explicit attribute value that
+  is not derived, element by element inside aggregates and inside typed select values, whose declared
+  type is the defined type or a defined type based on it, with `SELF` the value. Global rules run once
+  per file: the locals and body, then each domain rule over the populations of the entities they range
+  over (in file order).
+- A rule is violated only when it evaluates to `FALSE` (ISO 10303-11). `TRUE` passes; `UNKNOWN`, which
+  `?` also gives, passes and is counted apart in `WhereCount::unknown`. A rule the interpreter stops on
+  is not evaluated, with the reason of its first stop in `WhereCount::reason`, and never passes; so is
+  every rule of an instance whose records do not hold as many parameters as the tables give, because
+  its attributes cannot be found at their positions.
+- Values: integers, reals, logicals (`FALSE < UNKNOWN < TRUE`), strings, binaries (as bits),
+  enumeration items, entity instances of the file or built by entity constructors and `||`, aggregates
+  with their kind and lower index, and values of defined types, which keep their type for `TYPEOF`.
+  Attributes are found by name over the supertypes of every part: a derived attribute (its expression
+  evaluated with `SELF` the instance) before an explicit one before an inverse one (from the inverse
+  index); an attribute the instance does not have, or one of `?`, is `?`.
+- Semantics: `AND` and `OR` decide on their left operand when it settles the result; comparisons and
+  arithmetic with `?` give `UNKNOWN` and `?`; `/` is real division; `IN`, set union, difference and
+  intersection use instance equality; `=` on entity instances compares their explicit attribute values;
+  an index outside an aggregate gives `?`; `QUERY` keeps the elements the condition is `TRUE` for (`?`
+  for a `?` aggregate); `LIKE` follows the wildcards of ISO 10303-11 (`@`, `^`, `!`, `?`, `&`, `#`, `$`,
+  `*`, `\`); an aggregate assigned to an aggregate variable takes the variable's kind and array lower
+  bound. `TYPEOF` gives the schema-qualified upper-case names (`IFC4.IFCWALL`, with the schema name as
+  the tables give it, such as `IFC4X3_ADD2`) of the entities of every part with their supertypes, or of a
+  defined type and the defined types it is based on followed by the simple or aggregation type name,
+  and an empty set for `?`. `USEDIN` reads the inverse index. Built-in functions: `ABS`, `ACOS`, `ASIN`,
+  `ATAN`, `BLENGTH`, `COS`, `EXISTS`, `EXP`, `HIINDEX`, `LENGTH`, `LOINDEX`, `LOG`, `LOG2`, `LOG10`,
+  `NVL`, `ODD`, `SIN`, `SIZEOF`, `SQRT`, `TAN`, `TYPEOF`, `USEDIN`, `VALUE`.
+- An evaluation stops (the rule is not evaluated) on an operand of another type, integer overflow,
+  division by zero, a numeric function outside its domain, an assignment into an instance of the file,
+  more than 1 000 000 steps (per rule on one instance and per global rule), calls of
+  functions and derived attributes nested deeper than `nesting_depth` or 32 (which bounds the
+  native stack), or an aggregate longer than
+  `array_length`. Cancellation is checked every 4096 steps and returns `base.cancelled`.
+- `Conformance::where_rules` holds one `WhereCount` per domain rule of the schema (scope, owner, label,
+  passed, unknown, failed, not evaluated, first reason): entity rules in entity order, then type rules,
+  then global rules. The `RuleCount` of `io.ifc.conformance_where_rule` and `io.ifc.conformance_type_rule`
+  counts instances (an instance passes when every applicable rule is `TRUE` or `UNKNOWN`), that of
+  `io.ifc.conformance_global_rule` counts the domain rules of the global rules. Level 3 findings follow
+  those of levels 1 and 2, in file order, within the same bound.
+
+All 365, 679 and 779 domain rules of IFC2X3, IFC4 and IFC4X3 evaluate: a test runs each on an entity
+value whose attributes are all `?`, a value of its type and an empty file without a stop, and none is
+left not evaluated on the published sample files the oracle is run on.
+
+Messages are the `io-ifc-conformance-*`
+identifiers with the arguments `instance`, `entity` and `attribute`. `cargo run -p arc-io-ifc --example
+conformance <file>` prints the findings, the rule counts and the domain rule counts as JSON for `tools/ifc-oracle/conformance_compare.py`.
+
+### Property and quantity set templates
+
+`arc_io_ifc::psets` holds the property and quantity set templates of IFC2X3 TC1 (317 property
+sets) and IFC4 ADD2 TC1 (420 property sets and 93 quantity sets), generated from the property set
+definitions (PSD XML) buildingSMART International publishes with each release. IFC4X3 ADD2
+publishes its sets only as documentation pages, so `PsetTemplates::of` returns `None` for it.
+
+- `PsetTemplates::of(&Schema)` returns the templates of a schema; `get(name)` finds a `SetTemplate`
+  by binary search ignoring ASCII case. A `SetTemplate` has its name, `SetKind` (`Properties` or
+  `Quantities`), the published template type (such as `PSET_TYPEDRIVENOVERRIDE`), the `Applicable`
+  entities with an optional predefined type (`IfcActuator/ELECTRICACTUATOR` in the definitions) and
+  its `PropertyTemplate`s in published order; `property(name)` finds one by its exact name.
+- A `PropertyKind` is `Single`, `Bounded` or `List` with the data type (the IFC defined type, such as
+  `IfcPositiveLengthMeasure`), `Enumerated` with the enumeration name and items, `Table` with the
+  defining and defined types, `Reference` with the referenced entity (`IfcTimeSeries`, `IfcPerson`,
+  `IfcMaterialDefinition`, ...), `Complex` with its usage name and nested templates, or
+  `Quantity(QuantityKind)` (`Length`, `Area`, `Volume`, `Count`, `Weight`, `Time`).
+  `PropertyKind::entity()` names the entity a value of the kind is written as. A data type is empty
+  where the published definition leaves it open (`<DataType />`, 16 IFC4 properties, among them
+  `LoadBearing` and `ThermalTransmittance` of `Pset_RampCommon` and `Pset_StairCommon`). Enumeration
+  items come from the enumeration list, or from the constants of the definition where the list is
+  empty. IFC2X3 time series properties (`TypeSimpleProperty`) are references to `IfcTimeSeries`;
+  the type of the series values is not kept, as in IFC4. An IFC2X3 class name with a schema module
+  prefix (`IFCKERNEL/IfcProduct`) keeps the entity only, and the free-text predefined type
+  conditions of IFC2X3 are not read.
+
+`IfcFile::check_property_sets(limits, cancel)` compares every `IfcPropertySet` and
+`IfcElementQuantity` whose name starts with `Pset_` or `Qto_` with the template of that name for the
+file's schema and returns a `PsetCheck`: the schema of the templates (`None` when there are none, so
+nothing was evaluated), the number of sets compared and the findings in file order. A
+`PsetFinding` has a stable code, the instance and name of the set, the property (with the names of
+enclosing complex properties joined by `.`), the object for an applicability finding, and the
+expected and found texts; `PsetFinding::error()` gives it as an `arc_base::Error` with the message
+arguments `set`, `property`, `expected` and `found` (messages in `locales/en-US` and
+`locales/tr-TR`).
+
+| Code | Finding |
+|---|---|
+| `io.ifc.pset_template_unknown` | The name starts with `Pset_` or `Qto_` but the schema has no template of that name |
+| `io.ifc.pset_set_kind` | A property set carries the name of a quantity set template, or the reverse |
+| `io.ifc.pset_property_unknown` | A property or quantity name is not in the template (names are case-sensitive) |
+| `io.ifc.pset_property_kind` | A property is written as another entity than its kind (a single value for a bounded value, a property for a quantity) |
+| `io.ifc.pset_quantity_kind` | A quantity is of another quantity class than its template's |
+| `io.ifc.pset_value_type` | A value of a single, bounded, list or table property is not wrapped in the template's data type, or the target of a reference is not of its entity |
+| `io.ifc.pset_enumeration_item` | An enumerated value is not an item of the template's enumeration (compared ignoring ASCII case) |
+| `io.ifc.pset_not_applicable` | The set is assigned to an object whose entity, or whose own predefined type, the template does not apply to |
+
+The objects of a set are the `RelatedObjects` of its `IfcRelDefinesByProperties` and the type objects
+that list it in `HasPropertySets`. A type object stands for its occurrence entity (`IfcWallType` for
+`IfcWall`, `IfcDoorStyle` for `IfcDoor`) on both sides. Subtypes, type objects, the entity of a
+reference and the `PredefinedType` of an object are resolved through the schema tables; without them,
+or for a name they do not hold, applicability and reference targets are not judged. A predefined type
+restriction is judged only against an object's own enumeration value; `USERDEFINED`, `NOTDEFINED` or
+none defers to the type and is not judged. Complex properties are followed to a depth of 16 and
+`nesting_depth`; the properties visited count against `record_count`.
+
+The templates are generated by `cargo xtask ifc-psets --psd-dir <dir> [--check]` into
+`crates/arc-io-ifc/src/schema/generated/psets_ifc2x3.rs` and `psets_ifc4.rs`, under the same license
+condition as the schema tables (ADR-0018): they are not stored in the repository, and the build
+script sets `cfg(arc_ifc_pset_tables)` only when both files exist. `<dir>` is a checkout of the
+`Standards-builds` repository of buildingSMART International; the task reads these folders, never
+downloads, and checks each against the BLAKE3 digest of its manifest (the sorted lines
+`<path>\t<BLAKE3 of the file>`):
+
+| Folder | Files | Manifest BLAKE3 |
+|---|---|---|
+| `IFC/RELEASE/IFC2x3/TC1/HTML/psd` (recursive) | 317 | `cc826797d4e35afd4e07117d6941bd04a6bc39b0620ee8ee4cd472c610d3f268` |
+| `IFC/RELEASE/IFC4/ADD2_TC1/HTML/psd` | 420 | `48bd17998c7e91314d70b5df959e98439790587ba187642ee84f0d4fcac21c23` |
+| `IFC/RELEASE/IFC4/ADD2_TC1/HTML/qto` | 93 | `9e3f018e4404287a90055f4fe823ab7ec1b545fe38e8271ebb980d5845419d16` |
+
+The generator (`xtask/src/ifc_pset.rs`) reads the files with a small XML reader of its own (elements,
+attributes, text and the predefined and character references; the declaration, comments and
+processing instructions are skipped, a document type declaration is refused, nesting is limited to 64
+levels and a file to 4 MiB). With `ARC_IFC_PSD_DIR` set, `tests/psets.rs` requires the templates
+and checks the counts above; `ARC_IFC_PSET_DUMP=<file>` writes them as JSON for
+`tools/ifc-oracle/pset_diff.py`, which compares names, kinds, data types and quantity kinds with
+IfcOpenShell's templates.
+
 ### Error codes
 
 | Code | Category | Meaning |
@@ -1480,53 +2165,352 @@ argument `limit` naming `memory_bytes`, `record_count` or `array_length`.
 | `io.ifc.instance_duplicate` | `corrupt_data` | Two instances have the same name, in one or several data sections |
 | `io.ifc.archive_entry_missing` | `not_found` | The archive has no entry whose name ends in `.ifc` after the metadata entries are skipped |
 | `io.ifc.archive_entry_ambiguous` | `unsupported` | The archive has more than one entry whose name ends in `.ifc` after the metadata entries are skipped |
-| `io.ifc.write_value_invalid` | `invalid_input` | The writer was given a number that is not finite, a negative quantity, a door or window size that is not positive, placement axes or a true north that are too short or parallel, a NUL in a text, a name repeated within a property or quantity set, or a set name repeated on one element |
-| `io.ifc.write_reference_invalid` | `invalid_input` | The writer was given an element whose storey or host is not in the model or of a kind the relationship does not allow, an opening without a host, or a chain of hosts that returns to its start |
+| `io.ifc.write_value_invalid` | `invalid_input` | The writer was given a number that is not finite, a negative quantity, a door or window size that is not positive, placement axes, a mapping transform or a true north that are too short or parallel, a mapping of an element that has a body or no type, a NUL in a text, a name repeated within a property or quantity set, a set name repeated on one element, a property value its type refuses (a measure outside its rule, a label or identifier over 255 characters, an enumerated value outside its items, one enumeration name with two item lists), a grid axis curve that is degenerate or not joined, or an invalid georeferencing |
+| `io.ifc.write_reference_invalid` | `invalid_input` | The writer was given an element whose storey or host is not in the model or of a kind the relationship does not allow (an opening or a space is never a host of a part), an opening without a host, a mapping of an element whose type has no representation, a chain of hosts that returns to its start, or a group member that is not an element or grid of the model |
 | `io.ifc.write_id_duplicate` | `invalid_input` | Two objects of the written file would have the same `GlobalId` |
+| `io.ifc.write_schema_unavailable` | `unsupported` | The output schema is IFC2X3 and the generated tables are not part of the build (IFC4 needs none; IFC4X3 tables are always present) |
+| `io.ifc.write_not_conformant` | `internal` | The self-check found the written file non-conformant (levels 1 to 3 against the tables of its schema); the arguments name the count and the first finding. A defect of the writer or of the schema mapping; nothing is returned |
+| `io.ifc.write_view_violated` | `invalid_input` | `ViewCheck::Enforce`: the file does not satisfy the rule set of the model view |
+| `io.ifc.edit_target_missing` | `not_found` | An edit names an instance, a record or a parameter that the file does not have |
+| `io.ifc.edit_reference_dangling` | `conflict` | An edit would leave a reference to an instance that is not in the file: a new value refers to one, or the instance to remove is still referred to |
+| `io.ifc.edit_value_invalid` | `invalid_input` | An edited value cannot be written: no records, a real that is not finite, a NUL in a text, a malformed type name, enumeration or binary, nesting deeper than 64, no instance name left, or an edited header without `FILE_DESCRIPTION`, `FILE_NAME` and `FILE_SCHEMA` first |
+| `io.ifc.curve_invalid` | `corrupt_data` | A curve, alignment layout or linear placement is not evaluable: an attribute is missing or of the wrong type, a parameter is not finite, a segment list is longer than the limits allow, or a reference does not lead to a curve |
+| `io.ifc.curve_unsupported` | `unsupported` | A curve type or parameter combination of an alignment is outside what the evaluator covers; the argument `kind` names it |
+| `io.ifc.distance_out_of_range` | `invalid_input` | A distance along a curve lies outside the curve by more than the tolerance |
+| `io.ids.invalid` | `corrupt_data` | An IDS file is not a valid IDS 1.0 document: not well-formed XML, an element or attribute outside the schema, a required element missing, a prohibited specification with requirements, or a pattern outside the pattern language; the argument `reason` names the first problem |
+| `io.ids.unsupported` | `unsupported` | An IDS file uses a restriction the IDS documentation excludes (`totalDigits`, `fractionDigits`); the argument `kind` names it |
+| `io.ids.schema_unavailable` | `unsupported` | The file to check is IFC2X3 or IFC4 and the generated tables are not part of the build (IFC4X3 tables are always present) |
 
 The `io.zip.*` codes of the archive reader are returned as the `arc-io-common` section defines them.
+
+## Alignments and linear placement as implemented
+
+`arc_io_ifc::alignment` evaluates the curves of IFC4X3 alignments and resolves placements that are
+measured along them (the alignment part of CORE-IO-015). It reads the instances through the schema
+tables, so it needs an IFC4X3 file, and it converts every length to meters with the units of the
+project.
+
+### Two descriptions, evaluated separately
+
+An `IfcAlignment` is described twice, and the module reads both so that one checks the other.
+
+- The **representation** is an `IfcCompositeCurve` (plan), `IfcGradientCurve` (plan and heights) or
+  `IfcSegmentedReferenceCurve` (plan, heights and cant) of `IfcCurveSegment`s. The parent curves
+  are `IfcLine`, `IfcCircle`, `IfcClothoid`, `IfcPolynomialCurve`, `IfcSecondOrderPolynomialSpiral`,
+  `IfcThirdOrderPolynomialSpiral`, `IfcSeventhOrderPolynomialSpiral`, `IfcCosineSpiral` and
+  `IfcSineSpiral`. A cant segment may also have a line or a polynomial curve as parent.
+- The **layout** is `IfcAlignmentHorizontal`, `IfcAlignmentVertical` and `IfcAlignmentCant` with the
+  design parameters of their `IfcAlignmentSegment`s, found through `IfcRelNests` (a child alignment
+  that reuses its parent's horizontal layout is followed through `IfcRelAggregates`). The horizontal
+  segment types are `LINE`, `CIRCULARARC`, `CLOTHOID`, `CUBIC`, `HELMERTCURVE`, `BLOSSCURVE`,
+  `COSINECURVE`, `SINECURVE` and `VIENNESEBEND`; the vertical types are `CONSTANTGRADIENT`,
+  `CIRCULARARC` and `PARABOLICARC`; the cant types are all transitions of the schema. A vertical
+  `CLOTHOID` is not evaluated from the layout, because its start curvature is not among the
+  attributes of the segment; its representation is. The Viennese bend takes the cant layout into
+  account as the schema describes it, with the bank angle in the correction term taken as `D / b`
+  (the small angle form the schema gives with `sin psi ~ psi`).
+
+`IfcFile::alignments(limits, cancel)` returns an `AlignmentCurves` per alignment with both curves
+(`representation` and `layout`, each present when it can be evaluated) and a loss report for the
+rest: an unsupported curve is `io.ifc.geometry_not_evaluated`, a malformed one
+`io.ifc.geometry_degenerate`. `IfcFile::curve(name, ..)` builds the curve of one composite, gradient
+or segmented reference curve and `IfcFile::alignment_layout_curve(alignment, ..)` the curve of one
+layout; both return `io.ifc.curve_invalid` or `io.ifc.curve_unsupported` as errors.
+
+### Evaluation
+
+`Curve::evaluate(distance, tolerance)` returns a `Pose`: the position, the unit tangent and the
+frame (X along the tangent, Y to the left, Z up, tilted toward the left by the cant angle), in meters.
+A distance outside `[0, length]` by no more than `tolerance` meters is clamped to the end; any other
+is `io.ifc.distance_out_of_range`. `Curve::segment_kinds(distance)` names the plan, gradient and
+cant segment in effect, by the entity type of the parent curve or the layout segment type.
+
+- **Segments.** A curve segment is its parent curve trimmed from `SegmentStart` by `SegmentLength`
+  (a negative length runs the parent backward), placed so that the start point and the start tangent
+  take the `Placement`. The `Position` of a parent curve therefore does not matter. The start and
+  length are lengths along the parent; for an `IfcPolynomialCurve` that is the arc length. The
+  distance along a composite curve is the sum of the segment lengths.
+- **Spirals.** A spiral is evaluated from its heading: the polynomial spirals from the curvature
+  `sum A_k^-(k+1) s^k` (with the sign of `A_k` for odd `k`) as the schema defines them, the clothoid
+  from `kappa = s / (A |A|)`, the cosine spiral from `kappa = 1/A0 + cos(pi s / L) / A1` and the sine
+  spiral from its heading angle (the schema gives the curvature of the sine spiral with a different
+  scale than its heading angle; the heading angle is used). `L` is the length of the segment. The
+  position is the integral of `(cos theta, sin theta)`, by 8-point Gauss-Legendre panels whose count
+  follows the turn of the heading, split at the kink of a Helmert transition.
+- **Gradient curves.** The distance is the distance along the base curve, as the schema defines the
+  parameterization. The vertical segments are in the plane (distance along, height); the piece in
+  effect is the last one whose placement starts at or before the distance, and the height is found
+  by solving for the distance along on that piece. Past the end of the last piece the height
+  continues along its end tangent.
+- **Cant.** A cant layout gives, per piece, the raise of the centerline `(left + right) / 2` and the
+  cross slope `(right - left) / b` over the rail head distance `b`; the shape of the change is the
+  one of the segment type. The tilt is `asin` of the cross slope. In a segmented reference curve the
+  parent curve of a cant segment gives the shape of the change: a spiral by its curvature function
+  (clothoid linear, polynomial spirals and cosine and sine as their curvature), a line or a
+  polynomial curve by its height. The deviating elevation changes from the start location of the
+  segment to the location of the next, and the tilt of the `Axis` from the start axis to the next
+  axis, with that fraction. The elevation adds to the height, and its slope tilts the tangent.
+- **Linear placement.** `IfcFile::linear_resolver(limits, cancel, tolerance)` returns a
+  `LinearResolver`, the hook for the typed views and the geometry: `curve(name)` reads and caches a
+  curve (an alignment gives its axis representation, or its layout when it has none), `point(name)`
+  resolves an `IfcPointByDistanceExpression` (lateral to the left, vertical up in the frame, and
+  longitudinal offsets), and `placement(name)` an `IfcLinearPlacement` to a world transform,
+  including its `PlacementRelTo` chain, with `Axis` and `RefDirection` taken in the frame of the
+  curve. `placement_with_fallback(name)` uses the `CartesianPosition` when the curve cannot be
+  evaluated. Geometry evaluation ([above](#geometry-evaluation-as-implemented)) does not call the
+  resolver yet: an element with a linear placement is not placed along its curve there.
+
+Every list is bounded by `array_length`, placement chains by the nesting limit, and a repeated
+placement is `io.ifc.curve_invalid`. The cancellation token is checked per alignment, per segment and
+per placement.
+
+### Verification
+
+`tools/ifc-oracle/alignment_compare.py <file>...` compares the frame at sampled distances with
+IfcOpenShell's function item evaluator on the same curve item (for a layout, on the item of the axis
+representation), and the world transform of every `IfcLinearPlacement` with
+`ifcopenshell.util.placement.get_local_placement`. The samples come from `cargo run -p arc-io-ifc
+--example alignment_samples <file>`. The files were the four alignment samples of the published
+IFC4.3 sample set (reference curves, sectioned solids, a signal placed linearly) and 9 files written
+for the check with the alignment API of the same library (every horizontal, vertical and cant
+segment type, spirals of every order). The largest position deviations per segment type, in meters,
+over 18,446 sampled frames (12,832 of them on curves with heights and 6,416 with cant), were:
+
+| Segment type | Representation | Layout |
+|---|---|---|
+| line, circle | 1e-9, 5e-9 | 1e-9, 5e-9 |
+| clothoid | 1e-6 | 1e-6 |
+| second, third and seventh order polynomial spiral (Helmert, Bloss, Viennese bend) | 3e-7, 4e-7, 1e-6 | 6e-4 (Helmert), 4e-7, 1e-6 |
+| cosine spiral, sine spiral | 5e-7, 5e-7 | 4e-7, 5e-7 |
+| polynomial curve, `CUBIC` | 2e-7 | 2e-7 |
+| vertical line, parabola, circle | 1e-6, 4e-15, 1e-6 | 1e-6, 4e-15, 1e-6 |
+| cant, every shape | 1e-6 | 1e-6 |
+| linear placement, 28 placements, frames to 7e-16 | 2e-7 | |
+
+The oracle integrates spirals with an error of the order of 5e-7 m, which is the remainder of the
+plan rows. The layout and the representation of a file also agree with each other to 1e-13 m except
+for the Helmert transition of the file the oracle wrote: its second half starts from a heading that
+is 2e-5 rad off the exact middle heading of the transition, which the layout does not have.
+Differences that are not rounding:
+
+- The tangent and frame differ by up to 2e-3 rad where a cant is present. The oracle keeps the
+  tangent of the base curve; the description of `IfcSegmentedReferenceCurve` makes the slope of the
+  deviating elevation part of the direction, which this module follows.
+- The cosine cant of the reference-curve sample differs by up to 7.9 m at its end: the oracle does
+  not reproduce the deviating elevation that the published description of that sample gives
+  (0.08 at the start, 0.04 in the middle, 0 at the end), which this module does, to 1e-14 m against
+  its own layout of the same alignment.
+- The vertical circular arc of a layout is fixed by the horizontal length and the two gradients; the
+  radius attribute is redundant and differs from the one the oracle writes by 1e-4 relative.
+
+The tests are in `crates/arc-io-ifc/tests/alignment.rs`: closed forms for the line and the circle,
+numerical integration of the heading for every spiral, the gradient and cant of a layout, linear
+placements with offsets, axes and parents, units, and hostile input.
+
+## Streaming read as implemented
+
+`arc_io_ifc::stream` reads a physical file from a `Read` source with memory bounded by a window and
+an index, not by the file (CORE-IO-017). It handles the STEP physical file; an IFC-ZIP archive is read
+whole and then by `read`.
+
+- `scan(source, limits, stream_limits, cancel, visit)` reads the source once, in chunks of 64 KiB, and
+  calls `visit(&Instance, span)` for each instance as soon as it is parsed; nothing is kept but the set
+  of names that detects duplicates. It returns a `StreamSummary` with the schema, the header records
+  with their spans, the number of instances, the bytes read and the largest window.
+- `StreamIndex::build(source, ..)` keeps, per instance, its name, the span of its source text and its
+  place in the list of its entity types: a conservative estimate of 96 bytes whatever the instance
+  holds, charged against `memory_bytes`. `span(name)` is the span `IfcFile::span` reports, from the
+  `#` to the `;`, and `instances_of(type)` the names in file order.
+- `StreamFile::open(source, ..)` couples an index with a `Read + Seek` source; `instance(name)` seeks
+  to the span and parses that one statement with the parser of `read`, so the instance is the one
+  `read` returns, and `instances_of(type)` parses the instances of a type in order.
+
+A statement is found by its terminating `;` outside strings and comments, so a source may be
+delivered in pieces of any size (the tests use 1 to 1,048,576 bytes). The window holds the statement
+being read: a statement longer than `StreamLimits::statement_bytes` (64 MiB by default) is
+`io.limit_exceeded`. The limits of `read` apply (`input_bytes`, `record_count`, `array_length`,
+`string_bytes`, `nesting_depth`). A malformed file returns the same `io.ifc.*` code as `read` in the
+cases tested, with the offset relative to the statement and the detail `statement_offset` with its
+place in the file; after `END-ISO-10303-21;` nothing is read. The loss report and the typed views
+need an `IfcFile` and are not produced by the stream.
+
+### Verification
+
+`cargo run --release -p arc-io-ifc --example stream_stats -- compare <file>...` compares the stream
+with `read` on every file: the header, the schema, every instance, every span and the lists by type.
+On all 2,256 files found on the development machine (the published IFC2X3, IFC4 and IFC4.3 samples, the
+IDS test cases, the files the writer and the mutation tests produce) the results were equal, and no
+file failed on one side only. The largest file, 51.7 MB and 714,501 instances, took:
+
+| | Peak resident set | Time |
+|---|---|---|
+| `read` (in memory) | 534 MiB | 2.3 s |
+| `StreamFile`: index, then every instance parsed on demand | 52 MiB | 2.9 s |
+
+(release build; the stream's peak is dominated by the index; its window was 67 KiB). The tests are in
+`crates/arc-io-ifc/tests/stream.rs`: equality with `read` on a file that has comments between and
+inside statements, strings holding `;`, `''` and `/*`, a complex instance, two data sections, an
+anchor section and trailing bytes, at several chunk sizes; a 250,000-instance file whose window stays
+below 400 KB and whose index is a third of the memory of the in-memory parse; and the failures
+(truncation at several places, a duplicate name, a syntax error, a statement without end, the limits,
+cancellation).
+
+## IDS as implemented
+
+`arc_io_ifc::ids` reads Information Delivery Specification 1.0 files and checks an `IfcFile` against
+them (CORE-IO-018, reading, and the checker the products use). It is written from the published schema
+and documentation of IDS 1.0.
+
+### Reading
+
+`ids::read(bytes, limits, cancel)` reads the document with the bounded XML reader of `arc-io-common`
+(no document type declaration, no entity expansion; the limits of the profile apply, and the number of
+elements is bounded by `record_count`) and accepts exactly the structure of the schema: `info` with a
+`title`, `specifications` with one or more `specification` (`name`, `ifcVersion` of `IFC2X3`, `IFC4`,
+`IFC4X3_ADD2`, `identifier`, `description`, `instructions`), an `applicability` with `minOccurs` and
+`maxOccurs`, and `requirements`. Anything else is `io.ids.invalid` with the argument `reason`; a
+prohibited specification with requirements is invalid.
+
+The six facets are read into `Facet`: entity (`name`, `predefinedType`), attribute, classification
+(`system`, `value`), property (`propertySet`, `baseName`, `dataType`, `value`), material and partOf
+(`relation`, nested `entity`). A requirement carries `cardinality` (`required`, `optional`,
+`prohibited`) and `instructions`; an entity requirement has no cardinality and an optional partOf is
+invalid. A value is a `simpleValue` or an `xs:restriction` with `enumeration`, `pattern`, the four
+bounds and `length`, `minLength` and `maxLength`; `xs:annotation` inside a restriction is ignored.
+`totalDigits` and `fractionDigits`, which the IDS documentation excludes, are `io.ids.unsupported`.
+
+Patterns are compiled by `ids::regex::Pattern`, an implementation of the pattern language of XML
+Schema: alternation, groups, `? * + {n} {n,} {n,m}`, `.`, classes with ranges, negation and
+subtraction, the escapes `\d \s \w \i \c` and their complements, `\p{..}` for the common categories
+and the single-character escapes. A pattern matches a whole string. Matching is by backtracking with
+a step budget of 2,000,000, so a hostile pattern such as `(a+)+b` stops with no match. A
+repetition of one character (`.*`, `[a-z]+`, `\d{3}`) is matched without recursion per character;
+any other match recurses at most 1,024 levels deep and fails beyond that, so a long value cannot
+exhaust the stack. Group
+extensions (`(?:`), back references and unknown escapes are refused when the document is read. A
+backslash before any other punctuation character is taken as that character.
+
+### Checking
+
+`Ids::check(file, limits, cancel)` returns a `Report` with a `SpecificationResult` per
+specification: its `Status`, the applicable instances, the failing instances with the requirement,
+the facet and the reason, and a reason for the specification as a whole. It needs the schema tables
+of the file's schema (`io.ids.schema_unavailable` when the IFC2X3 or IFC4 tables are not part of the
+build). The applicability facets select the instances, the requirements are evaluated on each, and
+the specification passes by its cardinality: required needs at least one applicable instance, optional
+none, prohibited no applicable instance. The `ifcVersion` list is metadata and does not change a
+result. The rules the checker applies, where the documentation leaves a choice:
+
+- **Entity.** The class name is compared in upper case and exactly, subclasses do not match. The
+  predefined type is the one of the type object, unless that is `NOTDEFINED`, else the one of the
+  instance; `USERDEFINED` is resolved through `ElementType`, `ObjectType`, `ProcessType` or
+  `ResourceType`, and the item `USERDEFINED` itself matches too. In IFC2X3 a name that the schema does
+  not declare but whose `...Type` class it does (`IfcAirTerminal`) is an instance of the supertype of
+  that type class that its type object has that class.
+- **Attribute.** Only explicit attributes are checked; a derived or inverse attribute never passes. An
+  attribute with no value, an empty string, an empty list or a logical unknown does not satisfy the
+  facet; a reference satisfies a facet without value and never one with a value. When a name
+  restriction matches several attributes, one is enough.
+- **Values.** A string is compared exactly, with case. A number is compared as a decimal text in the
+  formats of IDS (no `NaN`, no separators) with the tolerance of the IDS documentation, `1e-6`
+  relative plus `1e-6` absolute, bounds included; bounds of a restriction are compared exactly. A
+  boolean is `true` or `false` in lower case. Patterns and lengths apply to strings only.
+- **Property.** Property sets and quantity sets come from `IfcRelDefinesByProperties`, the type's
+  `HasPropertySets` (the occurrence's set of the same name replaces the type's), the material's
+  `IfcMaterialProperties` and `IfcExtendedMaterialProperties`, and the predefined property sets whose
+  attributes are the properties. Every matching set must hold a matching property and every
+  matching property must satisfy the facet. The data type is the defined type of the value (a
+  quantity has the measure of its kind; a table has two). Measure values are converted to the
+  default SI units from the project's unit assignment (prefix and conversion-based units for length,
+  area, volume, mass, time and plane angle) before the comparison. A list, enumeration or table
+  satisfies a single value when one item does and a range when all items do; a bounded value needs
+  both bounds inside the range.
+- **Classification.** The system is the name of the root `IfcClassification` and the value is the
+  identification of any reference on the way up to it, so `EF_25_10` matches a reference
+  `EF_25_10_25`. Classifications of the occurrence override those of the type per system, and
+  non-rooted resources are classified through `IfcExternalReferenceRelationship`.
+- **Material.** The value matches the name or category of the material, a layer, profile or
+  constituent, and the name of a layer set, profile set or constituent set; the materials are those
+  of the occurrence, else those of its type.
+- **PartOf.** The instance is part of an entity when that entity is reached through the relations
+  `IfcRelAggregates`, `IfcRelNests`, `IfcRelContainedInSpatialStructure`, `IfcRelAssignsToGroup`,
+  `IfcRelVoidsElement` and `IfcRelFillsElement`, transitively, or through the one named relation.
+
+### Verification
+
+`cargo run -p arc-io-ifc --example ids_testcases <directory>` runs the checker over a directory of IDS
+and IFC pairs in the layout of the buildingSMART IDS test cases (`pass-`, `fail-` and `invalid-`
+prefixes) and reports the agreement; an `invalid-` pair counts as agreeing when the reader rejects the
+IDS or the check fails. Over the 334 pairs of the published test cases (attribute 56, classification
+27, entity 33, ids 12, material 29, partOf 34, property 82, restriction 25, tolerance 36), with the
+IFC2X3, IFC4 and IFC4X3 tables, all 334 agree: 187 pairs expect pass, 120 fail and 27 invalid. Of
+the invalid ones 26 fail in the check and one, a prohibited specification with requirements, is
+rejected by the reader. The 12 example IDS files of the same repository are all read. The first run
+agreed on 300 of the 334 pairs; the differences were in the lowercase text of booleans, a name
+restriction that matches several attributes, optional classifications, classification through
+external references, the predefined type of a type, the IFC2X3 type mapping, the bounds of the
+tolerance interval, the property sets of a type and of a material, the data type of bounded, table
+and predefined values, and the escape `\/` in a pattern, which the pattern language does not list
+and the reader now takes as `/`. Each was resolved to the rule in the list above.
+
+The checker needs the schema tables of the file: without the local IFC2X3 and IFC4 tables only IFC4X3
+files can be checked and the others return `io.ids.schema_unavailable`. Tests written for this project,
+without the published files, are in
+`crates/arc-io-ifc/tests/ids.rs` (facets, units, inheritance, cardinalities, malformed and hostile
+documents) and in `ids/regex.rs` (the pattern language and the step budget).
 
 ## IFC writing as implemented
 
 `arc-io-ifc` writes the first part of CORE-IO-016: an IFC4 physical file (ISO 10303-21 clear text)
 from a neutral description of a building. `write(model, options)` takes a `WriteModel` and
 `WriteOptions` and returns `WriteOutput`: the bytes of the file and a loss report. It returns bytes and
-never writes a path. The model knows no product: a product maps its own objects to it. IFC4X3 output is
-not written yet.
+never writes a path. The model knows no product: a product maps its own objects to it. The output
+schema is `WriteOptions::schema` (`OutputSchema`): IFC4 by default, IFC4X3 ADD2 or IFC2X3 TC1.
 
 ### The write model
 
 `WriteModel` (module `write`) holds a project, a site and a building (`Spatial`: identifier and name),
-the storeys (`Storey`: identifier, name, elevation), the elements, the grids (`Grid`), the length unit (`LengthUnit`:
+the storeys (`Storey`: identifier, name, elevation), the elements, the grids (`Grid`), the groups
+(`Group`), an optional georeferencing (`Georeference`), the length unit (`LengthUnit`:
 meters or millimeters), the plane angle unit (`AngleUnit`: radians or degrees) and an optional true
 north direction. Every length, area and volume of the model is in the length unit, squared or cubed.
 The structs of the model are marked non-exhaustive and are built with their `new` constructors
 (`WriteModel::new`, `Spatial::new`, `Storey::new`, `Element::new`, `Placement::new`,
 `PropertySet::new`, `Property::new`, `QuantitySet::new`, `Quantity::new`, `ElementType::new`,
-`MaterialLayer::new`, `LayerSetUsage::new`, `Grid::new`, `GridAxis::new`); their fields are public and set after construction.
+`MaterialLayer::new`, `LayerSetUsage::new`, `Grid::new`, `GridAxis::new`, `AxisSegment::new`,
+`Group::new`, `Georeference::new`); their fields are public and set after construction.
 
-An `Element` has an identifier, a kind (`ElementKind`: wall, slab, door, window, opening, space, roof, covering, stair, stair flight, railing, ramp, ramp flight, curtain wall, plate, member), a name, a long name (spaces), the
+An `Element` has an identifier, a kind (`ElementKind`: wall, slab, door, window, opening, space, roof, covering, stair, stair flight, railing, ramp, ramp flight, curtain wall, plate, member, transport element, pipe segment, furniture, sanitary terminal, light fixture, electric appliance, unitary equipment, column, beam, building element proxy), a name, a long name (spaces), the
 identifier of its storey, a `Placement` relative to the storey (origin, local z axis, local x axis), an
 optional `Body`, a predefined type, an operation type (doors) or partitioning type (windows), the overall
 width and height (doors and windows), a host, property sets, quantity sets, the identifier of its
-element type and a layer set usage (walls and slabs). A `Body` is an extrusion
+element type, a layer set usage (walls and slabs) and a mapping (a `Placement`: the transform of an occurrence of a type's shared geometry). A `Body` is an extrusion
 (a closed polyline profile with optional holes in the plane `z = 0`, a direction and a depth) or a faceted
 B-rep (vertices and polygon faces given as index loops, counterclockwise seen from outside). The host of
 an opening is the element it voids (a wall, slab, door or window) and is required, because an opening
 voids exactly one element; the host of a door or window is the opening it fills; walls and slabs have
 no host. A chain of hosts that returns to its start, such as an opening hosted by the door that fills
-it, is refused.
+it, is refused. Any element of the furniture, sanitary terminal, light fixture, electric appliance,
+unitary equipment, column, beam, building element proxy, transport element and pipe segment kinds may
+name as its host any element except an opening or a space; the host aggregates it (`IfcRelAggregates`).
+Walls, spaces, roofs, coverings, stairs, ramps and curtain walls keep their rules: no host, or the
+decomposition rules of the stair, ramp and curtain wall kinds.
 
 `WriteModel::types` holds the element types. An `ElementType` has an identifier, the kind of its
-occurrences (wall, slab, door or window; an opening or space kind is refused), a name, a predefined
-type, an operation type (doors) or partitioning type (windows) and, for walls and slabs, its
-`MaterialLayer`s in order: a material name, a thickness (zero for a membrane; negative or not finite
-is refused), an optional layer name and an optional category. An element names its type by
-identifier; a missing type or a type of another kind is refused. A `LayerSetUsage` says how the
-type's layers lie in the element: the axis of the element's placement they are stacked along
+occurrences (any kind with a type; an opening, space, stair, stair flight, railing, ramp or ramp flight
+is refused), a name, a predefined type, an operation type (doors) or partitioning type (windows) and,
+for walls and slabs, its `MaterialLayer`s in order: a material name, a thickness (zero for a membrane;
+negative or not finite is refused), an optional layer name and an optional category. An element names
+its type by identifier; a missing type or a type of another kind is refused. A `LayerSetUsage` says how
+the type's layers lie in the element: the axis of the element's placement they are stacked along
 (`LayerDirection::Axis2`, the local y axis across a wall, or `Axis3`, the local z axis through a
 slab), whether they follow toward the positive or the negative side, and the offset of the first
-layer from the reference line or plane (an offset that is not finite is refused).
+layer from the reference line or plane (an offset that is not finite is refused). The type's
+`property_sets` and `quantity_sets` are listed in its `HasPropertySets`; its `representation` is the
+shared geometry, written as an `IfcRepresentationMap`. An element with `mapping` set uses that map
+through an `IfcMappedItem` whose `MappingTarget` is the placement's transform (an
+`IfcCartesianTransformationOperator3D`: the x and z axes made orthogonal, the scale one); the element
+has no body of its own, and its type must have a representation.
 
 ### What is written
 
@@ -1589,6 +2573,12 @@ layer from the reference line or plane (an offset that is not finite is refused)
   one, and is contained in its storey otherwise. Bodies, placements (relative to the storey for
   every part), property sets and quantity sets (for example `Qto_StairFlightBaseQuantities` and
   `Qto_RailingBaseQuantities` with `Length`) are written as for the other elements.
+- Generic aggregation: an element of the kinds listed above (furniture to building element proxy, transport
+  element and pipe segment) with a `host` is a part of that host, whatever the host's kind (except an
+  opening or a space). The writer adds one `IfcRelAggregates` per host with parts
+  (`derived_id(host, AGGREGATES, 0)`, parts in model order), and a part is not in the storey's
+  `IfcRelContainedInSpatialStructure`. A chain of hosts that returns to its start, and a host that is not
+  in the model, are refused.
 - Ramps and curtain walls decompose like stairs. The writer's rule is general: a stair, a ramp
   or a curtain wall (a decomposing container) aggregates the elements that name it as their `host`
   (`IfcRelAggregates`, `derived_id(container, AGGREGATES, 0)`, parts in model order), and a part is not
@@ -1608,29 +2598,67 @@ layer from the reference line or plane (an offset that is not finite is refused)
     `STRUT`, `STUD`). Plates, members and curtain walls have element types (`IfcPlateType`,
     `IfcMemberType`, `IfcCurtainWallType`, written like the other types; their layers are reported,
     not written).
+- Furniture, sanitary terminals, light fixtures, electric appliances, unitary equipment, columns, beams
+  and building element proxies: `IfcFurniture` (`ElementKind::Furniture`, `IfcFurnitureTypeEnum`: `CHAIR`,
+  `TABLE`, `DESK`, `BED`, `FILECABINET`, `SHELF`, `SOFA`), `IfcSanitaryTerminal` (`SanitaryTerminal`,
+  `IfcSanitaryTerminalTypeEnum`: `BATH`, `BIDET`, `CISTERN`, `SHOWER`, `SINK`, `SANITARYFOUNTAIN`,
+  `TOILETPAN`, `URINAL`, `WASHHANDBASIN`, `WCSEAT`), `IfcLightFixture` (`LightFixture`:
+  `POINTSOURCE`, `DIRECTIONSOURCE`, `SECURITYLIGHTING`), `IfcElectricAppliance` (`ElectricAppliance`:
+  `DISHWASHER`, `ELECTRICCOOKER`, `FREESTANDINGELECTRICHEATER`, `FREESTANDINGFAN`,
+  `FREESTANDINGWATERHEATER`, `FREESTANDINGWATERCOOLER`, `FREEZER`, `FRIDGE_FREEZER`, `HANDDRYER`,
+  `KITCHENMACHINE`, `MICROWAVE`, `PHOTOCOPIER`, `REFRIGERATOR`, `TUMBLEDRYER`, `VENDINGMACHINE`,
+  `WASHINGMACHINE`), `IfcUnitaryEquipment` (`UnitaryEquipment`: `AIRHANDLER`, `AIRCONDITIONINGUNIT`,
+  `DEHUMIDIFIER`, `SPLITSYSTEM`, `ROOFTOPUNIT`), `IfcColumn` (`Column`: `COLUMN`, `PILASTER`), `IfcBeam`
+  (`Beam`: `BEAM`, `JOIST`, `HOLLOWCORE`, `LINTEL`, `SPANDREL`, `T_BEAM`) and `IfcBuildingElementProxy`
+  (`BuildingElementProxy`: `COMPLEX`, `ELEMENT`, `PARTIAL`, `PROVISIONFORVOID`, `PROVISIONFORSPACE`).
+  Each takes the `PredefinedType` of its IFC4 enumeration (another text is `USERDEFINED`, none is
+  `NOTDEFINED`) and is contained in its storey unless it has a host (see generic aggregation below). Each
+  has an element type (`IfcFurnitureType`, `IfcSanitaryTerminalType`, `IfcLightFixtureType`,
+  `IfcElectricApplianceType`, `IfcUnitaryEquipmentType`, `IfcColumnType`, `IfcBeamType`,
+  `IfcBuildingElementProxyType`). The writer never writes a proxy in place of a kind that the output
+  schema or the model lacks: such an element is reported as not written. `IfcFurnitureType` requires
+  `AssemblyPlace` in IFC4; the writer writes `NOTDEFINED`, as the model has no value for it.
+- Transport elements and pipe segments: `IfcTransportElement` (`ElementKind::TransportElement`,
+  `IfcTransportElementTypeEnum`: `ELEVATOR`, `ESCALATOR`, `MOVINGWALKWAY`, `CRANEWAY`, `LIFTINGGEAR`)
+  and `IfcPipeSegment` (`ElementKind::PipeSegment`, `IfcPipeSegmentTypeEnum`: `CULVERT`,
+  `FLEXIBLESEGMENT`, `RIGIDSEGMENT`, `GUTTER`, `SPOOL`) are contained in their storey and have no
+  host; their types are `IfcTransportElementType` and `IfcPipeSegmentType` (layers reported, not
+  written).
 - Grids: `Grid { id, name, storey, placement, axes_u, axes_v, axes_w, predefined_type }` is written as an
   `IfcGrid` placed relative to its storey and contained in it (`IfcRelContainedInSpatialStructure`, after
   the storey's elements), after the elements. `UAxes` and `VAxes` need at least one axis, `WAxes` is
   omitted when empty; each `GridAxis { tag, curve, same_sense }` is an `IfcGridAxis` (`AxisTag` omitted
   when empty, `SameSense` from the field). The curve (`AxisCurve`, two dimensions, in the plane of the
   grid's placement) is `Line { start, end }`, an `IfcPolyline` of two points (at least the linear
-  tolerance apart), or `Arc { center, radius, start_angle, end_angle }`, an `IfcTrimmedCurve` of an
+  tolerance apart), `Polyline(points)`, an `IfcPolyline` of two or more points (consecutive points at
+  least the linear tolerance apart), `Composite(segments)`, or `Arc { center, radius, start_angle, end_angle }`, an `IfcTrimmedCurve` of an
   `IfcCircle` at an `IfcAxis2Placement2D`, trimmed by `IfcParameterValue`s (the angles are in radians in
   the model and written in the plane angle unit of the project), counterclockwise with
   `SenseAgreement` true (radius above the linear tolerance, sweep above the angular tolerance and at
-  most a full turn); a clockwise or reversed axis is an arc with `same_sense` false. A value that is
+  most a full turn); a clockwise or reversed axis is an arc with `same_sense` false. A composite is an
+  `IfcCompositeCurve` (`SelfIntersect` unknown) of `IfcCompositeCurveSegment`s, one per `AxisSegment
+  { curve, same_sense }` whose curve is a line, polyline or arc (a nested composite is refused);
+  each segment must start within the linear tolerance of where the previous one ends, taking
+  `same_sense` false as running the curve backward. Every segment is `CONTINUOUS` except the last,
+  which is `DISCONTINUOUS` unless it ends at the start of the first (a closed curve), as the
+  continuity rule of `IfcCompositeCurve` requires. A value that is
   not finite or outside these bounds is `io.ifc.write_value_invalid`, a storey that is not in the
   model `io.ifc.write_reference_invalid`. The representation is an `IfcShapeRepresentation`
   `FootPrint` / `GeometricCurveSet` in an `IfcGeometricRepresentationSubContext` `FootPrint` (added
   only when the model has grids) holding one `IfcGeometricCurveSet` of the axis curves, which are
   shared with the axes. `PredefinedType` takes `IfcGridTypeEnum` (`RECTANGULAR`, `RADIAL`,
   `TRIANGULAR`, `IRREGULAR`; another text is `USERDEFINED`).
-- Element types: `IfcWallType`, `IfcSlabType`, `IfcRoofType`, `IfcCoveringType`, `IfcPlateType`, `IfcMemberType`, `IfcCurtainWallType`, `IfcDoorType` and `IfcWindowType`, after the
+- Element types: `IfcWallType`, `IfcSlabType`, `IfcRoofType`, `IfcCoveringType`, `IfcPlateType`, `IfcMemberType`, `IfcCurtainWallType`, `IfcDoorType`, `IfcWindowType` and the types of the kinds listed above, after the
   elements, in model order, with the rules of the predefined type below (the text of a user-defined
   predefined type is the `ElementType` attribute) and, for doors and windows, the operation or
-  partitioning type; `ParameterTakesPrecedence` is omitted. Each type with at least one occurrence
-  gets one `IfcRelDefinesByType` (`derived_id(type, TYPED, 0)`) listing its occurrences in model
-  order; a type without occurrences is written alone.
+  partitioning type; `ParameterTakesPrecedence` is omitted. Each type's property and quantity sets are
+  written before it and listed in `HasPropertySets` (an empty set is reported and not listed); no
+  `IfcRelDefinesByProperties` relates them. A type with a representation gets one `IfcRepresentationMap`
+  (`MappingOrigin` the identity, `MappedRepresentation` the body's `IfcShapeRepresentation`) in its
+  `RepresentationMaps`, written before the elements; an occurrence with `mapping` gets an `IfcMappedItem`
+  in a `MappedRepresentation` shape. Each type with at least one occurrence gets one `IfcRelDefinesByType`
+  (`derived_id(type, TYPED, 0)`) listing its occurrences in model order; a type without occurrences is
+  written alone.
 - Materials: each wall, slab or roof type with layers gets an `IfcMaterialLayerSet` named after the type,
   of one `IfcMaterialLayer` per layer (the `IfcMaterial`, the thickness, `IsVentilated` unknown, the
   layer name and category; one `IfcMaterial` per distinct material name in the file), associated
@@ -1649,10 +2677,39 @@ layer from the reference line or plane (an offset that is not finite is refused)
   curves are closed `IfcPolyline`s (the last point is the first point's instance). A last profile point
   equal to the first is dropped before writing. A B-rep is `Brep`: an `IfcFacetedBrep` of one
   `IfcClosedShell` whose faces are `IfcFace`s with one `IfcFaceOuterBound` of an `IfcPolyLoop`.
-- Property sets: an `IfcPropertySet` of `IfcPropertySingleValue`s, with the values `IfcLabel`,
-  `IfcLengthMeasure`, `IfcAreaMeasure`, `IfcVolumeMeasure` or `IfcBoolean` and no unit (the project
-  units apply). Quantity sets: an `IfcElementQuantity` of `IfcQuantityLength`, `IfcQuantityArea` and
-  `IfcQuantityVolume`. Each set is assigned to its element by its own `IfcRelDefinesByProperties`.
+- Property sets: an `IfcPropertySet` of `IfcPropertySingleValue`s and `IfcPropertyEnumeratedValue`s
+  with no unit (the project units apply). A `PropertyValue` is `Label`, `Identifier` (both at most
+  255 characters), `Text`, `Integer`, `Real`, `Boolean`, `Logical` (unknown is `None`), `Length`,
+  `Area`, `Volume`, `Measure(Measure, value)` or `Enumerated { enumeration, items, values }`. A
+  `Measure` names the defined type: length, positive length, non-negative length, area, volume, plane
+  angle, positive plane angle, ratio, positive ratio, normalised ratio, count, thermal transmittance,
+  thermodynamic temperature, power, pressure, volumetric flow rate, mass, mass density, area
+  density, time, illuminance, linear velocity, heat flux density, planar force and monetary measure.
+  Its rule is checked (`Measure::accepts`): positive measures are above zero, the non-negative length
+  is zero or more, the normalised ratio lies from 0 to 1, and every value is finite. Plane angles are
+  given in radians and written in the plane angle unit of the project. An enumerated value writes its
+  chosen items as `IfcLabel`s and refers to an `IfcPropertyEnumeration` of its name and items, written
+  once per name (the name is unique in a file); the items must be distinct and the chosen ones among
+  them, and one name with two item lists is refused. The constructors `PropertyValue::measure`,
+  `real`, `label`, `identifier` and `enumerated` refuse what the writer refuses
+  (`PropertyValue::check`), so a caller learns of an invalid value where it builds it. Quantity sets:
+  an `IfcElementQuantity` of `IfcQuantityLength`, `IfcQuantityArea`, `IfcQuantityVolume`,
+  `IfcQuantityCount`, `IfcQuantityWeight` (kilograms) and `IfcQuantityTime` (seconds); a value must
+  be finite and not negative. Each set is assigned to its element by its own
+  `IfcRelDefinesByProperties`. The sets the writer tests produce under template names match their
+  templates (`IfcFile::check_property_sets`).
+- Groups: each `Group { id, name, description, object_type, members }` is an `IfcGroup` after the
+  grids, and its members (elements and grids of the model, each written once in model order) are
+  assigned to it by one `IfcRelAssignsToGroup` (`derived_id(group, GROUP, 0)`); an empty group is
+  written alone, and a member that is not an element or grid of the model is
+  `io.ifc.write_reference_invalid`.
+- Georeferencing: with `WriteModel::georeference`, an `IfcMapConversion` from the model context to an
+  `IfcProjectedCRS` (`Name`, `Description`, `GeodeticDatum`, `VerticalDatum`, `MapProjection`,
+  `MapZone`, the map unit an `IfcSIUnit` metre) with `Eastings`, `Northings`, `OrthogonalHeight` in
+  meters, `XAxisAbscissa` and `XAxisOrdinate` from the normalized `x_axis` and the positive `Scale`;
+  the optional values are omitted when `None`. A value that is not finite, an empty reference system
+  name, a text over 255 characters, a zero x axis or a scale that is not positive is
+  `io.ifc.write_value_invalid`.
 
 ### Encoding and determinism
 
@@ -1679,8 +2736,8 @@ writer adds take a version 8 UUID from `derived_id(owner, role, index)`: the ide
 a role number of the module `role` and the index of the set (0 for a relationship), so they are stable
 too and never equal a version 7 identifier. The roles are `AGGREGATES` 1, `CONTAINS` 2, `VOIDS` 3,
 `FILLS` 4, `PROPERTY_SET` 5, `PROPERTY_REL` 6, `QUANTITY_SET` 7, `QUANTITY_REL` 8, `TYPED` 10
-(the type relationship of an element type) and `MATERIAL` 11 (the material association of a type or
-an element). Element types take their `GlobalId` from the caller's identifier. `INSERT_OPENING` 9
+(the type relationship of an element type), `MATERIAL` 11 (the material association of a type or
+an element) and `GROUP` 12 (the assignment to a group). Element types take their `GlobalId` from the caller's identifier. `INSERT_OPENING` 9
 is for the caller: a product whose door or window has no opening object of its own derives the
 opening's identifier from the insert's with this role and index 0. The roles from `CALLER_FIRST`
 (`0x10000`) up are never used by the writer. Two objects with the same `GlobalId` are refused with
@@ -1699,6 +2756,62 @@ placement axes or a true north not longer than the square root of the `f64` mach
 element, storeys, hosts or element types that are missing or of the wrong kind, openings without a
 host, chains of hosts that return to their start, negative layer thicknesses and layer set usage
 offsets that are not finite.
+
+### Output schemas, self-check, IFC-ZIP and model views
+
+The writer builds every record in an IFC4 layout (attribute names in order, `write/layout.rs`; a test
+compares it with the IFC4 tables where they are generated). IFC4 output (the default) writes the
+values as built: its bytes do not depend on the tables and are pinned by tests. For `OutputSchema::Ifc4x3`
+and `OutputSchema::Ifc2x3` every record is rebuilt by attribute name through the tables of the
+output schema, so the order and the number of attributes, derived positions (`*`), required
+attributes and enumeration items come from the tables. IFC4X3 tables are part of every build; IFC2X3
+tables are generated locally, and without them an IFC2X3 write returns `io.ifc.write_schema_unavailable`.
+
+Differences handled by the mapping, and what is reported when the schema cannot carry the model:
+
+| Model content | IFC4X3 ADD2 | IFC2X3 TC1 |
+|---|---|---|
+| `IfcProperty.Description` | `Specification` | `Description` |
+| Door and window types | `IfcDoorType`, `IfcWindowType` | `IfcDoorStyle`, `IfcWindowStyle` (operation and construction; the required `ConstructionType`, `ParameterTakesPrecedence` and `Sizeable` get neutral values, `io.ifc.write_default_supplied`) |
+| `PredefinedType` of roofs, stairs, ramps, transport elements and spaces | same | `ShapeType`, `OperationType`, `InteriorOrExteriorSpace`; of walls, doors, windows, plates, members, curtain walls, openings, grids and stair and ramp flights: no attribute (`io.ifc.write_attribute_unrepresentable`) |
+| Enumeration item the schema lacks | `NOTDEFINED` (`io.ifc.write_value_unrepresentable`) | the same |
+| Roof types, pipe segments, georeferencing (`IfcMapConversion`) | written | not written (`io.ifc.write_entity_unrepresentable`) |
+| Measure types (`IfcNonNegativeLengthMeasure`, `IfcAreaDensityMeasure`) | written | the nearest wider type, or the property is not written (`io.ifc.write_entity_unrepresentable`) |
+| `Qto_` quantity sets | written under their name | written as `BaseQuantities` (`io.ifc.write_set_renamed`) |
+| Owner history | optional, not written | required: one `IfcOwnerHistory` from the options' author, organization and time stamp |
+| `IfcMaterialLayer` name, category, priority; `IfcMaterial` description, category; quantity `Formula` | written | not written (reported when set) |
+
+Self-check: after writing, a file whose schema has tables (IFC4X3 always) is read back and checked at
+conformance levels 1 to 3. `WriteOptions::self_check` is `SelfCheck::Fail` (default: a finding fails
+the write with `io.ifc.write_not_conformant`), `Report` (the findings are in `WriteOutput::findings`)
+or `Off`. A check that cannot run within the limits is reported as `io.ifc.write_self_check_skipped`.
+
+`WriteOptions::container` is `Container::Step` or `Container::Zip`: an IFC-ZIP archive with one
+deflated `.ifc` entry named after `file_name` (`model.ifc` otherwise), written by `ifc_zip`.
+
+`WriteOptions::view_check` is `ViewCheck::Off` (the `view_definition` text is written as given),
+`Report(view)` or `Enforce(view)` with a `ModelView`: `ReferenceView` allows tessellated face sets,
+mapped items, bounding boxes and annotation curves as representation items; `DesignTransferView` adds
+extrusions, revolutions, B-reps, clipping results and swept disks. Both allow the building products
+the writer produces; a product outside the list is a finding. The findings are `ViewFinding`s with the
+codes `io.ifc.view_representation_not_allowed`, `io.ifc.view_entity_not_allowed` and
+`io.ifc.view_schema_unsupported` (IFC2X3 has neither view). The header names `ReferenceView_V1.2` or
+`DesignTransferView_V1.0` only when the file passes; otherwise it holds `ViewDefinition []`.
+
+| Code | Finding |
+|---|---|
+| `io.ifc.view_representation_not_allowed` | A shape representation holds an item the view does not exchange |
+| `io.ifc.view_entity_not_allowed` | A placed product is not one the view exchanges |
+| `io.ifc.view_schema_unsupported` | The view is not defined for the output schema |
+
+### Spatial elements
+
+`Spatial` (project, site, building) and `Storey` carry `long_name`, `description`, `actors`,
+`property_sets` and `quantity_sets`; `Spatial` also has `phase` (project) and `address` (an `Address`,
+written as `IfcPostalAddress` for a site or building). An `Actor` (identifier, name, `Party`
+organization or person, optional role) is written as `IfcActor` with an `IfcActorRole` and one
+`IfcRelAssignsToActor` (role number `role::ACTOR`). A phase on a site or building and an address on
+the project are reported as `io.ifc.write_attribute_unrepresentable`.
 
 ### What is not written
 
@@ -1721,9 +2834,9 @@ with the element's `GlobalId` as the source and the entity that was not written 
 The loss report counts the element types as mapped too.
 
 The writer does not check that a profile is simple (a self-intersecting profile with area is written),
-that holes lie inside the outer loop, or that a B-rep is closed and planar. It writes no property sets of element types, representation maps, materials other than layer sets,
-space boundaries, axis representations, owner history, classification or other element kinds, and
-no IFC4X3 schema.
+that holes lie inside the outer loop, or that a B-rep is closed and planar. It writes no materials other than layer sets,
+space boundaries, axis representations, owner history (except IFC2X3), classification, zones, bounded, list, table,
+reference or complex property values, or other element kinds.
 
 ### Verification
 
@@ -1731,9 +2844,15 @@ The tests read every written file back with `read`, `typed_views` and `geometry`
 (three extrusions and one B-rep), a slab with a hole, and a door and a window filling openings in two
 walls, on two storeys. The spatial structure, the containment, the `GlobalId`s, the voids and fills, the
 property and quantity sets and the body volumes (6.0 m³ for a 10 × 0.2 × 3 m wall, 15.8 m³ for the slab)
-are compared with the model; `geometry` does not subtract openings, so each body keeps its own volume.
+are compared with the model; `geometry` subtracts the prism openings of the walls by default, so a wall loses the volume of its door or window.
 The same house with a layered wall type, a slab type with a membrane layer and door and window types
 reads back with its type assignments, layer sets, layers and layer set usages, and the refusals of
-type references and layer values are checked.
+type references and layer values are checked. `tests/write_kinds.rs` reads back the kinds of the
+ArchBuilder families with their types and predefined values, the type property and quantity sets, the
+mapped items with their transforms (volumes and bounds) and the generic aggregation through hosts, and
+checks the refusals of invalid mappings and hosts.
 The out-of-process oracle of the [interchange architecture](../architecture/interchange.md) is not part
-of the gate.
+of the gate. `tools/ifc-oracle` (see its [README](../../tools/ifc-oracle/README.md)) validates every file
+the writer tests produce with IfcOpenShell and the EXPRESS rules and compares per-product volume, area
+and bounding box with `IfcFile::geometry`; `ARC_IFC_DUMP=<directory>` makes the tests write those files
+(`tools/ifc-oracle/run_all.sh` runs the whole check).

@@ -3,6 +3,10 @@
 //! - `layers` checks the workspace against `xtask/layers.toml` (ADR-0001).
 //! - `wasm` builds the WebAssembly set for `wasm32-unknown-unknown`.
 //! - `features`, `catalogs` and `schemas` run one gate of `ci` alone.
+//! - `ifc-schema --schema-dir <dir> [--check]` generates the IFC schema tables of `arc-io-ifc` from
+//!   the published EXPRESS schemas in `<dir>` (ADR-0018); see [`ifc_schema`].
+//! - `ifc-psets --psd-dir <dir> [--check]` generates the property and quantity set templates of
+//!   `arc-io-ifc` from the published property set definitions in `<dir>`; see [`ifc_pset`].
 //! - `ci` runs every gate in order; it is the single command CI runs: format, clippy, layers,
 //!   wasm, tests (nextest and documentation tests), the feature matrix, `cargo deny`,
 //!   `cargo audit`, the localization catalog check and the schema check.
@@ -12,6 +16,8 @@
 
 mod catalog;
 mod features;
+mod ifc_pset;
+mod ifc_schema;
 mod layers;
 mod schemas;
 mod workspace;
@@ -31,7 +37,12 @@ fn main() -> ExitCode {
         "catalogs" => run_catalogs(),
         "schemas" => run_schemas(),
         "ci" => run_ci(),
-        _ => Err("usage: cargo xtask <layers|wasm|features|catalogs|schemas|ci>".to_owned()),
+        "ifc-schema" => ifc_schema::run(&std::env::args().skip(2).collect::<Vec<_>>()),
+        "ifc-psets" => ifc_pset::run(&std::env::args().skip(2).collect::<Vec<_>>()),
+        _ => Err(
+            "usage: cargo xtask <layers|wasm|features|catalogs|schemas|ci|ifc-schema|ifc-psets>"
+                .to_owned(),
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

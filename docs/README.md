@@ -22,6 +22,7 @@ the document for the area you work on and the specification of the crate you cha
 | [ui-kit.md](architecture/ui-kit.md) | Widgets, workspace, localization, accessibility, settings, shared interaction standards, browser and tablet or phone targets |
 | [interchange.md](architecture/interchange.md) | The `arc-io-*` family, per-format choices, hostile-input limits, loss reports, open readers, the Arc exchange package, licensed bridges, corpora |
 | [extensibility.md](architecture/extensibility.md) | Node graphs, WebAssembly plug-ins and what is not supported |
+| [ifc-schema-support.md](architecture/ifc-schema-support.md) | Design for complete IFC schema support: generated schema tables, conformance checking, round trips, geometry coverage, verification |
 | [technology-baseline.md](architecture/technology-baseline.md) | Third-party choices with reasons, licenses, isolation and replacement conditions |
 
 ## Crates
@@ -74,6 +75,7 @@ the document for the area you work on and the specification of the crate you cha
 | [adr/0013-geometry-encoding.md](adr/0013-geometry-encoding.md) | Hand-written versioned geometry encoding |
 | [adr/0015-stroke-font-format.md](adr/0015-stroke-font-format.md) | Versioned text format for Arc stroke fonts |
 | [adr/0016-hatch-pattern-format.md](adr/0016-hatch-pattern-format.md) | Versioned text format for Arc hatch patterns |
+| [adr/0018-ifc-schema-tables-from-express.md](adr/0018-ifc-schema-tables-from-express.md) | IFC schema tables generated from the published EXPRESS schemas (proposed) |
 
 ## Repository root
 
