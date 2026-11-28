@@ -26,6 +26,6 @@
   copy of this license, visit http://creativecommons.org/licenses/by-nd/4.0/".
 - BLAKE3 of `IFC4X3_ADD2.exp`: `57a975a98ce9402c06d3702de93d32175a79de7bb923a7e8488286bce93fa6b0`.
   SHA-256 of `IFC4X3_ADD2.exp`: `f67c8762b13a099c28082061e6f16b9ef1284ceec34069792afc702725675860`.
-- SHA-256 of `ifc4x3.rs`: `212ea2daa02b419307704033e7c12b96f4d4bd0baa111756956247fa18cec04e`.
+- SHA-256 of `ifc4x3.rs`: `92ce353546937bacf32cf5c63f6c9a13d7596fe5939ccdaf5349467d2df5a0ec`.
 - Modified: no. The file is a generated lookup table that changes only the format of the schema
   (section 2(a)(4) of the license); the schema text is not modified.
